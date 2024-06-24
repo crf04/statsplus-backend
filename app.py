@@ -66,6 +66,24 @@ def get_games_to_exclude(player_logs, players_off_names, season= '2023-24'):
         exclude_game_ids |= player_game_ids
 
     return exclude_game_ids
+
+# Function to calculate the player matchup rating
+def calculate_matchup_rating(player_name,team):
+    teams_df = fetch_data_from_table('team_play_types')
+    players_df = fetch_data_from_table('player_play_types')
+
+    player_data = players_df[players_df['PLAYER_NAME'] == player_name]
+    team_data = teams_df[teams_df['team'] == team]
+
+    matchupRTG = 0
+    playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup','Transition']
+    for playtype in playtypes:
+        matchup_score = player_data[playtype].values[0] * team_data[playtype].values[0]
+        matchupRTG += matchup_score
+    
+    return matchupRTG
+        
+
     
 # Function to retrieve all relevant games based on the user filtering
 def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off = [],date_filter = None, teams_against = [], location_filter = 'Both', last_games = None):
@@ -89,6 +107,7 @@ def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off 
     gamelogs_df = gamelogs_df[gamelogs_df['MIN'] <= minutes_filter[1]]
     gamelogs_df['GAME_DATE'] = pd.to_datetime(gamelogs_df['GAME_DATE'])
     gamelogs_df['OPP'] = gamelogs_df['MATCHUP'].apply(get_opponent_team)
+    gamelogs_df['MATCHUP_RATING'] = gamelogs_df.apply(lambda row: calculate_matchup_rating(player_name, row['OPP']), axis=1)
     gamelogs_df['MIN'] = gamelogs_df['MIN'].round().astype(int)
     if len(teams_against) != 0:
         gamelogs_df = gamelogs_df[gamelogs_df['OPP'].isin(teams_against)]
