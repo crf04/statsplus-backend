@@ -508,6 +508,25 @@ def get_player_playtypes():
     print(playtypes)
     return jsonify(playtypes)
 
+#Get stats from PBP
+def get_PBP_stats(team, category):
+    abbr = nba_team_to_abbreviation(team)
+    df = fetch_data_from_table('pbp_opponent_stats')
+    
+    if category == 'Assists':
+        columns = ["TwoPtAssists","ThreePtAssists","Assists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists","AssistPoints"]
+        names = []
+        for col in columns:
+            name = f'{col}_RANK'
+            names.append(name)
+            df[name] = df[col].rank(method='min', ascending = True)
+        columns.extend(names)
+        
+    df = df[df['Name'] == abbr]
+    df = df[columns]
+    return df
+        
+
 #Fetch opponent stats from PBP endpoint
 def fetch_PBP_opponent():
     url = 'https://api.pbpstats.com/get-totals/nba?Season=2023-24&SeasonType=Regular%2BSeason&StartType=All&Type=Opponent'
@@ -536,5 +555,6 @@ def store_PBP_opponent():
 
 # Run the Flask app
 if __name__ == '__main__':
+    print(get_PBP_stats('New York Knicks','Assists'))
     app.run(debug=True)
     
