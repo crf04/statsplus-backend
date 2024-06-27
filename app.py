@@ -5,6 +5,7 @@ from nba_api.stats.static import teams, players
 from nba_api.stats.endpoints import playergamelogs
 import pandas as pd
 from sqlalchemy import create_engine
+import requests
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -12,6 +13,24 @@ CORS(app)  # Enable CORS
 
 # Set up database connection
 engine = create_engine('sqlite:///nba_play_types.db')
+
+
+#function to retrieve team stats
+def team_stats(category,team):
+    if category == 'Traditional':
+        df = fetch_data_from_table('General Opponent Stats')
+        df['OPP_STL+BLK'] = df['OPP_STL'] + df['OPP_BLK']
+        df['OPP_STL+BLK_RANK'] = df['OPP_STL+BLK'].rank(method='min', ascending=True)
+    elif category == 'Playtypes':
+        df = fetch_data_from_table('team_play_types')
+        columns = [c for c in df.columns if 'eam' not in c or 'EAM' not in c]
+        for col in columns:
+            name = f'{col}_RANK'
+            df[name] = df[col].rank(method='min', ascending = True)
+        del df['Team_ID']
+        del df['team']
+    df = df[df['TEAM_NAME'] == team]
+    return df
 
 # Function to fetch players dictionary from nba api
 def fetch_players():
@@ -74,11 +93,10 @@ def calculate_matchup_rating(player_name,team):
 
     player_data = players_df[players_df['PLAYER_NAME'] == player_name]
     team_data = teams_df[teams_df['team'] == team]
-
     matchupRTG = 0
     playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup','Transition']
     for playtype in playtypes:
-        matchup_score = player_data[playtype].values[0] * team_data[playtype].values[0]
+        matchup_score = player_data[playtype + '%'].values[0] * team_data[playtype].values[0]
         matchupRTG += matchup_score
     
     return matchupRTG
@@ -86,7 +104,7 @@ def calculate_matchup_rating(player_name,team):
 
     
 # Function to retrieve all relevant games based on the user filtering
-def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off = [],date_filter = None, teams_against = [], location_filter = 'Both', last_games = None):
+def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off = [],date_filter = None, teams_against = [], location_filter = 'Both', last_games = None, playstyle_filter = None):
     player_dict = fetch_players()
     player = [player for player in player_dict if player['full_name'] == player_name][0]
     player_id = player['id']
@@ -107,12 +125,14 @@ def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off 
     gamelogs_df = gamelogs_df[gamelogs_df['MIN'] <= minutes_filter[1]]
     gamelogs_df['GAME_DATE'] = pd.to_datetime(gamelogs_df['GAME_DATE'])
     gamelogs_df['OPP'] = gamelogs_df['MATCHUP'].apply(get_opponent_team)
-    gamelogs_df['MATCHUP_RATING'] = gamelogs_df.apply(lambda row: calculate_matchup_rating(player_name, row['OPP']), axis=1)
+    gamelogs_df['PLAYSTYLE_RTG'] = gamelogs_df.apply(lambda row: calculate_matchup_rating(player_name, row['OPP']), axis=1)
+    if playstyle_filter is not None:
+        gamelogs_df = gamelogs_df[gamelogs_df['PLAYSTYLE_RTG'] > int(playstyle_filter[0])]
+        gamelogs_df = gamelogs_df[gamelogs_df['PLAYSTYLE_RTG'] < int(playstyle_filter[1])]
     gamelogs_df['MIN'] = gamelogs_df['MIN'].round().astype(int)
     if len(teams_against) != 0:
         gamelogs_df = gamelogs_df[gamelogs_df['OPP'].isin(teams_against)]
     if date_filter is not None:
-        print("hi")
         if not pd.isnull(date_filter):
             date_filter = pd.to_datetime(date_filter)
             # Filter the DataFrame to include only rows with 'GAME_DATE' on or after 'date_filter'
@@ -120,7 +140,6 @@ def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off 
     gamelogs_df['FD_PTS'] = gamelogs_df['NBA_FANTASY_PTS']
     common_game_ids = gamelogs_df['GAME_ID']
     exclude_game_ids = []
-    print(players_off)
     if players_on:
         common_game_ids = get_common_games(gamelogs_df,players_on)
     if players_off:
@@ -169,7 +188,6 @@ def filter_teams(filter, rank_filter, date_filter = None):
         df.sort_values(by = 'FG2M', ascending = False, inplace=True)
         df['team'] = df['TEAM_ABBREVIATION']
         
-    print(df['FG2M'])
     if rank_filter >= 0:
         return df.head(rank_filter)['team'].tolist()
     else:
@@ -210,6 +228,7 @@ def pullup_filtering(filter, date_filter):
     else:
         df = fetch_data_from_table('Pullups')
     df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
+    df['team'] = df['TEAM_ABBREVIATION']
     return df.sort_values(by = f_map[filter], ascending = False)  
     
 # Function to fetch data from a table
@@ -222,7 +241,7 @@ def fetch_data_from_table(table_name):
 # fetch overall opponent data
 def fetch_opponent_data(date_filter = None):
     response = endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter)
-    return response.get_data_fames()[0]
+    return response.get_data_frames()[0]
 
 # process and store yearly opponent data
 def process_opponent_scoring():
@@ -398,7 +417,7 @@ def store_team_play_types():
         return jsonify({'error': str(e)}), 500
     
 # API endpoint to trigger opponent scoring data processing and storage
-@app.route('/api/store_opponent_scoring', methods=['PUT'])
+@app.route('/api/store_opponent_scoring', methods=['GET'])
 def store_opponent_scoring():
     try:
         process_opponent_scoring()
@@ -429,7 +448,7 @@ def store_opp_shooting_zone():
 def get_game_log():
     # Extract parameters from the request
     player_name = request.args.get('player_name')
-    #minutes_filter = request.args.get('minutes_filter', '0,48')
+    minutes_filter = request.args.get('minutes_filter', '0,48')
     players_on = request.args.getlist('players_on[]')
     players_off = request.args.getlist('players_off[]')
     date_filter = request.args.get('date_filter')
@@ -437,22 +456,26 @@ def get_game_log():
     rank_filter = request.args.getlist('filter_numbers[]')
     location_filter = request.args.get('location_filter')
     game_filter = request.args.get('game_filter')
+    playstyle_min = request.args.get('playstyle_RTG_min', '75')
+    playstyle_max = request.args.get('playstyle_RTG_max', '125')
     # Convert the minutes_filter to a tuple of integers
-    #minutes_filter = tuple(map(int, minutes_filter.split(',')))
+    minutes_filter = tuple(map(int, minutes_filter.split(',')))
     teams_against = []
     for index, ele in enumerate(filters):
         teams_against.extend(filter_teams(ele, int(rank_filter[index]),date_filter))
     teams_against = set(teams_against)
-    print(teams_against)
-    # Call the game_log function with the parameters
-    game_logs_df = game_log(player_name, [0,48], players_on, players_off, date_filter, teams_against, location_filter, game_filter)
+    game_logs_df = game_log(player_name, minutes_filter, players_on, players_off, date_filter, teams_against, location_filter, game_filter, [playstyle_min,playstyle_max])
     
-    average_columns = ['MIN','FGM','FGA','FG_PCT','FG3M','FG3A','FTM','FTA','OREB','DREB','REB','AST','TOV','STL','BLK','PF','PTS','PRA','PA','PR','RA','STKS','FD_PTS']
+    average_columns = ['MIN','PTS','REB','AST', 'PRA','PA','PR','RA','FD_PTS', 'FGM','FGA','FG3M','FG3A','FTM','FTA','OREB','DREB','TOV','STL','BLK','PF','STKS']
     averages = game_logs_df[average_columns].mean().round(2).to_frame().T
     
     game_logs_json = game_logs_df.to_json(orient='records', date_format='iso')
     averages_json = averages.to_json(orient ='records',date_format = 'iso')
-    return jsonify({'game_logs': game_logs_json, 'averages': averages_json})
+    
+    season_logs = game_log(player_name)
+    average_season = season_logs[average_columns].mean().round(2).to_frame().T
+    season_json = average_season.to_json(orient ='records',date_format = 'iso')
+    return jsonify({'game_logs': game_logs_json, 'averages': averages_json, 'season_averages': season_json})
 
 @app.route('/api/players', methods=['GET'])
 def get_players():
@@ -460,6 +483,58 @@ def get_players():
     players = df['PLAYER_NAME'].unique().tolist()  # Assuming 'player_name' is the column name
     return jsonify(players)
 
+@app.route('/api/team_stats', methods=['GET'])
+def get_team_stats():
+    category = request.args.get('category')
+    team = request.args.get('team')
+    df = team_stats(category, team)
+    if df.empty:
+        return jsonify({"error": "No data found for the specified team and category"}), 404
+    team_stats_dict = df.to_dict(orient='records')[0]  # Assuming we're always getting one row
+    return jsonify(team_stats_dict)
+
+@app.route('/api/get_teams',methods =['GET'])
+def get_teams():
+    team = teams.get_teams()
+    team_names = [d['full_name'] for d in team]
+    return jsonify(team_names)
+
+@app.route('/api/player_playstyles', methods =['GET'])
+def get_player_playtypes():
+    player_name = request.args.get('player_name')
+    df = fetch_data_from_table('player_play_types')
+    df = df[df['PLAYER_NAME'] == player_name]
+    playtypes= df.to_dict(orient='records')[0] 
+    print(playtypes)
+    return jsonify(playtypes)
+
+#Fetch opponent stats from PBP endpoint
+def fetch_PBP_opponent():
+    url = 'https://api.pbpstats.com/get-totals/nba?Season=2023-24&SeasonType=Regular%2BSeason&StartType=All&Type=Opponent'
+
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise an exception for bad responses
+        data = response.json()
+        table_data = data['multi_row_table_data']
+
+        df = pd.DataFrame(table_data)
+        df = df.reset_index(drop=True)
+        df.to_sql('pbp_opponent_stats', engine, if_exists='replace', index=False)
+
+    except requests.RequestException as e:
+        print(f"An error occurred while fetching data: {e}")
+        return None
+    
+@app.route('/api/opponent_PBP', methods = ['GET','PUT'])
+def store_PBP_opponent():
+    try:
+        fetch_PBP_opponent()
+        return jsonify({'message': 'Opponent PBP data processed and stored successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Run the Flask app
 if __name__ == '__main__':
     app.run(debug=True)
+    
