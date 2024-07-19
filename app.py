@@ -6,6 +6,7 @@ from nba_api.stats.endpoints import playergamelogs
 import pandas as pd
 from sqlalchemy import create_engine
 import requests
+from functools import lru_cache
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -29,39 +30,44 @@ def team_stats(category,team):
             df[name] = df[col].rank(method='min', ascending = True)
         del df['Team_ID']
         del df['team']
+    elif category == 'Assists':
+        df = fetch_data_from_table('pbp_opponent_stats')
+        columns = ["Assists","AssistPoints", "TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
+        means = df[columns].mean()
+        for c in columns:
+            df[c] = df[c]/means[c]
+        names = []
+        for col in columns:
+            name = f'{col}_RANK'
+            names.append(name)
+            df[name] = df[col].rank(method='min', ascending = True)
+        columns.extend(names)
+        abbr = nba_team_to_abbreviation(team)
+        df = df[df['Name'] == abbr]
+        df = df[columns]
+        return df
+        
     df = df[df['TEAM_NAME'] == team]
     return df
 
-# Function to fetch players dictionary from nba api
-def fetch_players():
-    player_dict = players.get_players() #can try to interface with database later
-    return player_dict
+
     
 
 # Function to find common games between players
 def get_common_games(primary_player_logs, other_players_names,season='2023-24'):
-    # Combine GAME_ID and TEAM_ABBREVIATION into a single identifier for primary player's games
     primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
     
-    player_dict = fetch_players()
     # Loop through other players and find intersections based on game IDs and team abbreviations
     for player_name in other_players_names:
-        player = next((player for player in player_dict if player['full_name'] == player_name), None)
-        if not player:
-            continue  # If player not found, skip to the next iteration
-        
-        player_id = player['id']
+        player_id = get_player_id(player_name)
         player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
         player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
         
-        # Intersect with primary_game_team_pairs to find games and teams where both played
         primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
         
-        # If at any point the intersection is empty, no need to continue
         if not primary_game_team_pairs:
             break
     
-    # Extract just the GAME_IDs from the intersecting pairs for further use
     common_game_ids = {pair[0] for pair in primary_game_team_pairs}
     
     return set(common_game_ids)
@@ -69,15 +75,10 @@ def get_common_games(primary_player_logs, other_players_names,season='2023-24'):
 # Function to find games to exclude due to filtering
 def get_games_to_exclude(player_logs, players_off_names, season= '2023-24'):
     exclude_game_ids = set()
-    player_dict = fetch_players()
     
     # Loop through players_off and union game IDs
     for player_name in players_off_names:
-        player = next((player for player in player_dict if player['full_name'] == player_name), None)
-        if not player:
-            continue
-        
-        player_id = player['id']
+        player_id = get_player_id(player_name)
         player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
         player_game_ids = set(player_gamelogs['GAME_ID'])
         
@@ -91,71 +92,91 @@ def calculate_matchup_rating(player_name,team):
     teams_df = fetch_data_from_table('team_play_types')
     players_df = fetch_data_from_table('player_play_types')
 
-    player_data = players_df[players_df['PLAYER_NAME'] == player_name]
-    team_data = teams_df[teams_df['team'] == team]
-    matchupRTG = 0
-    playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup','Transition']
-    for playtype in playtypes:
-        matchup_score = player_data[playtype + '%'].values[0] * team_data[playtype].values[0]
-        matchupRTG += matchup_score
-    
-    return matchupRTG
-        
+    playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup', 'Transition']
+
+    player_columns = [playtype + '%' for playtype in playtypes]
+    team_columns = playtypes
+
+    player_data = players_df.loc[players_df['PLAYER_NAME'] == player_name, player_columns]
+    team_data = teams_df.loc[teams_df['team'] == team, team_columns]
+
+    matchupRTG = (player_data.values * team_data.values).sum()
+
+    return round(matchupRTG, 2)
+
+def calculate_assist_location_rating(player_name, team):
+    teams_df = fetch_data_from_table('processed_team_assists')
+    players_df = fetch_data_from_table('processed_player_assists')
 
     
-# Function to retrieve all relevant games based on the user filtering
-def game_log(player_name, minutes_filter = (0,48), players_on = [], players_off = [],date_filter = None, teams_against = [], location_filter = 'Both', last_games = None, playstyle_filter = None):
-    player_dict = fetch_players()
-    player = [player for player in player_dict if player['full_name'] == player_name][0]
-    player_id = player['id']
-    gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable='2023-24')
-    gamelogs_df = gamelogs.get_data_frames()[0]
+    cats = ["Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
+    
+    player_data = players_df.loc[players_df['Name'] == player_name, cats]
+    team_data = teams_df.loc[teams_df['Name'] == team, cats]
+
+    # Compute the matchup rating using vectorized operations
+    matchupRTG = (player_data.values * team_data.values).sum()
+
+    return round(matchupRTG, 2)
+    
+#function to return a player's id
+def get_player_id(player_name):
+    player_dict = fetch_data_from_table('Player_Information')
+    player = player_dict[player_dict['full_name'] == player_name]
+    player_id = player['id'].values[0]
+    return player_id
+         
+# Add this cache decorator
+@lru_cache(maxsize=32)
+def cached_playergamelogs(player_id, season):
+    gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season)
+    return gamelogs.get_data_frames()[0]
+
+def game_log(player_name, minutes_filter=(0,48), players_on=[], players_off=[], date_filter=None, teams_against=[], location_filter=None, last_games=None, playstyle_filter=None):
+    # Fetch player information from the database
+    player_id= get_player_id(player_name)
+    #if not player_id:
+        #return pd.DataFrame()
+
+    season = '2023-24'
+
+    # Use cached function to get game logs
+    gamelogs_df = cached_playergamelogs(player_id, season)
     gamelogs_df = gamelogs_df.drop(['SEASON_YEAR','PLAYER_ID','GP_RANK', 'W_RANK', 'L_RANK', 'W_PCT_RANK','MIN_RANK', 'FGM_RANK', 'FGA_RANK', 'FG_PCT_RANK', 'FG3M_RANK',
    'FG3A_RANK', 'FG3_PCT_RANK', 'FTM_RANK', 'FTA_RANK', 'FT_PCT_RANK',
    'OREB_RANK', 'DREB_RANK', 'REB_RANK', 'AST_RANK', 'TOV_RANK',
    'STL_RANK', 'BLK_RANK', 'BLKA_RANK', 'PF_RANK', 'PFD_RANK', 'PTS_RANK',
    'PLUS_MINUS_RANK', 'NBA_FANTASY_PTS_RANK', 'DD2_RANK', 'TD3_RANK',
    'WNBA_FANTASY_PTS_RANK', 'AVAILABLE_FLAG','NICKNAME', 'TEAM_ID','TEAM_NAME','DD2','TD3','WNBA_FANTASY_PTS','BLKA','PFD'],axis = 1)
-    gamelogs_df['PRA'] = gamelogs_df['PTS'] + gamelogs_df['REB'] + gamelogs_df['AST']
-    gamelogs_df['PA'] = gamelogs_df['PTS'] + gamelogs_df['AST']
-    gamelogs_df['PR'] = gamelogs_df['PTS'] + gamelogs_df['REB']
-    gamelogs_df['RA'] = gamelogs_df['REB'] + gamelogs_df['AST']
-    gamelogs_df['STKS'] = gamelogs_df['STL'] + gamelogs_df['BLK']
-    gamelogs_df = gamelogs_df[gamelogs_df['MIN'] >= minutes_filter[0]]
-    gamelogs_df = gamelogs_df[gamelogs_df['MIN'] <= minutes_filter[1]]
-    gamelogs_df['GAME_DATE'] = pd.to_datetime(gamelogs_df['GAME_DATE'])
-    gamelogs_df['OPP'] = gamelogs_df['MATCHUP'].apply(get_opponent_team)
-    gamelogs_df['PLAYSTYLE_RTG'] = gamelogs_df.apply(lambda row: calculate_matchup_rating(player_name, row['OPP']), axis=1)
-    if playstyle_filter is not None:
-        gamelogs_df = gamelogs_df[gamelogs_df['PLAYSTYLE_RTG'] > int(playstyle_filter[0])]
-        gamelogs_df = gamelogs_df[gamelogs_df['PLAYSTYLE_RTG'] < int(playstyle_filter[1])]
-    gamelogs_df['MIN'] = gamelogs_df['MIN'].round().astype(int)
-    if len(teams_against) != 0:
-        gamelogs_df = gamelogs_df[gamelogs_df['OPP'].isin(teams_against)]
-    if date_filter is not None:
-        if not pd.isnull(date_filter):
-            date_filter = pd.to_datetime(date_filter)
-            # Filter the DataFrame to include only rows with 'GAME_DATE' on or after 'date_filter'
-            gamelogs_df = gamelogs_df[gamelogs_df['GAME_DATE'] >= date_filter]
-    gamelogs_df['FD_PTS'] = gamelogs_df['NBA_FANTASY_PTS']
-    common_game_ids = gamelogs_df['GAME_ID']
-    exclude_game_ids = []
-    if players_on:
-        common_game_ids = get_common_games(gamelogs_df,players_on)
-    if players_off:
-        exclude_game_ids = get_games_to_exclude(gamelogs_df, players_off)
-    final_game_ids = set(common_game_ids) - set(exclude_game_ids)
-    gamelogs_df = gamelogs_df[gamelogs_df['GAME_ID'].isin(final_game_ids)]
-    gamelogs_df = gamelogs_df.drop(['NBA_FANTASY_PTS','OPP','TEAM_ABBREVIATION','GAME_ID','PLAYER_NAME','FT_PCT'],axis=1)
-    gamelogs_df.rename(columns={'PLUS_MINUS':'+/-'},inplace = True)
-    if location_filter == 'Home':
-        gamelogs_df = gamelogs_df[gamelogs_df['MATCHUP'].str.contains('vs')]
-    elif location_filter == 'Away':
-        gamelogs_df = gamelogs_df[gamelogs_df['MATCHUP'].str.contains('@')]
-    if last_games:
-        gamelogs_df = gamelogs_df.head(int(last_games))
+    gamelogs_df = calculate_additional_stats(gamelogs_df)
+    
     gamelogs_df['GAME_DATE'] = gamelogs_df['GAME_DATE'].astype(str)
-    return gamelogs_df    
+    gamelogs_df.drop(['NBA_FANTASY_PTS','FT_PCT','PLUS_MINUS', 'MIN_SEC'],axis=1, inplace = True)
+    return gamelogs_df
+
+
+def filter_players_on_off(df, players_on, players_off, season):
+    if players_on:
+        common_games = get_common_games(df, players_on, season)
+        df = df[df['GAME_ID'].isin(common_games)]
+    
+    if players_off:
+        exclude_games = get_games_to_exclude(df, players_off, season)
+        df = df[~df['GAME_ID'].isin(exclude_games)]
+    
+    return df
+
+def calculate_additional_stats(df):
+    df['PRA'] = df['PTS'] + df['REB'] + df['AST']
+    df['PA'] = df['PTS'] + df['AST']
+    df['PR'] = df['PTS'] + df['REB']
+    df['RA'] = df['REB'] + df['AST']
+    df['STKS'] = df['STL'] + df['BLK']
+    df['FD_PTS'] = df['NBA_FANTASY_PTS']
+    df['+/-'] = df['PLUS_MINUS']
+    df['MIN'] = df['MIN'].round().astype(int)
+    return df
+    
 
 # Function to get the opponent team of the player
 def get_opponent_team(match):
@@ -208,7 +229,7 @@ def playtype_filtering(filter):
     df = fetch_data_from_table('team_play_types')
     return df.sort_values(by= filter, ascending=False)
         
-    
+#Function that filters when the user is filtering for catch and shoot teams
 def catch_shoot_filtering(filter, date_filter):
     f_map = {'C&S 3s': 'FG3M', 'C&S PTS' : 'PTS'}         
     if date_filter is not None:
@@ -220,6 +241,7 @@ def catch_shoot_filtering(filter, date_filter):
     df['team'] = df['TEAM_ABBREVIATION']
     return df.sort_values(by = f_map[filter], ascending = False)
 
+#Function that filters when the user is filtering for pullup teams
 def pullup_filtering(filter, date_filter):
     f_map = {'PU 2s': 'FG2M', 'PU 3s': 'FG3M', 'PU PTS' : 'PTS'}
     if date_filter is not None:
@@ -347,7 +369,7 @@ def fetch_play_type_data(play_type):
     return response.get_data_frames()[0]
 
 # Function to process and store data
-def process_and_store_data():
+def process_playstyles():
     playtypes = [
         'Transition', 'Isolation', 'PRBallHandler', 'PRRollman', 'OffRebound',
         'Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup'
@@ -402,7 +424,7 @@ def process_and_store_data():
 @app.route('/api/store_play_types', methods=['PUT'])
 def store_play_types():
     try:
-        process_and_store_data()
+        process_playstyles()
         return jsonify({'message': 'Data processed and stored successfully'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -443,40 +465,129 @@ def store_opp_shooting_zone():
         return jsonify({'error': str(e)}), 500
         
 
-# API endpoint to retrieve gamelogs after user filtering on frontend
-@app.route('/api/game_logs', methods = ['GET'])
-def get_game_log():
-    # Extract parameters from the request
-    player_name = request.args.get('player_name')
-    minutes_filter = request.args.get('minutes_filter', '0,48')
-    players_on = request.args.getlist('players_on[]')
-    players_off = request.args.getlist('players_off[]')
-    date_filter = request.args.get('date_filter')
-    filters = request.args.getlist('teams_against[]')
-    rank_filter = request.args.getlist('filter_numbers[]')
-    location_filter = request.args.get('location_filter')
-    game_filter = request.args.get('game_filter')
-    playstyle_min = request.args.get('playstyle_RTG_min', '75')
-    playstyle_max = request.args.get('playstyle_RTG_max', '125')
-    # Convert the minutes_filter to a tuple of integers
-    minutes_filter = tuple(map(int, minutes_filter.split(',')))
-    teams_against = []
-    for index, ele in enumerate(filters):
-        teams_against.extend(filter_teams(ele, int(rank_filter[index]),date_filter))
-    teams_against = set(teams_against)
-    game_logs_df = game_log(player_name, minutes_filter, players_on, players_off, date_filter, teams_against, location_filter, game_filter, [playstyle_min,playstyle_max])
+@lru_cache(maxsize=32)
+def get_player_game_logs_with_ratings(player_name):
+    """
+    Retrieve game logs for a player and calculate ratings.
+    This function is cached to avoid redundant calculations.
+    """
+    game_logs_df = game_log(player_name)
     
-    average_columns = ['MIN','PTS','REB','AST', 'PRA','PA','PR','RA','FD_PTS', 'FGM','FGA','FG3M','FG3A','FTM','FTA','OREB','DREB','TOV','STL','BLK','PF','STKS']
-    averages = game_logs_df[average_columns].mean().round(2).to_frame().T
+    # Calculate Playtype rating and assist location rating
+    game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
+        lambda row: calculate_matchup_rating(row['PLAYER_NAME'], get_opponent_team(row['MATCHUP'])), 
+        axis=1
+    )
+    game_logs_df['AST_LOC_RTG'] = game_logs_df.apply(
+        lambda row: calculate_assist_location_rating(row['PLAYER_NAME'], get_opponent_team(row['MATCHUP'])), 
+        axis=1
+    )
     
-    game_logs_json = game_logs_df.to_json(orient='records', date_format='iso')
-    averages_json = averages.to_json(orient ='records',date_format = 'iso')
-    
-    season_logs = game_log(player_name)
-    average_season = season_logs[average_columns].mean().round(2).to_frame().T
-    season_json = average_season.to_json(orient ='records',date_format = 'iso')
-    return jsonify({'game_logs': game_logs_json, 'averages': averages_json, 'season_averages': season_json})
+    return game_logs_df
 
+def apply_filters(df, filter_params):
+    """Apply filters to the DataFrame without recalculating ratings."""
+    # Extract filter parameters
+    minutes_filter = filter_params.get('minutes_filter', (0, 48))
+    players_on = filter_params.get('players_on', [])
+    players_off = filter_params.get('players_off', [])
+    date_filter = filter_params.get('date_filter')
+    teams_against = filter_params.get('teams_against', [])
+    location_filter = filter_params.get('location_filter', 'Both')
+    game_filter = filter_params.get('game_filter')
+    playstyle_range = filter_params.get('playstyle_range', [75, 125])
+    self_filters = filter_params.get('self_filters', {})
+
+    # Apply filters
+    df = df[(df['MIN'] >= minutes_filter[0]) & (df['MIN'] <= minutes_filter[1])]
+    
+    if date_filter:
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+        df = df[df['GAME_DATE'] >= date_filter]
+    
+    if teams_against:
+        df['OPPONENT'] = df['MATCHUP'].apply(lambda x: x.split()[-1].upper())
+        df = df[df['OPPONENT'].isin(teams_against)]
+        
+    if location_filter != 'Both':
+        df = df[df['MATCHUP'].str.contains('vs' if location_filter == 'Home' else '@')]
+    
+    df = df[(df['PLAYTYPE_RTG'] >= playstyle_range[0]) & (df['PLAYTYPE_RTG'] <= playstyle_range[1])]
+    
+    for column, range_values in self_filters.items():
+        if column in df.columns:
+            df = df[(df[column] >= range_values[0]) & (df[column] <= range_values[1])]
+    
+    if game_filter:
+        df = df.head(int(game_filter))
+        
+    df = filter_players_on_off(df, players_on, players_off, '2023-24')
+    
+    
+    return df
+
+@app.route('/api/game_logs', methods=['GET'])
+def get_game_log():
+    player_name = request.args.get('player_name')
+    # Retrieve game logs with pre-calculated ratings
+    full_game_logs = get_player_game_logs_with_ratings(player_name)
+    
+    
+    # Otherwise, apply filters
+    filter_params = {
+        'minutes_filter': tuple(map(int, request.args.get('minutes_filter', '0,48').split(','))),
+        'players_on': request.args.getlist('players_on[]'),
+        'players_off': request.args.getlist('players_off[]'),
+        'date_filter': request.args.get('date_filter'),
+        'teams_against': request.args.getlist('teams_against[]'),
+        'rank_filter': request.args.getlist('filter_numbers[]'),
+        'location_filter': request.args.get('location_filter', 'Both'),
+        'game_filter': request.args.get('game_filter'),
+        'playstyle_range': [
+            float(request.args.get('playstyle_RTG_min', '75')),
+            float(request.args.get('playstyle_RTG_max', '125'))
+        ],
+        'self_filters': {
+            key[13:-1]: list(map(float, value.split(',')))
+            for key, value in request.args.items()
+            if key.startswith('self_filters[') and key.endswith(']')
+        }
+    }
+    
+    teams_against = None
+    for index, ele in enumerate(filter_params['teams_against']):
+        filtered_teams = set(filter_teams(ele, int(filter_params['rank_filter'][index]), filter_params['date_filter']))
+        
+        if teams_against is None:
+            teams_against = filtered_teams
+        else:
+            teams_against = teams_against.intersection(filtered_teams)
+            
+    if teams_against is None:
+        teams_against = set()
+    
+    filter_params['teams_against'] = teams_against
+    filtered_game_logs = apply_filters(full_game_logs, filter_params)
+    filtered_game_logs.drop(['PLAYER_NAME','GAME_ID','TEAM_ABBREVIATION'], axis = 1, inplace = True)
+    filtered_game_logs['GAME_DATE'] = pd.to_datetime(filtered_game_logs['GAME_DATE']).dt.date
+    filtered_game_logs['GAME_DATE'] = filtered_game_logs['GAME_DATE'].astype(str)
+    
+    # Calculate averages and prepare response
+    average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA', 'FD_PTS', 'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS']
+    averages = filtered_game_logs[average_columns].mean().round(2).to_frame().T
+    
+    game_logs_json = filtered_game_logs.to_json(orient='records', date_format='iso')
+    averages_json = averages.to_json(orient='records', date_format='iso')
+    
+    average_season = full_game_logs[average_columns].mean().round(2).to_frame().T
+    season_json = average_season.to_json(orient='records', date_format='iso')
+    
+    return jsonify({
+        'game_logs': game_logs_json,
+        'averages': averages_json,
+        'season_averages': season_json
+    })
+    
 @app.route('/api/players', methods=['GET'])
 def get_players():
     df = fetch_data_from_table('player_play_types')
@@ -499,33 +610,11 @@ def get_teams():
     team_names = [d['full_name'] for d in team]
     return jsonify(team_names)
 
-@app.route('/api/player_playstyles', methods =['GET'])
-def get_player_playtypes():
-    player_name = request.args.get('player_name')
+def get_player_playtypes(player_name):
     df = fetch_data_from_table('player_play_types')
     df = df[df['PLAYER_NAME'] == player_name]
-    playtypes= df.to_dict(orient='records')[0] 
-    print(playtypes)
-    return jsonify(playtypes)
-
-#Get stats from PBP
-def get_PBP_stats(team, category):
-    abbr = nba_team_to_abbreviation(team)
-    df = fetch_data_from_table('pbp_opponent_stats')
-    
-    if category == 'Assists':
-        columns = ["TwoPtAssists","ThreePtAssists","Assists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists","AssistPoints"]
-        names = []
-        for col in columns:
-            name = f'{col}_RANK'
-            names.append(name)
-            df[name] = df[col].rank(method='min', ascending = True)
-        columns.extend(names)
-        
-    df = df[df['Name'] == abbr]
-    df = df[columns]
-    return df
-        
+    playtypes= df.to_dict(orient='records')[0]
+    return playtypes
 
 #Fetch opponent stats from PBP endpoint
 def fetch_PBP_opponent():
@@ -545,7 +634,32 @@ def fetch_PBP_opponent():
         print(f"An error occurred while fetching data: {e}")
         return None
     
-@app.route('/api/opponent_PBP', methods = ['GET','PUT'])
+#Fetch player stats from PBP endpoint
+def fetch_PBP_player():
+    url = 'https://api.pbpstats.com/get-totals/nba?Season=2023-24&SeasonType=Regular%2BSeason&Type=Player'
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise an exception for bad responses
+        data = response.json()
+        table_data = data['multi_row_table_data']
+
+        df = pd.DataFrame(table_data)
+        df = df.reset_index(drop=True)
+        df.to_sql('pbp_player_stats', engine, if_exists='replace', index=False)
+
+    except requests.RequestException as e:
+        print(f"An error occurred while fetching data: {e}")
+        return None
+    
+@app.route('/api/player_PBP', methods = ['PUT'])
+def store_PBP_player():
+    try:
+        fetch_PBP_player()
+        return jsonify({'message': 'Player PBP data processed and stored successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/opponent_PBP', methods = ['PUT'])
 def store_PBP_opponent():
     try:
         fetch_PBP_opponent()
@@ -553,8 +667,65 @@ def store_PBP_opponent():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Function to fetch players dictionary from nba api
+@app.route('/api/fetch_players', methods = ['PUT'])
+def fetch_players():
+    try: 
+        player_dict = players.get_players() #can try to interface with database later
+        player_df = pd.DataFrame.from_dict(player_dict)
+        player_df.to_sql('Player_Information', engine, if_exists = 'replace', index =False)
+        return jsonify({'message': 'Player dict processed and stored successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+#Function to return player profile data
+@app.route('/api/player_profile', methods = ['GET'])
+def get_player_profile_data():
+    player = request.args.get('player_name')
+    category = request.args.get('category')
+    if category == 'playstyles':
+        dict = get_player_playtypes(player)
+    elif category == 'assists':
+        df = fetch_data_from_table('pbp_player_stats')
+        df = df[df['Name'] == player]
+        df = df[["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]]
+        sum = df.drop(['TwoPtAssists','ThreePtAssists'], axis=1).sum(axis=1)
+        cats = ["Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
+        for c in cats:
+            df[c] = df[c] / sum * 100
+        sum = df[['TwoPtAssists','ThreePtAssists']].sum(axis=1)
+        df['TwoPtAssists'] = df['TwoPtAssists'] / sum * 100
+        df['ThreePtAssists'] = df['ThreePtAssists'] / sum * 100
+        dict = df.to_dict(orient = 'records')
+
+    
+    return jsonify(dict)
+
+def process_assist_data():
+    teams_df = fetch_data_from_table('pbp_opponent_stats')
+    players_df = fetch_data_from_table('pbp_player_stats')
+    
+    
+    teams_df = teams_df[["Name","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]]
+    columns = ["Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
+    means = teams_df[columns].mean()
+    for c in columns:
+        teams_df[c] = teams_df[c]/means[c]
+    
+    players_df = players_df[["Name","TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]]
+    sum = players_df.drop(["Name",'TwoPtAssists','ThreePtAssists'], axis=1).sum(axis=1)
+    cats = ["Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
+    for c in cats:
+        players_df[c] = players_df[c] / sum * 100
+    
+    teams_df.to_sql('processed_team_assists', engine, if_exists='replace', index=False)
+    players_df.to_sql('processed_player_assists', engine, if_exists='replace', index=False)
+    print('hi')
+        
+    
 # Run the Flask app
 if __name__ == '__main__':
-    print(get_PBP_stats('New York Knicks','Assists'))
+    process_assist_data()
     app.run(debug=True)
+    
     
