@@ -449,13 +449,14 @@ def process_playstyles():
     
 # API endpoint to trigger updating of database
 @app.route('/api/update_database', methods=['GET'])
-def store_opponent_scoring():
+def store_database():
     try:
         process_opponent_scoring()
         process_and_store_team_data()
         process_opp_shooting()
         process_opp_shooting_zone()
         process_playstyles()
+        process_player_zone()
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -721,7 +722,8 @@ def process_assist_data():
     
 # Run the Flask app
 if __name__ == '__main__':
-    df = fetch_data_from_table('processed_player_assists')
+    store_database()
+    
     app.run(debug=True)
     
     
