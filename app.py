@@ -419,49 +419,19 @@ def process_playstyles():
 
     pivot_df.to_sql('player_play_types', engine, if_exists='replace', index=False)
 
-# API endpoint to trigger data processing and storage
-@app.route('/api/store_play_types', methods=['PUT'])
-def store_play_types():
-    try:
-        process_playstyles()
-        return jsonify({'message': 'Data processed and stored successfully'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
     
-# API endpoint to trigger team data processing and storage
-@app.route('/api/store_team_play_types', methods=['PUT'])
-def store_team_play_types():
-    try:
-        process_and_store_team_data()
-        return jsonify({'message': 'Team data processed and stored successfully'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-# API endpoint to trigger opponent scoring data processing and storage
-@app.route('/api/store_opponent_scoring', methods=['GET'])
+# API endpoint to trigger updating of database
+@app.route('/api/update_database', methods=['GET'])
 def store_opponent_scoring():
     try:
         process_opponent_scoring()
-        return jsonify({'message': 'Opponent scoring data processed and stored successfully'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# API endpoint to trigger opponent shooting data processing and storage
-@app.route('/api/store_opp_shooting', methods=['PUT'])
-def store_opp_shooting():
-    try:
+        process_and_store_team_data()
         process_opp_shooting()
-        return jsonify({'message': 'Opponent shooting data processed and stored successfully'})
+        process_opp_shooting_zone()
+        process_playstyles()
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/store_opp_shooting_zone', methods = ['PUT'])
-def store_opp_shooting_zone():
-    try:
-        process_opp_shooting_zone()
-        return jsonify({'message': 'Opponent shooting zone data processed and stored successfully'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
         
 
 @lru_cache(maxsize=32)
@@ -582,7 +552,8 @@ def get_game_log():
     return jsonify({
         'game_logs': game_logs_json,
         'averages': averages_json,
-        'season_averages': season_json
+        'season_averages': season_json,
+        'next_game'  : "Houston Rockets"
     })
     
 @app.route('/api/players', methods=['GET'])
@@ -684,17 +655,11 @@ def get_player_profile_data():
     if category == 'playstyles':
         dict = get_player_playtypes(player)
     elif category == 'assists':
-        df = fetch_data_from_table('pbp_player_stats')
+        df = fetch_data_from_table('processed_player_assists')
         df = df[df['Name'] == player]
-        df = df[["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]]
-        sum = df.drop(['TwoPtAssists','ThreePtAssists'], axis=1).sum(axis=1)
-        cats = ["Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
-        for c in cats:
-            df[c] = df[c] / sum * 100
-        sum = df[['TwoPtAssists','ThreePtAssists']].sum(axis=1)
-        df['TwoPtAssists'] = df['TwoPtAssists'] / sum * 100
-        df['ThreePtAssists'] = df['ThreePtAssists'] / sum * 100
         dict = df.to_dict(orient = 'records')
+    #elif category == 'shooting zones':
+        
 
     
     return jsonify(dict)
@@ -730,8 +695,6 @@ def process_assist_data():
 # Run the Flask app
 if __name__ == '__main__':
     df = fetch_data_from_table('processed_player_assists')
-    df.sort_values(by = 'ThreePtAssists', inplace = True, ascending = False)
-    print(df.head(30))
     app.run(debug=True)
     
     
