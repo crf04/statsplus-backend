@@ -301,6 +301,32 @@ def process_opp_shooting():
 def process_opp_shooting_zone():
     opp_zone_df = fetch_opp_shooting_zone_data()
     opp_zone_df.to_sql('opp_shooting_zone', engine, if_exists='replace', index=False)
+    
+#Function to fetch shooting zone data from NBA API
+def fetch_player_zone(date_filter = None):
+    return endpoints.LeagueDashPlayerShotLocations(distance_range = 'By Zone', date_from_nullable = date_filter).get_data_frames()[0]
+
+#function to process player shooting zone data and store it in database
+def process_player_zone():
+    player_zones = fetch_player_zone()
+    player_zones.columns = ['_'.join(filter(None, col)).strip() for col in player_zones.columns]
+    player_zones = player_zones[[c for c in player_zones.columns if ('FGM' in c or '_NAME' in c) and 'Back' not in c]]
+    for col in player_zones.columns:
+        if 'NAME' not in col:
+            player_zones[col]  = player_zones[col] * 2 if '3' not in col else player_zones[col] * 3
+        
+
+    sums = player_zones.drop(['PLAYER_NAME'], axis = 1).sum(axis=1)
+
+    player_zones['Sum'] = sums
+
+    for col in player_zones.columns:
+        if 'NAME' not in col:
+            percentage_column_name = col.split('_')[0] + "_PTS%"
+            player_zones[percentage_column_name] = player_zones[col] / player_zones['Sum'] * 100  
+    player_zones.drop([c for c in player_zones.columns if 'PTS%' not in c and 'NAME' not in c],axis = 1, inplace=True)
+    player_zones.fillna(0, inplace=True)
+    player_zones.to_sql('player_shooting_zones', engine, if_exists='replace', index=False)
         
 # Function to fetch play type data for teams from the NBA API
 def fetch_team_play_type_data(play_type):
@@ -312,6 +338,7 @@ def nba_team_to_abbreviation(team_name):
     nba_teams = teams.get_teams()
     team_abbr_map = {team['full_name']: team['abbreviation'] for team in nba_teams}
     return team_abbr_map.get(team_name, "Unknown")
+
 
 # Function to process and store team data
 def process_and_store_team_data():
