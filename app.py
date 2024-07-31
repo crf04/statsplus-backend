@@ -140,7 +140,7 @@ def filter_teams(filter, rank_filter, date_filter = None):
     Catch_Shoot_types = ['C&S 3s', 'C&S PTS']
     Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
     playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound','Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
-    overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REBOUNDS','OPP_STOCKS']
+    overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS']
     assist_types = ["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
     
     if filter in Catch_Shoot_types:
@@ -447,20 +447,7 @@ def process_playstyles():
     pivot_df.to_sql('player_play_types', engine, if_exists='replace', index=False)
 
     
-# API endpoint to trigger updating of database
-@app.route('/api/update_database', methods=['GET'])
-def store_database():
-    try:
-        process_opponent_scoring()
-        process_and_store_team_data()
-        process_opp_shooting()
-        process_opp_shooting_zone()
-        process_playstyles()
-        process_player_zone()
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
-        
 
 @lru_cache(maxsize=32)
 def get_player_game_logs_with_ratings(player_name):
@@ -680,16 +667,16 @@ def fetch_players():
 def get_player_profile_data():
     player = request.args.get('player_name')
     category = request.args.get('category')
-    if category == 'playstyles':
+    opp_team = request.args.get('opp_team')
+    if category == 'Playtypes':
         dict = get_player_playtypes(player)
     elif category == 'assists':
         df = fetch_data_from_table('processed_player_assists')
         df = df[df['Name'] == player]
         dict = df.to_dict(orient = 'records')
     #elif category == 'shooting zones':
-        
-
-    
+    elif category == 'Archetype':
+        dict = get_archetype_gamelogs(player, opp_team).to_dict(orient='records')
     return jsonify(dict)
 
 def process_assist_data():
@@ -715,15 +702,83 @@ def process_assist_data():
     for c in cats:
         players_df[c] = players_df[c] / sum * 100
     
+    sum = players_df.drop(["Name","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"], axis=1).sum(axis=1)
+    
+    players_df["TwoPtAssists"] = players_df["TwoPtAssists"] / sum * 100
+    players_df["ThreePtAssists"] = players_df["ThreePtAssists"] / sum * 100
+    averages = players_df.drop('Name', axis=1).mean()
+    for col in players_df.columns:
+        if col != 'Name':
+            col_name = f'{col}+'
+            players_df[col_name] = players_df[col] / averages[col]
+    
     teams_df.to_sql('processed_team_assists', engine, if_exists='replace', index=False)
     players_df.to_sql('processed_player_assists', engine, if_exists='replace', index=False)
-    print('hi')
         
+# API endpoint to trigger updating of database
+@app.route('/api/update_database', methods=['GET'])
+def store_database():
+    try:
+        process_opponent_scoring()
+        process_and_store_team_data()
+        process_opp_shooting()
+        process_opp_shooting_zone()
+        process_playstyles()
+        process_player_zone()
+        process_assist_data()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+#function to organize the clustering of players into tables
+def process_clusters():
+    clusters = {
+        0: ['Alperen Sengun', 'Anthony Davis', 'Bam Adebayo', 'Bobby Portis', 'Deandre Ayton', 'Joel Embiid', 'Jonas Valanciunas', 'Jusuf Nurkic', 'Kyle Anderson', 'Nikola Jokic', 'Nikola Vucevic', 'Zach Collins'],
+        1: ['Alec Burks', 'Alex Caruso', 'Ayo Dosunmu', 'Bojan Bogdanovic', 'Brandin Podziemski', 'Brandon Miller', 'Brice Sensabaugh', 'Caleb Martin', 'Cam Whitmore', 'Cameron Johnson', 'Cameron Payne', 'Cody Martin', 'Davion Mitchell', "De'Andre Hunter", "De'Anthony Melton", 'Derrick White', 'Devin Vassell', 'Dillon Brooks', 'Evan Fournier', 'GG Jackson', 'Gary Trent Jr.', 'Harrison Barnes', 'Jake LaRavia', 'Jalen Suggs', 'Josh Hart', 'Josh Richardson', 'Jrue Holiday', 'Keldon Johnson', 'Kyle Lowry', 'Lonnie Walker IV', 'Malaki Branham', 'Mikal Bridges', 'Mike Conley', 'Miles McBride', 'Moses Moody', 'Naji Marshall', 'Norman Powell', 'Patrick Williams', 'Payton Pritchard', 'Rayan Rupert', 'Vince Williams Jr.', 'Ziaire Williams'],
+        2: ['Aaron Holiday', 'Anfernee Simons', 'Anthony Edwards', 'Austin Reaves', 'CJ McCollum', 'Caris LeVert', 'Coby White', 'Cole Anthony', "D'Angelo Russell", 'Damian Lillard', 'Darius Garland', "De'Aaron Fox", 'Dejounte Murray', 'Dennis Schroder', 'Desmond Bane', 'Donovan Mitchell', 'Fred VanVleet', 'Immanuel Quickley', 'Jalen Brunson', 'Jalen Green', 'Jalen Williams', 'James Harden', 'Jayson Tatum', 'Jordan Clarkson', 'Jordan Goodwin', 'Jordan Poole', 'Keyonte George', 'LaMelo Ball', 'Luka Doncic', 'Malcolm Brogdon', 'Malik Monk', 'Marcus Sasser', 'Patrick Beverley', 'Reggie Jackson', 'Scoot Henderson', 'Scotty Pippen Jr.', 'Shaedon Sharpe', 'Spencer Dinwiddie', 'Stephen Curry', 'Talen Horton-Tucker', 'Terry Rozier', 'Trae Young', 'Tre Mann', 'Tyler Herro', 'Tyrese Haliburton', 'Tyrese Maxey', 'Tyus Jones', 'Vasilije Micic', 'Zach LaVine'],
+        3: ['Al Horford', 'Dean Wade', 'Dorian Finney-Smith', 'Eric Gordon', 'Gary Harris', 'Georges Niang', 'Grayson Allen', 'Haywood Highsmith', 'Isaiah Livers', 'Jacob Gilyard', 'Jae Crowder', 'Joe Ingles', 'Jose Alvarado', 'Julian Champagnie', 'Luguentz Dort', 'Malik Beasley', 'Matisse Thybulle', 'Maxi Kleber', 'Nickeil Alexander-Walker', 'Nicolas Batum', 'Nikola Jovic', 'P.J. Tucker', 'Pat Connaughton', 'Quentin Grimes', "Royce O'Neale", 'Sam Hauser', 'Simone Fontecchio', 'Taurean Prince', 'Taylor Hendricks', 'Torrey Craig', 'Trey Lyles', 'Trey Murphy III', 'Vit Krejci'],
+        4: ['Aaron Nesmith', 'Aaron Wiggins', 'Amir Coffey', 'Anthony Black', 'Ausar Thompson', 'Bilal Coulibaly', 'Cam Reddish', 'Cason Wallace', 'Cedi Osman', 'Chimezie Metu', 'Christian Braun', 'David Roddy', 'Derrick Jones Jr.', 'Dyson Daniels', 'Gary Payton II', 'Herbert Jones', 'Isaac Okoro', 'Jaden McDaniels', 'Jalen Johnson', 'Jalen Wilson', 'Jarred Vanderbilt', 'John Konchar', 'Josh Green', 'Josh Okogie', 'Kevin Knox II', 'Kris Murray', 'OG Anunoby', 'Obi Toppin', 'Ochai Agbaji', 'Peyton Watson', 'Robert Covington', 'Saddiq Bey', 'Tari Eason', 'Terance Mann', 'Toumani Camara'],
+        5: ['Andrew Wiggins', 'Bennedict Mathurin', 'Bruce Brown', 'Collin Sexton', 'Dalano Banton', 'Dante Exum', 'Delon Wright', 'Deni Avdija', 'Dennis Smith Jr.', 'Derrick Rose', 'Franz Wagner', 'Giannis Antetokounmpo', 'Gordon Hayward', 'Jaden Ivey', "Jae'Sean Tate", 'Jaime Jaquez Jr.', 'Jaren Jackson Jr.', 'Javon Freeman-Liberty', 'Jaylen Brown', 'Jerami Grant', 'Jeremy Sochan', 'Jimmy Butler', 'Jonathan Kuminga', 'Josh Giddey', 'Julius Randle', 'Kelly Oubre Jr.', 'Kris Dunn', 'Kyle Kuzma', 'LeBron James', 'Markelle Fultz', 'Miles Bridges', 'Pascal Siakam', 'RJ Barrett', 'Russell Westbrook', 'Scottie Barnes', 'Tobias Harris', 'Tre Jones', 'Zion Williamson'],
+        6: ['Aaron Gordon', 'Amen Thompson', 'Andre Drummond', 'Bismack Biyombo', 'Bruno Fernando', 'Clint Capela', 'Daniel Gafford', 'Daniel Theis', "Day'Ron Sharpe", 'Dereck Lively II', 'Domantas Sabonis', 'Drew Eubanks', 'Evan Mobley', 'Goga Bitadze', 'Isaiah Hartenstein', 'Ivica Zubac', 'Jakob Poeltl', 'Jalen Duren', 'James Wiseman', 'Jarrett Allen', 'Kevon Looney', 'Luke Kornet', 'Marvin Bagley III', 'Mitchell Robinson', 'Moritz Wagner', 'Nic Claxton', 'Nick Richards', 'Onyeka Okongwu', 'Paul Reed', 'Precious Achiuwa', 'Rudy Gobert', 'Trayce Jackson-Davis', 'Trey Jemison', 'Walker Kessler', 'Xavier Tillman'],
+        7: ['Bogdan Bogdanovic', 'Buddy Hield', 'Corey Kispert', 'Donte DiVincenzo', 'Duncan Robinson', 'Davis Bertans', 'Gradey Dick', 'Isaiah Joe', 'Jordan Hawkins', 'Keegan Murray', 'Kentavious Caldwell-Pope', 'Keon Ellis', 'Kevin Huerter', 'Klay Thompson', 'Landry Shamet', 'Luke Kennard', 'Max Strus', 'Michael Porter Jr.', 'Sam Merrill', 'Tim Hardaway Jr.'],
+        8: ['Andrew Nembhard', 'Bradley Beal', 'Brandon Ingram', 'Cade Cunningham', 'Cam Thomas', 'Chris Paul', 'DeMar DeRozan', 'Devin Booker', 'Ish Smith', 'Jamal Murray', 'Kawhi Leonard', 'Kevin Durant', 'Khris Middleton', 'Killian Hayes', 'Kyrie Irving', 'Marcus Morris Sr.', 'Paolo Banchero', 'Paul George', 'Shai Gilgeous-Alexander', 'T.J. McConnell'],
+        9: ['Brook Lopez', 'Chet Holmgren', 'Christian Wood', 'Dario Saric', 'Draymond Green', 'Duop Reath', 'Grant Williams', 'Isaiah Stewart', 'Jabari Smith Jr.', 'Jabari Walker', 'Jalen Smith', 'Jeff Green', 'John Collins', 'Jonathan Isaac', 'Karl-Anthony Towns', 'Kelly Olynyk', 'Kevin Love', 'Kristaps Porzingis', 'Larry Nance Jr.', 'Lauri Markkanen', 'Myles Turner', 'Naz Reid', 'Noah Clowney', 'P.J. Washington', 'Rui Hachimura', 'Santi Aldama', 'Victor Wembanyama', 'Wendell Carter Jr.']
+    }
+
+    player_data = []
+    for cluster_id, players in clusters.items():
+        for player in players:
+            try:
+                player_data.append({'PlayerName': player, 'ClusterID': cluster_id, 'PlayerID': get_player_id(player)})
+            except:
+                print(player)
+
+    # Create DataFrame from player data
+    players_df = pd.DataFrame(player_data)
+    players_df.to_sql('player_clusters', engine, if_exists='replace', index=False)
+
+#Function to player's cluster
+def get_archetype_players_from_player(player_name):
+    players_df = fetch_data_from_table('player_clusters')
+    cluster_id = players_df[players_df['PlayerName'] == player_name]['ClusterID'].values[0]
+    result = players_df[players_df['ClusterID'] == cluster_id]['PlayerID']
+    return result.tolist()
+
+#function to get gamelogs of a certain archetype based on the player selected
+def get_archetype_gamelogs(player, opp_team):
+    team_dict = teams.get_teams()
+    team_dict = pd.DataFrame(team_dict)
+    team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
+    player_ids = get_archetype_players_from_player(player)
+    gl = endpoints.PlayerGameLogs(season_nullable='2023-24', opp_team_id_nullable=team_id).get_data_frames()[0]
+    gl = gl[gl["PLAYER_ID"].isin(player_ids)]
+    gl = gl[['PLAYER_NAME','GAME_DATE','MIN','FGM', 'FGA','FG3M', 'FG3A', 'FTM', 'FTA', 'PTS']]
+    for col in ['FGM', 'FGA','FG3M', 'FG3A', 'FTM', 'FTA', 'PTS']:
+        gl[f'{col}/MIN'] = gl[col] / gl['MIN']
+    return gl
     
+     
 # Run the Flask app
 if __name__ == '__main__':
-    store_database()
-    
     app.run(debug=True)
     
     
