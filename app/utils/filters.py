@@ -26,7 +26,6 @@ def apply_filters(df, filter_params):
 
     # Apply minutes filter
     df = df[(df['MIN'] >= minutes_filter[0]) & (df['MIN'] <= minutes_filter[1])]
-    
     # Apply date filter
     if date_filter:
         df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])

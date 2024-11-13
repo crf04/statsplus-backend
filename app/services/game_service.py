@@ -2,7 +2,7 @@ from functools import lru_cache
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs
 from ..utils.helpers import get_opponent_team, nba_team_to_abbreviation
-from ..utils.filters import filter_players_on_off
+from ..utils.filters import filter_players_on_off, apply_filters
 
 class GameService:
     def __init__(self, db_engine):
@@ -72,6 +72,8 @@ class GameService:
         gamelogs['+/-'] = gamelogs['PLUS_MINUS']
         gamelogs['MIN'] = gamelogs['MIN'].round().astype(int)
         
+        gamelogs['GAME_DATE'] = gamelogs['GAME_DATE'].astype(str)
+        
         return gamelogs
 
     def calculate_matchup_rating(self, player_name, team):
@@ -106,18 +108,19 @@ class GameService:
     def get_filtered_logs(self, player_name, filter_params):
         """Get filtered game logs based on parameters"""
         full_game_logs = self.get_player_game_logs_with_ratings(player_name)
-        filtered_logs = self._apply_filters(full_game_logs.copy(), filter_params)
+        filtered_logs = apply_filters(full_game_logs.copy(), filter_params)
         
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA', 
                          'FD_PTS', 'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 
                          'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS']
-        
+        filtered_logs['GAME_DATE'] = pd.to_datetime(filtered_logs['GAME_DATE'], errors='coerce').dt.date
         filtered_averages = filtered_logs[average_columns].mean().round(2)
         season_averages = full_game_logs[average_columns].mean().round(2)
-        
+        filtered_logs.drop(['PLAYER_NAME','GAME_ID','NBA_FANTASY_PTS','FT_PCT','PLUS_MINUS', 'MIN_SEC'],axis=1, inplace = True)
+        filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
         return {
-            'game_logs': filtered_logs.to_json(orient='records'),
+            'game_logs': filtered_logs.to_json(orient='records',  date_format='iso'),
             'averages': filtered_averages.to_frame().T.to_json(orient='records'),
             'season_averages': season_averages.to_frame().T.to_json(orient='records'),
             'next_game': "Houston Rockets"  # This should be implemented properly
