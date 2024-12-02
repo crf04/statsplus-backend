@@ -2,9 +2,10 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
 from ..services.game_service import GameService
 
+
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
-engine = create_engine('sqlite:///nba_play_types.db')
+engine = create_engine('sqlite:///nba_play_types.db')   
 game_service = GameService(engine)
 
 @game_bp.route('/game_logs', methods=['GET'])
@@ -21,8 +22,8 @@ def get_game_logs():
             'location_filter': request.args.get('location_filter', 'Both'),
             'game_filter': request.args.get('game_filter'),
             'playstyle_range': [
-                float(request.args.get('playstyle_RTG_min', '75')),
-                float(request.args.get('playstyle_RTG_max', '125'))
+                float(request.args.get('playstyle_RTG_min', '0')),
+                float(request.args.get('playstyle_RTG_max', '200'))
             ],
             'self_filters': {
                 key[13:-1]: list(map(float, value.split(',')))

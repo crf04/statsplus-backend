@@ -22,8 +22,10 @@ class DataService:
             self.process_opp_shooting_zone()
             self.process_playstyles()
             self.process_player_zone()
-            self.process_assist_data()
             self.process_clusters()
+            self.fetch_PBP_data()
+            self.fetch_PBP_data(data_type = 'Opponent')
+            self.process_assist_data()
             return True
         except Exception as e:
             print(f"Error updating database: {e}")
@@ -66,7 +68,7 @@ class DataService:
     def process_and_store_team_data(self):
         """Process and store team play type data"""
         playtypes = [
-            'Transition', 'Isolation', 'PRBallHandler', 'PRRollman', 'OffRebound',
+            'Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound',
             'Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup'
         ]
         team_dfs = []
@@ -90,7 +92,6 @@ class DataService:
             ]['PTS/G'].mean() 
             for play_type in playtypes
         }
-        
         for play_type in playtypes:
             combined_team_df.loc[
                 combined_team_df['PLAY_TYPE'] == play_type, 'PTS/G+'
@@ -111,6 +112,7 @@ class DataService:
         teams_df['Team_ID'] = teams_df['TEAM_NAME'].map(team_ids)
         teams_df['team'] = teams_df['TEAM_NAME'].apply(self._nba_team_to_abbreviation)
 
+        print(teams_df.columns)
         # Reorder columns
         new_order = ['TEAM_NAME', 'Cut', 'Isolation', 'PRRollMan', 'PRBallHandler',
                     'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 
@@ -122,7 +124,7 @@ class DataService:
     def process_playstyles(self):
         """Process and store player play type data"""
         playtypes = [
-            'Transition', 'Isolation', 'PRBallHandler', 'PRRollman', 'OffRebound',
+            'Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound',
             'Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup'
         ]
         dfs = []
@@ -233,7 +235,7 @@ class DataService:
         """Fetch play-by-play data from external API"""
         base_url = 'https://api.pbpstats.com/get-totals/nba'
         params = {
-            'Season': '2023-24',
+            'Season': '2024-25',
             'SeasonType': 'Regular+Season',
             'Type': 'Player' if data_type == 'player' else 'Opponent'
         }
@@ -331,8 +333,8 @@ class DataService:
         """
         try:
             # Fetch data
-            teams_df = self._fetch_data_from_table('pbp_opponent_stats')
-            players_df = self._fetch_data_from_table('pbp_player_stats')
+            teams_df = self._fetch_data_from_table('pbp_Opponent_stats')
+            players_df = self._fetch_data_from_table('pbp_Player_stats')
             
             # Process team assist data
             team_columns = [

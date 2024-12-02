@@ -17,7 +17,6 @@ def get_team_stats():
         team_stats = team_service.get_team_stats(category, team, date)
         if not team_stats:
             return jsonify({"error": "No data found for the specified team and category"}), 404
-            
         return jsonify(team_stats)
     except Exception as e:
         return jsonify({'error': str(e)}), 500

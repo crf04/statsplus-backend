@@ -10,8 +10,7 @@ class PlayerService:
     def get_all_players(self):
         """Fetch list of all players from database"""
         try:
-            df = self._fetch_data_from_table('player_play_types')
-            return df['PLAYER_NAME'].unique().tolist()
+            return [player['full_name'] for player in players.get_active_players()]
         except Exception as e:
             print(f"Error fetching players: {e}")
             return []
@@ -57,7 +56,7 @@ class PlayerService:
             
             # Get game logs
             gl = playergamelogs.PlayerGameLogs(
-                season_nullable='2023-24',
+                season_nullable='2024-25',
                 opp_team_id_nullable=team_id
             ).get_data_frames()[0]
             

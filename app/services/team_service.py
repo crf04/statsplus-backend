@@ -9,12 +9,18 @@ from nba_api.stats.endpoints import (
 class TeamService:
     def __init__(self, db_engine):
         self.engine = db_engine
+        
+    def get_all_teams(self):
+        team = teams.get_teams()
+        team_names = [d['full_name'] for d in team]
+        return team_names
 
     def get_team_stats(self, category, team, date=None):
         if category == 'Traditional':
             df = self._fetch_opponent_data(date) if date else self._fetch_data_from_table('General Opponent Stats')
             df['OPP_STL+BLK'] = df['OPP_STL'] + df['OPP_BLK']
             df['OPP_STL+BLK_RANK'] = df['OPP_STL+BLK'].rank(method='min', ascending=True)
+            team = 'LA Clippers' if team == 'Los Angeles Clippers' else team
         elif category == 'Playtypes':
             df = self._fetch_data_from_table('team_play_types')
             columns = [c for c in df.columns if 'eam' not in c or 'EAM' not in c]
@@ -23,14 +29,14 @@ class TeamService:
                 df[name] = df[col].rank(method='min', ascending=True)
             del df['Team_ID']
             del df['team']
+            print(df)
         elif category == 'Assists':
             df = self._fetch_data_from_table('processed_team_assists')
             abbr = self._nba_team_to_abbreviation(team)
             df = df[df['Name'] == abbr]
-            return df
+            return df.to_dict(orient='records')[0]
         elif category == 'Zone Shooting':
             df = self._fetch_opp_shooting_zone_data(date) if date else self._fetch_data_from_table('opp_shooting_zone')
-        
         return df[df['TEAM_NAME'] == team].to_dict(orient='records')[0]
 
     def _fetch_data_from_table(self, table_name):

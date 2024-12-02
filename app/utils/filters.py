@@ -1,5 +1,6 @@
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs
+from nba_api.stats import endpoints
 from sqlalchemy import create_engine
 from ..utils.helpers import get_opponent_team
 
@@ -55,7 +56,7 @@ def apply_filters(df, filter_params):
         df = df.head(int(game_filter))
         
     # Apply players on/off filters
-    df = filter_players_on_off(df, players_on, players_off, '2023-24')
+    df = filter_players_on_off(df, players_on, players_off, '2024-25')
     
     return df
 
@@ -70,7 +71,7 @@ def filter_players_on_off(df, players_on, players_off, season):
     
     return df
 
-def get_games_to_exclude(player_logs, players_off_names, season='2023-24'):
+def get_games_to_exclude(player_logs, players_off_names, season='2024-25'):
     exclude_game_ids = set()
     
     # Loop through players_off and union game IDs
@@ -87,7 +88,7 @@ def get_games_to_exclude(player_logs, players_off_names, season='2023-24'):
 
     return exclude_game_ids
 
-def get_common_games(primary_player_logs, other_players_names, season='2023-24'):
+def get_common_games(primary_player_logs, other_players_names, season='2024-25'):
     primary_game_team_pairs = set(zip(
         primary_player_logs['GAME_ID'], 
         primary_player_logs['TEAM_ABBREVIATION']
@@ -113,3 +114,4 @@ def get_common_games(primary_player_logs, other_players_names, season='2023-24')
             break
     
     return {pair[0] for pair in primary_game_team_pairs}
+
