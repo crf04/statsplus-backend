@@ -37,7 +37,28 @@ class TeamService:
             return df.to_dict(orient='records')[0]
         elif category == 'Zone Shooting':
             df = self._fetch_opp_shooting_zone_data(date) if date else self._fetch_data_from_table('opp_shooting_zone')
+        elif category == 'Shooting Type':
+            combined_df = pd.DataFrame()
+            types = ['Catch and Shoot', 'Pullups', 'Less Than 10 ft']
+
+            for shooting_type in types:
+                df = self._fetch_opp_shooting_data(shooting_type, date) if date else self._fetch_data_from_table(shooting_type)
+                df['PTS'] = df['FG2M'] * 2 + df['FG3M'] * 3
+                df['PTS_RANK'] = df['PTS'].rank(method='min', ascending=True)
+                df = df[df['TEAM_NAME'] == team]
+                df['ShootingType'] = shooting_type  # Add the ShootingType column
+                
+                combined_df = pd.concat([combined_df, df])
+            del combined_df['FG3_PCT']
+            return combined_df.to_dict(orient='records')
         return df[df['TEAM_NAME'] == team].to_dict(orient='records')[0]
+
+    def _fetch_opp_shooting_data(self, type, date_filter=None):
+        return LeagueDashOppPtShot(
+            general_range_nullable=type,
+            date_from_nullable=date_filter
+        ).get_data_frames()[0]
+    
 
     def _fetch_data_from_table(self, table_name):
         query = f"SELECT * FROM '{table_name}'"
