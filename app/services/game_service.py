@@ -88,6 +88,9 @@ class GameService:
         gamelogs['FD_PTS'] = gamelogs['NBA_FANTASY_PTS']
         gamelogs['+/-'] = gamelogs['PLUS_MINUS']
         gamelogs['MIN'] = gamelogs['MIN'].round().astype(int)
+        gamelogs['FG2M'] = gamelogs['FGM'] - gamelogs['FG3M']
+        gamelogs['FG2A'] = gamelogs['FGA'] - gamelogs['FG3A']
+        
         
         gamelogs['GAME_DATE'] = gamelogs['GAME_DATE'].astype(str)
         
@@ -160,7 +163,7 @@ class GameService:
     
     def filter_teams(self, filter, rank_filter, date_filter = None):
         #filter into diff types
-        Catch_Shoot_types = ['C&S 3s', 'C&S PTS']
+        Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
         playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound','Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
         overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS']
@@ -213,7 +216,7 @@ class GameService:
             
     #Function that filters when the user is filtering for catch and shoot teams
     def catch_shoot_filtering(self, filter, date_filter):
-        f_map = {'C&S 3s': 'FG3M', 'C&S PTS' : 'PTS'}         
+        f_map = {'C&S 3s': 'FG3M', 'C&S PTS' : 'PTS', 'C&S 3A' : 'FG3A'}         
         if date_filter is not None:
                 date_filter = pd.to_datetime(date_filter)
                 df = endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter).get_data_frames()[0]
