@@ -281,7 +281,8 @@ class DataService:
     def _fetch_opp_shooting_data(self, type, date_filter=None):
         return LeagueDashOppPtShot(
             general_range_nullable=type,
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            per_mode_simple='PerGame'
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
