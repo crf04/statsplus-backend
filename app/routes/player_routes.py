@@ -27,10 +27,21 @@ def get_player_profile():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@player_bp.route('/fetch', methods=['PUT'])
+@player_bp.route('/fetch', methods=['PUT','GET'])
 def fetch_players():
     try:
         success = player_service.store_player_information()
+        if success:
+            return jsonify({'message': 'Player data processed and stored successfully'})
+        else:
+            return jsonify({'error': 'Failed to store player data'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@player_bp.route('/test', methods=['PUT','GET'])
+def test():
+    try:
+        success = player_service._get_shooting_type('LeBron James')
         if success:
             return jsonify({'message': 'Player data processed and stored successfully'})
         else:
