@@ -43,6 +43,11 @@ class TeamService:
 
             for shooting_type in types:
                 df = self._fetch_opp_shooting_data(shooting_type, date) if date else self._fetch_data_from_table(shooting_type)
+                if date:
+                    df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
+                    df['FG3A_RANK'] = df['FG3A'].rank(method='min', ascending=True)
+                    df['FG2M_RANK'] = df['FG2M'].rank(method='min', ascending=True)
+                    df['FG3M_RANK'] = df['FG3M'].rank(method='min', ascending=True)
                 df['PTS'] = df['FG2M'] * 2 + df['FG3M'] * 3
                 df['PTS_RANK'] = df['PTS'].rank(method='min', ascending=True)
                 df = df[df['TEAM_NAME'] == team]

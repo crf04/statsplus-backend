@@ -5,7 +5,8 @@ from nba_api.stats.endpoints import (
     LeagueDashOppPtShot,
     LeagueDashTeamShotLocations,
     SynergyPlayTypes,
-    LeagueDashPlayerShotLocations
+    LeagueDashPlayerShotLocations,
+    commonplayerinfo
 )
 from nba_api.stats.static import teams, players
 
@@ -118,7 +119,6 @@ class DataService:
         teams_df['Team_ID'] = teams_df['TEAM_NAME'].map(team_ids)
         teams_df['team'] = teams_df['TEAM_NAME'].apply(self._nba_team_to_abbreviation)
 
-        print(teams_df.columns)
         # Reorder columns
         new_order = ['TEAM_NAME', 'Cut', 'Isolation', 'PRRollMan', 'PRBallHandler',
                     'OffRebound', 'Spotup', 'Handoff', 'OffScreen', 'Misc', 
@@ -281,7 +281,8 @@ class DataService:
     def _fetch_opp_shooting_data(self, type, date_filter=None):
         return LeagueDashOppPtShot(
             general_range_nullable=type,
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            per_mode_simple='PerGame'
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -392,7 +393,25 @@ class DataService:
             players_df.to_sql('processed_player_assists', self.engine, if_exists='replace', index=False)
             
             return True
-            
+                    
         except Exception as e:
             print(f"Error processing assist data: {e}")
             return False
+        
+    import openpyxl
+    def read_excel_and_save_to_db(self):
+        # Read the Excel file into a DataFrame
+        df = self._fetch_data_from_table('Player_Team_Table')
+        return df.to_dict(orient='records')
+    
+    def save_team(self):
+        teams_df = pd.DataFrame(teams.get_teams())
+        teams_df.to_sql('Team_Info', self.engine, if_exists='replace', index=False)
+    
+    def map_id_to_team(self):
+        teams_df = self._fetch_data_from_table('Team_Info')
+        teams_df['full_name'] = teams_df['full_name'].str.replace('76ers', 'Sixers')
+        df = self._fetch_data_from_table('Player_Team_Table')
+        df = df.iloc[:-1]
+        df['Team_ID'] = df['Current Team'].map(teams_df.set_index('full_name')['id'])
+        df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)

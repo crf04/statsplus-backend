@@ -1,6 +1,6 @@
 import pandas as pd
 from nba_api.stats.static import players
-from nba_api.stats.endpoints import playergamelogs, PlayerGameLogs
+from nba_api.stats.endpoints import playergamelogs, PlayerGameLogs, PlayerDashPtShots
 from sqlalchemy import create_engine
 
 class PlayerService:
@@ -27,6 +27,8 @@ class PlayerService:
                 return self._get_player_assists(player_name)
             elif category == 'Archetype':
                 return self._get_archetype_gamelogs(player_name, opp_team)
+            elif category == 'Shooting Type':
+                return self._get_shooting_type(player_name)
             else:
                 raise ValueError(f"Unknown category: {category}")
         except Exception as e:
@@ -44,6 +46,17 @@ class PlayerService:
         player_data = df[df['Name'] == player_name]
         return player_data.to_dict(orient='records')
 
+    def _get_shooting_type(self, player_name):
+        """Get player shooting type data"""
+        player_team = self._fetch_data_from_table('Player_Team_Table')
+        team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
+        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame' ).get_data_frames()[1]
+        df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
+        df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
+        df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
+        df.fillna(0, inplace=True)
+        return df.to_dict(orient='records')
+    
     def _get_archetype_gamelogs(self, player_name, opp_team):
         """Get archetype gamelogs for player against specific team"""
         try:
