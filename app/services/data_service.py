@@ -42,10 +42,6 @@ class DataService:
         for type in types:
             try:
                 df = self._fetch_opp_shooting_data(type)
-                df['FG3M'] = df['FG3M']
-                df['FG2M'] = df['FG2M']
-                df['FG2A'] = df['FG2A']
-                df['FG3A'] = df['FG3A']
                 df['FG3M_RANK'] = df['FG3M'].rank(method='min', ascending=True)
                 df['FG2M_RANK'] = df['FG2M'].rank(method='min', ascending=True)
                 df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
@@ -281,7 +277,8 @@ class DataService:
     def _fetch_opp_shooting_data(self, type, date_filter=None):
         return LeagueDashOppPtShot(
             general_range_nullable=type,
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            per_mode_detailed='PerGame'
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):

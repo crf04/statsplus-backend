@@ -10,7 +10,8 @@ class PlayerService:
     def get_all_players(self):
         """Fetch list of all players from database"""
         try:
-            return [player['full_name'] for player in players.get_active_players()]
+            df = self._fetch_data_from_table('player_play_types')
+            return df['PLAYER_NAME'].values.tolist()
         except Exception as e:
             print(f"Error fetching players: {e}")
             return []
