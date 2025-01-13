@@ -39,3 +39,11 @@ def store_opponent_PBP():
             return jsonify({'error': 'Failed to store opponent PBP data'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@data_bp.route('/fetch_players_with_teams', methods=['GET'])
+def fetch_players_with_teams():
+    try:
+        player_list = data_service.map_id_to_team()
+        return jsonify(player_list)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

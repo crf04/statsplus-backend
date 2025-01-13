@@ -29,7 +29,8 @@ class TeamService:
                 df[name] = df[col].rank(method='min', ascending=True)
             del df['Team_ID']
             del df['team']
-            print(df)
+            df = df[df['TEAM_NAME'] == team]
+            return df.to_dict(orient='records')[0]
         elif category == 'Assists':
             df = self._fetch_data_from_table('processed_team_assists')
             abbr = self._nba_team_to_abbreviation(team)
@@ -43,15 +44,36 @@ class TeamService:
 
             for shooting_type in types:
                 df = self._fetch_opp_shooting_data(shooting_type, date) if date else self._fetch_data_from_table(shooting_type)
+                if date:
+                    df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
+                    df['FG3A_RANK'] = df['FG3A'].rank(method='min', ascending=True)
+                    df['FG2M_RANK'] = df['FG2M'].rank(method='min', ascending=True)
+                    df['FG3M_RANK'] = df['FG3M'].rank(method='min', ascending=True)
                 df['PTS'] = df['FG2M'] * 2 + df['FG3M'] * 3
                 df['PTS_RANK'] = df['PTS'].rank(method='min', ascending=True)
+                cols = ['PTS', 'FG2M', 'FG3M', 'FG2A', 'FG3A']
+                league_avg = df[cols].mean()
+                for col in cols:
+                    if league_avg[col] != 0:
+                        df[f'{col}_vs_avg_pct'] = ((df[col] - league_avg[col]) / league_avg[col]) * 100
                 df = df[df['TEAM_NAME'] == team]
-                df['ShootingType'] = shooting_type  # Add the ShootingType column
-                
+                df['ShootingType'] = shooting_type 
+                             
                 combined_df = pd.concat([combined_df, df])
+            combined_df.fillna(0, inplace=True)
             del combined_df['FG3_PCT']
             return combined_df.to_dict(orient='records')
-        return df[df['TEAM_NAME'] == team].to_dict(orient='records')[0]
+        numeric_cols = df.select_dtypes(include='number').columns
+        numeric_cols = [col for col in numeric_cols if 'rank' not in col.lower() and 'backcourt' not in col.lower() and 'team_id' not in col.lower()]
+        league_avg = df[numeric_cols].mean()
+        team_df = df[df['TEAM_NAME'] == team]
+        
+        team_stats = team_df.to_dict(orient='records')[0]
+        for col in numeric_cols:
+            if col in league_avg and league_avg[col] != 0:
+                team_stats[f'{col}_vs_avg_pct'] = ((team_stats[col] - league_avg[col]) / league_avg[col]) * 100
+        
+        return team_stats
 
     def _fetch_opp_shooting_data(self, type, date_filter=None):
         return LeagueDashOppPtShot(

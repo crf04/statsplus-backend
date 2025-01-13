@@ -146,7 +146,7 @@ class GameService:
         
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA', 
-                         'FD_PTS', 'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 
+                         'FD_PTS', 'FGM', 'FGA', 'FG2A','FG2M', 'FG3M', 'FG3A', 'FTM', 'FTA', 
                          'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS']
         filtered_logs['GAME_DATE'] = pd.to_datetime(filtered_logs['GAME_DATE'], errors='coerce').dt.date
         filtered_averages = filtered_logs[average_columns].mean().round(2)
@@ -166,7 +166,7 @@ class GameService:
         Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
         playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound','Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
-        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS']
+        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA']
         assist_types = ["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
         
         if filter in Catch_Shoot_types:
