@@ -56,6 +56,7 @@ class PlayerService:
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
         df.fillna(0, inplace=True)
+        print(df)
         return df.to_dict(orient='records')
     
     def _get_archetype_gamelogs(self, player_name, opp_team):

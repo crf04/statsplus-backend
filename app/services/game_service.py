@@ -16,7 +16,6 @@ class GameService:
 
         player_names = player_dict['full_name'].tolist()
         closest_match = get_close_matches(player_name, player_names, n=1, cutoff=0.8)
-
         if closest_match:
             player = player_dict[player_dict['full_name'] == closest_match[0]]
             return player['id'].values[0]

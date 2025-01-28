@@ -43,6 +43,7 @@ def store_opponent_PBP():
 @data_bp.route('/fetch_players_with_teams', methods=['GET'])
 def fetch_players_with_teams():
     try:
+        data_service.save_team()
         player_list = data_service.map_id_to_team()
         return jsonify(player_list)
     except Exception as e:

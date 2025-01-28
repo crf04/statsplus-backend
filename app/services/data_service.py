@@ -278,7 +278,7 @@ class DataService:
         return LeagueDashOppPtShot(
             general_range_nullable=type,
             date_from_nullable=date_filter,
-            per_mode_simple='PerGame'
+            per_mode_simple = 'PerGame'
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -397,7 +397,9 @@ class DataService:
     import openpyxl
     def read_excel_and_save_to_db(self):
         # Read the Excel file into a DataFrame
-        df = self._fetch_data_from_table('Player_Team_Table')
+        df = pd.read_excel(r'C:\Users\chris\OneDrive\Documents\NBA_PLAYERS.xlsx')
+        df = df[['Player','Current Team']]
+        df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)
         return df.to_dict(orient='records')
     
     def save_team(self):
@@ -411,3 +413,4 @@ class DataService:
         df = df.iloc[:-1]
         df['Team_ID'] = df['Current Team'].map(teams_df.set_index('full_name')['id'])
         df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)
+        return df.to_dict(orient='records')
