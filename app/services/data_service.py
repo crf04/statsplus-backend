@@ -17,7 +17,9 @@ class DataService:
     def update_all_data(self):
         """Update all database tables with fresh data"""
         try:
+            self.store_player_information()
             self.process_opponent_scoring()
+            
             self.process_and_store_team_data()
             self.process_opp_shooting()
             self.process_opp_shooting_zone()
@@ -171,32 +173,47 @@ class DataService:
         """Process and store player shooting zone data"""
         player_zones = self._fetch_player_zone_data()
         player_zones.columns = ['_'.join(filter(None, col)).strip() 
-                              for col in player_zones.columns]
-        
-        # Filter and calculate points
-        player_zones = player_zones[[c for c in player_zones.columns 
-                                   if ('FGM' in c or '_NAME' in c) and 'Back' not in c]]
-        
-        for col in player_zones.columns:
-            if 'NAME' not in col:
-                player_zones[col] = (player_zones[col] * 2 
-                                   if '3' not in col else player_zones[col] * 3)
+                    for col in player_zones.columns]
 
+        # Filter and calculate points
+        player_zones_columns = [c for c in player_zones.columns 
+                                if ('FGM' in c or '_NAME' in c) and 'Back' not in c]
+        
+
+        for col in player_zones_columns:
+            if 'NAME' not in col:
+                player_zones[col.split('_')[0]+ "_PTS"] = (player_zones[col] * 2 
+                                if '3' not in col else player_zones[col] * 3)
+
+        
         # Calculate percentages
-        sums = player_zones.drop(['PLAYER_NAME'], axis=1).sum(axis=1)
+        sums = player_zones.drop(['PLAYER_NAME','PLAYER_ID','TEAM_ID','TEAM_ABBREVIATION','AGE','NICKNAME'], axis=1).sum(axis=1)
         player_zones['Sum'] = sums
 
-        for col in player_zones.columns:
+        for col in player_zones_columns:
             if 'NAME' not in col:
                 percentage_column_name = col.split('_')[0] + "_PTS%"
-                player_zones[percentage_column_name] = (player_zones[col] / 
-                                                      player_zones['Sum'] * 100)
-
+                player_zones[percentage_column_name] = (player_zones[col.split('_')[0] + "_PTS"] / 
+                                                    player_zones['Sum'] * 100)
+        
+        means = player_zones.drop(['PLAYER_NAME','PLAYER_ID','TEAM_ID','TEAM_ABBREVIATION','AGE','NICKNAME'], axis=1).mean()
         # Clean up
+        cols = [c for c in player_zones.columns if 'PTS%' in c]
+        
+
+        for c in cols:
+            if means[c] != 0:
+                player_zones[f"{c}+"] = player_zones[c] / means[c]
+            else:
+                player_zones[f"{c}+"] = 0
+        
         player_zones.drop([c for c in player_zones.columns 
-                          if 'PTS%' not in c and 'NAME' not in c], 
-                         axis=1, inplace=True)
+                        if 'Backcourt' in c], 
+                        axis=1, inplace=True)
+        player_zones.drop(['PLAYER_ID','TEAM_ID','TEAM_ABBREVIATION','AGE','NICKNAME','Sum'], 
+                        axis=1, inplace=True)
         player_zones.fillna(0, inplace=True)
+        
 
         player_zones.to_sql('player_shooting_zones', self.engine, 
                            if_exists='replace', index=False)
@@ -257,11 +274,11 @@ class DataService:
     def store_player_information(self):
         """Store basic player information"""
         try:
-            player_dict = players.get_players()
+            player_dict = players.get_active_players()
             player_df = pd.DataFrame.from_dict(player_dict)
             player_df.to_sql('Player_Information', self.engine, 
                            if_exists='replace', index=False)
-            return True
+            return player_df.to_dict(orient='records')
         except Exception as e:
             print(f"Error storing player information: {e}")
             return False
@@ -292,6 +309,7 @@ class DataService:
     def _fetch_player_zone_data(self, date_filter=None):
         return LeagueDashPlayerShotLocations(
             distance_range='By Zone',
+            per_mode_detailed='PerGame',
             date_from_nullable=date_filter
         ).get_data_frames()[0]
 

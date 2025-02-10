@@ -18,6 +18,7 @@ class GameService:
         closest_match = get_close_matches(player_name, player_names, n=1, cutoff=0.8)
         if closest_match:
             player = player_dict[player_dict['full_name'] == closest_match[0]]
+            print(player['id'].values[0])
             return player['id'].values[0]
         else:
             raise ValueError(f"No matching player found for {player_name}.")
@@ -165,7 +166,7 @@ class GameService:
         Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
         playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound','Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
-        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA']
+        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA', 'OPP_TOV']
         assist_types = ["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
         
         if filter in Catch_Shoot_types:

@@ -30,6 +30,8 @@ class PlayerService:
                 return self._get_archetype_gamelogs(player_name, opp_team)
             elif category == 'Shooting Type':
                 return self._get_shooting_type(player_name)
+            elif category == 'Zone Shooting':
+                return self._get_player_zone_shooting(player_name)
             else:
                 raise ValueError(f"Unknown category: {category}")
         except Exception as e:
@@ -39,6 +41,11 @@ class PlayerService:
     def _get_player_playtypes(self, player_name):
         """Get player playtypes data"""
         df = self._fetch_data_from_table('player_play_types')
+        return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
+    
+    def _get_player_zone_shooting(self, player_name):
+        """Get player zone shooting data"""
+        df = self._fetch_data_from_table('player_shooting_zones')
         return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
 
     def _get_player_assists(self, player_name):
@@ -56,7 +63,6 @@ class PlayerService:
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
         df.fillna(0, inplace=True)
-        print(df)
         return df.to_dict(orient='records')
     
     def _get_archetype_gamelogs(self, player_name, opp_team):
