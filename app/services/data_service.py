@@ -6,7 +6,8 @@ from nba_api.stats.endpoints import (
     LeagueDashTeamShotLocations,
     SynergyPlayTypes,
     LeagueDashPlayerShotLocations,
-    commonplayerinfo
+    commonplayerinfo,
+    LeagueDashPlayerStats
 )
 from nba_api.stats.static import teams, players
 
@@ -19,7 +20,7 @@ class DataService:
         try:
             self.store_player_information()
             self.process_opponent_scoring()
-            
+            self.store_player_per36_stats()
             self.process_and_store_team_data()
             self.process_opp_shooting()
             self.process_opp_shooting_zone()
@@ -282,6 +283,16 @@ class DataService:
         except Exception as e:
             print(f"Error storing player information: {e}")
             return False
+    
+    def store_player_per36_stats(self):
+        """Store player per36 stats"""
+        try:
+            df = self._fetch_player_per36_stats()
+            df.to_sql('Player_Per36_Stats', self.engine, if_exists='replace', index=False)
+            return True
+        except Exception as e:
+            print(f"Error storing player per36 stats: {e}")
+            return False
 
     # Helper methods
     def _fetch_opponent_data(self, date_filter=None):
@@ -325,6 +336,12 @@ class DataService:
             play_type_nullable=play_type,
             player_or_team_abbreviation='P',
             type_grouping_nullable='Offensive'
+        ).get_data_frames()[0]
+    
+    def _fetch_player_per36_stats(self):
+        return LeagueDashPlayerStats(
+            measure_type_detailed_defense='Base',
+            per_mode_detailed='Per36'
         ).get_data_frames()[0]
 
     def _fetch_data_from_table(self, table_name):
@@ -432,3 +449,41 @@ class DataService:
         df['Team_ID'] = df['Current Team'].map(teams_df.set_index('full_name')['id'])
         df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)
         return df.to_dict(orient='records')
+    
+    def get_playtypes(self):
+        
+        play_types = [
+            'Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound',
+            'Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup'
+        ]
+        
+        combined_df = pd.DataFrame()
+        
+        for play_type in play_types:
+            df = SynergyPlayTypes(
+                play_type_nullable=play_type,
+                player_or_team_abbreviation='T',
+                type_grouping_nullable='Defensive'
+            ).get_data_frames()[0]
+            df['PLAY_TYPE'] = play_type
+            df['PTS/G'] = df['PTS'] / df['GP']
+            combined_df = pd.concat([combined_df, df], ignore_index=True)
+            
+        # First, pivot just the PTS/G values
+        pts_pivot = combined_df.pivot_table(
+            index='TEAM_NAME',
+            columns='PLAY_TYPE',
+            values='PTS/G',
+            aggfunc='first'
+        ).reset_index()
+
+        # Get one GP value per team (grabbing any play type since they're all the same)
+        gp_per_team = combined_df.groupby('TEAM_NAME')['GP'].first().reset_index()
+
+        # Merge the two DataFrames
+        teams_df = pts_pivot.merge(gp_per_team, on='TEAM_NAME')
+        return teams_df.to_dict(orient='records')
+        
+        
+        
+        

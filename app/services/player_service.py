@@ -71,6 +71,7 @@ class PlayerService:
             # Get player's cluster members
             player_ids = self._get_archetype_players_from_player(player_name)
             
+            
             # Get team ID
             team_dict = pd.DataFrame(self._get_teams())
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
@@ -83,14 +84,28 @@ class PlayerService:
             
             # Filter and process game logs
             gl = gl[gl["PLAYER_ID"].isin(player_ids)]
-            gl = gl[['PLAYER_NAME', 'GAME_DATE', 'MIN', 
-                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS']]
+            gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
+                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             
-            # Calculate per minute stats
-            for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS']:
-                gl[f'{col}/MIN'] = gl[col] / gl['MIN']
-                
-            return gl.to_dict(orient='records')
+            per36_df = self._fetch_data_from_table('Player_Per36_Stats')
+            
+            # Calculate per 36minute stats
+            for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
+                gl[f'{col}/36MIN'] = (gl[col] / gl['MIN']) * 36
+            
+            print(gl)
+            merged_df = gl.merge(per36_df, left_on="PLAYER_ID", right_on="PLAYER_ID", suffixes=('', '_season'))
+            #get percentage diff between game and season
+            for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
+                merged_df[f'{col}/36MIN_DIFF'] = (merged_df[f'{col}/36MIN'] - merged_df[f'{col}_season']) / merged_df[f'{col}_season']
+            
+            merged_df = merged_df[['PLAYER_NAME', 'GAME_DATE', 'MIN', 
+                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV','FGM/36MIN', 'FGA/36MIN', 'FG3M/36MIN', 'FG3A/36MIN', 
+                               'FTM/36MIN', 'FTA/36MIN', 'PTS/36MIN', 
+                               'FGM/36MIN_DIFF', 'FGA/36MIN_DIFF', 'FG3M/36MIN_DIFF', 'FG3A/36MIN_DIFF', 
+                               'FTM/36MIN_DIFF', 'FTA/36MIN_DIFF', 'PTS/36MIN_DIFF', 'TOV/36MIN_DIFF']]
+
+            return merged_df.to_dict(orient='records')
         except Exception as e:
             print(f"Error getting archetype gamelogs: {e}")
             return []

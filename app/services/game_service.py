@@ -29,9 +29,9 @@ class GameService:
             return pd.read_sql(query, conn)
 
     @lru_cache(maxsize=32)
-    def get_player_game_logs_with_ratings(self, player_name):
+    def get_player_game_logs_with_ratings(self, player_name, season):
         """Retrieve game logs for a player and calculate ratings"""
-        game_logs_df, next_team = self._get_game_logs(player_name)
+        game_logs_df, next_team = self._get_game_logs(player_name, season)
         
         # Calculate ratings
         game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
@@ -71,13 +71,16 @@ class GameService:
             'BLKA', 'PFD'
         ]
         gamelogs = gamelogs.drop(drop_columns, axis=1)
-        next_game = endpoints.PlayerNextNGames(number_of_games=1,player_id=player_id).get_data_frames()[0]
-        team1, team2 = next_game.loc[0,'VISITOR_TEAM_ID'], next_game.loc[0,'HOME_TEAM_ID']
-        if team1 != gamelogs.loc[0, 'TEAM_ID']:
-            next_team = team1
-        else:
-            next_team = team2
-            
+        try:
+            next_game = endpoints.PlayerNextNGames(number_of_games=1,player_id=player_id).get_data_frames()[0]
+            team1, team2 = next_game.loc[0,'VISITOR_TEAM_ID'], next_game.loc[0,'HOME_TEAM_ID']
+            if team1 != gamelogs.loc[0, 'TEAM_ID']:
+                next_team = team1
+            else:
+                next_team = team2
+        except:
+            next_team = None
+        
         
         # Calculate additional stats
         gamelogs['PRA'] = gamelogs['PTS'] + gamelogs['REB'] + gamelogs['AST']
@@ -90,7 +93,6 @@ class GameService:
         gamelogs['MIN'] = gamelogs['MIN'].round().astype(int)
         gamelogs['FG2M'] = gamelogs['FGM'] - gamelogs['FG3M']
         gamelogs['FG2A'] = gamelogs['FGA'] - gamelogs['FG3A']
-        
         
         gamelogs['GAME_DATE'] = gamelogs['GAME_DATE'].astype(str)
         
@@ -127,7 +129,7 @@ class GameService:
 
     def get_filtered_logs(self, player_name, filter_params):
         """Get filtered game logs based on parameters"""
-        full_game_logs, next_team = self.get_player_game_logs_with_ratings(player_name)
+        full_game_logs, next_team = self.get_player_game_logs_with_ratings(player_name, filter_params['season_filter'])
         
         teams_against = None
         for index, ele in enumerate(filter_params['teams_against']):

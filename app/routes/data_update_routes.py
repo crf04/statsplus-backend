@@ -48,3 +48,10 @@ def fetch_players_with_teams():
         return jsonify(player_list)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+@data_bp.route('/fetch_playtypes', methods=['GET'])
+def fetch_playtypes():
+    try:
+        return jsonify(data_service.get_playtypes())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
