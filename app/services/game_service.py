@@ -1,9 +1,9 @@
 from functools import lru_cache
 import pandas as pd
 from nba_api.stats import endpoints
+from nba_api.stats.endpoints import playergamelogs
 from nba_api.stats.static import teams
-from ..utils.helpers import get_opponent_team, nba_team_to_abbreviation
-from ..utils.filters import filter_players_on_off, apply_filters
+from ..utils.database_utils import get_opponent_team, nba_team_to_abbreviation, get_player_id, calculate_additional_stats
 from difflib import get_close_matches
 
 class GameService:
@@ -127,6 +127,104 @@ class GameService:
         matchupRTG = (player_data.values * team_data.values).sum()
         return round(matchupRTG, 2)
 
+    def get_common_games(self, primary_player_logs, other_players_names, season='2023-24'):
+        """Find common games between players"""
+        primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
+        
+        # Loop through other players and find intersections based on game IDs and team abbreviations
+        for player_name in other_players_names:
+            player_id = get_player_id(self.engine, player_name)
+            player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
+            player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
+            
+            primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
+            
+            if not primary_game_team_pairs:
+                break
+        
+        common_game_ids = {pair[0] for pair in primary_game_team_pairs}
+        return set(common_game_ids)
+
+    def get_games_to_exclude(self, player_logs, players_off_names, season='2023-24'):
+        """Find games to exclude due to filtering"""
+        exclude_game_ids = set()
+        
+        # Loop through players_off and union game IDs
+        for player_name in players_off_names:
+            player_id = get_player_id(self.engine, player_name)
+            player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
+            player_game_ids = set(player_gamelogs['GAME_ID'])
+            
+            # Union with exclude_game_ids to accumulate games where any player_off played
+            exclude_game_ids |= player_game_ids
+
+        return exclude_game_ids
+
+    def filter_players_on_off(self, df, players_on, players_off, season):
+        """Filter games based on players on/off"""
+        if players_on:
+            common_games = self.get_common_games(df, players_on, season)
+            df = df[df['GAME_ID'].isin(common_games)]
+        
+        if players_off:
+            exclude_games = self.get_games_to_exclude(df, players_off, season)
+            df = df[~df['GAME_ID'].isin(exclude_games)]
+        
+        return df
+
+    def apply_filters(self, df, filter_params):
+        """Apply all filters to game logs dataframe"""
+        # Apply minutes filter
+        if 'minutes_filter' in filter_params:
+            min_filter, max_filter = filter_params['minutes_filter']
+            df = df[(df['MIN'] >= min_filter) & (df['MIN'] <= max_filter)]
+
+        # Apply date filter
+        if filter_params.get('date_filter'):
+            date_filter = pd.to_datetime(filter_params['date_filter'])
+            df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+            df = df[df['GAME_DATE'] >= date_filter]
+
+        # Apply location filter
+        if filter_params.get('location_filter') and filter_params['location_filter'] != 'Both':
+            if filter_params['location_filter'] == 'Home':
+                df = df[~df['MATCHUP'].str.contains('@')]
+            elif filter_params['location_filter'] == 'Away':
+                df = df[df['MATCHUP'].str.contains('@')]
+
+        # Apply last games filter
+        if filter_params.get('game_filter'):
+            try:
+                last_games = int(filter_params['game_filter'])
+                df = df.head(last_games)
+            except (ValueError, TypeError):
+                pass
+
+        # Apply teams against filter
+        if filter_params.get('teams_against'):
+            teams_against = filter_params['teams_against']
+            if isinstance(teams_against, (list, set)) and teams_against:
+                df = df[df['MATCHUP'].str.extract(r'([A-Z]{2,3})')[0].isin(teams_against)]
+
+        # Apply playstyle filter
+        if filter_params.get('playstyle_range'):
+            min_rating, max_rating = filter_params['playstyle_range']
+            if 'PLAYTYPE_RTG' in df.columns:
+                df = df[(df['PLAYTYPE_RTG'] >= min_rating) & (df['PLAYTYPE_RTG'] <= max_rating)]
+
+        # Apply players on/off filter
+        season = filter_params.get('season_filter', '2024-25')
+        if filter_params.get('players_on') or filter_params.get('players_off'):
+            df = self.filter_players_on_off(df, filter_params.get('players_on', []), filter_params.get('players_off', []), season)
+
+        # Apply self filters (stat ranges)
+        if filter_params.get('self_filters'):
+            for stat, (min_val, max_val) in filter_params['self_filters'].items():
+                if stat in df.columns:
+                    df = df[(df[stat] >= min_val) & (df[stat] <= max_val)]
+
+        return df
+
     def get_filtered_logs(self, player_name, filter_params):
         """Get filtered game logs based on parameters"""
         full_game_logs, next_team = self.get_player_game_logs_with_ratings(player_name, filter_params['season_filter'])
@@ -144,12 +242,12 @@ class GameService:
             teams_against = set()
         
         filter_params['teams_against'] = teams_against
-        filtered_logs = apply_filters(full_game_logs.copy(), filter_params)
+        filtered_logs = self.apply_filters(full_game_logs.copy(), filter_params)
         
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA', 
-                         'FD_PTS', 'FGM', 'FGA', 'FG2A','FG2M', 'FG3M', 'FG3A', 'FTM', 'FTA', 
-                         'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS']
+                         'FD_PTS', 'FGM', 'FGA', 'FG_PCT','FG2A','FG2M', 'FG3M', 'FG3A', 'FTM', 'FTA', 
+                         'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS','PLUS_MINUS']
         filtered_logs['GAME_DATE'] = pd.to_datetime(filtered_logs['GAME_DATE'], errors='coerce').dt.date
         filtered_averages = filtered_logs[average_columns].mean().round(2)
         season_averages = full_game_logs[average_columns].mean().round(2)
@@ -168,7 +266,7 @@ class GameService:
         Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
         playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound','Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
-        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA', 'OPP_TOV']
+        overall_opp_types = ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA', 'OPP_TOV', 'OPP_BLK', 'OPP_STL','OPP_FG3M', 'OPP_FG3A','OPP_FTA']
         assist_types = ["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
         
         if filter in Catch_Shoot_types:
