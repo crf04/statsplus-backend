@@ -1,0 +1,319 @@
+# NBA Player Aliases Configuration
+# Maps common nicknames, abbreviations, and variations to official player names
+
+aliases:
+  # === SUPERSTARS ===
+  # LeBron James
+  "king james": "LeBron James"
+  "the king": "LeBron James"
+  "lebron": "LeBron James"
+  "bron": "LeBron James"
+  "chosen one": "LeBron James"
+  "bron-bron": "LeBron James"
+  "captain lemerica": "LeBron James"
+  "unc": "LeBron James"
+  "lefraud": "LeBron James"
+  "lechoke": "LeBron James"
+  "legm": "LeBron James"
+  "Lemickey": "LeBron James"
+  
+  # Stephen Curry
+  "chef curry": "Stephen Curry"
+  "steph": "Stephen Curry"
+  "chef": "Stephen Curry"
+  "baby-faced assassin": "Stephen Curry"
+  "curry": "Stephen Curry"
+  
+  # Kevin Durant
+  "kd": "Kevin Durant"
+  "slim reaper": "Kevin Durant"
+  "the servant": "Kevin Durant"
+  "durantula": "Kevin Durant"
+  
+  # Giannis Antetokounmpo
+  "the greek freak": "Giannis Antetokounmpo"
+  "giannis": "Giannis Antetokounmpo"
+  "greek freak": "Giannis Antetokounmpo"
+  "the freak": "Giannis Antetokounmpo"
+  "the alphabet": "Giannis Antetokounmpo"
+  
+  # === RISING SUPERSTARS ===
+  # Victor Wembanyama
+  "wemby": "Victor Wembanyama"
+  "the alien": "Victor Wembanyama"
+  "alien": "Victor Wembanyama"
+  "the extraterrestrial": "Victor Wembanyama"
+  "hector banana-bread": "Victor Wembanyama"  # Viral Reddit nickname
+  "wet bananas": "Victor Wembanyama"
+  
+  # Anthony Edwards
+  "ant-man": "Anthony Edwards"
+  "antman": "Anthony Edwards"
+  "ant": "Anthony Edwards"
+  "a1": "Anthony Edwards"
+  
+  # Luka Dončić
+  "luka": "Luka Dončić"
+  "luka doncic": "Luka Dončić"
+  "wonder boy": "Luka Dončić"
+  "luka magic": "Luka Dončić"
+  "the don": "Luka Dončić"
+  
+  # === CENTERS & BIG MEN ===
+  # Nikola Jokić
+  "jokic": "Nikola Jokić"
+  "nikola jokic": "Nikola Jokić"
+  "the joker": "Nikola Jokić"
+  "joker": "Nikola Jokić"
+  "big honey": "Nikola Jokić"
+  
+  # Joel Embiid
+  "embiid": "Joel Embiid"
+  "the process": "Joel Embiid"
+  "process": "Joel Embiid"
+  "jojo": "Joel Embiid"
+  
+  # Rudy Gobert
+  "the stifle tower": "Rudy Gobert"
+  "stifle tower": "Rudy Gobert"
+  "the french rejection": "Rudy Gobert"
+  "french rejection": "Rudy Gobert"
+  "big ru": "Rudy Gobert"
+  
+  # === GUARDS ===
+  # Damian Lillard
+  "dame": "Damian Lillard"
+  "dame time": "Damian Lillard"
+  "dame dolla": "Damian Lillard"
+  "logo lillard": "Damian Lillard"
+  
+  # Ja Morant
+  "ja": "Ja Morant"
+  "ja rule": "Ja Morant"
+
+  # Trae Young
+  "trae": "Trae Young"
+  "ice trae": "Trae Young"
+  "young ice": "Trae Young"
+  "lollipop": "Trae Young"
+  
+  # Kyrie Irving
+  "kyrie": "Kyrie Irving"
+  "uncle drew": "Kyrie Irving"
+  "kyriediculous": "Kyrie Irving"
+  "the ankletaker": "Kyrie Irving"
+  "flat earth": "Kyrie Irving"  # Viral reference
+  
+  # === FORWARDS ===
+  # Jayson Tatum
+  "tatum": "Jayson Tatum"
+  "jt": "Jayson Tatum"
+  "deuce": "Jayson Tatum"
+  "the anomaly": "Jayson Tatum"
+  
+  # Paolo Banchero
+  "paolo": "Paolo Banchero"
+  "banchero": "Paolo Banchero"
+  "p5": "Paolo Banchero"
+  
+  # Scottie Barnes
+  "scottie": "Scottie Barnes"
+  "scottie 2 hottie": "Scottie Barnes"
+  
+  # Zion Williamson
+  "zion": "Zion Williamson"
+  "zanos": "Zion Williamson"
+  "big z": "Zion Williamson"
+  "fatass": "Zion Williamson"
+
+  # Fred VanVleet
+  "dick vanmeat": "Fred VanVleet"
+
+  # Tyrese Haliburton
+  "the haliban": "Tyrese Haliburton"
+  "haliban": "Tyrese Haliburton"
+
+  # Jonathan Kuminga
+  "kum bucket": "Jonathan Kuminga"
+  "kum": "Jonathan Kuminga"
+
+
+
+
+
+  # === ABBREVIATIONS & INITIALS ===
+  # Chris Paul
+  "cp3": "Chris Paul"
+  "chris paul": "Chris Paul"
+  "point god": "Chris Paul"
+  "the point god": "Chris Paul"
+  
+  # Paul George
+  "pg13": "Paul George"
+  "pg": "Paul George"
+  "playoff p": "Paul George"
+  "pandemic p": "Paul George"  # Viral/mocking nickname
+  "podcast p": "Paul George"    # Another viral nickname
+  
+  # Anthony Davis
+  "ad": "Anthony Davis"
+  "the brow": "Anthony Davis"
+  "brow": "Anthony Davis"
+  "anthony davis": "Anthony Davis"
+  
+  # Klay Thompson
+  "klay": "Klay Thompson"
+  "klay thompson": "Klay Thompson"
+  
+  # Draymond Green  
+  "draymond": "Draymond Green"
+  "draymond green": "Draymond Green"
+  
+  
+  # Khris Middleton
+  "middleton": "Khris Middleton"
+  "khris middleton": "Khris Middleton"
+  "adisney": "Anthony Davis"
+  "street clothes": "Anthony Davis"  # Viral injury reference
+  "day-to-davis": "Anthony Davis"    # Injury reference
+  
+  # Shai Gilgeous-Alexander
+  "sga": "Shai Gilgeous-Alexander"
+  "shai": "Shai Gilgeous-Alexander"
+  "mr buy 2 get 1 free": "Shai Gilgeous-Alexander"  # Viral reference to his long name
+  "shaisis": "Shai Gilgeous-Alexander"
+  
+  # === VETERAN STARS ===
+  # James Harden
+  "the beard": "James Harden"
+  "beard": "James Harden"
+  "honey bun": "James Harden"  # Viral Basketball Reference nickname
+  
+  # Kawhi Leonard
+  "kawhi": "Kawhi Leonard"
+  "the claw": "Kawhi Leonard"
+  "claw": "Kawhi Leonard"
+  "klaw": "Kawhi Leonard"
+  "board man": "Kawhi Leonard"
+  "fun guy": "Kawhi Leonard"  # Viral reference
+  
+  # Jimmy Butler
+  "jimmy buckets": "Jimmy Butler"
+  "buckets": "Jimmy Butler"
+  "playoff jimmy": "Jimmy Butler"
+  "big face coffee": "Jimmy Butler"
+  
+  # Russell Westbrook
+  "russ": "Russell Westbrook"
+  "mr triple double": "Russell Westbrook"
+  "brodie": "Russell Westbrook"
+  "westbrick": "Russell Westbrook"  # Viral mocking nickname
+  
+  # === YOUNG STARS ===
+  # Devin Booker
+  "book": "Devin Booker"
+  "d book": "Devin Booker"
+  "young kobe": "Devin Booker"
+  "wet like book": "Devin Booker"
+  
+  # Donovan Mitchell
+  "spida": "Donovan Mitchell"
+  "spiderman": "Donovan Mitchell"
+  
+  # Cade Cunningham
+  "cade": "Cade Cunningham"
+  "cade the blade": "Cade Cunningham"
+  
+  # Jalen Green
+  "jg": "Jalen Green"
+  "jaygee": "Jalen Green"
+  
+  # === FUNNY/VIRAL NICKNAMES ===
+  # Evan Fournier
+  "never google": "Evan Fournier"  # Famous for warning people not to google his last name
+  
+  # Kristaps Porziņģis
+  "unicorn": "Kristaps Porziņģis"
+  "kp": "Kristaps Porziņģis"
+  "tingus pingus": "Kristaps Porziņģis"  # Viral Michael Rapaport reference
+  "porzingod": "Kristaps Porziņģis"
+  
+  # Andre Drummond
+  "big penguin": "Andre Drummond"  # He loves penguins
+  
+  # Boban Marjanović
+  "boban": "Boban Marjanović"
+  "bobi": "Boban Marjanović"
+  "friendly giant": "Boban Marjanović"
+  
+  # Grayson Allen
+  "grayson allen": "Grayson Allen"
+  "the zodiac killer": "Grayson Allen"  # Viral comparison
+  "ted cruz": "Grayson Allen"  # Another viral comparison
+  
+  # === ROOKIES & RECENT DRAFTEES ===
+  # Cooper Flagg
+  "cooper flagg": "Cooper Flagg"
+  "flagg": "Cooper Flagg"
+  
+  # Bronny James
+  "bronny": "Bronny James"
+  "bronny james": "Bronny James"
+  "young king": "Bronny James"
+  
+  # Scoot Henderson
+  "scoot": "Scoot Henderson"
+  "scoot scoot": "Scoot Henderson"
+  
+  # Dalton Knecht
+  "knecht": "Dalton Knecht"
+  "knecht4": "Dalton Knecht"  # His jersey number reference
+  
+  # === TEAM NICKNAMES FOR PLAYERS ===
+  # Lakers
+  "lakers lebron": "LeBron James"
+  "lakers ad": "Anthony Davis"
+  
+  # Warriors  
+  "warriors curry": "Stephen Curry"
+  "gsw curry": "Stephen Curry"
+  
+  # Celtics
+  "celtics tatum": "Jayson Tatum"
+  
+  # Bucks
+  "bucks giannis": "Giannis Antetokounmpo"
+  "milwaukee giannis": "Giannis Antetokounmpo"
+  
+  # Spurs
+  "spurs wemby": "Victor Wembanyama"
+  "spurs wembanyama": "Victor Wembanyama"
+  
+  # === COMMON MISSPELLINGS ===
+  "lebron james": "LeBron James"
+  "currry": "Stephen Curry"
+  "gianis": "Giannis Antetokounmpo"
+  "durnat": "Kevin Durant"
+  "kevin durant": "Kevin Durant"
+  "embiid": "Joel Embiid"
+  "wembanyama": "Victor Wembanyama"
+  "victor wembanyama": "Victor Wembanyama"
+  "anthoney edwards": "Anthony Edwards"
+  "anthony edward": "Anthony Edwards"
+  
+  # === LEGACY PLAYERS (if in database) ===
+  # Michael Jordan
+  "mj": "Michael Jordan"
+  "his airness": "Michael Jordan"
+  "goat": "Michael Jordan"
+  
+  # Kobe Bryant
+  "black mamba": "Kobe Bryant"
+  "mamba": "Kobe Bryant"
+  "bean": "Kobe Bryant"
+  
+  # Shaquille O'Neal
+  "shaq": "Shaquille O'Neal"
+  "diesel": "Shaquille O'Neal"
+  "the big aristotle": "Shaquille O'Neal"
+  "superman": "Shaquille O'Neal"
