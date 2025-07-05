@@ -181,13 +181,15 @@ class BaseQueryParser:
         processed_query = self._preprocess_query(query)
         doc = self.nlp(processed_query)
         
-        # Extract components step by step
-        components.player_name = self._extract_player_name(query, doc)
+        # OPTIMIZATION: Extract player information in single pass
+        # This avoids calling _extract_players_with_syntax twice
+        components.player_name, components.players_on, components.players_off = self._extract_players_with_syntax(query, doc)
+        
+        # Extract other components
         components.team_name = self._extract_team_name(query, doc)
         components.time_period, components.game_count = self._extract_time_period(query)
         components.location = self._extract_location(query)
         components.opponent_filters = self._extract_opponent_filters(query)
-        components.players_on, components.players_off = self._extract_players_on_off(query, components.player_name)
         components.intent = self._classify_intent(query, components)
         
         # Calculate confidence score
@@ -219,7 +221,12 @@ class BaseQueryParser:
         return query
     
     def _extract_player_name(self, query: str, doc) -> Optional[str]:
-        """Extract main player name from full query using spaCy syntax analysis"""
+        """Extract main player name from full query using spaCy syntax analysis
+        
+        NOTE: This method is no longer used in the main parse() flow to avoid redundant processing.
+        The main parse() method calls _extract_players_with_syntax() directly.
+        This method is kept for backwards compatibility and testing purposes.
+        """
         main_player, _, _ = self._extract_players_with_syntax(query, doc)
         return main_player
     
@@ -308,17 +315,6 @@ class BaseQueryParser:
         if match:
             return match[0]
         
-        # STEP 5: Try individual words for last names
-        for word in text.split():
-            if len(word) > 4 and word[0].isupper():
-                match = process.extractOne(
-                    word,
-                    self.players,
-                    scorer=fuzz.partial_ratio,
-                    score_cutoff=80
-                )
-                if match:
-                    return match[0]
         
         return None
     
@@ -388,7 +384,8 @@ class BaseQueryParser:
         query_lower = query.lower()
         
         # Pattern: "against top/worst X category"
-        pattern = r'against\s+(top|best|worst|bottom)\s+(\d+)\s+([\w\s]+?)(?:\s|$)'
+        # Use greedy matching to capture full multi-word categories like "three point defense"
+        pattern = r'against\s+(top|best|worst|bottom)\s+(\d+)\s+([\w\s]+?)(?:\s+(?:teams?|matchups?|games?)|$)'
         matches = re.finditer(pattern, query_lower)
         
         for match in matches:
@@ -396,27 +393,50 @@ class BaseQueryParser:
             try:
                 rank_num = int(number)
                 
-                # Map category to filter system
+                # Map category to filter system - find the best match (most specific)
+                best_match = None
+                best_match_score = 0
+                
                 for filter_name, config in self.filter_mappings.items():
-                    if any(keyword in category for keyword in config["keywords"]):
-                        # Determine ranking direction
-                        if direction in self.ranking_terms["positive"]:
-                            if config["ranking_direction"] == "ascending":
-                                rank = rank_num
-                            else:
-                                rank = rank_num
-                        else:  # negative terms
+                    matching_keywords = [keyword for keyword in config["keywords"] if keyword in category]
+                    if matching_keywords:
+                        # Score based on total length of matching keywords (more specific = higher score)
+                        score = sum(len(keyword) for keyword in matching_keywords)
+                        if score > best_match_score:
+                            best_match_score = score
+                            best_match = (filter_name, config)
+                
+                if best_match:
+                    filter_name, config = best_match
+                    # Determine ranking direction
+                    if direction in self.ranking_terms["positive"]:
+                        if config["ranking_direction"] == "ascending":
+                            # For ascending stats (like defense), "top 10" means bottom 10 values
                             rank = -rank_num
-                        
-                        filters.append((config["api_filters"][0], rank))
-                        break
+                        else:
+                            # For descending stats (like offense), "top 10" means top 10 values
+                            rank = rank_num
+                    else:  # negative terms
+                        if config["ranking_direction"] == "ascending":
+                            # For ascending stats, "worst 10" means top 10 values
+                            rank = rank_num
+                        else:
+                            # For descending stats, "worst 10" means bottom 10 values
+                            rank = -rank_num
+                    
+                    filters.append((config["api_filters"][0], rank))
             except ValueError:
                 continue
         
         return filters
     
     def _extract_players_on_off(self, query: str, main_player: Optional[str]) -> Tuple[List[str], List[str]]:
-        """Extract players that should be on court (with) or off court (without) using spaCy syntax"""
+        """Extract players that should be on court (with) or off court (without) using spaCy syntax
+        
+        NOTE: This method is no longer used in the main parse() flow to avoid redundant processing.
+        The main parse() method calls _extract_players_with_syntax() directly.
+        This method is kept for backwards compatibility and testing purposes.
+        """
         doc = self.nlp(query)
         _, players_on, players_off = self._extract_players_with_syntax(query, doc)
         
@@ -503,7 +523,6 @@ class BaseQueryParser:
             
             if not overlap:
                 unique_players.append(match)
-        
         if not unique_players:
             # Last resort: fuzzy matching fallback
             main_player = self._extract_single_player_name(query, context="spacy_fallback")
@@ -625,6 +644,10 @@ class BaseQueryParser:
         if main_player or players_on or players_off:
             # spaCy parsing completed successfully
             pass
+        
+        print(main_player)
+        print(players_on)
+        print(players_off)
         
         return main_player, players_on, players_off
     

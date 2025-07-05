@@ -18,7 +18,6 @@ class GameService:
         closest_match = get_close_matches(player_name, player_names, n=1, cutoff=0.8)
         if closest_match:
             player = player_dict[player_dict['full_name'] == closest_match[0]]
-            print(player['id'].values[0])
             return player['id'].values[0]
         else:
             raise ValueError(f"No matching player found for {player_name}.")
@@ -34,20 +33,20 @@ class GameService:
         game_logs_df, next_team = self._get_game_logs(player_name, season)
         
         # Calculate ratings
-        game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
-            lambda row: self.calculate_matchup_rating(
-                row['PLAYER_NAME'], 
-                get_opponent_team(row['MATCHUP'])
-            ), 
-            axis=1
-        )
-        game_logs_df['AST_LOC_RTG'] = game_logs_df.apply(
-            lambda row: self.calculate_assist_location_rating(
-                row['PLAYER_NAME'], 
-                get_opponent_team(row['MATCHUP'])
-            ), 
-            axis=1
-        )
+        #game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
+        #    lambda row: self.calculate_matchup_rating(
+        #        row['PLAYER_NAME'], 
+        #        get_opponent_team(row['MATCHUP'])
+        #    ), 
+        #    axis=1
+        #)
+        #game_logs_df['AST_LOC_RTG'] = game_logs_df.apply(
+        #    lambda row: self.calculate_assist_location_rating(
+        #        row['PLAYER_NAME'], 
+        #        get_opponent_team(row['MATCHUP'])
+        #    ), 
+        #    axis=1
+        #)
         
         return game_logs_df, next_team
 
@@ -204,7 +203,8 @@ class GameService:
         if filter_params.get('teams_against'):
             teams_against = filter_params['teams_against']
             if isinstance(teams_against, (list, set)) and teams_against:
-                df = df[df['MATCHUP'].str.extract(r'([A-Z]{2,3})')[0].isin(teams_against)]
+                # Extract opponent team (second team in matchup like "LAL vs. HOU" or "LAL @ HOU")
+                df = df[df['MATCHUP'].str.extract(r'(?:vs\.|@)\s*([A-Z]{2,3})')[0].isin(teams_against)]
 
         # Apply playstyle filter
         if filter_params.get('playstyle_range'):
@@ -229,10 +229,10 @@ class GameService:
         """Get filtered game logs based on parameters"""
         full_game_logs, next_team = self.get_player_game_logs_with_ratings(player_name, filter_params['season_filter'])
         
+        
         teams_against = None
         for index, ele in enumerate(filter_params['teams_against']):
             filtered_teams = set(self.filter_teams(ele, int(filter_params['rank_filter'][index]), filter_params['date_filter']))
-            
             if teams_against is None:
                 teams_against = filtered_teams
             else:

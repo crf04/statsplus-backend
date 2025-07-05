@@ -18,7 +18,7 @@ def get_game_logs():
             'players_off': request.args.getlist('players_off[]'),
             'date_filter': request.args.get('date_filter'),
             'teams_against': request.args.getlist('teams_against[]'),
-            'rank_filter': request.args.getlist('filter_numbers[]'),
+            'rank_filter': request.args.getlist('rank_filter[]'),
             'location_filter': request.args.get('location_filter', 'Both'),
             'game_filter': request.args.get('game_filter'),
             'season_filter': request.args.get('season_filter','2024-25'),

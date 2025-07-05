@@ -165,6 +165,12 @@ class QueryExecutor:
         if params.get("rank_filter"):
             filter_params["rank_filter"] = params["rank_filter"]
         
+        if params.get("players_on"):
+            filter_params["players_on"] = params["players_on"]
+            
+        if params.get("players_off"):
+            filter_params["players_off"] = params["players_off"]
+        
         return filter_params
     
     def _generate_summary(self, data: Any, endpoint: str) -> Dict[str, Any]:
