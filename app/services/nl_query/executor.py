@@ -171,6 +171,10 @@ class QueryExecutor:
         if params.get("players_off"):
             filter_params["players_off"] = params["players_off"]
         
+        # Handle minutes filter override
+        if params.get("minutes_filter"):
+            filter_params["minutes_filter"] = params["minutes_filter"]
+        
         return filter_params
     
     def _generate_summary(self, data: Any, endpoint: str) -> Dict[str, Any]:

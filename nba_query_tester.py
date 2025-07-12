@@ -49,6 +49,7 @@ class NBAQueryTester:
         print("Commands:")
         print("  • Type any NBA query (e.g., 'LeBron James last 10 games')")
         print("  • 'examples' - Show sample queries")
+        print("  • 'debug-players' - Show loaded players and check specific names")
         print("  • 'help' - Show this help")
         print("  • 'quit', 'exit', 'q' - Exit")
         print("=" * 80)
@@ -67,6 +68,10 @@ class NBAQueryTester:
                 
                 if query.lower() == 'help':
                     self.show_help()
+                    continue
+                
+                if query.lower() == 'debug-players':
+                    self.debug_players()
                     continue
                 
                 if not query:
@@ -155,6 +160,62 @@ class NBAQueryTester:
         except Exception as e:
             print(f"❌ Error processing query: {e}")
             print("💡 Try rephrasing your query or type 'examples' for samples.")
+    
+    def debug_players(self):
+        """Debug loaded players and check for specific names"""
+        print(f"\n🔍 PLAYER DATABASE DEBUG")
+        print("=" * 50)
+        
+        # Show basic stats
+        total_players = len(self.parser.players)
+        total_aliases = len(self.parser.player_aliases)
+        print(f"📊 Total players loaded: {total_players}")
+        print(f"📊 Total aliases loaded: {total_aliases}")
+        
+        # Check for Austin Reaves specifically
+        austin_variants = [
+            "Austin Reaves",
+            "Austin Tyler Reaves", 
+            "A. Reaves",
+            "Reaves, Austin"
+        ]
+        
+        print(f"\n🔍 Checking for Austin Reaves variants:")
+        found_austin = False
+        for variant in austin_variants:
+            if variant in self.parser.players:
+                print(f"  ✅ Found: '{variant}'")
+                found_austin = True
+            else:
+                print(f"  ❌ Not found: '{variant}'")
+        
+        # Search for any player with "Reaves"
+        reaves_players = [p for p in self.parser.players if "reaves" in p.lower()]
+        if reaves_players:
+            print(f"\n📝 Players with 'Reaves' in name:")
+            for player in reaves_players:
+                print(f"  • {player}")
+        else:
+            print(f"\n❌ No players found with 'Reaves' in name")
+        
+        # Show a sample of loaded players
+        print(f"\n📋 Sample of loaded players:")
+        sample_players = self.parser.players[:10]
+        for i, player in enumerate(sample_players, 1):
+            print(f"  {i}. {player}")
+        
+        if total_players > 10:
+            print(f"  ... and {total_players - 10} more players")
+        
+        # Check aliases for Austin
+        austin_aliases = {k: v for k, v in self.parser.player_aliases.items() 
+                         if "austin" in k.lower() or "austin" in v.lower()}
+        if austin_aliases:
+            print(f"\n🏷️  Austin-related aliases:")
+            for alias, player in austin_aliases.items():
+                print(f"  • '{alias}' → {player}")
+        else:
+            print(f"\n❌ No Austin-related aliases found")
     
     def display_nba_results(self, results):
         """Display real NBA data in a user-friendly format"""

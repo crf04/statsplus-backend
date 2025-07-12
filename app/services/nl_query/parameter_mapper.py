@@ -106,6 +106,10 @@ class ParameterMapper:
         if components.opponent_filters:
             params["opponent_filters"] = components.opponent_filters
         
+        # Map minutes filter
+        if components.minutes_filter:
+            params["minutes_filter"] = components.minutes_filter
+        
         # Map players on/off court
         if components.players_on:
             params["players_on"] = components.players_on
@@ -241,6 +245,10 @@ class ParameterMapper:
             if params.get("players_off"):
                 mapped_params["players_off"] = params["players_off"]
             
+            # Map minutes filter
+            if params.get("minutes_filter"):
+                mapped_params["minutes_filter"] = params["minutes_filter"]
+            
             # Map season parameter to season_filter
             if params.get("season"):
                 mapped_params["season_filter"] = params["season"]
@@ -286,6 +294,15 @@ class ParameterMapper:
                 operator = "top" if value > 0 else "worst"
                 filter_descriptions.append(f"against {operator} {abs(value)} teams by {stat}")
             description_parts.append(", ".join(filter_descriptions))
+        
+        if components.minutes_filter:
+            min_minutes, max_minutes = components.minutes_filter
+            if min_minutes > 0 and max_minutes < 48:
+                description_parts.append(f"with {min_minutes}-{max_minutes} minutes played")
+            elif min_minutes > 0:
+                description_parts.append(f"with {min_minutes}+ minutes played")
+            elif max_minutes < 48:
+                description_parts.append(f"with less than {max_minutes} minutes played")
         
         if components.players_on:
             description_parts.append(f"playing with {', '.join(components.players_on)}")
