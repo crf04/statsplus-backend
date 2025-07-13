@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from rapidfuzz import process, fuzz
 from sqlalchemy import text
+from ...utils.date_parser import NBADateParser
 
 @dataclass
 class QueryComponents:
@@ -480,6 +481,9 @@ class BaseQueryParser:
             db_engine, self.players, self.player_aliases
         )
         
+        # Initialize date parser
+        self.date_parser = NBADateParser()
+        
         # Debug: Print loaded data
         print(f"DEBUG: Loaded {len(self.players)} players")
         print(f"DEBUG: Loaded {len(self.player_aliases)} aliases")
@@ -558,6 +562,25 @@ class BaseQueryParser:
                     ],
                     "id": player
                 })
+        
+        # Add last name patterns for each player (NEW FIX)
+        for player in self.players:
+            words = player.split()
+            if len(words) >= 2:
+                last_name = words[-1]
+                # Add both original case and title case patterns
+                patterns.append({
+                    "label": "PLAYER",
+                    "pattern": last_name,
+                    "id": player
+                })
+                # Add title case if different
+                if last_name.title() != last_name:
+                    patterns.append({
+                        "label": "PLAYER",
+                        "pattern": last_name.title(),
+                        "id": player
+                    })
         
         for alias, player in self.player_aliases.items():
             # Add lowercase pattern (original)
@@ -717,6 +740,7 @@ class BaseQueryParser:
         # Extract other components with position tracking
         components.team_name = self._extract_team_name(query, doc)
         components.time_period, components.game_count = self._extract_time_period_with_coverage(query, coverage)
+        components.date_range = self._extract_date_filter_with_coverage(query, coverage)
         components.location = self._extract_location_with_coverage(query, coverage)
         components.opponent_filters = self._extract_opponent_filters_with_coverage(query, coverage)
         components.minutes_filter = self._extract_minutes_filter_with_coverage(query, coverage)
@@ -935,6 +959,22 @@ class BaseQueryParser:
                 return "month", None
         return None, None
     
+    def _extract_date_filter(self, query: str) -> Optional[str]:
+        """
+        Extract date filter from the query using the NBA date parser.
+        
+        Args:
+            query (str): The original query string.
+            
+        Returns:
+            Optional[str]: Date in YYYY-MM-DD format if found, else None.
+        """
+        try:
+            return self.date_parser.parse_date_from_query(query)
+        except Exception as e:
+            print(f"Warning: Date parsing failed for '{query}': {e}")
+            return None
+    
     def _extract_location(self, query: str) -> Optional[str]:
         """
         Extract the location filter (home/away) from the query.
@@ -1090,6 +1130,38 @@ class BaseQueryParser:
         
         return None
     
+    def _normalize_player_name(self, name: str) -> str:
+        """
+        Normalize player names by removing accents and special characters.
+        Args:
+            name (str): The player name with potential accents.
+        Returns:
+            str: The normalized player name without accents.
+        """
+        if not name:
+            return name
+        
+        # Common accent mappings for NBA players
+        accent_mappings = {
+            'ć': 'c', 'č': 'c', 'ć': 'c', 'Ć': 'C', 'Č': 'C',
+            'ń': 'n', 'ň': 'n', 'Ń': 'N', 'Ň': 'N',
+            'š': 's', 'Š': 'S',
+            'ž': 'z', 'Ž': 'Z',
+            'ö': 'o', 'Ö': 'O',
+            'ü': 'u', 'Ü': 'U',
+            'á': 'a', 'à': 'a', 'ä': 'a', 'Á': 'A', 'À': 'A', 'Ä': 'A',
+            'é': 'e', 'è': 'e', 'ê': 'e', 'É': 'E', 'È': 'E', 'Ê': 'E',
+            'í': 'i', 'ì': 'i', 'î': 'i', 'Í': 'I', 'Ì': 'I', 'Î': 'I',
+            'ó': 'o', 'ò': 'o', 'ô': 'o', 'Ó': 'O', 'Ò': 'O', 'Ô': 'O',
+            'ú': 'u', 'ù': 'u', 'û': 'u', 'Ú': 'U', 'Ù': 'U', 'Û': 'U'
+        }
+        
+        normalized = name
+        for accented, normal in accent_mappings.items():
+            normalized = normalized.replace(accented, normal)
+        
+        return normalized
+    
     def _extract_players_with_syntax(self, query: str, doc) -> Tuple[Optional[str], List[str], List[str]]:
         """
         Extract player relationships (main, ON, OFF) from the query using entity-first approach.
@@ -1100,7 +1172,7 @@ class BaseQueryParser:
             Tuple[Optional[str], List[str], List[str]]: (main_player, players_on, players_off)
         Implementation details:
             - Step 1: Find all player entities using spaCy
-            - Step 2: Use simple fallback for any obvious missed players
+            - Step 2: Use fallback extraction for missed players
             - Step 3: Classify each player based on surrounding context
         """
         # Step 1: Find ALL player entities using spaCy
@@ -1120,40 +1192,119 @@ class BaseQueryParser:
                     })
                     found_names.add(player_name)
         
-        # Step 2: Simple fallback for obvious missed players (only for main player at start)
-        # This handles cases where spaCy might miss the main player name at the beginning
-        if not all_players:
-            # Look for player name at the very beginning of the query
-            start_pattern = r'^\s*(\w+(?:\s+\w+){0,2})\s+'
-            match = re.match(start_pattern, query)
+        # Step 2: Enhanced fallback for obvious missed players
+        # Look for common patterns where spaCy might miss players
+        fallback_patterns = [
+            # "X with Y" - both X and Y should be players
+            r'^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this|and|but)|\s*$)',
+            # "X with Y and Z" - X, Y, Z should be players
+            r'^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*)\s+and\s+(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this|but)|\s*$)',
+            # "X with Y but without Z" - X, Y, Z should be players
+            r'^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*)\s+but\s+without\s+(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this)|\s*$)',
+            # "X without Y" - both X and Y should be players
+            r'^(\w+(?:\s+\w+)*)\s+without\s+(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this)|\s*$)',
+            # "X with Y, Z and W" - complex lists
+            r'^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*),\s*(\w+(?:\s+\w+)*)\s+and\s+(\w+(?:\s+\w+)*)',
+            # "X with Y and Z at home" - handle location context
+            r'^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*)\s+and\s+(\w+(?:\s+\w+)*)\s+(?:at|on)',
+            # "X at/on location" or "X last N games" - simple single player queries
+            r'^(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this|in|during|for|against))',
+        ]
+        
+        for pattern in fallback_patterns:
+            match = re.search(pattern, query, re.IGNORECASE)
             if match:
+                for i, potential_name in enumerate(match.groups()):
+                    if potential_name and self._is_valid_player_candidate(potential_name):
+                        # Try to find exact match first
+                        player_name = self._extract_single_player_name(potential_name.strip())
+                        if player_name and player_name not in found_names:
+                            # Find the actual position in query (case-insensitive)
+                            start_pos = query.lower().find(potential_name.lower().strip())
+                            if start_pos != -1:
+                                all_players.append({
+                                    'name': player_name,
+                                    'start': start_pos,
+                                    'end': start_pos + len(potential_name.strip()),
+                                    'text': potential_name.strip()
+                                })
+                                found_names.add(player_name)
+        
+        # Step 2.5: Additional fallback for common missed patterns
+        # Look for standalone names that might be players
+        additional_patterns = [
+            # After "with" keyword
+            r'with\s+(\w+(?:\s+\w+)*?)(?:\s+(?:and|at|on|last|this|but)|\s*$)',
+            # After "without" keyword  
+            r'without\s+(\w+(?:\s+\w+)*?)(?:\s+(?:and|at|on|last|this|but)|\s*$)',
+            # After "and" keyword
+            r'and\s+(\w+(?:\s+\w+)*?)(?:\s+(?:and|at|on|last|this|but)|\s*$)',
+            # After "but without" keyword
+            r'but\s+without\s+(\w+(?:\s+\w+)*?)(?:\s+(?:and|at|on|last|this)|\s*$)',
+        ]
+        
+        for pattern in additional_patterns:
+            matches = re.finditer(pattern, query, re.IGNORECASE)
+            for match in matches:
                 potential_name = match.group(1).strip()
-                if self._is_valid_player_candidate(potential_name):
+                if potential_name and self._is_valid_player_candidate(potential_name):
                     player_name = self._extract_single_player_name(potential_name)
                     if player_name and player_name not in found_names:
+                        start_pos = match.start(1)
                         all_players.append({
                             'name': player_name,
-                            'start': match.start(1),
-                            'end': match.end(1),
+                            'start': start_pos,
+                            'end': start_pos + len(potential_name),
                             'text': potential_name
                         })
                         found_names.add(player_name)
         
-        # Step 3: Classify each player based on context
+        # Step 3: Classify each player based on context and position
         main_player = None
         players_on = []
         players_off = []
         
-        for player in all_players:
-            classification = self._classify_player_relationship(query, player)
+        # Sort players by their position in the query to handle priority correctly
+        all_players.sort(key=lambda x: x['start'])
+        
+        for i, player in enumerate(all_players):
+            classification = self._classify_player_relationship(query, player, all_players)
             
             if classification == "main":
                 if main_player is None:  # Only set first main player
-                    main_player = player['name']
+                    main_player = self._normalize_player_name(player['name'])
             elif classification == "with":
-                players_on.append(player['name'])
+                players_on.append(self._normalize_player_name(player['name']))
             elif classification == "without":
-                players_off.append(player['name'])
+                players_off.append(self._normalize_player_name(player['name']))
+        
+        # If no main player found but we have players, use positional logic
+        if main_player is None and all_players:
+            # Check if query starts with a player name pattern
+            query_lower = query.lower()
+            
+            # Look for patterns like "X with Y" where X should be main
+            with_pattern = r'^([^,]+?)\s+with\s+'
+            match = re.match(with_pattern, query_lower)
+            if match:
+                potential_main = match.group(1).strip()
+                # Find the player that matches this text
+                for player in all_players:
+                    if player['start'] < len(potential_main):
+                        main_player = self._normalize_player_name(player['name'])
+                        # Remove from players_on if it was misclassified
+                        normalized_name = self._normalize_player_name(player['name'])
+                        if normalized_name in players_on:
+                            players_on.remove(normalized_name)
+                        break
+            
+            # If still no main player, use the first player that wasn't classified as with/without
+            if main_player is None:
+                for player in all_players:
+                    normalized_name = self._normalize_player_name(player['name'])
+                    if normalized_name not in players_on and normalized_name not in players_off:
+                        main_player = normalized_name
+                        break
         
         # Remove duplicates while preserving order
         players_on = list(dict.fromkeys(players_on))
@@ -1161,12 +1312,13 @@ class BaseQueryParser:
         
         return main_player, players_on, players_off
     
-    def _classify_player_relationship(self, query: str, player: Dict) -> str:
+    def _classify_player_relationship(self, query: str, player: Dict, all_players: List[Dict]) -> str:
         """
         Classify a player's relationship (main, with, without) based on surrounding context.
         Args:
             query (str): The original query string.
             player (Dict): Player entity with 'name', 'start', 'end', 'text' keys.
+            all_players (List[Dict]): All player entities found in the query.
         Returns:
             str: 'main', 'with', 'without', or 'unknown'
         """
@@ -1178,72 +1330,79 @@ class BaseQueryParser:
         context_before = query_lower[:start_pos].strip()
         context_after = query_lower[end_pos:].strip()
         
-        # Look for direct "with" patterns before the player
-        with_before_patterns = [
-            r'\bwith\s*$',
-            r'\bplaying\s+with\s*$',
-            r'\balongside\s*$',
-            r'\bincluding\s*$',
-            r'\bfeaturing\s*$',
+        # Check for "without" patterns first (more specific)
+        without_patterns = [
+            r'without$',
+            r'but\s+without$',
+            r'minus$',
+            r'excluding$',
+            r'except$',
+            r'not\s+with$',
         ]
         
-        # Look for direct "without" patterns before the player
-        without_before_patterns = [
-            r'\bwithout\s*$',
-            r'\bminus\s*$',
-            r'\bexcluding\s*$',
-            r'\bbut\s+without\s*$',
-        ]
-        
-        # Check for direct "with" patterns
-        for pattern in with_before_patterns:
-            if re.search(pattern, context_before):
-                return "with"
-        
-        # Check for direct "without" patterns  
-        for pattern in without_before_patterns:
+        for pattern in without_patterns:
             if re.search(pattern, context_before):
                 return "without"
         
-        # Check for "and" patterns that might indicate additional players
-        # "LeBron and AD" - both could be main, but "with LeBron and AD" - both are "with"
-        and_pattern = r'\band\s*$'
-        if re.search(and_pattern, context_before):
-            # Check for "without" patterns first (more specific)
-            if any(word in context_before for word in ['without', 'minus', 'excluding']):
-                return "without"
-            elif any(word in context_before for word in ['with', 'alongside', 'including', 'featuring']):
+        # Check for "with" patterns
+        with_patterns = [
+            r'with$',  # "with" at end of context
+            r'with\s+[\w\s]+\s+and$',  # "with X and" at end
+            r'with\s+[\w\s]+,$',  # "with X," at end
+            r'playing\s+with$',
+            r'alongside$',
+            r'including$',
+            r'featuring$',
+        ]
+        
+        for pattern in with_patterns:
+            if re.search(pattern, context_before):
                 return "with"
         
-        # Check for comma-separated lists (e.g., "with AD, LeBron, and Curry")
-        comma_pattern = r',\s*$'
-        if re.search(comma_pattern, context_before):
-            # Check for "without" patterns first (more specific)
-            if any(word in context_before for word in ['without', 'minus', 'excluding']):
+        # Check for "and" in context (part of a list)
+        if re.search(r'and$', context_before):
+            # Look for "with" or "without" keywords earlier in the context
+            if 'without' in context_before:
                 return "without"
-            elif any(word in context_before for word in ['with', 'alongside', 'including', 'featuring']):
+            elif 'with' in context_before:
                 return "with"
         
-        # Check for complex "but without" patterns in the middle
-        # "LeBron with AD but without Westbrook" - need to find which side of "but without" this player is on
+        # Check for comma-separated lists
+        if re.search(r',$', context_before):
+            # Look for "with" or "without" keywords earlier in the context
+            if 'without' in context_before:
+                return "without"
+            elif 'with' in context_before:
+                return "with"
+        
+        # Handle complex "but without" constructions
         but_without_match = re.search(r'(.+?)\s+but\s+without\s+(.+)', query_lower)
         if but_without_match:
             with_part = but_without_match.group(1)
             without_part = but_without_match.group(2)
             
             # Check which part contains this player
-            if start_pos < len(with_part) and start_pos >= 0:
+            if start_pos <= len(with_part):
                 # Player is in the "with" part
                 if 'with' in with_part:
-                    return "with"
-            elif start_pos >= len(with_part):
+                    # Check if this is NOT the main player (main player comes before "with")
+                    with_match = re.search(r'^(.+?)\s+with\s+', with_part)
+                    if with_match:
+                        main_part = with_match.group(1)
+                        if start_pos > len(main_part):
+                            return "with"
+            else:
                 # Player is in the "without" part
                 return "without"
         
-        # Default: if no relationship context found, assume main player
+        # Check if this is the first player in the query and not in a "with" context
+        if player == min(all_players, key=lambda p: p['start']):
+            # First player is usually main unless it's clearly in a "with" context
+            if not any(keyword in context_before for keyword in ['with', 'alongside', 'including', 'featuring']):
+                return "main"
+        
+        # Default: if no clear relationship context found, assume main player
         return "main"
-    
-
     
     def _is_valid_player_candidate(self, text: str) -> bool:
         """
@@ -1416,6 +1575,31 @@ class BaseQueryParser:
                     break
         
         return time_period, game_count
+    
+    def _extract_date_filter_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[str]:
+        """Extract date filter and track coverage"""
+        date_filter = self._extract_date_filter(query)
+        
+        if date_filter:
+            # Track coverage for date patterns using the date parser's analysis
+            try:
+                date_result = self.date_parser.get_date_components(query)
+                if date_result.get('original_expression'):
+                    # Find the position of the original expression in the query
+                    original_expr = date_result['original_expression']
+                    start_pos = query.lower().find(original_expr.lower())
+                    if start_pos != -1:
+                        coverage.add_component(ParsedComponent(
+                            value=original_expr,
+                            start_pos=start_pos,
+                            end_pos=start_pos + len(original_expr),
+                            component_type="date_filter",
+                            extraction_method="nba_date_parser"
+                        ))
+            except Exception as e:
+                print(f"Warning: Date coverage tracking failed: {e}")
+        
+        return date_filter
     
     def _extract_location_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[str]:
         """Extract location and track coverage"""

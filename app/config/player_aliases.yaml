@@ -321,3 +321,43 @@ aliases:
   "diesel": "Shaquille O'Neal"
   "the big aristotle": "Shaquille O'Neal"
   "superman": "Shaquille O'Neal"
+  
+  # === MISSING LAST NAME ALIASES ===
+  # Klay Thompson
+  "klay": "Klay Thompson"
+  "thompson": "Klay Thompson"
+  
+  # Chet Holmgren
+  "chet": "Chet Holmgren"
+  "holmgren": "Chet Holmgren"
+  
+  # Tim Hardaway Jr.
+  "thj": "Tim Hardaway Jr."
+  "hardaway": "Tim Hardaway Jr."
+  "tim hardaway": "Tim Hardaway Jr."
+  
+  # Devin Vassell
+  "vassell": "Devin Vassell"
+  
+  # Jamal Murray
+  "jamal": "Jamal Murray"
+  "murray": "Jamal Murray"
+  
+  # Aaron Gordon
+  "gordon": "Aaron Gordon"
+  
+  # Grant Williams
+  "grant": "Grant Williams"
+  "williams": "Grant Williams"
+  
+  # Marcus Smart
+  "smart": "Marcus Smart"
+  "marcus": "Marcus Smart"
+  
+  # Tyrese Maxey
+  "maxey": "Tyrese Maxey"
+  "tyrese": "Tyrese Maxey"
+  
+  # OG Anunoby
+  "og": "OG Anunoby"
+  "o.g. anunoby": "OG Anunoby"
