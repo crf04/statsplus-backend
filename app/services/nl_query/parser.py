@@ -38,11 +38,416 @@ class QueryComponents:
     intent: Optional[str] = None       # "game_logs", "player_profile", "team_stats"
     confidence: float = 0.0            # Confidence score (0-1)
     raw_query: str = ""               # Original query text
+    confidence_breakdown: Optional['ConfidenceBreakdown'] = None  # Detailed confidence analysis
     
     # Additional filters (for future expansion)
     stat_categories: List[str] = field(default_factory=list)
     players_on: List[str] = field(default_factory=list)
     players_off: List[str] = field(default_factory=list)
+
+@dataclass
+class ParsedComponent:
+    """Represents a component extracted from the query with position tracking"""
+    value: Any
+    start_pos: int
+    end_pos: int
+    component_type: str  # 'player', 'time', 'location', 'minutes', 'opponent', etc.
+    confidence: float = 1.0
+    extraction_method: str = "unknown"  # How this was extracted (regex, spacy, etc.)
+
+@dataclass
+class ConfidenceBreakdown:
+    """Detailed breakdown of confidence calculation"""
+    final_confidence: float
+    should_use_llm: bool
+    coverage_score: float
+    semantic_score: float
+    ambiguity_score: float
+    complexity_score: float
+    completeness_score: float
+    details: Dict[str, Any] = field(default_factory=dict)
+
+class QueryCoverage:
+    """Tracks which parts of the query were successfully parsed"""
+    
+    def __init__(self, query: str):
+        self.query = query
+        self.query_lower = query.lower()
+        self.covered_positions = set()
+        self.components: List[ParsedComponent] = []
+        self.significant_words = self._extract_significant_words()
+        
+    def _extract_significant_words(self) -> List[str]:
+        """Extract words that should be covered by parsing (excluding stop words)"""
+        # Common stop words that don't need to be "covered"
+        stop_words = {
+            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he', 'in', 
+            'is', 'it', 'its', 'of', 'on', 'that', 'the', 'to', 'was', 'were', 'will', 'with',
+            'his', 'her', 'their', 'this', 'these', 'those', 'when', 'where', 'how', 'why'
+        }
+        
+        words = [word.strip('.,!?;:') for word in self.query_lower.split()]
+        significant_words = [word for word in words if word not in stop_words and len(word) > 1]
+        return significant_words
+    
+    def add_component(self, component: ParsedComponent) -> None:
+        """Add a parsed component and mark its positions as covered"""
+        self.components.append(component)
+        for pos in range(component.start_pos, component.end_pos):
+            self.covered_positions.add(pos)
+    
+    def calculate_coverage_score(self) -> float:
+        """Calculate percentage of significant content that was parsed"""
+        if not self.significant_words:
+            return 1.0
+        
+        total_significant_chars = sum(len(word) for word in self.significant_words)
+        if total_significant_chars == 0:
+            return 1.0
+        
+        # Count covered significant characters
+        covered_significant_chars = 0
+        for word in self.significant_words:
+            word_start = self.query_lower.find(word)
+            if word_start != -1:
+                word_end = word_start + len(word)
+                word_coverage = sum(1 for pos in range(word_start, word_end) if pos in self.covered_positions)
+                covered_significant_chars += word_coverage
+        
+        return min(covered_significant_chars / total_significant_chars, 1.0)
+    
+    def get_uncovered_text(self) -> str:
+        """Get the parts of the query that weren't covered by any component"""
+        uncovered_chars = []
+        for i, char in enumerate(self.query):
+            if i not in self.covered_positions:
+                uncovered_chars.append(char)
+        return ''.join(uncovered_chars).strip()
+
+class SemanticValidator:
+    """Validates extracted components for logical consistency"""
+    
+    def __init__(self, db_engine):
+        self.engine = db_engine
+        self.player_team_map = {}  # Will be populated as needed
+        
+    def validate_components(self, components: QueryComponents) -> Tuple[bool, List[str]]:
+        """Validate components and return warnings"""
+        warnings = []
+        
+        # Check for logical contradictions
+        warnings.extend(self._check_contradictions(components))
+        
+        # Check for unrealistic values
+        warnings.extend(self._check_realistic_values(components))
+        
+        # Check for player relationships
+        warnings.extend(self._check_player_relationships(components))
+        
+        return len(warnings) == 0, warnings
+    
+    def _check_contradictions(self, components: QueryComponents) -> List[str]:
+        """Check for logical contradictions in the query"""
+        warnings = []
+        
+        # Player appearing in both ON and OFF lists
+        if components.players_on and components.players_off:
+            overlap = set(components.players_on) & set(components.players_off)
+            if overlap:
+                warnings.append(f"Player(s) {overlap} appear in both 'with' and 'without' lists")
+        
+        # Main player also in ON/OFF lists
+        if components.player_name:
+            if components.player_name in components.players_on:
+                warnings.append(f"Main player {components.player_name} also in 'with' list")
+            if components.player_name in components.players_off:
+                warnings.append(f"Main player {components.player_name} also in 'without' list")
+        
+        return warnings
+    
+    def _check_realistic_values(self, components: QueryComponents) -> List[str]:
+        """Check for unrealistic values"""
+        warnings = []
+        
+        # Unrealistic game counts
+        if components.game_count:
+            if components.game_count > 82:
+                warnings.append(f"Game count {components.game_count} exceeds season length")
+            elif components.game_count < 1:
+                warnings.append(f"Game count {components.game_count} is invalid")
+        
+        # Unrealistic minutes
+        if components.minutes_filter:
+            min_min, max_min = components.minutes_filter
+            if min_min > 48 or max_min > 48:
+                warnings.append(f"Minutes filter {components.minutes_filter} exceeds game length")
+            elif min_min < 0 or max_min < 0:
+                warnings.append(f"Minutes filter {components.minutes_filter} has negative values")
+            elif min_min > max_min:
+                warnings.append(f"Minutes filter {components.minutes_filter} has invalid range")
+        
+        return warnings
+    
+    def _check_player_relationships(self, components: QueryComponents) -> List[str]:
+        """Check if player relationships make sense"""
+        warnings = []
+        
+        # Too many players (might indicate parsing error)
+        total_players = len(components.players_on) + len(components.players_off)
+        if total_players > 8:  # NBA has 5 players on court
+            warnings.append(f"Too many players mentioned ({total_players}), might indicate parsing error")
+        
+        return warnings
+
+class AmbiguityDetector:
+    """Detects ambiguities in the parsed query"""
+    
+    def __init__(self, players: List[str], player_aliases: Dict[str, str]):
+        self.players = players
+        self.player_aliases = player_aliases
+    
+    def detect_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+        """Detect various types of ambiguities"""
+        ambiguities = []
+        
+        # Player name ambiguities
+        ambiguities.extend(self._detect_player_ambiguities(query, components))
+        
+        # Relationship ambiguities
+        ambiguities.extend(self._detect_relationship_ambiguities(query, components))
+        
+        # Temporal ambiguities
+        ambiguities.extend(self._detect_temporal_ambiguities(query, components))
+        
+        return ambiguities
+    
+    def _detect_player_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+        """Detect ambiguous player references"""
+        ambiguities = []
+        
+        # Check for last name only matches
+        if components.player_name:
+            player_words = components.player_name.split()
+            if len(player_words) >= 2:
+                last_name = player_words[-1].lower()
+                # Find other players with same last name
+                same_last_name = [p for p in self.players if p.lower().split()[-1] == last_name and p != components.player_name]
+                if same_last_name:
+                    ambiguities.append({
+                        'type': 'player_last_name_ambiguity',
+                        'current': components.player_name,
+                        'alternatives': same_last_name,
+                        'severity': 'high' if len(same_last_name) > 1 else 'medium'
+                    })
+        
+        return ambiguities
+    
+    def _detect_relationship_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+        """Detect ambiguous player relationships"""
+        ambiguities = []
+        
+        # Check for "and" patterns that could be interpreted multiple ways
+        if ' and ' in query.lower():
+            # Count player names in query
+            player_mentions = sum(1 for p in self.players if p.lower() in query.lower())
+            if player_mentions >= 2 and not components.players_on and not components.players_off:
+                ambiguities.append({
+                    'type': 'relationship_ambiguity',
+                    'description': 'Multiple players mentioned with "and" but unclear relationship',
+                    'severity': 'medium'
+                })
+        
+        return ambiguities
+    
+    def _detect_temporal_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+        """Detect temporal ambiguities"""
+        ambiguities = []
+        
+        # Vague time references
+        vague_patterns = ['recent', 'lately', 'currently', 'now', 'today']
+        for pattern in vague_patterns:
+            if pattern in query.lower() and not components.game_count:
+                ambiguities.append({
+                    'type': 'temporal_ambiguity',
+                    'description': f'Vague time reference "{pattern}" without specific period',
+                    'severity': 'low'
+                })
+        
+        return ambiguities
+
+class ComplexityAnalyzer:
+    """Analyzes query complexity"""
+    
+    def __init__(self):
+        self.complexity_patterns = [
+            # Nested clauses
+            (r'when\s+.*\s+(?:and|but|or)\s+.*\s+(?:then|during)', 'nested_conditional', 0.8),
+            # Multiple conjunctions
+            (r'(?:and|or|but).*(?:and|or|but).*(?:and|or|but)', 'multiple_conjunctions', 0.7),
+            # Comparative statements
+            (r'(?:better|worse|more|less)\s+than', 'comparative', 0.6),
+            # Complex temporal expressions
+            (r'(?:before|after|during|since).*(?:when|while|as)', 'complex_temporal', 0.7),
+            # Conditional statements
+            (r'if\s+.*\s+then|when\s+.*\s+show|only\s+when', 'conditional', 0.8),
+            # Nested filters
+            (r'(?:with|without).*(?:with|without).*(?:with|without)', 'nested_filters', 0.9),
+            # Multiple negations
+            (r'(?:not|without|excluding).*(?:not|without|excluding)', 'multiple_negations', 0.8),
+        ]
+    
+    def calculate_complexity_score(self, query: str) -> float:
+        """Calculate complexity score (0-1 where 1 is most complex)"""
+        query_lower = query.lower()
+        max_complexity = 0.0
+        
+        for pattern, name, complexity in self.complexity_patterns:
+            if re.search(pattern, query_lower):
+                max_complexity = max(max_complexity, complexity)
+        
+        # Length-based complexity
+        word_count = len(query.split())
+        length_complexity = min(word_count / 25, 0.5)  # Cap at 0.5
+        
+        # Punctuation complexity
+        punctuation_count = sum(1 for char in query if char in '.,!?;:')
+        punctuation_complexity = min(punctuation_count / 10, 0.3)  # Cap at 0.3
+        
+        return max(max_complexity, length_complexity, punctuation_complexity)
+
+class CompletenessChecker:
+    """Checks for incomplete or partial extractions"""
+    
+    def check_completeness(self, query: str, components: QueryComponents) -> Dict[str, Any]:
+        """Check completeness and return issues"""
+        issues = []
+        
+        # Essential component checks
+        if self._looks_like_player_query(query) and not components.player_name:
+            issues.append({'type': 'missing_player', 'severity': 'high'})
+        
+        # Partial pattern matches
+        partial_patterns = [
+            (r'\blast\s+(?!\d+\s+(?:games?|season|month))', 'incomplete_time_reference'),
+            (r'\bwith\s*$', 'dangling_with'),
+            (r'\bwithout\s*$', 'dangling_without'),
+            (r'\bagainst\s*$', 'dangling_against'),
+            (r'\bat\s*$', 'dangling_at'),
+            (r'\bwhen\s*$', 'dangling_when'),
+        ]
+        
+        for pattern, issue_type in partial_patterns:
+            if re.search(pattern, query.lower()):
+                issues.append({'type': issue_type, 'severity': 'medium'})
+        
+        # Orphaned modifiers
+        if self._has_orphaned_modifiers(query):
+            issues.append({'type': 'orphaned_modifiers', 'severity': 'medium'})
+        
+        return {
+            'issues': issues,
+            'completeness_score': self._calculate_completeness_score(issues)
+        }
+    
+    def _looks_like_player_query(self, query: str) -> bool:
+        """Determine if query should have a player"""
+        player_indicators = ['games', 'stats', 'performance', 'last', 'recent', 'season', 'minutes']
+        return any(indicator in query.lower() for indicator in player_indicators)
+    
+    def _has_orphaned_modifiers(self, query: str) -> bool:
+        """Check for modifiers without clear targets"""
+        orphan_patterns = [
+            r'\b(?:very|really|extremely|quite)\s+(?:good|bad|high|low)\b',
+            r'\b(?:all|every|each)\s+(?:time|game)\b(?!\s+(?:with|against|when))',
+        ]
+        
+        for pattern in orphan_patterns:
+            if re.search(pattern, query.lower()):
+                return True
+        return False
+    
+    def _calculate_completeness_score(self, issues: List[Dict[str, Any]]) -> float:
+        """Calculate completeness score based on issues"""
+        if not issues:
+            return 1.0
+        
+        # Weight issues by severity
+        severity_weights = {'high': 0.4, 'medium': 0.2, 'low': 0.1}
+        total_penalty = sum(severity_weights.get(issue['severity'], 0.1) for issue in issues)
+        
+        return max(0.0, 1.0 - total_penalty)
+
+class MasterConfidenceCalculator:
+    """Combines all confidence signals into final score"""
+    
+    def __init__(self, db_engine, players: List[str], player_aliases: Dict[str, str]):
+        self.semantic_validator = SemanticValidator(db_engine)
+        self.ambiguity_detector = AmbiguityDetector(players, player_aliases)
+        self.complexity_analyzer = ComplexityAnalyzer()
+        self.completeness_checker = CompletenessChecker()
+        
+        # Weights for different signals
+        self.weights = {
+            'coverage': 0.25,
+            'semantic': 0.20,
+            'ambiguity': 0.20,
+            'complexity': 0.15,
+            'completeness': 0.20
+        }
+        
+        # Conservative threshold for LLM fallback
+        self.llm_threshold = 0.75
+    
+    def calculate_confidence(self, query: str, components: QueryComponents, 
+                           coverage: QueryCoverage) -> ConfidenceBreakdown:
+        """Calculate comprehensive confidence score"""
+        
+        # 1. Coverage score (0-1, higher is better)
+        coverage_score = coverage.calculate_coverage_score()
+        
+        # 2. Semantic validation (0-1, higher is better)
+        is_valid, warnings = self.semantic_validator.validate_components(components)
+        semantic_score = max(0.0, 1.0 - (len(warnings) * 0.25))  # Deduct 0.25 per warning
+        
+        # 3. Ambiguity score (0-1, higher is better)
+        ambiguities = self.ambiguity_detector.detect_ambiguities(query, components)
+        ambiguity_penalties = {'high': 0.4, 'medium': 0.25, 'low': 0.1}
+        ambiguity_penalty = sum(ambiguity_penalties.get(amb.get('severity', 'medium'), 0.25) for amb in ambiguities)
+        ambiguity_score = max(0.0, 1.0 - ambiguity_penalty)
+        
+        # 4. Complexity score (0-1, higher is better)
+        complexity = self.complexity_analyzer.calculate_complexity_score(query)
+        complexity_score = 1.0 - complexity
+        
+        # 5. Completeness score (0-1, higher is better)
+        completeness_result = self.completeness_checker.check_completeness(query, components)
+        completeness_score = completeness_result['completeness_score']
+        
+        # Weighted average
+        final_confidence = (
+            coverage_score * self.weights['coverage'] +
+            semantic_score * self.weights['semantic'] +
+            ambiguity_score * self.weights['ambiguity'] +
+            complexity_score * self.weights['complexity'] +
+            completeness_score * self.weights['completeness']
+        )
+        
+        return ConfidenceBreakdown(
+            final_confidence=final_confidence,
+            should_use_llm=final_confidence < self.llm_threshold,
+            coverage_score=coverage_score,
+            semantic_score=semantic_score,
+            ambiguity_score=ambiguity_score,
+            complexity_score=complexity_score,
+            completeness_score=completeness_score,
+            details={
+                'semantic_warnings': warnings,
+                'ambiguities': ambiguities,
+                'completeness_issues': completeness_result['issues'],
+                'uncovered_text': coverage.get_uncovered_text(),
+                'coverage_components': len(coverage.components)
+            }
+        )
 
 class BaseQueryParser:
     """
@@ -69,6 +474,11 @@ class BaseQueryParser:
         
         # Load player aliases from configuration file
         self.player_aliases = self._load_player_aliases()
+        
+        # Initialize confidence calculator
+        self.confidence_calculator = MasterConfidenceCalculator(
+            db_engine, self.players, self.player_aliases
+        )
         
         # Debug: Print loaded data
         print(f"DEBUG: Loaded {len(self.players)} players")
@@ -114,7 +524,9 @@ class BaseQueryParser:
         Set up custom spaCy components for the parser.
         Adds an entity ruler for player/alias recognition and initializes relationship patterns for the matcher.
         """
-        ruler = self.nlp.add_pipe("entity_ruler", after="ner", config={"overwrite_ents": True})
+        # Disable the built-in NER to prevent conflicts with our entity ruler
+        self.nlp.disable_pipes("ner")
+        ruler = self.nlp.add_pipe("entity_ruler", config={"overwrite_ents": True})
         self._add_player_entity_patterns(ruler)
         self._setup_relationship_patterns()
     
@@ -148,11 +560,29 @@ class BaseQueryParser:
                 })
         
         for alias, player in self.player_aliases.items():
+            # Add lowercase pattern (original)
             patterns.append({
                 "label": "PLAYER",
                 "pattern": alias,
                 "id": player
             })
+            
+            # Add title case pattern for all aliases
+            title_case = alias.title()
+            if title_case != alias:
+                patterns.append({
+                    "label": "PLAYER", 
+                    "pattern": title_case,
+                    "id": player
+                })
+            
+            # Add uppercase pattern for short abbreviations
+            if len(alias) <= 4 and alias.upper() != alias:
+                patterns.append({
+                    "label": "PLAYER",
+                    "pattern": alias.upper(), 
+                    "id": player
+                })
             
             # Add token-based patterns for multi-word aliases
             words = alias.split()
@@ -268,17 +698,37 @@ class BaseQueryParser:
         components = QueryComponents(raw_query=query)
         processed_query = self._preprocess_query(query)
         doc = self.nlp(processed_query)
-        # Extract player information (main, on, off)
+        coverage = QueryCoverage(query)
+        
+        # Extract player information (main, on, off) with position tracking
         components.player_name, components.players_on, components.players_off = self._extract_players_with_syntax(query, doc)
-        # Extract other components
+        
+        # Track player components in coverage
+        for ent in doc.ents:
+            if ent.label_ == "PLAYER":
+                coverage.add_component(ParsedComponent(
+                    value=ent.text,
+                    start_pos=ent.start_char,
+                    end_pos=ent.end_char,
+                    component_type="player",
+                    extraction_method="spacy"
+                ))
+        
+        # Extract other components with position tracking
         components.team_name = self._extract_team_name(query, doc)
-        components.time_period, components.game_count = self._extract_time_period(query)
-        components.location = self._extract_location(query)
-        components.opponent_filters = self._extract_opponent_filters(query)
-        components.minutes_filter = self._extract_minutes_filter(query)
+        components.time_period, components.game_count = self._extract_time_period_with_coverage(query, coverage)
+        components.location = self._extract_location_with_coverage(query, coverage)
+        components.opponent_filters = self._extract_opponent_filters_with_coverage(query, coverage)
+        components.minutes_filter = self._extract_minutes_filter_with_coverage(query, coverage)
         components.intent = self._classify_intent(query, components)
-        # Calculate confidence score
-        components.confidence = self._calculate_confidence(components)
+        
+        # Calculate comprehensive confidence score
+        confidence_breakdown = self.confidence_calculator.calculate_confidence(query, components, coverage)
+        components.confidence = confidence_breakdown.final_confidence
+        
+        # Store confidence breakdown for debugging
+        components.confidence_breakdown = confidence_breakdown
+        
         return components
     
     def _preprocess_query(self, query: str) -> str:
@@ -351,9 +801,10 @@ class BaseQueryParser:
         Returns:
             Optional[str]: The canonical player name if found, else None.
         Implementation details:
-            - Prioritizes strict alias matches, then substring, then fuzzy matching.
+            - Prioritizes strict alias matches, then substring, then last name matching.
+            - Fuzzy matching is used as a conservative fallback with higher thresholds.
             - Handles short abbreviations with word boundaries.
-            - Last name matching is used as a final fallback, even if ambiguous. If the wrong player is returned, it is the user's responsibility to clarify their query.
+            - Last name matching is prioritized over fuzzy matching to avoid false positives.
         """
         if not text or len(text.strip()) < 2:
             return None
@@ -385,7 +836,12 @@ class BaseQueryParser:
                         alias_norm = alias.strip().lower()
                         if phrase == alias_norm:
                             return self.player_aliases[alias]
-        # STEP 4: Try fuzzy matching on word combinations (as fallback)
+        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
+        last_name_match = self._extract_last_name(text)
+        if last_name_match:
+            return last_name_match
+        
+        # STEP 5: Try fuzzy matching on word combinations (more conservative)
         for i in range(len(words)):
             for j in range(i + 1, min(i + 4, len(words) + 1)):
                 phrase = ' '.join(words[i:j])
@@ -394,14 +850,15 @@ class BaseQueryParser:
                         phrase,
                         [a.strip().lower() for a in self.player_aliases.keys()],
                         scorer=fuzz.partial_ratio,
-                        score_cutoff=85
+                        score_cutoff=90  # Increased threshold from 85 to 90
                     )
                     if alias_match:
                         matched_alias = alias_match[0]
                         for alias in self.player_aliases.keys():
                             if alias.strip().lower() == matched_alias:
                                 return self.player_aliases[alias]
-        # STEP 5: Try direct fuzzy matching against player database
+        
+        # STEP 6: Try direct fuzzy matching against player database
         match = process.extractOne(
             text,
             self.players,
@@ -410,10 +867,6 @@ class BaseQueryParser:
         )
         if match:
             return match[0]
-        # STEP 6: Try last name matching (final fallback, even if ambiguous)
-        last_name_match = self._extract_last_name(text)
-        if last_name_match:
-            return last_name_match
         return None
     
     def _extract_team_name(self, query: str, doc) -> Optional[str]:
@@ -646,14 +1099,15 @@ class BaseQueryParser:
         Returns:
             Tuple[Optional[str], List[str], List[str]]: (main_player, players_on, players_off)
         Implementation details:
-            - Step 1: Find all player entities in the query
-            - Step 2: Classify each player based on surrounding context
+            - Step 1: Find all player entities using spaCy
+            - Step 2: Use simple fallback for any obvious missed players
+            - Step 3: Classify each player based on surrounding context
         """
-        # Step 1: Find ALL player entities
+        # Step 1: Find ALL player entities using spaCy
         all_players = []
         found_names = set()  # Track names to avoid duplicates
         
-        # First, get spaCy entities
+        # Get spaCy entities (primary method)
         for ent in doc.ents:
             if ent.label_ == "PLAYER":
                 player_name = ent.ent_id_ if ent.ent_id_ else ent.text
@@ -666,22 +1120,15 @@ class BaseQueryParser:
                     })
                     found_names.add(player_name)
         
-        # Fallback: Use regex extraction for any missed players
-        # This ensures we don't lose players that spaCy might miss
-        # Always run fallback to catch players spaCy might miss
-        
-        # Try to extract players from common patterns (more precise)
-        common_patterns = [
-            r'^\s*(\w+(?:\s+\w+){0,2})\s+(?:last|this|recent)',  # "LeBron James last 10 games" - limit to start of query
-            r'^\s*(\w+(?:\s+\w+){0,2})\s+with',  # "LeBron with AD" - limit to start of query
-            r'^\s*(\w+(?:\s+\w+){0,2})\s+(?:home|away|at home|on the road)',  # "LeBron home games"
-        ]
-        
-        for pattern in common_patterns:
-            matches = re.finditer(pattern, query, re.IGNORECASE)
-            for match in matches:
+        # Step 2: Simple fallback for obvious missed players (only for main player at start)
+        # This handles cases where spaCy might miss the main player name at the beginning
+        if not all_players:
+            # Look for player name at the very beginning of the query
+            start_pattern = r'^\s*(\w+(?:\s+\w+){0,2})\s+'
+            match = re.match(start_pattern, query)
+            if match:
                 potential_name = match.group(1).strip()
-                if len(potential_name) > 2 and self._is_valid_player_candidate(potential_name):
+                if self._is_valid_player_candidate(potential_name):
                     player_name = self._extract_single_player_name(potential_name)
                     if player_name and player_name not in found_names:
                         all_players.append({
@@ -692,83 +1139,13 @@ class BaseQueryParser:
                         })
                         found_names.add(player_name)
         
-        # Handle complex "with X minus Y" patterns first
-        complex_patterns = [
-            r'with\s+(.+?)\s+minus\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)',
-            r'with\s+(.+?)\s+but\s+without\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)',
-        ]
-        
-        for pattern in complex_patterns:
-            matches = re.finditer(pattern, query, re.IGNORECASE)
-            for match in matches:
-                with_players_text = match.group(1).strip()
-                without_players_text = match.group(2).strip()
-                
-                # Extract "with" players
-                if with_players_text:
-                    with_players = self._extract_multiple_players(with_players_text)
-                    for player_name in with_players:
-                        if player_name and player_name not in found_names:
-                            all_players.append({
-                                'name': player_name,
-                                'start': match.start(1),
-                                'end': match.end(1),
-                                'text': with_players_text,
-                                'context_type': 'with'
-                            })
-                            found_names.add(player_name)
-                
-                # Extract "without" players
-                if without_players_text:
-                    without_players = self._extract_multiple_players(without_players_text)
-                    for player_name in without_players:
-                        if player_name and player_name not in found_names:
-                            all_players.append({
-                                'name': player_name,
-                                'start': match.start(2),
-                                'end': match.end(2),
-                                'text': without_players_text,
-                                'context_type': 'without'
-                            })
-                            found_names.add(player_name)
-        
-        # Handle simpler "with/without" patterns
-        with_without_patterns = [
-            (r'with\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)', 'with'),
-            (r'without\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)', 'without'),
-            (r'minus\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)', 'without'),
-            (r'but\s+without\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)', 'without'),
-            (r'excluding\s+(.+?)(?:\s+(?:last|this|recent|home|away|against)|\s*$)', 'without'),
-        ]
-        
-        for pattern, context_type in with_without_patterns:
-            matches = re.finditer(pattern, query, re.IGNORECASE)
-            for match in matches:
-                players_text = match.group(1).strip()
-                if players_text:
-                    # Split on conjunctions and extract individual players
-                    multiple_players = self._extract_multiple_players(players_text)
-                    for player_name in multiple_players:
-                        if player_name and player_name not in found_names:
-                            all_players.append({
-                                'name': player_name,
-                                'start': match.start(1),
-                                'end': match.end(1),
-                                'text': players_text
-                            })
-                            found_names.add(player_name)
-        
-        # Step 2: Classify each player based on context
+        # Step 3: Classify each player based on context
         main_player = None
         players_on = []
         players_off = []
         
         for player in all_players:
-            # Check if we already have a pre-classified context type
-            if 'context_type' in player:
-                classification = player['context_type']
-            else:
-                classification = self._classify_player_relationship(query, player)
+            classification = self._classify_player_relationship(query, player)
             
             if classification == "main":
                 if main_player is None:  # Only set first main player
@@ -801,81 +1178,69 @@ class BaseQueryParser:
         context_before = query_lower[:start_pos].strip()
         context_after = query_lower[end_pos:].strip()
         
-        # DEBUG: Print classification details
-        print(f"  🔍 Classifying: '{player['name']}'")
-        print(f"     Context before: '{context_before}'")
-        print(f"     Start: {start_pos}, End: {end_pos}")
-        
-        # Look for "with" patterns before the player
+        # Look for direct "with" patterns before the player
         with_before_patterns = [
             r'\bwith\s*$',
             r'\bplaying\s+with\s*$',
             r'\balongside\s*$',
             r'\bincluding\s*$',
             r'\bfeaturing\s*$',
-            r'\bwhen\s+.*\s+(?:plays|is\s+playing|on\s+court|in\s+the\s+lineup|in\s+the\s+game|is\s+in|active|available)\s*$'
         ]
         
-        # Look for "without" patterns before the player
+        # Look for direct "without" patterns before the player
         without_before_patterns = [
             r'\bwithout\s*$',
             r'\bminus\s*$',
             r'\bexcluding\s*$',
             r'\bbut\s+without\s*$',
-            r'\bwhen\s+.*\s+(?:sits|is\s+out|is\s+sitting|doesn\'t\s+play|is\s+out|inactive|unavailable|injured)\s*$'
         ]
         
-        # Also check for "minus" patterns that might appear in different positions
-        minus_patterns = [
-            r'\bminus\s*$',  # "with KD minus" (ends with minus)
-            r'\bminus\s+\w+\s*$',  # This might catch some cases but let's be more specific
-        ]
-        
-        # Check for "with" patterns
+        # Check for direct "with" patterns
         for pattern in with_before_patterns:
             if re.search(pattern, context_before):
-                print(f"     → Classification: WITH (pattern: {pattern})")
                 return "with"
         
-        # Check for "without" patterns  
+        # Check for direct "without" patterns  
         for pattern in without_before_patterns:
             if re.search(pattern, context_before):
-                print(f"     → Classification: WITHOUT (pattern: {pattern})")
                 return "without"
         
         # Check for "and" patterns that might indicate additional players
         # "LeBron and AD" - both could be main, but "with LeBron and AD" - both are "with"
         and_pattern = r'\band\s*$'
         if re.search(and_pattern, context_before):
-            print(f"     Found 'and' pattern - checking extended context")
-            # Use the entire context before (not just a limited window)
-            extended_context = context_before
-            print(f"     Extended context: '{extended_context}'")
             # Check for "without" patterns first (more specific)
-            if any(word in extended_context for word in ['without', 'minus', 'excluding']):
-                print(f"     → Classification: WITHOUT (via 'and' + extended context)")
+            if any(word in context_before for word in ['without', 'minus', 'excluding']):
                 return "without"
-            elif any(word in extended_context for word in ['with', 'alongside', 'including', 'featuring']):
-                print(f"     → Classification: WITH (via 'and' + extended context)")
+            elif any(word in context_before for word in ['with', 'alongside', 'including', 'featuring']):
                 return "with"
         
         # Check for comma-separated lists (e.g., "with AD, LeBron, and Curry")
         comma_pattern = r',\s*$'
         if re.search(comma_pattern, context_before):
-            print(f"     Found comma pattern - checking extended context")
-            # Use the entire context before (not just a limited window)
-            extended_context = context_before
-            print(f"     Extended context: '{extended_context}'")
             # Check for "without" patterns first (more specific)
-            if any(word in extended_context for word in ['without', 'minus', 'excluding']):
-                print(f"     → Classification: WITHOUT (via comma + extended context)")
+            if any(word in context_before for word in ['without', 'minus', 'excluding']):
                 return "without"
-            elif any(word in extended_context for word in ['with', 'alongside', 'including', 'featuring']):
-                print(f"     → Classification: WITH (via comma + extended context)")
+            elif any(word in context_before for word in ['with', 'alongside', 'including', 'featuring']):
                 return "with"
         
+        # Check for complex "but without" patterns in the middle
+        # "LeBron with AD but without Westbrook" - need to find which side of "but without" this player is on
+        but_without_match = re.search(r'(.+?)\s+but\s+without\s+(.+)', query_lower)
+        if but_without_match:
+            with_part = but_without_match.group(1)
+            without_part = but_without_match.group(2)
+            
+            # Check which part contains this player
+            if start_pos < len(with_part) and start_pos >= 0:
+                # Player is in the "with" part
+                if 'with' in with_part:
+                    return "with"
+            elif start_pos >= len(with_part):
+                # Player is in the "without" part
+                return "without"
+        
         # Default: if no relationship context found, assume main player
-        print(f"     → Classification: MAIN")
         return "main"
     
 
@@ -1006,6 +1371,175 @@ class BaseQueryParser:
         if components.minutes_filter:
             confidence += 0.05
         return min(confidence, 1.0)
+    
+    def _extract_time_period_with_coverage(self, query: str, coverage: QueryCoverage) -> Tuple[Optional[str], Optional[int]]:
+        """Extract time period and track coverage"""
+        time_period, game_count = self._extract_time_period(query)
+        
+        # Track coverage for time-related patterns
+        if time_period or game_count:
+            game_patterns = [
+                r'(?:last|past|recent)\s+(\d+)\s+(?:games?|matchups?|contests?)',
+                r'(?:last|past|recent)\s+(\w+)\s+(?:games?|matchups?|contests?)'
+            ]
+            
+            for pattern in game_patterns:
+                match = re.search(pattern, query.lower())
+                if match:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="time",
+                        extraction_method="regex"
+                    ))
+                    break
+            
+            # Track season patterns
+            season_patterns = [
+                r'(?:this|current)\s+season',
+                r'season',
+                r'\d{4}-\d{2,4}',
+                r'\d{4}/\d{2,4}'
+            ]
+            
+            for pattern in season_patterns:
+                match = re.search(pattern, query.lower())
+                if match:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="time",
+                        extraction_method="regex"
+                    ))
+                    break
+        
+        return time_period, game_count
+    
+    def _extract_location_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[str]:
+        """Extract location and track coverage"""
+        location = self._extract_location(query)
+        
+        if location:
+            # Track coverage for location patterns
+            home_patterns = [
+                r'\bhome\b',
+                r'\bat home\b',
+                r'\bhome games?\b',
+                r'\bhome court\b',
+                r'\bat their place\b'
+            ]
+            
+            away_patterns = [
+                r'\baway\b',
+                r'\baway games?\b',
+                r'\bon the road\b',
+                r'\broad games?\b',
+                r'\broad trip\b',
+                r'\broad\b(?!\s+(?:runner|warrior|rage))',
+                r'\bvisiting\b',
+                r'\bon road\b'
+            ]
+            
+            patterns = home_patterns if location == "home" else away_patterns
+            
+            for pattern in patterns:
+                match = re.search(pattern, query.lower())
+                if match:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="location",
+                        extraction_method="regex"
+                    ))
+                    break
+        
+        return location
+    
+    def _extract_opponent_filters_with_coverage(self, query: str, coverage: QueryCoverage) -> List[Tuple[str, int]]:
+        """Extract opponent filters and track coverage"""
+        filters = self._extract_opponent_filters(query)
+        
+        if filters:
+            # Track coverage for ranking patterns
+            ranking_patterns = [
+                (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
+                (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
+                (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
+                (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
+                (r'top\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
+                (r'bottom\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
+            ]
+            
+            for pattern, filter_type, direction in ranking_patterns:
+                match = re.search(pattern, query.lower())
+                if match:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="opponent_filter",
+                        extraction_method="regex"
+                    ))
+            
+            # Track team abbreviations
+            team_pattern = r'\b([A-Z]{2,3})\b'
+            for match in re.finditer(team_pattern, query):
+                if match.group(1).lower() in self.teams:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="team_filter",
+                        extraction_method="regex"
+                    ))
+        
+        return filters
+    
+    def _extract_minutes_filter_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[Tuple[int, int]]:
+        """Extract minutes filter and track coverage"""
+        minutes_filter = self._extract_minutes_filter(query)
+        
+        if minutes_filter:
+            # Track coverage for minutes patterns
+            all_patterns = [
+                # Plus patterns
+                r'(\d+)\+\s*(?:min|mins|minutes)',
+                r'(\d+)\s*or\s*more\s*(?:min|mins|minutes)',
+                r'more\s*than\s*(\d+)\s*(?:min|mins|minutes)',
+                r'over\s*(\d+)\s*(?:min|mins|minutes)',
+                r'above\s*(\d+)\s*(?:min|mins|minutes)',
+                r'at\s*least\s*(\d+)\s*(?:min|mins|minutes)',
+                r'minimum\s*(\d+)\s*(?:min|mins|minutes)',
+                # Less patterns
+                r'less\s*than\s*(\d+)\s*(?:min|mins|minutes)',
+                r'under\s*(\d+)\s*(?:min|mins|minutes)',
+                r'below\s*(\d+)\s*(?:min|mins|minutes)',
+                r'maximum\s*(\d+)\s*(?:min|mins|minutes)',
+                r'max\s*(\d+)\s*(?:min|mins|minutes)',
+                # Range patterns
+                r'(\d+)\s*-\s*(\d+)\s*(?:min|mins|minutes)',
+                r'(\d+)\s*to\s*(\d+)\s*(?:min|mins|minutes)',
+                r'between\s*(\d+)\s*and\s*(\d+)\s*(?:min|mins|minutes)',
+                # Exact patterns
+                r'(?:exactly\s*)?(\d+)\s*(?:min|mins|minutes)(?!\s*(?:or\s*more|or\s*less|\+|\-|to))',
+            ]
+            
+            for pattern in all_patterns:
+                match = re.search(pattern, query.lower())
+                if match:
+                    coverage.add_component(ParsedComponent(
+                        value=match.group(0),
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                        component_type="minutes_filter",
+                        extraction_method="regex"
+                    ))
+                    break
+        
+        return minutes_filter
     
     def debug_spacy_entities(self, query: str) -> Dict:
         """
