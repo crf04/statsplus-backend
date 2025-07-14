@@ -219,9 +219,27 @@ class GameService:
 
         # Apply self filters (stat ranges)
         if filter_params.get('self_filters'):
-            for stat, (min_val, max_val) in filter_params['self_filters'].items():
-                if stat in df.columns:
-                    df = df[(df[stat] >= min_val) & (df[stat] <= max_val)]
+            # Handle new SelfFilter format
+            for self_filter in filter_params['self_filters']:
+                if hasattr(self_filter, 'stat_column') and self_filter.stat_column in df.columns:
+                    if self_filter.operator == 'gte':
+                        df = df[df[self_filter.stat_column] >= self_filter.value]
+                    elif self_filter.operator == 'gt':
+                        df = df[df[self_filter.stat_column] > self_filter.value]
+                    elif self_filter.operator == 'lt':
+                        df = df[df[self_filter.stat_column] < self_filter.value]
+                    elif self_filter.operator == 'lte':
+                        df = df[df[self_filter.stat_column] <= self_filter.value]
+                    elif self_filter.operator == 'eq':
+                        df = df[df[self_filter.stat_column] == self_filter.value]
+                    elif self_filter.operator == 'between' and self_filter.value2 is not None:
+                        df = df[(df[self_filter.stat_column] >= self_filter.value) & 
+                               (df[self_filter.stat_column] <= self_filter.value2)]
+            # Handle old format for backward compatibility
+            if isinstance(filter_params['self_filters'], dict):
+                for stat, (min_val, max_val) in filter_params['self_filters'].items():
+                    if stat in df.columns:
+                        df = df[(df[stat] >= min_val) & (df[stat] <= max_val)]
 
         return df
 

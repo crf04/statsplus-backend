@@ -18,6 +18,15 @@ from sqlalchemy import text
 from ...utils.date_parser import NBADateParser
 
 @dataclass
+class SelfFilter:
+    """Represents a single self-filter condition for player stats"""
+    stat_column: str        # Database column name (e.g., "PTS")
+    operator: str          # Comparison operator ("gte", "gt", "lt", "eq", "between")
+    value: int            # Primary value
+    value2: Optional[int] = None  # Secondary value for range operations
+    original_text: str = ""       # Original query text for debugging
+
+@dataclass
 class QueryComponents:
     """Structured representation of a parsed natural language query"""
     
@@ -34,6 +43,7 @@ class QueryComponents:
     opponent_filters: List[Tuple[str, int]] = field(default_factory=list)  # [(filter_type, rank), ...]
     location: Optional[str] = None     # "home", "away", "both"
     minutes_filter: Optional[Tuple[int, int]] = None  # (min_minutes, max_minutes)
+    self_filters: List[SelfFilter] = field(default_factory=list)  # Player stat filters
     
     # Query metadata
     intent: Optional[str] = None       # "game_logs", "player_profile", "team_stats"
@@ -45,6 +55,76 @@ class QueryComponents:
     stat_categories: List[str] = field(default_factory=list)
     players_on: List[str] = field(default_factory=list)
     players_off: List[str] = field(default_factory=list)
+
+# Stat mappings for self-filter functionality
+STAT_MAPPINGS = {
+    # Basic stats (both singular and plural)
+    "point": "PTS", "points": "PTS", "pts": "PTS", "bucket": "PTS", "buckets": "PTS", "scored": "PTS",
+    "rebound": "REB", "rebounds": "REB", "rebs": "REB", "board": "REB", "boards": "REB",
+    "assist": "AST", "assists": "AST", "asts": "AST", "dime": "AST", "dimes": "AST",
+    "steal": "STL", "steals": "STL", "stls": "STL", 
+    "block": "BLK", "blocks": "BLK", "blks": "BLK", "blocked shots": "BLK", "blocks shots": "BLK",  # More specific for blocks context
+    "turnover": "TOV", "turnovers": "TOV", "tovs": "TOV",
+    "minute": "MIN", "minutes": "MIN", "mins": "MIN",
+    
+    # Shooting stats - Attempts (volume) - MUST come before made shots to match first
+    "field goal attempt": "FGA", "field goal attempts": "FGA", "fga": "FGA", "fg attempts": "FGA",
+    "attempts field goal": "FGA", "attempts field goals": "FGA", "takes field goal": "FGA", "takes field goals": "FGA",
+    "shot attempt": "FGA", "shot attempts": "FGA", "shots attempted": "FGA", "shooting attempt": "FGA", "shooting attempts": "FGA",
+    "shoots shots": "FGA", "shoot shots": "FGA", "takes shots": "FGA", "shot": "FGA", "shots": "FGA",
+    "3 point attempt": "FG3A", "3 point attempts": "FG3A", "three attempt": "FG3A", "three attempts": "FG3A", "3pa": "FG3A",
+    "three point attempt": "FG3A", "three point attempts": "FG3A", "attempts three": "FG3A", "attempts threes": "FG3A",
+    "attempts 3": "FG3A", "attempts 3s": "FG3A", "takes three": "FG3A", "takes threes": "FG3A",
+    "free throw attempt": "FTA", "free throw attempts": "FTA", "fta": "FTA", "ft attempts": "FTA",
+    
+    # Shooting stats - Made shots
+    "field goal": "FGM", "field goals": "FGM", "fgm": "FGM", "fg made": "FGM", "field goals made": "FGM",
+    "3": "FG3M", "3s": "FG3M", "three": "FG3M", "threes": "FG3M", "triple": "FG3M", "triples": "FG3M", "from deep": "FG3M",
+    "three pointer": "FG3M", "three pointers": "FG3M", "3 pointer": "FG3M", "3 pointers": "FG3M",
+    "free throw": "FTM", "free throws": "FTM", "ftm": "FTM", "ft made": "FTM"
+}
+
+# Comparison patterns for self-filters (ordered by priority)
+COMPARISON_PATTERNS = [
+    # Range: "between 20 and 30 points" (must be first to avoid conflicts)
+    (r'between\s+(\d+)\s+and\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'between'),
+    # Verb + number + stat patterns: "attempts 15+ field goals", "takes 20+ threes"
+    (r'(?:attempts?|takes?|shoots?)\s+(\d+)\+\s*(\w+(?:\s+\w+)*)', 'gte'),
+    (r'(?:attempts?|takes?|shoots?)\s+more\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gt'),
+    (r'(?:attempts?|takes?|shoots?)\s+at\s+least\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gte'),
+    (r'(?:attempts?|takes?|shoots?)\s+over\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gt'),
+    (r'(?:attempts?|takes?|shoots?)\s+under\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lt'),
+    (r'(?:attempts?|takes?|shoots?)\s+less\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lt'),
+    (r'(?:attempts?|takes?|shoots?)\s+exactly\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'eq'),
+    (r'(?:attempts?|takes?|shoots?)\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'eq'),
+    # Plus notation: "30+ points"
+    (r'(\d+)\+\s*(\w+(?:\s+\w+)*)', 'gte'),
+    # More than: "more than 30 points"
+    (r'more\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gt'),
+    # Less than: "less than 30 points"
+    (r'less\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lt'),
+    # At least: "at least 30 points"
+    (r'at\s+least\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gte'),
+    # Over: "over 30 points"
+    (r'over\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gt'),
+    # Under: "under 30 points"
+    (r'under\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lt'),
+    # Exactly: "exactly 30 points"
+    (r'exactly\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'eq'),
+    # Simple number: "30 points" (defaults to exactly, must be last)
+    (r'(\d+)\s+(\w+(?:\s+\w+)*)(?!\s*(?:and|or|but))', 'eq')
+]
+
+# Main patterns to detect self-filters (ordered by priority to avoid overlaps)
+SELF_FILTER_PATTERNS = [
+    r'games\s+where\s+he\s+(.+)',  # Most specific first
+    r'where\s+he\s+(.+)',
+    r'when\s+he\s+(.+)',
+    # Pattern for "30+ point games", "10+ rebound games", etc.
+    r'(\d+\+?\s*(?:points?|rebounds?|assists?|steals?|blocks?|threes?|buckets?|boards?|dimes?))\s+games',
+    r'games\s+with\s+(.+)',
+    r'with\s+(.+?\s+(?:points|rebounds|assists|steals|blocks|shots|3s|threes|field goals|free throws|buckets|boards|dimes|turnovers))',
+]
 
 @dataclass
 class ParsedComponent:
@@ -100,7 +180,8 @@ class QueryCoverage:
     def calculate_coverage_score(self) -> float:
         """Calculate percentage of significant content that was parsed"""
         if not self.significant_words:
-            return 1.0
+            # Empty query or no significant words should have very low coverage
+            return 0.0 if len(self.query.strip()) == 0 else 0.1
         
         total_significant_chars = sum(len(word) for word in self.significant_words)
         if total_significant_chars == 0:
@@ -744,6 +825,7 @@ class BaseQueryParser:
         components.location = self._extract_location_with_coverage(query, coverage)
         components.opponent_filters = self._extract_opponent_filters_with_coverage(query, coverage)
         components.minutes_filter = self._extract_minutes_filter_with_coverage(query, coverage)
+        components.self_filters = self._extract_self_filters_with_coverage(query, coverage)
         components.intent = self._classify_intent(query, components)
         
         # Calculate comprehensive confidence score
@@ -834,6 +916,21 @@ class BaseQueryParser:
             return None
         text = text.strip()
         text_lower = text.lower()
+        
+        # Blacklist common basketball terms that shouldn't trigger player matches
+        basketball_blacklist = {
+            'points', 'point', 'rebounds', 'rebound', 'assists', 'assist', 'steals', 'steal', 
+            'blocks', 'block', 'turnovers', 'turnover', 'minutes', 'minute', 'games', 'game',
+            'triple', 'double', 'field', 'goals', 'free', 'throws', 'shots', 'shot',
+            'performance', 'stats', 'statistics', 'season', 'playoff', 'playoffs',
+            'home', 'away', 'road', 'court', 'team', 'teams', 'player', 'players',
+            'offense', 'defense', 'basketball', 'nba', 'scoring', 'shooting',
+            'king', 'chef', 'greek', 'mr', 'the'  # Generic titles that are too broad
+        }
+        
+        # Don't extract if it's a blacklisted term
+        if text_lower in basketball_blacklist:
+            return None
         # STEP 0: Strict full alias match (case-insensitive, stripped)
         for alias in self.player_aliases:
             if text_lower == alias.strip().lower():
@@ -874,7 +971,7 @@ class BaseQueryParser:
                         phrase,
                         [a.strip().lower() for a in self.player_aliases.keys()],
                         scorer=fuzz.partial_ratio,
-                        score_cutoff=90  # Increased threshold from 85 to 90
+                        score_cutoff=90  # Keep at 90 to allow misspellings like "currey" -> "stephen curry"
                     )
                     if alias_match:
                         matched_alias = alias_match[0]
@@ -887,7 +984,7 @@ class BaseQueryParser:
             text,
             self.players,
             scorer=fuzz.token_sort_ratio,
-            score_cutoff=75
+            score_cutoff=90  # Raised from 85 to 90 to prevent false positives
         )
         if match:
             return match[0]
@@ -920,8 +1017,8 @@ class BaseQueryParser:
         """
         query_lower = query.lower()
         game_patterns = [
-            r'(?:last|past|recent)\s+(\d+)\s+(?:games?|matchups?|contests?)',
-            r'(?:last|past|recent)\s+(\w+)\s+(?:games?|matchups?|contests?)'
+            r'(?:last|past|recent)\s+(\d+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)',
+            r'(?:last|past|recent)\s+(\w+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)'
         ]
         for pattern in game_patterns:
             match = re.search(pattern, query_lower)
@@ -1041,10 +1138,21 @@ class BaseQueryParser:
         ranking_patterns = [
             (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
             (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
+            (r'worst\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
+            (r'best\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
             (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
             (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
+            (r'worst\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
+            (r'best\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
+            # More specific patterns for three point defenses
+            (r'top\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', 1),
+            (r'bottom\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', -1),
+            (r'worst\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', -1),
+            (r'best\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', 1),
             (r'top\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
             (r'bottom\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
+            (r'worst\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
+            (r'best\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
         ]
         for pattern, filter_type, direction in ranking_patterns:
             matches = re.findall(pattern, query_lower)
@@ -1423,6 +1531,8 @@ class BaseQueryParser:
             'against', 'vs', 'road', 'court', 'team', 'player', 'stats', 'points', 'rebounds',
             'assists', 'minutes', 'shooting', 'defense', 'offense', 'when', 'where', 'how',
             'what', 'who', 'during', 'after', 'before', 'including', 'excluding', 'featuring',
+            'exactly', 'approximately', 'around', 'about', 'nearly', 'over', 'under', 'more',
+            'less', 'than', 'between', 'and', 'or', 'but', 'the', 'a', 'an', 'to', 'from',
             'shai gilgeous alexander without josh giddey'  # Specific problematic pattern
         }
         
@@ -1724,6 +1834,146 @@ class BaseQueryParser:
                     break
         
         return minutes_filter
+    
+    def _extract_self_filters_with_coverage(self, query: str, coverage: QueryCoverage) -> List[SelfFilter]:
+        """Extract self-filter conditions and track coverage"""
+        filters = []
+        
+        # Find self-filter sections using the patterns (stop at first match to avoid duplicates)
+        for pattern in SELF_FILTER_PATTERNS:
+            match = re.search(pattern, query.lower())
+            if match:
+                filter_text = match.group(1)
+                
+                # Parse individual conditions from the filter text
+                individual_filters = self._parse_filter_conditions(filter_text)
+                filters.extend(individual_filters)
+                
+                # Track coverage for the entire self-filter expression
+                coverage.add_component(ParsedComponent(
+                    value=match.group(0),
+                    start_pos=match.start(),
+                    end_pos=match.end(),
+                    component_type="self_filter",
+                    extraction_method="regex"
+                ))
+                
+                # Stop after first match to avoid duplicates
+                break
+        
+        return filters
+    
+    def _parse_filter_conditions(self, filter_text: str) -> List[SelfFilter]:
+        """Parse individual filter conditions from text"""
+        filters = []
+        
+        # Handle AND conditions by splitting on "and", but not if it's part of "between X and Y"
+        # First, protect "between X and Y" patterns
+        protected_text = filter_text.lower()
+        between_matches = list(re.finditer(r'between\s+\d+\s+and\s+\d+', protected_text))
+        
+        # Replace "and" in between patterns with a placeholder
+        for match in reversed(between_matches):  # Reverse to maintain positions
+            start, end = match.span()
+            replacement = protected_text[start:end].replace(' and ', ' BETWEEN_AND ')
+            protected_text = protected_text[:start] + replacement + protected_text[end:]
+        
+        # Now split on "and"
+        conditions = re.split(r'\s+and\s+', protected_text)
+        
+        # Restore the "and" in between patterns
+        conditions = [cond.replace(' BETWEEN_AND ', ' and ') for cond in conditions]
+        
+        for condition in conditions:
+            condition = condition.strip()
+            if condition:
+                filter_obj = self._parse_single_condition(condition)
+                if filter_obj:
+                    filters.append(filter_obj)
+        
+        return filters
+    
+    def _parse_single_condition(self, condition: str) -> Optional[SelfFilter]:
+        """Parse a single condition like '30+ points' or 'more than 25 rebounds'"""
+        # Handle special cases like "double-digit rebounds"
+        double_digit_pattern = r'double-digit\s+(\w+(?:\s+\w+)*)'
+        double_digit_match = re.search(double_digit_pattern, condition)
+        if double_digit_match:
+            stat_name = double_digit_match.group(1)
+            return self._create_filter(stat_name, 'gte', 10, None, condition)
+        
+        # Try each comparison pattern FIRST (including between)
+        for pattern, operator in COMPARISON_PATTERNS:
+            match = re.search(pattern, condition)
+            if match:
+                # Extract values and stat name based on operator type
+                if operator == 'between':
+                    # Pattern: between X and Y stat_name
+                    value1, value2, stat_name = match.groups()
+                    return self._create_filter(stat_name, operator, int(value1), int(value2), condition)
+                else:
+                    # Pattern: value stat_name
+                    value, stat_name = match.groups()
+                    return self._create_filter(stat_name, operator, int(value), None, condition)
+        
+        # Check if this is a simple "30+ points" pattern (from "30+ point games") - as fallback
+        simple_pattern = r'(\d+)\+?\s*(points?|rebounds?|assists?|steals?|blocks?|threes?|buckets?|boards?|dimes?)'
+        simple_match = re.search(simple_pattern, condition)
+        if simple_match:
+            value, stat_name = simple_match.groups()
+            # Convert plural to singular for mapping
+            stat_name_clean = stat_name.rstrip('s') if stat_name.endswith('s') else stat_name
+            return self._create_filter(stat_name_clean, 'gte', int(value), None, condition)
+        
+        return None
+    
+    def _create_filter(self, stat_name: str, operator: str, value: int, 
+                      value2: Optional[int], original_text: str) -> Optional[SelfFilter]:
+        """Create SelfFilter object if stat name is valid"""
+        # Clean up stat name (remove extra spaces, normalize)
+        stat_name_clean = ' '.join(stat_name.strip().split())
+        original_lower = original_text.lower()
+        
+        # Check if this is an attempt context based on verbs in the original text
+        attempt_verbs = ['attempts', 'attempt', 'takes', 'take', 'shoots', 'shoot', 'shooting']
+        is_attempt_context = any(verb in original_lower for verb in attempt_verbs)
+        
+        # Check if this is a blocks context (should override attempt context)
+        is_blocks_context = 'blocks' in original_lower or 'block' in original_lower
+        
+        # Handle context-sensitive mappings
+        if is_blocks_context:
+            # Special handling for blocks context
+            if stat_name_clean.lower() in ['shot', 'shots']:
+                stat_column = 'BLK'
+            else:
+                stat_column = STAT_MAPPINGS.get(stat_name_clean.lower())
+        elif is_attempt_context:
+            # For attempt context, prioritize FGA/FG3A/FTA mappings
+            if stat_name_clean.lower() in ['field goal', 'field goals', 'shot', 'shots']:
+                stat_column = 'FGA'
+            elif stat_name_clean.lower() in ['three', 'threes', '3', '3s', 'three point', 'three points', 'three pointer', 'three pointers', '3 pointer', '3 pointers']:
+                stat_column = 'FG3A'
+            elif stat_name_clean.lower() in ['free throw', 'free throws']:
+                stat_column = 'FTA'
+            else:
+                # Fall back to regular mapping
+                stat_column = STAT_MAPPINGS.get(stat_name_clean.lower())
+        else:
+            # Regular context, use normal mapping
+            stat_column = STAT_MAPPINGS.get(stat_name_clean.lower())
+        
+        if stat_column:
+            return SelfFilter(
+                stat_column=stat_column,
+                operator=operator,
+                value=value,
+                value2=value2,
+                original_text=original_text
+            )
+        
+        # Silently ignore invalid stat names per user requirements
+        return None
     
     def debug_spacy_entities(self, query: str) -> Dict:
         """

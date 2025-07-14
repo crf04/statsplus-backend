@@ -7,6 +7,7 @@ aliases:
   "king james": "LeBron James"
   "the king": "LeBron James"
   "lebron": "LeBron James"
+  "LeBron": "LeBron James"
   "bron": "LeBron James"
   "chosen one": "LeBron James"
   "bron-bron": "LeBron James"
@@ -48,6 +49,12 @@ aliases:
   
   # Anthony Edwards
   "ant-man": "Anthony Edwards"
+  
+  # Draymond Green
+  "draymond": "Draymond Green"
+  
+  # Klay Thompson
+  "klay": "Klay Thompson"
   "antman": "Anthony Edwards"
   "ant": "Anthony Edwards"
   "a1": "Anthony Edwards"
@@ -209,7 +216,6 @@ aliases:
   
   # Russell Westbrook
   "russ": "Russell Westbrook"
-  "mr triple double": "Russell Westbrook"
   "brodie": "Russell Westbrook"
   "westbrick": "Russell Westbrook"  # Viral mocking nickname
   

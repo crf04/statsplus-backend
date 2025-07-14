@@ -20,20 +20,18 @@ class NBADateParser:
         self.current_year = datetime.now().year
         self.current_season = self._get_current_nba_season()
         
-        # NBA-specific date mappings
         self.nba_dates = {
-            "all star break": "2024-02-15",
-            "all-star break": "2024-02-15", 
-            "allstar break": "2024-02-15",
-            "trade deadline": "2024-02-08",
-            "christmas": f"{self.current_year}-12-25",
-            "christmas day": f"{self.current_year}-12-25",
-            "new year": f"{self.current_year + 1}-01-01",
-            "new years": f"{self.current_year + 1}-01-01",
-            "playoffs": "2024-04-15",  # Approximate playoff start
-            "playoff start": "2024-04-15",
-            "season start": "2024-10-15",  # Approximate season start
-            "training camp": "2024-09-30",
+            "all star break": "2025-02-14",         # All-Star Weekend Feb 14–16, break covers 14–19
+            "all-star break": "2025-02-14",
+            "allstar break": "2025-02-14",
+            "trade deadline": "2025-02-06",         # Deadline 3 p.m. ET 6 Feb :contentReference[oaicite:1]{index=1}
+            "christmas": "2024-12-25",              # Always Dec 25
+            "christmas day": "2024-12-25",
+            "new year": "2025-01-01",               # Jan 1 of next year
+            "new years": "2025-01-01",
+            "playoffs": "2025-04-19",               # Playoffs begin Apr 19 :contentReference[oaicite:2]{index=2}
+            "playoff start": "2025-04-19",
+            "season start": "2024-10-22",           # Regular season opener Oct 22 :contentReference[oaicite:3]{index=3}
         }
     
     def _get_current_nba_season(self) -> str:
