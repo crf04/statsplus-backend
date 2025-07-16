@@ -191,13 +191,7 @@ class GameService:
             elif filter_params['location_filter'] == 'Away':
                 df = df[df['MATCHUP'].str.contains('@')]
 
-        # Apply last games filter
-        if filter_params.get('game_filter'):
-            try:
-                last_games = int(filter_params['game_filter'])
-                df = df.head(last_games)
-            except (ValueError, TypeError):
-                pass
+        
 
         # Apply teams against filter
         if filter_params.get('teams_against'):
@@ -240,6 +234,14 @@ class GameService:
                 for stat, (min_val, max_val) in filter_params['self_filters'].items():
                     if stat in df.columns:
                         df = df[(df[stat] >= min_val) & (df[stat] <= max_val)]
+        
+        # Apply last games filter
+        if filter_params.get('game_filter'):
+            try:
+                last_games = int(filter_params['game_filter'])
+                df = df.head(last_games)
+            except (ValueError, TypeError):
+                pass
 
         return df
 

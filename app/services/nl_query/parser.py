@@ -84,6 +84,92 @@ STAT_MAPPINGS = {
     "free throw": "FTM", "free throws": "FTM", "ftm": "FTM", "ft made": "FTM"
 }
 
+# Opponent filter mappings for natural language to filter types
+OPPONENT_FILTER_MAPPINGS = {
+    # Catch & Shoot variations
+    'catch and shoot': 'C&S PTS',
+    'catch and shoot points': 'C&S PTS',
+    'catch and shoot 3s': 'C&S 3s',
+    'catch and shoot threes': 'C&S 3s',
+    'catch and shoot 3 point attempts': 'C&S 3A',
+    'catch and shoot three attempts': 'C&S 3A',
+    'catch and shoot attempts': 'C&S 3A',
+    'catch and shoot 3 point': 'C&S 3s',
+    'catch and shoot three point': 'C&S 3s',
+    
+    # Pullup variations
+    'pullup': 'PU PTS',
+    'pullup points': 'PU PTS',
+    'pullup 2s': 'PU 2s',
+    'pullup twos': 'PU 2s',
+    'pullup 3s': 'PU 3s',
+    'pullup threes': 'PU 3s',
+    'pullup 3 point': 'PU 3s',
+    'pullup three point': 'PU 3s',
+    'pullup 2 point': 'PU 2s',
+    'pullup two point': 'PU 2s',
+    
+    # Playtype variations
+    'transition': 'Transition',
+    'isolation': 'Isolation',
+    'pick and roll ball handler': 'PRBallHandler',
+    'pick and roll roll man': 'PRRollMan',
+    'offensive rebound': 'OffRebound',
+    'offensive rebounds': 'OffRebound',
+    'spot up': 'Spotup',
+    'spotup': 'Spotup',
+    'cut': 'Cut',
+    'handoff': 'Handoff',
+    'off screen': 'OffScreen',
+    'offscreen': 'OffScreen',
+    'post up': 'Postup',
+    'postup': 'Postup',
+    'misc': 'Misc',
+    
+    # Opponent stat variations
+    'opponent assists': 'OPP_AST',
+    'opponent points': 'OPP_PTS',
+    'opponent rebounds': 'OPP_REB',
+    'opponent steals and blocks': 'OPP_STOCKS',
+    'opponent stocks': 'OPP_STOCKS',
+    'opponent free throw attempts': 'OPP_FTA',
+    'opponent free throws': 'OPP_FTA',
+    'opponent turnovers': 'OPP_TOV',
+    'opponent blocks': 'OPP_BLK',
+    'opponent steals': 'OPP_STL',
+    'opponent 3s': 'OPP_FG3M',
+    'opponent threes': 'OPP_FG3M',
+    'opponent 3 point attempts': 'OPP_FG3A',
+    'opponent three attempts': 'OPP_FG3A',
+    'opponent 3 point': 'OPP_FG3M',
+    'opponent three point': 'OPP_FG3M',
+    
+    # Assist variations
+    'two point assists': 'TwoPtAssists',
+    'three point assists': 'ThreePtAssists',
+    'arc 3 assists': 'Arc3Assists',
+    'corner 3 assists': 'Corner3Assists',
+    'at rim assists': 'AtRimAssists',
+    'short mid range assists': 'ShortMidRangeAssists',
+    'long mid range assists': 'LongMidRangeAssists',
+    
+    # Special cases
+    'less than 10 feet': 'Less Than 10 ft',
+    'inside 10 feet': 'Less Than 10 ft',
+    'close range': 'Less Than 10 ft',
+    'close to basket': 'Less Than 10 ft',
+    'near basket': 'Less Than 10 ft',
+    
+    # Defense/Offense variations (for ranking context)
+    'defense': 'defense_rank',
+    'defensive': 'defense_rank',
+    'offense': 'offense_rank',
+    'offensive': 'offense_rank',
+    'scoring': 'offense_rank',
+    'points allowed': 'defense_rank',
+    'points scored': 'offense_rank',
+}
+
 # Comparison patterns for self-filters (ordered by priority)
 COMPARISON_PATTERNS = [
     # Range: "between 20 and 30 points" (must be first to avoid conflicts)
@@ -126,6 +212,50 @@ SELF_FILTER_PATTERNS = [
     r'with\s+(.+?\s+(?:points|rebounds|assists|steals|blocks|shots|3s|threes|field goals|free throws|buckets|boards|dimes|turnovers))',
 ]
 
+# Enhanced patterns to detect opponent filters - ONLY obvious, unambiguous phrases
+OPPONENT_FILTER_PATTERNS = [
+    # Very specific, obvious patterns only
+    
+    # "against [specific filter] teams" - only for well-defined filters
+    (r'against\s+(catch\s+and\s+shoot)\s+teams?', 'against'),
+    (r'against\s+(pullup)\s+teams?', 'against'),
+    (r'against\s+(transition)\s+teams?', 'against'),
+    (r'against\s+(isolation)\s+teams?', 'against'),
+    (r'against\s+(offensive\s+rebound)\s+teams?', 'against'),
+    (r'against\s+(spot\s+up)\s+teams?', 'against'),
+    (r'against\s+(handoff)\s+teams?', 'against'),
+    (r'against\s+(off\s+screen)\s+teams?', 'against'),
+    (r'against\s+(post\s+up)\s+teams?', 'against'),
+    (r'against\s+(close\s+range)\s+teams?', 'against'),
+    (r'against\s+(inside\s+10\s+feet)\s+teams?', 'against'),
+    
+    # "vs [specific filter] teams" - same specific filters
+    (r'vs\s+(catch\s+and\s+shoot)\s+teams?', 'against'),
+    (r'vs\s+(pullup)\s+teams?', 'against'),
+    (r'vs\s+(transition)\s+teams?', 'against'),
+    (r'vs\s+(isolation)\s+teams?', 'against'),
+    (r'vs\s+(offensive\s+rebound)\s+teams?', 'against'),
+    (r'vs\s+(spot\s+up)\s+teams?', 'against'),
+    (r'vs\s+(handoff)\s+teams?', 'against'),
+    (r'vs\s+(off\s+screen)\s+teams?', 'against'),
+    (r'vs\s+(post\s+up)\s+teams?', 'against'),
+    (r'vs\s+(close\s+range)\s+teams?', 'against'),
+    (r'vs\s+(inside\s+10\s+feet)\s+teams?', 'against'),
+    
+    # "top X [specific filter] teams" - only for well-defined filters
+    (r'top\s+(\d+)\s+(catch\s+and\s+shoot)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(pullup)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(transition)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(isolation)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(offensive\s+rebound)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(spot\s+up)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(handoff)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(off\s+screen)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(post\s+up)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(close\s+range)\s+teams?', 'ranking'),
+    (r'top\s+(\d+)\s+(inside\s+10\s+feet)\s+teams?', 'ranking'),
+]
+
 @dataclass
 class ParsedComponent:
     """Represents a component extracted from the query with position tracking"""
@@ -160,16 +290,99 @@ class QueryCoverage:
         
     def _extract_significant_words(self) -> List[str]:
         """Extract words that should be covered by parsing (excluding stop words)"""
-        # Common stop words that don't need to be "covered"
+        # Extended stop words that don't need to be "covered"
         stop_words = {
+            # Basic stop words
             'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he', 'in', 
             'is', 'it', 'its', 'of', 'on', 'that', 'the', 'to', 'was', 'were', 'will', 'with',
-            'his', 'her', 'their', 'this', 'these', 'those', 'when', 'where', 'how', 'why'
+            'his', 'her', 'their', 'this', 'these', 'those', 'when', 'where', 'how', 'why',
+            
+            # Functional words that set up other parts of the sentence
+            'playing', 'played', 'plays', 'play', 'having', 'has', 'had', 'with', 'without',
+            'during', 'while', 'when', 'where', 'against', 'versus', 'vs', 'facing', 'faced',
+            'scoring', 'scored', 'scoring', 'getting', 'got', 'gets', 'making', 'made', 'makes',
+            'taking', 'took', 'takes', 'shooting', 'shot', 'shots', 'attempting', 'attempted',
+            'attempts', 'grabbing', 'grabbed', 'grabs', 'dishing', 'dished', 'dishes',
+            'stealing', 'stole', 'steals', 'blocking', 'blocked', 'blocks', 'turning', 'turned',
+            'turns', 'committing', 'committed', 'commits',
+            
+            # Contextual words that support meaning but aren't core content
+            'games', 'game', 'last', 'first', 'next', 'previous', 'recent', 'current',
+            'season', 'month', 'week', 'day', 'today', 'yesterday', 'tomorrow',
+            'home', 'away', 'both', 'either', 'neither', 'all', 'every', 'each',
+            'more', 'less', 'than', 'over', 'under', 'above', 'below', 'between',
+            'around', 'about', 'approximately', 'exactly', 'precisely', 'roughly',
+            'plus', 'minus', 'add', 'subtract', 'total', 'sum', 'average', 'avg',
+            'minimum', 'min', 'maximum', 'max', 'at least', 'at most', 'no more than',
+            'no less than', 'greater than', 'less than', 'equal to', 'equals',
+            
+            # Partial words that might appear due to text processing
+            'utes', 'utes', 'utes', 'utes', 'utes', 'utes', 'utes', 'utes', 'utes',
+            'ing', 'ed', 'er', 'est', 'ly', 'tion', 'sion', 'ment', 'ness', 'ful',
+            'less', 'able', 'ible', 'ous', 'ious', 'eous', 'al', 'ial', 'ical',
+            'ive', 'ative', 'itive', 'ize', 'ise', 'ify', 'fy', 'en', 'ize',
         }
         
         words = [word.strip('.,!?;:') for word in self.query_lower.split()]
-        significant_words = [word for word in words if word not in stop_words and len(word) > 1]
+        
+        # Filter out stop words and very short words
+        significant_words = []
+        for word in words:
+            if (word not in stop_words and 
+                len(word) > 2 and  # Increased minimum length to avoid partial words
+                not word.isdigit() and  # Exclude pure numbers (they're handled separately)
+                not self._is_partial_word(word)):  # Exclude partial words
+                significant_words.append(word)
+        
         return significant_words
+    
+    def _is_partial_word(self, word: str) -> bool:
+        """Check if a word appears to be a partial word from text processing"""
+        # Common partial word patterns
+        partial_patterns = [
+            r'^[a-z]{1,3}$',  # Very short words (1-3 chars)
+            r'^[a-z]+ing$',   # Words ending in 'ing' that are very short
+            r'^[a-z]+ed$',    # Words ending in 'ed' that are very short
+            r'^[a-z]+er$',    # Words ending in 'er' that are very short
+            r'^[a-z]+est$',   # Words ending in 'est' that are very short
+            r'^[a-z]+ly$',    # Words ending in 'ly' that are very short
+            r'^[a-z]+tion$',  # Words ending in 'tion' that are very short
+            r'^[a-z]+sion$',  # Words ending in 'sion' that are very short
+            r'^[a-z]+ment$',  # Words ending in 'ment' that are very short
+            r'^[a-z]+ness$',  # Words ending in 'ness' that are very short
+            r'^[a-z]+ful$',   # Words ending in 'ful' that are very short
+            r'^[a-z]+less$',  # Words ending in 'less' that are very short
+            r'^[a-z]+able$',  # Words ending in 'able' that are very short
+            r'^[a-z]+ible$',  # Words ending in 'ible' that are very short
+            r'^[a-z]+ous$',   # Words ending in 'ous' that are very short
+            r'^[a-z]+ious$',  # Words ending in 'ious' that are very short
+            r'^[a-z]+eous$',  # Words ending in 'eous' that are very short
+            r'^[a-z]+al$',    # Words ending in 'al' that are very short
+            r'^[a-z]+ial$',   # Words ending in 'ial' that are very short
+            r'^[a-z]+ical$',  # Words ending in 'ical' that are very short
+            r'^[a-z]+ive$',   # Words ending in 'ive' that are very short
+            r'^[a-z]+ative$', # Words ending in 'ative' that are very short
+            r'^[a-z]+itive$', # Words ending in 'itive' that are very short
+            r'^[a-z]+ize$',   # Words ending in 'ize' that are very short
+            r'^[a-z]+ise$',   # Words ending in 'ise' that are very short
+            r'^[a-z]+ify$',   # Words ending in 'ify' that are very short
+            r'^[a-z]+fy$',    # Words ending in 'fy' that are very short
+            r'^[a-z]+en$',    # Words ending in 'en' that are very short
+        ]
+        
+        import re
+        for pattern in partial_patterns:
+            if re.match(pattern, word) and len(word) <= 6:  # Short words with these patterns
+                return True
+        
+        # Specific partial words that commonly appear
+        specific_partials = {
+            'utes', 'ing', 'ed', 'er', 'est', 'ly', 'tion', 'sion', 'ment', 'ness',
+            'ful', 'less', 'able', 'ible', 'ous', 'ious', 'eous', 'al', 'ial', 'ical',
+            'ive', 'ative', 'itive', 'ize', 'ise', 'ify', 'fy', 'en'
+        }
+        
+        return word in specific_partials
     
     def add_component(self, component: ParsedComponent) -> None:
         """Add a parsed component and mark its positions as covered"""
@@ -835,6 +1048,7 @@ class BaseQueryParser:
         # Store confidence breakdown for debugging
         components.confidence_breakdown = confidence_breakdown
         
+        print(components)
         return components
     
     def _preprocess_query(self, query: str) -> str:
@@ -1120,21 +1334,27 @@ class BaseQueryParser:
     
     def _extract_opponent_filters(self, query: str) -> List[Tuple[str, int]]:
         """
-        Extract opponent filters (team abbreviations, rankings) from the query.
+        Extract opponent filters using enhanced natural language mapping.
         Args:
             query (str): The original query string.
         Returns:
-            List[Tuple[str, int]]: List of opponent filter tuples, e.g. [('defense_rank', -10)].
+            List[Tuple[str, int]]: List of opponent filter tuples, e.g. [('C&S PTS', 10)].
         Implementation details:
-            - Handles team abbreviations and top/bottom N defense/offense patterns.
+            - Maps natural language to specific filter types using OPPONENT_FILTER_MAPPINGS
+            - Handles team abbreviations and ranking patterns
+            - Supports various natural language constructions
         """
         filters = []
         query_lower = query.lower()
+        
+        # First, handle team abbreviations (existing logic)
         team_pattern = r'\b([A-Z]{2,3})\b'
         team_matches = re.findall(team_pattern, query)
         for team in team_matches:
             if team.lower() in self.teams:
                 filters.append(("team", team.upper()))
+        
+        # Handle ranking patterns (existing logic for defense/offense rankings)
         ranking_patterns = [
             (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
             (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
@@ -1144,16 +1364,12 @@ class BaseQueryParser:
             (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
             (r'worst\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
             (r'best\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
-            # More specific patterns for three point defenses
-            (r'top\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', 1),
-            (r'bottom\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', -1),
-            (r'worst\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', -1),
-            (r'best\s+(\d+)\s+(?:three\s+point\s+defenses?|3\s+point\s+defenses?)', 'defense_rank', 1),
             (r'top\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
             (r'bottom\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
             (r'worst\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
             (r'best\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
         ]
+        
         for pattern, filter_type, direction in ranking_patterns:
             matches = re.findall(pattern, query_lower)
             for match in matches:
@@ -1162,7 +1378,63 @@ class BaseQueryParser:
                     filters.append((filter_type, rank * direction))
                 except ValueError:
                     pass
+        
+        # NEW: Handle specific filter types using enhanced patterns
+        processed_filters = set()  # Track processed filters to avoid duplicates
+        
+        for pattern, pattern_type in OPPONENT_FILTER_PATTERNS:
+            matches = re.findall(pattern, query_lower)
+            for match in matches:
+                if pattern_type == 'ranking':
+                    # Handle "top 10 catch and shoot teams"
+                    try:
+                        rank_num = int(match[0])
+                        filter_text = match[1].strip()
+                        filter_type = self._map_filter_text_to_type(filter_text)
+                        if filter_type and filter_type not in processed_filters:
+                            filters.append((filter_type, rank_num))
+                            processed_filters.add(filter_type)
+                    except (ValueError, IndexError):
+                        continue
+                else:
+                    # Handle other pattern types
+                    filter_text = match.strip()
+                    filter_type = self._map_filter_text_to_type(filter_text)
+                    if filter_type and filter_type not in processed_filters:
+                        # Default rank of 10 for non-ranking patterns
+                        filters.append((filter_type, 10))
+                        processed_filters.add(filter_type)
+        
         return filters
+    
+    def _map_filter_text_to_type(self, filter_text: str) -> Optional[str]:
+        """
+        Map natural language filter text to specific filter type.
+        Only handles obvious, unambiguous cases - complex cases go to LLM.
+        Args:
+            filter_text (str): Natural language description of the filter
+        Returns:
+            Optional[str]: The mapped filter type or None if not found
+        """
+        filter_text = filter_text.lower().strip()
+        
+        # Direct mapping lookup - only for very specific, obvious phrases
+        direct_mappings = {
+            'catch and shoot': 'C&S PTS',
+            'pullup': 'PU PTS',
+            'transition': 'Transition',
+            'isolation': 'Isolation',
+            'offensive rebound': 'OffRebound',
+            'spot up': 'Spotup',
+            'handoff': 'Handoff',
+            'off screen': 'OffScreen',
+            'post up': 'Postup',
+            'close range': 'Less Than 10 ft',
+            'inside 10 feet': 'Less Than 10 ft',
+        }
+        
+        # Only return exact matches - no fuzzy matching
+        return direct_mappings.get(filter_text)
     
     def _extract_minutes_filter(self, query: str) -> Optional[Tuple[int, int]]:
         """
@@ -1757,7 +2029,7 @@ class BaseQueryParser:
         filters = self._extract_opponent_filters(query)
         
         if filters:
-            # Track coverage for ranking patterns
+            # Track coverage for ranking patterns (existing)
             ranking_patterns = [
                 (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
                 (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
@@ -1789,6 +2061,36 @@ class BaseQueryParser:
                         component_type="team_filter",
                         extraction_method="regex"
                     ))
+            
+            # NEW: Track coverage for enhanced opponent filter patterns
+            for pattern, pattern_type in OPPONENT_FILTER_PATTERNS:
+                matches = re.findall(pattern, query.lower())
+                for match in matches:
+                    if pattern_type == 'ranking':
+                        # For ranking patterns, track the full match
+                        full_match = re.search(pattern, query.lower())
+                        if full_match:
+                            coverage.add_component(ParsedComponent(
+                                value=full_match.group(0),
+                                start_pos=full_match.start(),
+                                end_pos=full_match.end(),
+                                component_type="opponent_filter",
+                                extraction_method="enhanced_regex"
+                            ))
+                    else:
+                        # For other patterns, track the matched filter text
+                        filter_text = match.strip()
+                        if filter_text:
+                            # Find the position of this text in the original query
+                            start_pos = query.lower().find(filter_text)
+                            if start_pos != -1:
+                                coverage.add_component(ParsedComponent(
+                                    value=filter_text,
+                                    start_pos=start_pos,
+                                    end_pos=start_pos + len(filter_text),
+                                    component_type="opponent_filter",
+                                    extraction_method="enhanced_regex"
+                                ))
         
         return filters
     
@@ -2138,6 +2440,64 @@ def debug_spacy_issue():
             return self
         def __exit__(self, *args):
             pass
+
+def test_opponent_filter_mapping():
+    """Test the new opponent filter mapping system"""
+    class MockEngine:
+        def connect(self):
+            return self
+        
+        def execute(self, query):
+            # Mock team data
+            class MockResult:
+                def fetchall(self):
+                    return [('LAL',), ('GSW',), ('BOS',)]
+            return MockResult()
+        
+        def __enter__(self):
+            return self
+        
+        def __exit__(self, *args):
+            pass
+    
+    # Create a mock parser instance
+    parser = BaseQueryParser(MockEngine())
+    parser.teams = {'lal': 'LAL', 'gsw': 'GSW', 'bos': 'BOS'}
+    
+    # Test cases - only obvious, unambiguous phrases
+    test_queries = [
+        "LeBron James against catch and shoot teams",
+        "Stephen Curry vs transition teams", 
+        "Kevin Durant vs pullup teams",
+        "Luka Doncic vs isolation teams",
+        "Giannis against offensive rebound teams",
+        "LeBron James vs LAL",
+        "Stephen Curry vs top 10 catch and shoot teams",
+        "Luka Doncic against close range teams",
+        "Giannis vs spot up teams",
+        "LeBron James vs handoff teams",
+        "Stephen Curry against off screen teams",
+        "Kevin Durant vs post up teams",
+        "Luka Doncic vs inside 10 feet teams"
+    ]
+    
+    print("Testing Opponent Filter Mapping System")
+    print("=" * 50)
+    
+    for query in test_queries:
+        print(f"\nQuery: {query}")
+        filters = parser._extract_opponent_filters(query)
+        if filters:
+            for filter_type, rank in filters:
+                print(f"  → {filter_type}: {rank}")
+        else:
+            print("  → No filters found")
+    
+    print("\n" + "=" * 50)
+    print("Test completed!")
+
+if __name__ == "__main__":
+    test_opponent_filter_mapping()
     
     try:
         # Create parser with mock engine

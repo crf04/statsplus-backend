@@ -47,6 +47,9 @@ class NLService:
             'players_on': parsed_components.players_on,
             'players_off': parsed_components.players_off,
             'teams_against': teams_against,  
+            'minutes_filter': parsed_components.minutes_filter,
+            'date_range': parsed_components.date_range,
+            'self_filters': parsed_components.self_filters,
             'rank_filter': rank_filter,      
             'season': getattr(parsed_components, 'season', '2024-25'),
             'confidence': parsed_components.confidence,
@@ -54,5 +57,5 @@ class NLService:
             'time_period': parsed_components.time_period,
             'original_query': query.strip()
         }
-        print(result)
+        
         return result 

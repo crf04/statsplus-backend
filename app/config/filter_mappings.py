@@ -12,12 +12,6 @@ FILTER_MAPPINGS = {
         "ranking_direction": "ascending",
         "description": "Teams that allow fewer points (better defense)"
     },
-    "offense": {
-        "api_filters": ["OPP_PTS"],
-        "keywords": ["offense", "offensive", "offenses", "scoring", "offensive teams"],
-        "ranking_direction": "descending", 
-        "description": "Teams that allow more points (worse defense, better offense faced)"
-    },
     "three_point_defense": {
         "api_filters": ["C&S 3s", "C&S 3A", "PU 3s"],
         "keywords": ["three point", "3pt", "perimeter", "catch and shoot", "three point defense"],
@@ -29,12 +23,6 @@ FILTER_MAPPINGS = {
         "keywords": ["rebound", "rebounding", "boards", "rebounding teams"],
         "ranking_direction": "ascending",
         "description": "Teams that allow fewer rebounds"
-    },
-    "pace": {
-        "api_filters": ["Transition"],
-        "keywords": ["pace", "fast", "transition", "tempo", "fast break"],
-        "ranking_direction": "descending",
-        "description": "Teams that play at faster pace"
     },
     "turnovers": {
         "api_filters": ["OPP_TOV"],
