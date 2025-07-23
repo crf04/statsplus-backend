@@ -54,11 +54,6 @@ ENDPOINT_SCHEMAS = {
                 "description": "NBA season in YYYY-YY format",
                 "example": "2024-25"
             },
-            "playstyle_range": {
-                "type": "list",
-                "default": [0, 200],
-                "description": "Playstyle rating range filter"
-            },
             "players_on": {
                 "type": "list",
                 "description": "Players that must be playing in filtered games"
