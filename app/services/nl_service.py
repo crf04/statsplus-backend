@@ -1,24 +1,39 @@
 from app.services.nl_query.parser import BaseQueryParser
 from app.services.nl_query.executor import QueryExecutor
+from app.services.llm_service import LLMService
+import logging
+
+logger = logging.getLogger(__name__)
 
 class NLService:
     def __init__(self, engine):
         self.engine = engine
         self.nl_parser = None
         self.query_executor = None
+        self.llm_service = None
         self.initialize_nl_system()
     
     def initialize_nl_system(self):
-        """Initialize the natural language query system"""
+        """Initialize the natural language query system with LLM fallback"""
         try:
             self.nl_parser = BaseQueryParser(self.engine)
             self.query_executor = QueryExecutor(self.engine)
+            
+            # Initialize LLM service for fallback
+            try:
+                self.llm_service = LLMService()
+                logger.info("✅ LLM Service initialized for fallback routing")
+            except Exception as llm_error:
+                logger.warning(f"⚠️  LLM Service initialization failed: {llm_error}")
+                logger.warning("   Will continue with NLP-only mode")
+                self.llm_service = None
+            
             print("✅ Natural Language Query System initialized successfully")
         except Exception as e:
             print(f"❌ Failed to initialize NL Query System: {e}")
     
     def process_query(self, query):
-        """Process natural language query and return structured results"""
+        """Process natural language query with hybrid NLP+LLM routing"""
         if not query or not query.strip():
             raise ValueError("Empty query provided")
         
@@ -26,9 +41,114 @@ class NLService:
         if not self.nl_parser or not self.query_executor:
             raise RuntimeError("Natural language system not initialized")
         
-        # Parse the query
-        parsed_components = self.nl_parser.parse(query.strip()) 
+        query_text = query.strip()
         
+        # Step 1: Parse with NLP first
+        parsed_components = self.nl_parser.parse(query_text)
+        
+        # Step 2: Check if LLM fallback is needed
+        should_use_llm = (
+            parsed_components.confidence_breakdown and 
+            parsed_components.confidence_breakdown.should_use_llm
+        )
+        
+        if should_use_llm and self.llm_service:
+            logger.info(f"🧠 Routing to LLM (confidence: {parsed_components.confidence:.3f}): {query_text[:50]}...")
+            try:
+                # Route to LLM for better accuracy
+                llm_result = self._process_with_llm(query_text, parsed_components)
+                if llm_result:
+                    return llm_result
+                else:
+                    logger.warning("⚠️  LLM processing failed, falling back to NLP result")
+            except Exception as e:
+                logger.error(f"❌ LLM processing error: {e}")
+                logger.info("   Falling back to NLP result")
+        else:
+            logger.info(f"⚡ Using NLP (confidence: {parsed_components.confidence:.3f}): {query_text[:50]}...")
+        
+        # Step 3: Use NLP result (fast path or fallback)
+        return self._format_nlp_result(parsed_components, query_text)
+    
+    def _process_with_llm(self, query_text: str, nlp_fallback):
+        """Process query with LLM and format response"""
+        try:
+            # Use optimized prompt for best performance
+            llm_response = self.llm_service.test_prompt_file(
+                "prompts/system_prompt_optimized.txt", 
+                query_text
+            )
+            
+            if not llm_response.get("success", False):
+                logger.warning(f"LLM parsing failed: {llm_response.get('error', 'Unknown error')}")
+                return None
+            
+            llm_content = llm_response.get("content", {})
+            
+            # Format LLM response to match frontend expectations
+            return self._format_llm_result(llm_content, query_text, nlp_fallback)
+            
+        except Exception as e:
+            logger.error(f"LLM processing exception: {e}")
+            return None
+    
+    def _format_llm_result(self, llm_content: dict, query_text: str, nlp_fallback):
+        """Format LLM response to match frontend expectations"""
+        try:
+            # Convert opponent_filters from LLM format [[stat, rank], ...] to frontend format
+            teams_against = []
+            rank_filter = []
+            
+            opponent_filters = llm_content.get("opponent_filters", [])
+            if opponent_filters:
+                for filter_item in opponent_filters:
+                    if isinstance(filter_item, list) and len(filter_item) >= 2:
+                        stat, rank = filter_item[0], filter_item[1]
+                        teams_against.append(stat)
+                        rank_filter.append(str(rank))
+            
+            # Convert self_filters from LLM format to frontend format
+            self_filters = llm_content.get("self_filters", [])
+            
+            # Extract minutes filter if present
+            minutes_filter = None
+            for sf in self_filters:
+                if isinstance(sf, dict) and sf.get("stat_column") in ["MIN", "minutes"]:
+                    if sf.get("operator") == "between":
+                        minutes_filter = [sf.get("value", 0), sf.get("value2", 48)]
+                        # Remove from self_filters since it's handled separately
+                        self_filters = [f for f in self_filters if f != sf]
+                    break
+            
+            result = {
+                'player_name': llm_content.get('player_name'),
+                'team_name': llm_content.get('team_name'),
+                'game_count': llm_content.get('game_count'),
+                'location': llm_content.get('location'),
+                'players_on': llm_content.get('players_on', []),
+                'players_off': llm_content.get('players_off', []),
+                'teams_against': teams_against,
+                'minutes_filter': minutes_filter,
+                'date_range': llm_content.get('date_range'),
+                'self_filters': self_filters,
+                'rank_filter': rank_filter,
+                'season': llm_content.get('season', '2024-25'),
+                'confidence': llm_content.get('confidence', 0.9),  # LLM typically has high confidence
+                'intent': llm_content.get('intent', 'game_logs'),
+                'time_period': llm_content.get('time_period'),
+                'original_query': query_text,
+                'parsed_by': 'llm'  # Flag to indicate LLM was used
+            }
+            
+            logger.info(f"✅ LLM successfully parsed query with {result['confidence']:.3f} confidence")
+            return result
+            
+        except Exception as e:
+            logger.error(f"LLM result formatting error: {e}")
+            return None
+    
+    def _format_nlp_result(self, parsed_components, query_text: str):
+        """Format NLP parser result to frontend expectations"""
         # Convert opponent_filters to frontend-compatible format
         teams_against = []
         rank_filter = []
@@ -55,7 +175,8 @@ class NLService:
             'confidence': parsed_components.confidence,
             'intent': parsed_components.intent,
             'time_period': parsed_components.time_period,
-            'original_query': query.strip()
+            'original_query': query_text,
+            'parsed_by': 'nlp'  # Flag to indicate NLP was used
         }
         
         return result 

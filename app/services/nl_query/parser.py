@@ -65,7 +65,7 @@ STAT_MAPPINGS = {
     "steal": "STL", "steals": "STL", "stls": "STL", 
     "block": "BLK", "blocks": "BLK", "blks": "BLK", "blocked shots": "BLK", "blocks shots": "BLK",  # More specific for blocks context
     "turnover": "TOV", "turnovers": "TOV", "tovs": "TOV",
-    "minute": "MIN", "minutes": "MIN", "mins": "MIN",
+    # NOTE: Minutes are handled by dedicated minutes_filter parameter, not self_filters
     
     # Shooting stats - Attempts (volume) - MUST come before made shots to match first
     "field goal attempt": "FGA", "field goal attempts": "FGA", "fga": "FGA", "fg attempts": "FGA",
@@ -210,6 +210,8 @@ SELF_FILTER_PATTERNS = [
     r'(\d+\+?\s*(?:points?|rebounds?|assists?|steals?|blocks?|threes?|buckets?|boards?|dimes?))\s+games',
     r'games\s+with\s+(.+)',
     r'with\s+(.+?\s+(?:points|rebounds|assists|steals|blocks|shots|3s|threes|field goals|free throws|buckets|boards|dimes|turnovers))',
+    # Pattern for "scoring X+", "averaging X+", etc.
+    r'(scoring\s+\d+\+)',
 ]
 
 # Enhanced patterns to detect opponent filters - ONLY obvious, unambiguous phrases
@@ -1138,8 +1140,7 @@ class BaseQueryParser:
             'triple', 'double', 'field', 'goals', 'free', 'throws', 'shots', 'shot',
             'performance', 'stats', 'statistics', 'season', 'playoff', 'playoffs',
             'home', 'away', 'road', 'court', 'team', 'teams', 'player', 'players',
-            'offense', 'defense', 'basketball', 'nba', 'scoring', 'shooting',
-            'king', 'chef', 'greek', 'mr', 'the'  # Generic titles that are too broad
+            'offense', 'defense', 'basketball', 'nba', 'scoring', 'shooting','mr', 'the'  # Generic titles that are too broad
         }
         
         # Don't extract if it's a blacklisted term
@@ -1171,10 +1172,7 @@ class BaseQueryParser:
                         alias_norm = alias.strip().lower()
                         if phrase == alias_norm:
                             return self.player_aliases[alias]
-        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
-        last_name_match = self._extract_last_name(text)
-        if last_name_match:
-            return last_name_match
+        
         
         # STEP 5: Try fuzzy matching on word combinations (more conservative)
         for i in range(len(words)):
@@ -1198,11 +1196,16 @@ class BaseQueryParser:
             text,
             self.players,
             scorer=fuzz.token_sort_ratio,
-            score_cutoff=90  # Raised from 85 to 90 to prevent false positives
+            score_cutoff=90  
         )
         if match:
             return match[0]
         return None
+
+        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
+        last_name_match = self._extract_last_name(text)
+        if last_name_match:
+            return last_name_match
     
     def _extract_team_name(self, query: str, doc) -> Optional[str]:
         """
@@ -1354,20 +1357,20 @@ class BaseQueryParser:
             if team.lower() in self.teams:
                 filters.append(("team", team.upper()))
         
-        # Handle ranking patterns (existing logic for defense/offense rankings)
+        # Handle ranking patterns (map to actual NBA stat columns)
         ranking_patterns = [
-            (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
-            (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
-            (r'worst\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
-            (r'best\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
-            (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
-            (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
-            (r'worst\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
-            (r'best\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
-            (r'top\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
-            (r'bottom\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
-            (r'worst\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
-            (r'best\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
+            (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+            (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+            (r'worst\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+            (r'best\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+            (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', 1),
+            (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
+            (r'worst\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
+            (r'best\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', 1),
+            (r'top\s+(\d+)\s+(?:teams?)', 'OPP_PTS', 1),
+            (r'bottom\s+(\d+)\s+(?:teams?)', 'OPP_PTS', -1),
+            (r'worst\s+(\d+)\s+(?:teams?)', 'OPP_PTS', -1),
+            (r'best\s+(\d+)\s+(?:teams?)', 'OPP_PTS', 1),
         ]
         
         for pattern, filter_type, direction in ranking_patterns:
@@ -1882,36 +1885,7 @@ class BaseQueryParser:
         elif any(word in query_lower for word in ["team", "teams"]):
             return "team_stats"
         return "game_logs"
-    
-    def _calculate_confidence(self, components: QueryComponents) -> float:
-        """
-        Calculate a confidence score for the parsed query based on extracted components.
-        Args:
-            components (QueryComponents): The parsed query components.
-        Returns:
-            float: Confidence score between 0.0 and 1.0.
-        Implementation details:
-            - Adds weight for each key component found.
-            - Caps the score at 1.0.
-        """
-        confidence = 0.0
-        if components.player_name:
-            confidence += 0.3
-        if components.intent:
-            confidence += 0.2
-        if components.time_period:
-            confidence += 0.1
-        if components.opponent_filters:
-            confidence += 0.1
-        if components.players_on or components.players_off:
-            confidence += 0.1
-        if components.location:
-            confidence += 0.05
-        if components.team_name:
-            confidence += 0.05
-        if components.minutes_filter:
-            confidence += 0.05
-        return min(confidence, 1.0)
+
     
     def _extract_time_period_with_coverage(self, query: str, coverage: QueryCoverage) -> Tuple[Optional[str], Optional[int]]:
         """Extract time period and track coverage"""
@@ -2029,14 +2003,14 @@ class BaseQueryParser:
         filters = self._extract_opponent_filters(query)
         
         if filters:
-            # Track coverage for ranking patterns (existing)
+            # Track coverage for ranking patterns (updated to use actual NBA stat columns)
             ranking_patterns = [
-                (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', 1),
-                (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'defense_rank', -1),
-                (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', 1),
-                (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'offense_rank', -1),
-                (r'top\s+(\d+)\s+(?:teams?)', 'overall_rank', 1),
-                (r'bottom\s+(\d+)\s+(?:teams?)', 'overall_rank', -1),
+                (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+                (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+                (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', 1),
+                (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
+                (r'top\s+(\d+)\s+(?:teams?)', 'OPP_PTS', 1),
+                (r'bottom\s+(\d+)\s+(?:teams?)', 'OPP_PTS', -1),
             ]
             
             for pattern, filter_type, direction in ranking_patterns:
@@ -2204,6 +2178,13 @@ class BaseQueryParser:
             stat_name = double_digit_match.group(1)
             return self._create_filter(stat_name, 'gte', 10, None, condition)
         
+        # Check for "scoring X+" patterns - map to points
+        scoring_pattern = r'scoring\s+(\d+)\+'
+        scoring_match = re.search(scoring_pattern, condition)
+        if scoring_match:
+            value = int(scoring_match.group(1))
+            return self._create_filter('points', 'gte', value, None, condition)
+        
         # Try each comparison pattern FIRST (including between)
         for pattern, operator in COMPARISON_PATTERNS:
             match = re.search(pattern, condition)
@@ -2369,78 +2350,6 @@ class BaseQueryParser:
         }
 
 
-# Enhanced testing and validation methods
-def test_enhanced_parser():
-    """Test function to validate enhanced parser functionality"""
-    
-    # Note: This would need a real database engine in practice
-    # parser = BaseQueryParser(your_db_engine)
-    
-    test_queries = [
-        # Basic queries
-        "LeBron James last 10 games",
-        "Stephen Curry this season",
-        
-        # Multiple WITH players
-        "LeBron with AD and Klay Thompson last 10 games",
-        "Steph with KD, Draymond, and Klay this season",
-        "CP3 with Book and KD when they're all healthy",
-        
-        # Multiple WITHOUT players
-        "Curry without Draymond, Wiggins and Klay last 5 games",
-        "LeBron without AD and Russ when they sit",
-        
-        # Mixed scenarios
-        "Tatum with Brown but without Smart and Williams",
-        "Luka with Kyrie and without THJ, Dwight Powell",
-        
-        # Complex queries with locations and opponents
-        "Giannis at home against top 10 defenses without Dame",
-        "KD on the road with Kyrie against worst 5 three point teams",
-        
-        # Using viral nicknames from your YAML
-        "The King with the Brow and Greek Freak vs top teams",
-        "Wemby with CP3 when Ant-Man is playing last 15 games"
-    ]
-    
-    print("Enhanced NBA Query Parser Test Results")
-    print("=" * 60)
-    
-    for query in test_queries:
-        print(f"\nQuery: '{query}'")
-        print("-" * 40)
-        
-        # In a real implementation, you would:
-        # analysis = parser.analyze_query(query)
-        # components = analysis['parsed_components']
-        
-        # Mock expected results for demonstration
-        print("✅ Expected improvements:")
-        print("  - Better multi-player recognition")
-        print("  - Enhanced relationship detection") 
-        print("  - Improved confidence scoring")
-        print("  - Robust alias handling")
-
-
-def debug_spacy_issue():
-    """Test function to debug spaCy entity recognition issues"""
-    print("=== DEBUG: spaCy Entity Recognition Issue ===")
-    
-    # Mock some basic setup for testing
-    class MockEngine:
-        def connect(self):
-            return self
-        def execute(self, query):
-            # Mock player data
-            class MockResult:
-                def fetchall(self):
-                    return [("LeBron James",), ("Anthony Davis",), ("Anthony Edwards",), ("Stephen Curry",), ("Austin Reaves",)]
-            return MockResult()
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-
 def test_opponent_filter_mapping():
     """Test the new opponent filter mapping system"""
     class MockEngine:
@@ -2496,27 +2405,3 @@ def test_opponent_filter_mapping():
     print("\n" + "=" * 50)
     print("Test completed!")
 
-if __name__ == "__main__":
-    test_opponent_filter_mapping()
-    
-    try:
-        # Create parser with mock engine
-        parser = BaseQueryParser(MockEngine())
-        
-        # Test the problematic query
-        test_query = "king james with anthony davis and austin reaves"
-        
-        print(f"Testing query: '{test_query}'")
-        debug_info = parser.debug_spacy_entities(test_query)
-        
-        print(f"\nDEBUG INFO:")
-        print(f"Entities found: {debug_info['entities']}")
-        
-    except Exception as e:
-        print(f"Error during debug: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    # Enhanced NBA Natural Language Query Parser
-    test_enhanced_parser()

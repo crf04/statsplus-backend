@@ -1,0 +1,241 @@
+{
+  "timestamp": "20250724_223808",
+  "test_summary": {
+    "summary": {
+      "total_cases": 5,
+      "llm_success_rate": 1.0,
+      "avg_nlp_accuracy": 0.65,
+      "avg_llm_accuracy": 0.8833333333333333,
+      "avg_improvement": 0.23333333333333334,
+      "llm_better_count": 2,
+      "llm_recommended_count": 2,
+      "avg_nlp_time": 0.02,
+      "avg_llm_time": 1.542537021636963,
+      "speed_ratio": 77.12685108184814
+    },
+    "improvements": {
+      "significant": 2,
+      "moderate": 0,
+      "minor": 0,
+      "none": 3
+    },
+    "improvement_cases": {
+      "significant": [
+        "HybridTestResult(test_case=HybridTestCase(query='embid games', category='typo', clarity_level='very_unclear', expected=ExpectedComponents(player_name='Joel Embiid', team_name=None, time_period=None, game_count=None, location=None, minutes_filter=None, self_filters=None, opponent_filters=None, players_on=None, players_off=None, intent='game_logs'), nlp_confidence=0.658, nlp_accuracy=0.0, notes='Misspelled name - complete NLP failure'), nlp_confidence=0.658, nlp_accuracy=0.0, nlp_processing_time=0.02, llm_success=True, llm_confidence=0.8, llm_accuracy=1.0, llm_processing_time=2.209465742111206, llm_components={'player': 'Joel Embiid'}, accuracy_improvement=1.0, recommended_parser='llm')",
+        "HybridTestResult(test_case=HybridTestCase(query='Dame vs top 10 three point defenses', category='opponent_specific', clarity_level='clear', expected=ExpectedComponents(player_name='Damian Lillard', team_name=None, time_period=None, game_count=None, location=None, minutes_filter=None, self_filters=None, opponent_filters=[('OPP_FG3M', 10)], players_on=None, players_off=None, intent='game_logs'), nlp_confidence=0.753, nlp_accuracy=0.5, notes='Specific defense type - missed opponent filter'), nlp_confidence=0.753, nlp_accuracy=0.5, nlp_processing_time=0.02, llm_success=True, llm_confidence=0.9, llm_accuracy=1.0, llm_processing_time=1.1176574230194092, llm_components={'player': 'Damian Lillard', 'opponent_filters': [['OPP_FG3M', 10]]}, accuracy_improvement=0.5, recommended_parser='llm')"
+      ],
+      "moderate": [],
+      "minor": [],
+      "none": [
+        "HybridTestResult(test_case=HybridTestCase(query='Beal home games this season scoring 30+', category='complete', clarity_level='clear', expected=ExpectedComponents(player_name='Bradley Beal', team_name=None, time_period='season', game_count=None, location='home', minutes_filter=None, self_filters=[{'stat_column': 'PTS', 'operator': 'gte', 'value': 30}], opponent_filters=None, players_on=None, players_off=None, intent='game_logs'), nlp_confidence=0.708, nlp_accuracy=0.75, notes=\"Missing stat extraction from 'scoring 30+'\"), nlp_confidence=0.708, nlp_accuracy=0.75, nlp_processing_time=0.02, llm_success=True, llm_confidence=0.9, llm_accuracy=0.75, llm_processing_time=1.778611183166504, llm_components={'player': 'Bradley Beal', 'time_period': None, 'location': 'home', 'self_filters': [{'stat_column': 'PTS', 'operator': 'gte', 'value': 30}]}, accuracy_improvement=0.0, recommended_parser='nlp')",
+        "HybridTestResult(test_case=HybridTestCase(query='Jimmy Butler last 20 games', category='full_name', clarity_level='very_clear', expected=ExpectedComponents(player_name='Jimmy Butler', team_name=None, time_period='recent', game_count=20, location=None, minutes_filter=None, self_filters=None, opponent_filters=None, players_on=None, players_off=None, intent='game_logs'), nlp_confidence=0.67, nlp_accuracy=1.0, notes='Full name ambiguity caused low confidence'), nlp_confidence=0.67, nlp_accuracy=1.0, nlp_processing_time=0.02, llm_success=True, llm_confidence=0.9, llm_accuracy=0.6666666666666666, llm_processing_time=0.7619636058807373, llm_components={'player': 'Jimmy Butler', 'time_period': None, 'game_count': 20}, accuracy_improvement=-0.33333333333333337, recommended_parser='nlp')",
+        "HybridTestResult(test_case=HybridTestCase(query='Curry shooting lights out recently', category='metaphor', clarity_level='unclear', expected=ExpectedComponents(player_name='Stephen Curry', team_name=None, time_period=None, game_count=None, location=None, minutes_filter=None, self_filters=None, opponent_filters=None, players_on=None, players_off=None, intent='game_logs'), nlp_confidence=0.716, nlp_accuracy=1.0, notes='Metaphorical expression'), nlp_confidence=0.716, nlp_accuracy=1.0, nlp_processing_time=0.02, llm_success=True, llm_confidence=0.7, llm_accuracy=1.0, llm_processing_time=1.844987154006958, llm_components={'player': 'Stephen Curry'}, accuracy_improvement=0.0, recommended_parser='nlp')"
+      ]
+    }
+  },
+  "detailed_results": [
+    {
+      "test_case": {
+        "query": "embid games",
+        "category": "typo",
+        "clarity_level": "very_unclear",
+        "expected": {
+          "player_name": "Joel Embiid",
+          "team_name": null,
+          "time_period": null,
+          "game_count": null,
+          "location": null,
+          "minutes_filter": null,
+          "self_filters": null,
+          "opponent_filters": null,
+          "players_on": null,
+          "players_off": null,
+          "intent": "game_logs"
+        },
+        "nlp_confidence": 0.658,
+        "nlp_accuracy": 0.0,
+        "notes": "Misspelled name - complete NLP failure"
+      },
+      "nlp_confidence": 0.658,
+      "nlp_accuracy": 0.0,
+      "nlp_processing_time": 0.02,
+      "llm_success": true,
+      "llm_confidence": 0.8,
+      "llm_accuracy": 1.0,
+      "llm_processing_time": 2.209465742111206,
+      "llm_components": {
+        "player": "Joel Embiid"
+      },
+      "accuracy_improvement": 1.0,
+      "recommended_parser": "llm"
+    },
+    {
+      "test_case": {
+        "query": "Dame vs top 10 three point defenses",
+        "category": "opponent_specific",
+        "clarity_level": "clear",
+        "expected": {
+          "player_name": "Damian Lillard",
+          "team_name": null,
+          "time_period": null,
+          "game_count": null,
+          "location": null,
+          "minutes_filter": null,
+          "self_filters": null,
+          "opponent_filters": [
+            [
+              "OPP_FG3M",
+              10
+            ]
+          ],
+          "players_on": null,
+          "players_off": null,
+          "intent": "game_logs"
+        },
+        "nlp_confidence": 0.753,
+        "nlp_accuracy": 0.5,
+        "notes": "Specific defense type - missed opponent filter"
+      },
+      "nlp_confidence": 0.753,
+      "nlp_accuracy": 0.5,
+      "nlp_processing_time": 0.02,
+      "llm_success": true,
+      "llm_confidence": 0.9,
+      "llm_accuracy": 1.0,
+      "llm_processing_time": 1.1176574230194092,
+      "llm_components": {
+        "player": "Damian Lillard",
+        "opponent_filters": [
+          [
+            "OPP_FG3M",
+            10
+          ]
+        ]
+      },
+      "accuracy_improvement": 0.5,
+      "recommended_parser": "llm"
+    },
+    {
+      "test_case": {
+        "query": "Beal home games this season scoring 30+",
+        "category": "complete",
+        "clarity_level": "clear",
+        "expected": {
+          "player_name": "Bradley Beal",
+          "team_name": null,
+          "time_period": "season",
+          "game_count": null,
+          "location": "home",
+          "minutes_filter": null,
+          "self_filters": [
+            {
+              "stat_column": "PTS",
+              "operator": "gte",
+              "value": 30
+            }
+          ],
+          "opponent_filters": null,
+          "players_on": null,
+          "players_off": null,
+          "intent": "game_logs"
+        },
+        "nlp_confidence": 0.708,
+        "nlp_accuracy": 0.75,
+        "notes": "Missing stat extraction from 'scoring 30+'"
+      },
+      "nlp_confidence": 0.708,
+      "nlp_accuracy": 0.75,
+      "nlp_processing_time": 0.02,
+      "llm_success": true,
+      "llm_confidence": 0.9,
+      "llm_accuracy": 0.75,
+      "llm_processing_time": 1.778611183166504,
+      "llm_components": {
+        "player": "Bradley Beal",
+        "time_period": null,
+        "location": "home",
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 30
+          }
+        ]
+      },
+      "accuracy_improvement": 0.0,
+      "recommended_parser": "nlp"
+    },
+    {
+      "test_case": {
+        "query": "Jimmy Butler last 20 games",
+        "category": "full_name",
+        "clarity_level": "very_clear",
+        "expected": {
+          "player_name": "Jimmy Butler",
+          "team_name": null,
+          "time_period": "recent",
+          "game_count": 20,
+          "location": null,
+          "minutes_filter": null,
+          "self_filters": null,
+          "opponent_filters": null,
+          "players_on": null,
+          "players_off": null,
+          "intent": "game_logs"
+        },
+        "nlp_confidence": 0.67,
+        "nlp_accuracy": 1.0,
+        "notes": "Full name ambiguity caused low confidence"
+      },
+      "nlp_confidence": 0.67,
+      "nlp_accuracy": 1.0,
+      "nlp_processing_time": 0.02,
+      "llm_success": true,
+      "llm_confidence": 0.9,
+      "llm_accuracy": 0.6666666666666666,
+      "llm_processing_time": 0.7619636058807373,
+      "llm_components": {
+        "player": "Jimmy Butler",
+        "time_period": null,
+        "game_count": 20
+      },
+      "accuracy_improvement": -0.33333333333333337,
+      "recommended_parser": "nlp"
+    },
+    {
+      "test_case": {
+        "query": "Curry shooting lights out recently",
+        "category": "metaphor",
+        "clarity_level": "unclear",
+        "expected": {
+          "player_name": "Stephen Curry",
+          "team_name": null,
+          "time_period": null,
+          "game_count": null,
+          "location": null,
+          "minutes_filter": null,
+          "self_filters": null,
+          "opponent_filters": null,
+          "players_on": null,
+          "players_off": null,
+          "intent": "game_logs"
+        },
+        "nlp_confidence": 0.716,
+        "nlp_accuracy": 1.0,
+        "notes": "Metaphorical expression"
+      },
+      "nlp_confidence": 0.716,
+      "nlp_accuracy": 1.0,
+      "nlp_processing_time": 0.02,
+      "llm_success": true,
+      "llm_confidence": 0.7,
+      "llm_accuracy": 1.0,
+      "llm_processing_time": 1.844987154006958,
+      "llm_components": {
+        "player": "Stephen Curry"
+      },
+      "accuracy_improvement": 0.0,
+      "recommended_parser": "nlp"
+    }
+  ]
+}

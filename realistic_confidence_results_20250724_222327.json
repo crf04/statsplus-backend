@@ -1,0 +1,5592 @@
+{
+  "timestamp": "20250724_222327",
+  "test_summary": {
+    "summary": {
+      "total_cases": 100,
+      "successful_parses": 96,
+      "parse_success_rate": 0.96,
+      "accurate_confidences": 56,
+      "confidence_accuracy_rate": 0.56,
+      "avg_confidence": 0.8648475276136403,
+      "avg_processing_time": 0.02138551473617554
+    },
+    "confidence_distribution": {
+      "high": 73,
+      "medium": 27,
+      "low": 0,
+      "very_low": 0
+    },
+    "success_by_confidence": {
+      "high": 1.0,
+      "medium": 0.8518518518518519,
+      "low": 0.0,
+      "very_low": 0.0
+    },
+    "clarity_analysis": {
+      "very_clear": {
+        "count": 25,
+        "avg_confidence": 0.9316109090909092,
+        "success_rate": 1.0,
+        "confidence_accuracy": 0.96
+      },
+      "clear": {
+        "count": 25,
+        "avg_confidence": 0.8969662962527668,
+        "success_rate": 0.96,
+        "confidence_accuracy": 0.96
+      },
+      "moderate": {
+        "count": 25,
+        "avg_confidence": 0.7976678860776307,
+        "success_rate": 1.0,
+        "confidence_accuracy": 0.12
+      },
+      "unclear": {
+        "count": 15,
+        "avg_confidence": 0.8318064042711102,
+        "success_rate": 1.0,
+        "confidence_accuracy": 0.0
+      },
+      "very_unclear": {
+        "count": 10,
+        "avg_confidence": 0.8351529411764707,
+        "success_rate": 0.7,
+        "confidence_accuracy": 0.5
+      }
+    },
+    "threshold_analysis": {
+      "0.5": {
+        "high_conf_count": 100,
+        "low_conf_count": 0,
+        "high_conf_success_rate": 0.96,
+        "low_conf_success_rate": 0,
+        "separation": 0.96
+      },
+      "0.6": {
+        "high_conf_count": 100,
+        "low_conf_count": 0,
+        "high_conf_success_rate": 0.96,
+        "low_conf_success_rate": 0,
+        "separation": 0.96
+      },
+      "0.7": {
+        "high_conf_count": 96,
+        "low_conf_count": 4,
+        "high_conf_success_rate": 0.96875,
+        "low_conf_success_rate": 0.75,
+        "separation": 0.21875
+      },
+      "0.75": {
+        "high_conf_count": 84,
+        "low_conf_count": 16,
+        "high_conf_success_rate": 0.9880952380952381,
+        "low_conf_success_rate": 0.8125,
+        "separation": 0.17559523809523814
+      },
+      "0.8": {
+        "high_conf_count": 73,
+        "low_conf_count": 27,
+        "high_conf_success_rate": 1.0,
+        "low_conf_success_rate": 0.8518518518518519,
+        "separation": 0.14814814814814814
+      },
+      "0.85": {
+        "high_conf_count": 59,
+        "low_conf_count": 41,
+        "high_conf_success_rate": 1.0,
+        "low_conf_success_rate": 0.9024390243902439,
+        "separation": 0.09756097560975607
+      },
+      "0.9": {
+        "high_conf_count": 41,
+        "low_conf_count": 59,
+        "high_conf_success_rate": 1.0,
+        "low_conf_success_rate": 0.9322033898305084,
+        "separation": 0.06779661016949157
+      }
+    }
+  },
+  "detailed_results": [
+    {
+      "test_case": {
+        "query": "LeBron last 10 games",
+        "category": "basic",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Standard player + time"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 10,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.976,
+        "raw_query": "LeBron last 10 games",
+        "confidence_breakdown": {
+          "final_confidence": 0.976,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.976,
+      "processing_time": 1.4882383346557617,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Curry this season with 30+ points",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + stat filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 30,
+            "value2": null,
+            "original_text": "30+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.9140000000000001,
+        "raw_query": "Curry this season with 30+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.9140000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.9140000000000001,
+      "processing_time": 0.02006220817565918,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Giannis home games",
+        "category": "location",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + location"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Giannis Antetokounmpo",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.982,
+        "raw_query": "Giannis home games",
+        "confidence_breakdown": {
+          "final_confidence": 0.982,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.982,
+      "processing_time": 0.004511356353759766,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dame last 15 games with 8+ threes",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + time + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 15,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "FG3M",
+            "operator": "gte",
+            "value": 8,
+            "value2": null,
+            "original_text": "8+ threes"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.958,
+        "raw_query": "Dame last 15 games with 8+ threes",
+        "confidence_breakdown": {
+          "final_confidence": 0.958,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.958,
+      "processing_time": 0.015810012817382812,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "KD away games with 25+ points",
+        "category": "stat_location",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + location + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kevin Durant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "away",
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 25,
+            "value2": null,
+            "original_text": "25+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "KD away games with 25+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.004027843475341797,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Jokic games with 20+ points",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Clear statistical filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Nikola Jokic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 20,
+            "value2": null,
+            "original_text": "20+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Jokic games with 20+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.005565643310546875,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Embiid last 5 games at home",
+        "category": "location_time",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + time + location"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Joel Embiid",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 5,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Embiid last 5 games at home",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "at",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.015939950942993164,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Tatum this season",
+        "category": "time_period",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + time period"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jayson Tatum",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.982,
+        "raw_query": "Tatum this season",
+        "confidence_breakdown": {
+          "final_confidence": 0.982,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.982,
+      "processing_time": 0.013244152069091797,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Luka recent games with 35+ points",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + stat filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Luka Doncic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 35,
+            "value2": null,
+            "original_text": "35+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.944,
+        "raw_query": "Luka recent games with 35+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.944,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.9,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "temporal_ambiguity",
+                "description": "Vague time reference \"recent\" without specific period",
+                "severity": "low"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "recent",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.944,
+      "processing_time": 0.007686614990234375,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Harden games with 10+ assists",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + assists filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "James Harden",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 10,
+            "value2": null,
+            "original_text": "10+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Harden games with 10+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.0026328563690185547,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Anthony Davis games with 12+ rebounds",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + rebounds"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Anthony Davis",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "REB",
+            "operator": "gte",
+            "value": 12,
+            "value2": null,
+            "original_text": "12+ rebounds"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Anthony Davis games with 12+ rebounds",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.0037925243377685547,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Westbrook triple-double games",
+        "category": "stat_concept",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + stat concept"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Russell Westbrook",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8342727272727273,
+        "raw_query": "Westbrook triple-double games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8342727272727273,
+          "should_use_llm": false,
+          "coverage_score": 0.4090909090909091,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "triple-double games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8342727272727273,
+      "processing_time": 0.004642486572265625,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Jimmy Butler last 20 games",
+        "category": "basic",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + time filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jimmy Butler",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 20,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.67,
+        "raw_query": "Jimmy Butler last 20 games",
+        "confidence_breakdown": {
+          "final_confidence": 0.67,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Jimmy Butler",
+                "alternatives": [
+                  "Jared Butler"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "Jimmy",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.67,
+      "processing_time": 0.016816139221191406,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Kawhi games with 30+ minutes",
+        "category": "minutes",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + minutes filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kawhi Leonard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": [
+          30,
+          48
+        ],
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Kawhi games with 30+ minutes",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.004494667053222656,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Bradley Beal games with 25+ points this season",
+        "category": "complete",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Complete query"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Bradley Beal",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.952,
+        "raw_query": "Bradley Beal games with 25+ points this season",
+        "confidence_breakdown": {
+          "final_confidence": 0.952,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.6799999999999999,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.952,
+      "processing_time": 0.015600204467773438,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Chris Paul home games with 8+ assists",
+        "category": "complete",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + location + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Chris Paul",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 8,
+            "value2": null,
+            "original_text": "8+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.958,
+        "raw_query": "Chris Paul home games with 8+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.958,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.958,
+      "processing_time": 0.003553628921508789,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Zion games with double-digit points",
+        "category": "stat_phrase",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + stat phrase"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Zion Williamson",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 10,
+            "value2": null,
+            "original_text": "double-digit points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Zion games with double-digit points",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.0025436878204345703,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Ja Morant last 10 games",
+        "category": "basic",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + time"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Ja Morant",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 10,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Ja Morant last 10 games",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.017249584197998047,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Draymond Green games with 5+ assists",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Draymond Green",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 5,
+            "value2": null,
+            "original_text": "5+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8840000000000001,
+        "raw_query": "Draymond Green games with 5+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.8840000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Draymond Green",
+                "alternatives": [
+                  "AJ Green",
+                  "Jalen Green",
+                  "Javonte Green",
+                  "Jeff Green",
+                  "Josh Green"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8840000000000001,
+      "processing_time": 0.007123470306396484,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Klay Thompson this season with 6+ threes",
+        "category": "complete",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Klay Thompson",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "FG3M",
+            "operator": "gte",
+            "value": 6,
+            "value2": null,
+            "original_text": "6+ threes"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8780000000000001,
+        "raw_query": "Klay Thompson this season with 6+ threes",
+        "confidence_breakdown": {
+          "final_confidence": 0.8780000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Klay Thompson",
+                "alternatives": [
+                  "Amen Thompson",
+                  "Ausar Thompson"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8780000000000001,
+      "processing_time": 0.018157958984375,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Paul George recent 12 games",
+        "category": "basic",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + time"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Paul George",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 12,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8900000000000001,
+        "raw_query": "Paul George recent 12 games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8900000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Paul George",
+                "alternatives": [
+                  "Keyonte George",
+                  "Kyshawn George"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8900000000000001,
+      "processing_time": 0.002557039260864258,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Tyler Herro games with 4+ threes",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + threes"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Tyler Herro",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "FG3M",
+            "operator": "gte",
+            "value": 4,
+            "value2": null,
+            "original_text": "4+ threes"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Tyler Herro games with 4+ threes",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.002556324005126953,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Scottie Barnes games with 12+ points",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + points"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Scottie Barnes",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 12,
+            "value2": null,
+            "original_text": "12+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.9140000000000001,
+        "raw_query": "Scottie Barnes games with 12+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.9140000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Scottie Barnes",
+                "alternatives": [
+                  "Harrison Barnes"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.9140000000000001,
+      "processing_time": 0.006535768508911133,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Alperen Sengun games with 15+ points",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "International player"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Alperen Sengun",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 15,
+            "value2": null,
+            "original_text": "15+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Alperen Sengun games with 15+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.005089282989501953,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dejounte Murray games with 8+ assists",
+        "category": "stat_filter",
+        "clarity_level": "very_clear",
+        "expected_difficulty": 1,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player + assists"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Dejounte Murray",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 8,
+            "value2": null,
+            "original_text": "8+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8840000000000001,
+        "raw_query": "Dejounte Murray games with 8+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.8840000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Dejounte Murray",
+                "alternatives": [
+                  "Jamal Murray",
+                  "Keegan Murray",
+                  "Kris Murray"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8840000000000001,
+      "processing_time": 0.0020241737365722656,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "LeBron with Anthony Davis last 10 games",
+        "category": "relationships",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Player relationships"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 10,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.958,
+        "raw_query": "LeBron with Anthony Davis last 10 games",
+        "confidence_breakdown": {
+          "final_confidence": 0.958,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "with",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [
+          "Anthony Davis"
+        ],
+        "players_off": []
+      },
+      "confidence": 0.958,
+      "processing_time": 0.01635575294494629,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Curry against top 5 defenses",
+        "category": "opponent",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Opponent filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [
+          [
+            "defense_rank",
+            5
+          ]
+        ],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.9200000000000002,
+        "raw_query": "Curry against top 5 defenses",
+        "confidence_breakdown": {
+          "final_confidence": 0.9200000000000002,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "against",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.9200000000000002,
+      "processing_time": 0.005255699157714844,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Giannis games with 25+ points and 10+ rebounds",
+        "category": "multi_stat",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Multiple stats"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Giannis Antetokounmpo",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 25,
+            "value2": null,
+            "original_text": "25+ points"
+          },
+          {
+            "stat_column": "REB",
+            "operator": "gte",
+            "value": 10,
+            "value2": null,
+            "original_text": "10+ rebounds"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.952,
+        "raw_query": "Giannis games with 25+ points and 10+ rebounds",
+        "confidence_breakdown": {
+          "final_confidence": 0.952,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.6799999999999999,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.952,
+      "processing_time": 0.005361795425415039,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dame vs top 10 three point defenses",
+        "category": "opponent",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Specific defense type"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7534545454545456,
+        "raw_query": "Dame vs top 10 three point defenses",
+        "confidence_breakdown": {
+          "final_confidence": 0.7534545454545456,
+          "should_use_llm": false,
+          "coverage_score": 0.18181818181818182,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "vs top 10 three point defenses",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7534545454545456,
+      "processing_time": 0.0032057762145996094,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Luka home games with Kyrie Irving",
+        "category": "relationships",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Location + teammate"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Luka Doncic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Luka home games with Kyrie Irving",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 4
+          }
+        },
+        "stat_categories": [],
+        "players_on": [
+          "Kyrie Irving"
+        ],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.002602100372314453,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Tatum with Jaylen Brown last 15 games scoring 20+",
+        "category": "complex",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Complex relationship query"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jayson Tatum",
+        "team_name": null,
+        "time_period": "recent",
+        "game_count": 15,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8883076923076925,
+        "raw_query": "Tatum with Jaylen Brown last 15 games scoring 20+",
+        "confidence_breakdown": {
+          "final_confidence": 0.8883076923076925,
+          "should_use_llm": false,
+          "coverage_score": 0.7692307692307693,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.64,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "with   scoring 20+",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [
+          "Jaylen Brown"
+        ],
+        "players_off": []
+      },
+      "confidence": 0.8883076923076925,
+      "processing_time": 0.022501468658447266,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Embiid games playing between 30 and 35 minutes",
+        "category": "range",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Minutes range"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Joel Embiid",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": [
+          30,
+          35
+        ],
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8750769230769231,
+        "raw_query": "Embiid games playing between 30 and 35 minutes",
+        "confidence_breakdown": {
+          "final_confidence": 0.8750769230769231,
+          "should_use_llm": false,
+          "coverage_score": 0.6923076923076923,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.6799999999999999,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games playing utes",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8750769230769231,
+      "processing_time": 0.0036728382110595703,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Harden recent games with double-digit assists",
+        "category": "stat_phrase",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Stat description"
+      },
+      "success": true,
+      "components": {
+        "player_name": "James Harden",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 10,
+            "value2": null,
+            "original_text": "double-digit assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.944,
+        "raw_query": "Harden recent games with double-digit assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.944,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.9,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "temporal_ambiguity",
+                "description": "Vague time reference \"recent\" without specific period",
+                "severity": "low"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "recent",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.944,
+      "processing_time": 0.0025675296783447266,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Jokic away games with triple-double",
+        "category": "stat_concept",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Away + triple-double"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Nikola Jokic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "away",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Jokic away games with triple-double",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.003269195556640625,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "KD games against elite defensive teams",
+        "category": "opponent",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Elite defense"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kevin Durant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "team_stats",
+        "confidence": 0.714,
+        "raw_query": "KD games against elite defensive teams",
+        "confidence_breakdown": {
+          "final_confidence": 0.714,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games against elite defensive teams",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.714,
+      "processing_time": 0.0068094730377197266,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Kawhi games shooting 50%+ from the field",
+        "category": "advanced_stat",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Shooting percentage"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kawhi Leonard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7972857142857144,
+        "raw_query": "Kawhi games shooting 50%+ from the field",
+        "confidence_breakdown": {
+          "final_confidence": 0.7972857142857144,
+          "should_use_llm": false,
+          "coverage_score": 0.35714285714285715,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games shooting 50%+ from the field",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7972857142857144,
+      "processing_time": 0.019279003143310547,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Butler games with 6+ rebounds and 5+ assists",
+        "category": "multi_stat",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Multiple categories"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jared Butler",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "REB",
+            "operator": "gte",
+            "value": 6,
+            "value2": null,
+            "original_text": "6+ rebounds"
+          },
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 5,
+            "value2": null,
+            "original_text": "5+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.952,
+        "raw_query": "Butler games with 6+ rebounds and 5+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.952,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.6799999999999999,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.952,
+      "processing_time": 0.004324436187744141,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Westbrook games without a triple-double",
+        "category": "negative_stat",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Without stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Russell Westbrook",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8222727272727273,
+        "raw_query": "Westbrook games without a triple-double",
+        "confidence_breakdown": {
+          "final_confidence": 0.8222727272727273,
+          "should_use_llm": false,
+          "coverage_score": 0.4090909090909091,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games without a triple-double",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8222727272727273,
+      "processing_time": 0.006356239318847656,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Beal home games this season scoring 30+",
+        "category": "complete",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Home + season + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Bradley Beal",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.708,
+        "raw_query": "Beal home games this season scoring 30+",
+        "confidence_breakdown": {
+          "final_confidence": 0.708,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "games  scoring 30+",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.708,
+      "processing_time": 0.01482391357421875,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "CP3 games with Russell Westbrook",
+        "category": "relationships",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Teammate relationship"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Chris Paul",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "CP3 games with Russell Westbrook",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [
+          "Russell Westbrook"
+        ],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.006035566329956055,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Donovan Mitchell games with 25+ points",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Full name + stat"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Donovan Mitchell",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 25,
+            "value2": null,
+            "original_text": "25+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8840000000000001,
+        "raw_query": "Donovan Mitchell games with 25+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.8840000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Donovan Mitchell",
+                "alternatives": [
+                  "Ajay Mitchell",
+                  "Davion Mitchell"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8840000000000001,
+      "processing_time": 0.0025322437286376953,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Rudy Gobert games with 10+ rebounds",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Center + rebounds"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Rudy Gobert",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "REB",
+            "operator": "gte",
+            "value": 10,
+            "value2": null,
+            "original_text": "10+ rebounds"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Rudy Gobert games with 10+ rebounds",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.0045623779296875,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Devin Booker away games with 30+ points",
+        "category": "stat_location",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Away + scoring"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Devin Booker",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "away",
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 30,
+            "value2": null,
+            "original_text": "30+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.958,
+        "raw_query": "Devin Booker away games with 30+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.958,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.958,
+      "processing_time": 0.007647037506103516,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Karl-Anthony Towns games with double-double",
+        "category": "stat_concept",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Hyphenated name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Karl-Anthony Towns",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "Karl-Anthony Towns games with double-double",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.003543853759765625,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "De'Aaron Fox games with 8+ assists",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Apostrophe in name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "De'Aaron Fox",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 8,
+            "value2": null,
+            "original_text": "8+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "De'Aaron Fox games with 8+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.002524852752685547,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Nikola Vucevic games with 15+ rebounds",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "International name"
+      },
+      "success": false,
+      "components": {
+        "player_name": null,
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "REB",
+            "operator": "gte",
+            "value": 15,
+            "value2": null,
+            "original_text": "15+ rebounds"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.7485833333333334,
+        "raw_query": "Nikola Vucevic games with 15+ rebounds",
+        "confidence_breakdown": {
+          "final_confidence": 0.7485833333333334,
+          "should_use_llm": true,
+          "coverage_score": 0.4583333333333333,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 0.6,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [
+              {
+                "type": "missing_player",
+                "severity": "high"
+              }
+            ],
+            "uncovered_text": "Nikola Vucevic",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7485833333333334,
+      "processing_time": 0.006087779998779297,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "CJ McCollum games with 5+ threes",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Initials + last name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "CJ McCollum",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "FG3M",
+            "operator": "gte",
+            "value": 5,
+            "value2": null,
+            "original_text": "5+ threes"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "CJ McCollum games with 5+ threes",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.005049705505371094,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Mikal Bridges games playing 35+ minutes",
+        "category": "minutes",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Minutes filter"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Mikal Bridges",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": [
+          35,
+          48
+        ],
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8551764705882354,
+        "raw_query": "Mikal Bridges games playing 35+ minutes",
+        "confidence_breakdown": {
+          "final_confidence": 0.8551764705882354,
+          "should_use_llm": false,
+          "coverage_score": 0.7647058823529411,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Mikal Bridges",
+                "alternatives": [
+                  "Miles Bridges"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "games playing utes",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8551764705882354,
+      "processing_time": 0.0034651756286621094,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Fred VanVleet games with 6+ assists",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Compound last name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Fred VanVleet",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 6,
+            "value2": null,
+            "original_text": "6+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "Fred VanVleet games with 6+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.0031654834747314453,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "OG Anunoby games with 15+ points",
+        "category": "stat_filter",
+        "clarity_level": "clear",
+        "expected_difficulty": 2,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Unusual name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "OG Anunoby",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 15,
+            "value2": null,
+            "original_text": "15+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.964,
+        "raw_query": "OG Anunoby games with 15+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.964,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.964,
+      "processing_time": 0.006096363067626953,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "LeBron with AD but without Westbrook last 10",
+        "category": "complex_relationship",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "With/without logic"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.912,
+        "raw_query": "LeBron with AD but without Westbrook last 10",
+        "confidence_breakdown": {
+          "final_confidence": 0.912,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.6799999999999999,
+          "completeness_score": 0.8,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [
+              {
+                "type": "incomplete_time_reference",
+                "severity": "medium"
+              }
+            ],
+            "uncovered_text": "with  but without  last 10",
+            "coverage_components": 3
+          }
+        },
+        "stat_categories": [],
+        "players_on": [
+          "Anthony Davis"
+        ],
+        "players_off": [
+          "Russell Westbrook"
+        ]
+      },
+      "confidence": 0.912,
+      "processing_time": 0.018224239349365234,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Curry vs worst defensive teams recently",
+        "category": "opponent_time",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Worst + recent"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "team_stats",
+        "confidence": 0.6830625,
+        "raw_query": "Curry vs worst defensive teams recently",
+        "confidence_breakdown": {
+          "final_confidence": 0.6830625,
+          "should_use_llm": true,
+          "coverage_score": 0.15625,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.65,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              },
+              {
+                "type": "temporal_ambiguity",
+                "description": "Vague time reference \"recent\" without specific period",
+                "severity": "low"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "vs worst defensive teams recently",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.6830625,
+      "processing_time": 0.0025789737701416016,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Giannis efficient games this season",
+        "category": "efficiency",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vague efficiency"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Giannis Antetokounmpo",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.829375,
+        "raw_query": "Giannis efficient games this season",
+        "confidence_breakdown": {
+          "final_confidence": 0.829375,
+          "should_use_llm": false,
+          "coverage_score": 0.4375,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "efficient games",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.829375,
+      "processing_time": 0.013410568237304688,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dame clutch games with 25+ points",
+        "category": "context",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Clutch context"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "PTS",
+            "operator": "gte",
+            "value": 25,
+            "value2": null,
+            "original_text": "25+ points"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8850526315789475,
+        "raw_query": "Dame clutch games with 25+ points",
+        "confidence_breakdown": {
+          "final_confidence": 0.8850526315789475,
+          "should_use_llm": false,
+          "coverage_score": 0.6842105263157895,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "clutch",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8850526315789475,
+      "processing_time": 0.0033922195434570312,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Luka big games recently",
+        "category": "subjective",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vague 'big games'"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Luka Doncic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7893333333333334,
+        "raw_query": "Luka big games recently",
+        "confidence_breakdown": {
+          "final_confidence": 0.7893333333333334,
+          "should_use_llm": false,
+          "coverage_score": 0.3333333333333333,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.9,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "temporal_ambiguity",
+                "description": "Vague time reference \"recent\" without specific period",
+                "severity": "low"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "big games recently",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7893333333333334,
+      "processing_time": 0.002682209014892578,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Tatum good shooting games this season",
+        "category": "efficiency",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vague 'good shooting'"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jayson Tatum",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.852888888888889,
+        "raw_query": "Tatum good shooting games this season",
+        "confidence_breakdown": {
+          "final_confidence": 0.852888888888889,
+          "should_use_llm": false,
+          "coverage_score": 0.5555555555555556,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "good shooting games",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.852888888888889,
+      "processing_time": 0.012787342071533203,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Embiid dominant games in the paint",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Subjective dominance"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Joel Embiid",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7929473684210526,
+        "raw_query": "Embiid dominant games in the paint",
+        "confidence_breakdown": {
+          "final_confidence": 0.7929473684210526,
+          "should_use_llm": false,
+          "coverage_score": 0.3157894736842105,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "dominant games in the paint",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7929473684210526,
+      "processing_time": 0.003796100616455078,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Jokic playmaking games with 8+ assists",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Playmaking style"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Nikola Jokic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [
+          {
+            "stat_column": "AST",
+            "operator": "gte",
+            "value": 8,
+            "value2": null,
+            "original_text": "8+ assists"
+          }
+        ],
+        "intent": "game_logs",
+        "confidence": 0.8503636363636364,
+        "raw_query": "Jokic playmaking games with 8+ assists",
+        "confidence_breakdown": {
+          "final_confidence": 0.8503636363636364,
+          "should_use_llm": false,
+          "coverage_score": 0.5454545454545454,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "playmaking",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8503636363636364,
+      "processing_time": 0.007152557373046875,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "KD hot shooting games from three",
+        "category": "streaks",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Hot shooting streak"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kevin Durant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.714,
+        "raw_query": "KD hot shooting games from three",
+        "confidence_breakdown": {
+          "final_confidence": 0.714,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.76,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "hot shooting games from three",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.714,
+      "processing_time": 0.010494470596313477,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Harden high scoring games",
+        "category": "subjective",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vague high scoring"
+      },
+      "success": true,
+      "components": {
+        "player_name": "James Harden",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.726,
+        "raw_query": "Harden high scoring games",
+        "confidence_breakdown": {
+          "final_confidence": 0.726,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "high scoring games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.726,
+      "processing_time": 0.007521390914916992,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Kawhi healthy games this season",
+        "category": "health",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Health status"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kawhi Leonard",
+        "team_name": null,
+        "time_period": "season",
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8241666666666667,
+        "raw_query": "Kawhi healthy games this season",
+        "confidence_breakdown": {
+          "final_confidence": 0.8241666666666667,
+          "should_use_llm": false,
+          "coverage_score": 0.4166666666666667,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "healthy games",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8241666666666667,
+      "processing_time": 0.012687206268310547,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Butler intense games",
+        "category": "subjective",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Subjective intensity"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jared Butler",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.732,
+        "raw_query": "Butler intense games",
+        "confidence_breakdown": {
+          "final_confidence": 0.732,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "intense games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.732,
+      "processing_time": 0.00529932975769043,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Westbrook explosive games",
+        "category": "subjective",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Subjective explosive"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Russell Westbrook",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.857,
+        "raw_query": "Westbrook explosive games",
+        "confidence_breakdown": {
+          "final_confidence": 0.857,
+          "should_use_llm": false,
+          "coverage_score": 0.5,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "explosive games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.857,
+      "processing_time": 0.0027434825897216797,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Beal volume scoring games",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Volume scoring"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Bradley Beal",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.726,
+        "raw_query": "Beal volume scoring games",
+        "confidence_breakdown": {
+          "final_confidence": 0.726,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "volume scoring games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.726,
+      "processing_time": 0.0031256675720214844,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Draymond impactful games defensively",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Defensive impact"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Draymond Green",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7174285714285715,
+        "raw_query": "Draymond impactful games defensively",
+        "confidence_breakdown": {
+          "final_confidence": 0.7174285714285715,
+          "should_use_llm": true,
+          "coverage_score": 0.2857142857142857,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Draymond Green",
+                "alternatives": [
+                  "AJ Green",
+                  "Jalen Green",
+                  "Javonte Green",
+                  "Jeff Green",
+                  "Josh Green"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "impactful games defensively",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7174285714285715,
+      "processing_time": 0.004291057586669922,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Klay hot games from three point line",
+        "category": "streaks",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Three point hot streak"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Klay Thompson",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.6835555555555555,
+        "raw_query": "Klay hot games from three point line",
+        "confidence_breakdown": {
+          "final_confidence": 0.6835555555555555,
+          "should_use_llm": true,
+          "coverage_score": 0.2222222222222222,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.72,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Klay Thompson",
+                "alternatives": [
+                  "Amen Thompson",
+                  "Ausar Thompson"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "hot games from three point line",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.6835555555555555,
+      "processing_time": 0.0145416259765625,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Zion attacking games",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Attacking style"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Zion Williamson",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8089230769230769,
+        "raw_query": "Zion attacking games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8089230769230769,
+          "should_use_llm": false,
+          "coverage_score": 0.3076923076923077,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "attacking games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8089230769230769,
+      "processing_time": 0.006519317626953125,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Ja explosive scoring games",
+        "category": "style",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Explosive scoring"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Ja Morant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.726,
+        "raw_query": "Ja explosive scoring games",
+        "confidence_breakdown": {
+          "final_confidence": 0.726,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "explosive scoring games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.726,
+      "processing_time": 0.002513885498046875,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Morant highlight games",
+        "category": "subjective",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Highlight performances"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Ja Morant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8320000000000001,
+        "raw_query": "Morant highlight games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8320000000000001,
+          "should_use_llm": false,
+          "coverage_score": 0.4,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "highlight games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8320000000000001,
+      "processing_time": 0.003515005111694336,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Greek Freak monster games",
+        "category": "nickname",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Nickname + monster"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Giannis Antetokounmpo",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8730588235294119,
+        "raw_query": "Greek Freak monster games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8730588235294119,
+          "should_use_llm": false,
+          "coverage_score": 0.5882352941176471,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "monster games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8730588235294119,
+      "processing_time": 0.0026934146881103516,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "King James vintage games",
+        "category": "nickname",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vintage performances"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8301666666666667,
+        "raw_query": "King James vintage games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8301666666666667,
+          "should_use_llm": false,
+          "coverage_score": 0.4166666666666667,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "vintage games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8301666666666667,
+      "processing_time": 0.005532503128051758,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Chef Curry three point games",
+        "category": "nickname",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Chef nickname"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7884210526315789,
+        "raw_query": "Chef Curry three point games",
+        "confidence_breakdown": {
+          "final_confidence": 0.7884210526315789,
+          "should_use_llm": false,
+          "coverage_score": 0.47368421052631576,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "three point games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7884210526315789,
+      "processing_time": 0.0030019283294677734,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "The Process dominant games",
+        "category": "nickname",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Embiid nickname"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Joel Embiid",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8426666666666667,
+        "raw_query": "The Process dominant games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8426666666666667,
+          "should_use_llm": false,
+          "coverage_score": 0.4666666666666667,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "dominant games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8426666666666667,
+      "processing_time": 0.0025599002838134766,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dame Time clutch performances",
+        "category": "nickname",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Dame Time reference"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8029230769230769,
+        "raw_query": "Dame Time clutch performances",
+        "confidence_breakdown": {
+          "final_confidence": 0.8029230769230769,
+          "should_use_llm": false,
+          "coverage_score": 0.3076923076923077,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "clutch performances",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8029230769230769,
+      "processing_time": 0.002624034881591797,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Air Jordan level games",
+        "category": "comparison",
+        "clarity_level": "moderate",
+        "expected_difficulty": 3,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Jordan comparison"
+      },
+      "success": true,
+      "components": {
+        "player_name": "DeAndre Jordan",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8623636363636364,
+        "raw_query": "Air Jordan level games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8623636363636364,
+          "should_use_llm": false,
+          "coverage_score": 0.5454545454545454,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "Air  level games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8623636363636364,
+      "processing_time": 0.002526998519897461,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "LeBron when he goes off",
+        "category": "vague",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Vague 'goes off'"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.97,
+        "raw_query": "LeBron when he goes off",
+        "confidence_breakdown": {
+          "final_confidence": 0.97,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.8,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.97,
+      "processing_time": 0.00561213493347168,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Curry from way downtown",
+        "category": "location_vague",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Way downtown reference"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7721538461538462,
+        "raw_query": "Curry from way downtown",
+        "confidence_breakdown": {
+          "final_confidence": 0.7721538461538462,
+          "should_use_llm": false,
+          "coverage_score": 0.38461538461538464,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "from way downtown",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7721538461538462,
+      "processing_time": 0.01333165168762207,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Giannis unstoppable games",
+        "category": "subjective",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Unstoppable descriptor"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Giannis Antetokounmpo",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8292222222222223,
+        "raw_query": "Giannis unstoppable games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8292222222222223,
+          "should_use_llm": false,
+          "coverage_score": 0.3888888888888889,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "unstoppable games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8292222222222223,
+      "processing_time": 0.004296064376831055,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Dame deep range games",
+        "category": "range_vague",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Deep range shooting"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8029230769230769,
+        "raw_query": "Dame deep range games",
+        "confidence_breakdown": {
+          "final_confidence": 0.8029230769230769,
+          "should_use_llm": false,
+          "coverage_score": 0.3076923076923077,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "deep range games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8029230769230769,
+      "processing_time": 0.0020017623901367188,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Luka doing Luka things",
+        "category": "meme",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Doing X things meme"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Luka Doncic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.868857142857143,
+        "raw_query": "Luka doing Luka things",
+        "confidence_breakdown": {
+          "final_confidence": 0.868857142857143,
+          "should_use_llm": false,
+          "coverage_score": 0.5714285714285714,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "doing  things",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.868857142857143,
+      "processing_time": 0.0025942325592041016,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Tatum iso games",
+        "category": "abbreviated",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Isolation abbreviated"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jayson Tatum",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.982,
+        "raw_query": "Tatum iso games",
+        "confidence_breakdown": {
+          "final_confidence": 0.982,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "iso games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.982,
+      "processing_time": 0.0036361217498779297,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Embiid in the zone",
+        "category": "subjective",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "In the zone reference"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Joel Embiid",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8760000000000001,
+        "raw_query": "Embiid in the zone",
+        "confidence_breakdown": {
+          "final_confidence": 0.8760000000000001,
+          "should_use_llm": false,
+          "coverage_score": 0.6,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "in the zone",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8760000000000001,
+      "processing_time": 0.005025386810302734,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Jokic magic games",
+        "category": "subjective",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Magic performances"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Nikola Jokic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.857,
+        "raw_query": "Jokic magic games",
+        "confidence_breakdown": {
+          "final_confidence": 0.857,
+          "should_use_llm": false,
+          "coverage_score": 0.5,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "magic games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.857,
+      "processing_time": 0.0015282630920410156,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "KD being KD",
+        "category": "meme",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Being X meme"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kevin Durant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7570000000000001,
+        "raw_query": "KD being KD",
+        "confidence_breakdown": {
+          "final_confidence": 0.7570000000000001,
+          "should_use_llm": false,
+          "coverage_score": 0.1,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "being",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7570000000000001,
+      "processing_time": 0.002590179443359375,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Harden doing his thing",
+        "category": "vague",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Doing his thing"
+      },
+      "success": true,
+      "components": {
+        "player_name": "James Harden",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7510000000000001,
+        "raw_query": "Harden doing his thing",
+        "confidence_breakdown": {
+          "final_confidence": 0.7510000000000001,
+          "should_use_llm": false,
+          "coverage_score": 0.1,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "doing his thing",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7510000000000001,
+      "processing_time": 0.002530813217163086,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Kawhi when healthy",
+        "category": "conditional",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Health conditional"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kawhi Leonard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8361666666666667,
+        "raw_query": "Kawhi when healthy",
+        "confidence_breakdown": {
+          "final_confidence": 0.8361666666666667,
+          "should_use_llm": false,
+          "coverage_score": 0.4166666666666667,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "when healthy",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8361666666666667,
+      "processing_time": 0.006021261215209961,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Butler locked in",
+        "category": "subjective",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Locked in mentality"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jared Butler",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7570000000000001,
+        "raw_query": "Butler locked in",
+        "confidence_breakdown": {
+          "final_confidence": 0.7570000000000001,
+          "should_use_llm": false,
+          "coverage_score": 0.1,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "locked in",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7570000000000001,
+      "processing_time": 0.004063129425048828,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Westbrook going crazy",
+        "category": "slang",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Going crazy slang"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Russell Westbrook",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8927142857142858,
+        "raw_query": "Westbrook going crazy",
+        "confidence_breakdown": {
+          "final_confidence": 0.8927142857142858,
+          "should_use_llm": false,
+          "coverage_score": 0.6428571428571429,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "going crazy",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8927142857142858,
+      "processing_time": 0.0031549930572509766,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "Beal on fire",
+        "category": "metaphor",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "On fire metaphor"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Bradley Beal",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.732,
+        "raw_query": "Beal on fire",
+        "confidence_breakdown": {
+          "final_confidence": 0.732,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "on fire",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.732,
+      "processing_time": 0.0050754547119140625,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "Paul George feeling it",
+        "category": "subjective",
+        "clarity_level": "unclear",
+        "expected_difficulty": 4,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Feeling it reference"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Paul George",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.7930588235294118,
+        "raw_query": "Paul George feeling it",
+        "confidence_breakdown": {
+          "final_confidence": 0.7930588235294118,
+          "should_use_llm": false,
+          "coverage_score": 0.5882352941176471,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.6,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Paul George",
+                "alternatives": [
+                  "Keyonte George",
+                  "Kyshawn George"
+                ],
+                "severity": "high"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "feeling it",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.7930588235294118,
+      "processing_time": 0.006100654602050781,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "lebron last games",
+        "category": "typo",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Lowercase name"
+      },
+      "success": true,
+      "components": {
+        "player_name": "LeBron James",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.9420000000000001,
+        "raw_query": "lebron last games",
+        "confidence_breakdown": {
+          "final_confidence": 0.9420000000000001,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.88,
+          "completeness_score": 0.8,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [
+              {
+                "type": "incomplete_time_reference",
+                "severity": "medium"
+              }
+            ],
+            "uncovered_text": "last games",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.9420000000000001,
+      "processing_time": 0.01498723030090332,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "curry 3s",
+        "category": "abbreviated",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Very abbreviated"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Stephen Curry",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.9380000000000002,
+        "raw_query": "curry 3s",
+        "confidence_breakdown": {
+          "final_confidence": 0.9380000000000002,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.75,
+          "complexity_score": 0.92,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "player_last_name_ambiguity",
+                "current": "Stephen Curry",
+                "alternatives": [
+                  "Seth Curry"
+                ],
+                "severity": "medium"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "3s",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.9380000000000002,
+      "processing_time": 0.00374603271484375,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "giannas home",
+        "category": "typo",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Misspelled name"
+      },
+      "success": false,
+      "components": {
+        "player_name": null,
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.738,
+        "raw_query": "giannas home",
+        "confidence_breakdown": {
+          "final_confidence": 0.738,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.92,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "giannas",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.738,
+      "processing_time": 0.00478363037109375,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "dame threes recent",
+        "category": "word_order",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Unusual word order"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Damian Lillard",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.812,
+        "raw_query": "dame threes recent",
+        "confidence_breakdown": {
+          "final_confidence": 0.812,
+          "should_use_llm": false,
+          "coverage_score": 0.4,
+          "semantic_score": 1.0,
+          "ambiguity_score": 0.9,
+          "complexity_score": 0.88,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [
+              {
+                "type": "temporal_ambiguity",
+                "description": "Vague time reference \"recent\" without specific period",
+                "severity": "low"
+              }
+            ],
+            "completeness_issues": [],
+            "uncovered_text": "threes recent",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.812,
+      "processing_time": 0.0076181888580322266,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "luka last",
+        "category": "incomplete",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Incomplete query"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Luka Doncic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.988,
+        "raw_query": "luka last",
+        "confidence_breakdown": {
+          "final_confidence": 0.988,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.92,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "last",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.988,
+      "processing_time": 0.011803388595581055,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "tatum pts",
+        "category": "abbreviated",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Abbreviated stats"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Jayson Tatum",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.988,
+        "raw_query": "tatum pts",
+        "confidence_breakdown": {
+          "final_confidence": 0.988,
+          "should_use_llm": false,
+          "coverage_score": 1.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.92,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "pts",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.988,
+      "processing_time": 0.004053354263305664,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "embid games",
+        "category": "typo",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Misspelled name"
+      },
+      "success": false,
+      "components": {
+        "player_name": null,
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.658,
+        "raw_query": "embid games",
+        "confidence_breakdown": {
+          "final_confidence": 0.658,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.92,
+          "completeness_score": 0.6,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [
+              {
+                "type": "missing_player",
+                "severity": "high"
+              }
+            ],
+            "uncovered_text": "embid games",
+            "coverage_components": 0
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.658,
+      "processing_time": 0.001997709274291992,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "jokic tripledouble",
+        "category": "spacing",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "No spacing"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Nikola Jokic",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.8115294117647058,
+        "raw_query": "jokic tripledouble",
+        "confidence_breakdown": {
+          "final_confidence": 0.8115294117647058,
+          "should_use_llm": false,
+          "coverage_score": 0.29411764705882354,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.92,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "tripledouble",
+            "coverage_components": 1
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.8115294117647058,
+      "processing_time": 0.0036764144897460938,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "high"
+    },
+    {
+      "test_case": {
+        "query": "kd points home games",
+        "category": "word_order",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": true,
+        "expected_components": null,
+        "notes": "Mixed word order"
+      },
+      "success": true,
+      "components": {
+        "player_name": "Kevin Durant",
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": "home",
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.726,
+        "raw_query": "kd points home games",
+        "confidence_breakdown": {
+          "final_confidence": 0.726,
+          "should_use_llm": true,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 0.84,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "points  games",
+            "coverage_components": 2
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.726,
+      "processing_time": 0.0035483837127685547,
+      "errors": [],
+      "confidence_accurate": true,
+      "confidence_category": "medium"
+    },
+    {
+      "test_case": {
+        "query": "",
+        "category": "empty",
+        "clarity_level": "very_unclear",
+        "expected_difficulty": 5,
+        "should_parse_successfully": false,
+        "expected_components": null,
+        "notes": "Empty query"
+      },
+      "success": false,
+      "components": {
+        "player_name": null,
+        "team_name": null,
+        "time_period": null,
+        "game_count": null,
+        "date_range": null,
+        "opponent_filters": [],
+        "location": null,
+        "minutes_filter": null,
+        "self_filters": [],
+        "intent": "game_logs",
+        "confidence": 0.75,
+        "raw_query": "",
+        "confidence_breakdown": {
+          "final_confidence": 0.75,
+          "should_use_llm": false,
+          "coverage_score": 0.0,
+          "semantic_score": 1.0,
+          "ambiguity_score": 1.0,
+          "complexity_score": 1.0,
+          "completeness_score": 1.0,
+          "details": {
+            "semantic_warnings": [],
+            "ambiguities": [],
+            "completeness_issues": [],
+            "uncovered_text": "",
+            "coverage_components": 0
+          }
+        },
+        "stat_categories": [],
+        "players_on": [],
+        "players_off": []
+      },
+      "confidence": 0.75,
+      "processing_time": 0.0010080337524414062,
+      "errors": [],
+      "confidence_accurate": false,
+      "confidence_category": "medium"
+    }
+  ]
+}

@@ -116,6 +116,53 @@ class LLMService:
         except Exception as e:
             logger.warning(f"Failed to load aliases from database: {e}")
     
+    def _get_default_prompt(self) -> str:
+        """
+        Get the default system prompt.
+        
+        Returns:
+            str: Default system prompt
+        """
+        return """You are an expert at parsing NBA statistics queries and converting them into structured JSON requests.
+
+Parse the user's query and return a JSON object with these fields:
+- player_name: Main player name (string or null)
+- team_name: Team name (string or null)  
+- game_count: Number of games (integer or null)
+- date_range: Date range YYYY-MM-DD (string or null)
+- opponent_filters: List of [filter_type, rank] pairs or []
+- location: "home", "away", or null
+- minutes_filter: [min, max] tuple or null
+- self_filters: List of stat filters or []
+- players_on: List of teammate names or []
+- players_off: List of excluded player names or []
+- season: Season string or null
+- intent: "game_logs", "player_profile", "team_stats", or null
+- confidence: Overall confidence score 0-1
+- field_confidence: Object with confidence for each field
+
+Focus on accuracy and provide confidence scores for each extracted component."""
+
+    def _build_system_prompt(self) -> str:
+        """
+        Build the complete system prompt with context.
+        
+        Returns:
+            str: Complete system prompt
+        """
+        # Try to load from file first
+        prompt = self._load_system_prompt_from_file()
+        
+        # Add dynamic context if available
+        if self.player_aliases:
+            sample_players = list(self.player_aliases.values())[:20]
+            prompt += f"\n\nKNOWN PLAYERS (sample): {', '.join(sample_players)}"
+        
+        if self.team_aliases:
+            prompt += f"\n\nKNOWN TEAMS: {', '.join(self.team_aliases.values())}"
+        
+        return prompt
+    
     def _load_system_prompt_from_file(self, file_path: str = "prompts/system_prompt.txt") -> str:
         """
         Load the system prompt from a text file.
