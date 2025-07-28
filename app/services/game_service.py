@@ -1,15 +1,27 @@
-from functools import lru_cache
 import pandas as pd
 from nba_api.stats import endpoints
 from nba_api.stats.endpoints import playergamelogs
 from nba_api.stats.static import teams
 from ..utils.database_utils import get_opponent_team, nba_team_to_abbreviation, get_player_id, calculate_additional_stats
 from difflib import get_close_matches
+from .nba_cache import NBAGameCache
+from ..utils.cache_config import get_redis_client
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 class GameService:
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, redis_client=None):
         self.engine = db_engine
         self.all_teams = teams.get_teams()
+        
+        # Initialize cache
+        if redis_client is None:
+            redis_client = get_redis_client()
+        self.cache = NBAGameCache(redis_client)
+        
+        logger.info(f"GameService initialized with cache {'enabled' if self.cache.enabled else 'disabled'}")
 
     def get_player_id(self, player_name):
         player_dict = self._fetch_data_from_table('Player_Information')
@@ -27,10 +39,18 @@ class GameService:
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
 
-    @lru_cache(maxsize=32)
-    def get_player_game_logs_with_ratings(self, player_name, season):
-        """Retrieve game logs for a player and calculate ratings"""
-        game_logs_df, next_team = self._get_game_logs(player_name, season)
+    @property
+    def cache_decorator(self):
+        """Get cache decorator for this instance"""
+        return self.cache.cache_player_logs()
+    
+    def get_player_game_logs_with_ratings(self, player_name, season='2024-25'):
+        """Retrieve game logs for a player and calculate ratings (cached)"""
+        return self._get_player_game_logs_cached(player_name, season)
+    
+    def _get_player_game_logs_cached(self, player_name, season):
+        """Internal cached method for player game logs - uses daily cache strategy"""
+        return self._get_game_logs(player_name, season)
         
         # Calculate ratings
         #game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
@@ -50,7 +70,58 @@ class GameService:
         
         return game_logs_df, next_team
 
+    @property  
+    def daily_cache_decorator(self):
+        """Get daily cache decorator for this instance"""
+        return self.cache.cache_daily_nba_data()
+    
     def _get_game_logs(self, player_name, season='2024-25'):
+        """Get game logs with daily caching - only hits NBA API once per day"""
+        # Apply caching manually since we can't use decorators on dynamic methods
+        if self.cache.enabled:
+            from ..utils.cache_config import get_cache_date_key, CACHE_PREFIXES
+            
+            # Determine cache strategy based on season
+            if self.cache._is_current_season(season):
+                # Current season - cache until 4 AM ET next day with date key
+                cache_key = self.cache._generate_key(
+                    CACHE_PREFIXES['player_logs_daily'],
+                    True,  # include_date
+                    '_fetch_game_logs_from_api',
+                    player_name, season
+                )
+                cache_type = 'daily_nba_data'
+            else:
+                # Historical season - cache for 30 days without date key
+                cache_key = self.cache._generate_key(
+                    CACHE_PREFIXES['season_data'],
+                    False,  # include_date
+                    '_fetch_game_logs_from_api', 
+                    player_name, season
+                )
+                cache_type = 'season_historical'
+            
+            # Check cache first
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug(f"Cache hit for player logs: {player_name}, {season} (avoiding NBA API call)")
+                return cached_result
+            
+            # Cache miss - make NBA API call
+            logger.info(f"Cache miss for player logs: {player_name}, {season} - making NBA API call")
+            result = self._fetch_game_logs_from_api(player_name, season)
+            
+            # Cache the result
+            ttl = self.cache._get_ttl(cache_type)
+            self.cache.set(cache_key, result, ttl)
+            logger.info(f"Cached NBA API result for {player_name}, {season} until {datetime.now() + timedelta(seconds=ttl)}")
+            
+            return result
+        else:
+            # No cache - direct API call
+            return self._fetch_game_logs_from_api(player_name, season)
+    
+    def _fetch_game_logs_from_api(self, player_name, season='2024-25'):
         player_id = self.get_player_id(player_name)
         gamelogs = endpoints.playergamelogs.PlayerGameLogs(
             player_id_nullable=player_id, 
@@ -126,7 +197,7 @@ class GameService:
         matchupRTG = (player_data.values * team_data.values).sum()
         return round(matchupRTG, 2)
 
-    def get_common_games(self, primary_player_logs, other_players_names, season='2023-24'):
+    def get_common_games(self, primary_player_logs, other_players_names, season='2024-25'):
         """Find common games between players"""
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
         
@@ -144,7 +215,7 @@ class GameService:
         common_game_ids = {pair[0] for pair in primary_game_team_pairs}
         return set(common_game_ids)
 
-    def get_games_to_exclude(self, player_logs, players_off_names, season='2023-24'):
+    def get_games_to_exclude(self, player_logs, players_off_names, season='2024-25'):
         """Find games to exclude due to filtering"""
         exclude_game_ids = set()
         
@@ -281,7 +352,75 @@ class GameService:
             'next_game': self._get_team_name_by_id(next_team)  # This should be implemented properly
         }
     
-    def filter_teams(self, filter, rank_filter, date_filter = None):
+    def filter_teams(self, filter, rank_filter, date_filter=None):
+        """Filter teams with daily caching - avoids repeated NBA API calls"""
+        # Check if this filter type requires NBA API calls
+        api_dependent_filters = ['C&S 3s', 'C&S PTS', 'C&S 3A', 'PU 2s', 'PU 3s', 'PU PTS'] + \
+                               ['OPP_AST','OPP_PTS','OPP_REB','OPP_STOCKS','OPP_FTA', 'OPP_TOV', 'OPP_BLK', 'OPP_STL','OPP_FG3M', 'OPP_FG3A','OPP_FTA']
+        
+        if filter in api_dependent_filters and date_filter is not None:
+            # This might make NBA API calls - cache it daily
+            return self._filter_teams_with_api_calls(filter, rank_filter, date_filter)
+        else:
+            # Static database lookups - can use shorter cache
+            return self._filter_teams_computed(filter, rank_filter, date_filter)
+    
+    def _filter_teams_with_api_calls(self, filter, rank_filter, date_filter=None):
+        """Filter teams that may involve NBA API calls - cached daily"""
+        if self.cache.enabled:
+            from ..utils.cache_config import CACHE_PREFIXES
+            
+            # Cache with date component since NBA API data changes daily
+            cache_key = self.cache._generate_key(
+                CACHE_PREFIXES['team_stats_daily'],
+                True,  # include_date
+                'filter_teams_api',
+                filter, rank_filter, str(date_filter)
+            )
+            
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug(f"Cache hit for team filter: {filter} (avoiding NBA API call)")
+                return cached_result
+            
+            logger.info(f"Cache miss for team filter: {filter} - making NBA API call")
+            result = self._filter_teams_uncached(filter, rank_filter, date_filter)
+            
+            ttl = self.cache._get_ttl('daily_nba_data')
+            self.cache.set(cache_key, result, ttl)
+            logger.info(f"Cached team filter result for {filter}")
+            
+            return result
+        else:
+            return self._filter_teams_uncached(filter, rank_filter, date_filter)
+    
+    def _filter_teams_computed(self, filter, rank_filter, date_filter=None):
+        """Filter teams using computed/database data - shorter cache"""
+        if self.cache.enabled:
+            from ..utils.cache_config import CACHE_PREFIXES
+            
+            cache_key = self.cache._generate_key(
+                CACHE_PREFIXES['computed'],
+                False,  # include_date
+                'filter_teams_computed',
+                filter, rank_filter, str(date_filter)
+            )
+            
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug(f"Cache hit for computed team filter: {filter}")
+                return cached_result
+            
+            result = self._filter_teams_uncached(filter, rank_filter, date_filter)
+            
+            ttl = self.cache._get_ttl('intraday_computed')
+            self.cache.set(cache_key, result, ttl)
+            
+            return result
+        else:
+            return self._filter_teams_uncached(filter, rank_filter, date_filter)
+    
+    def _filter_teams_uncached(self, filter, rank_filter, date_filter=None):
         #filter into diff types
         Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
@@ -313,10 +452,27 @@ class GameService:
             return df.tail(-rank_filter)['team'].tolist()
     
     def _fetch_data_from_table(self, table_name):
-        """Helper method to fetch data from database table"""
+        """Helper method to fetch data from database table with caching"""
+        # Check cache first for static tables
+        if self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+            cache_key = self.cache._generate_key('table_data', table_name)
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug(f"Cache hit for table: {table_name}")
+                return cached_result
+        
+        # Fetch from database
         query = f"SELECT * FROM '{table_name}'"
         with self.engine.connect() as conn:
-            return pd.read_sql(query, conn)
+            result = pd.read_sql(query, conn)
+        
+        # Cache static tables for longer periods
+        if self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+            ttl = self.cache._get_ttl('player_info')  # Use longer TTL for static data
+            self.cache.set(cache_key, result, ttl)
+            logger.debug(f"Cached table data for {table_name}")
+        
+        return result
 
     # Function that returns general opponent stats sorted by the filter
     def general_opp_filtering(self, filter, date_filter):

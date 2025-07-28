@@ -379,6 +379,63 @@ Focus on accuracy and provide confidence scores for each extracted component."""
         
         return results
     
+    def test_prompt_with_context(self, prompt_file: str, test_query: str, player_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Test a prompt file with player context for hybrid NLP-LLM processing.
+        
+        Args:
+            prompt_file: Path to the prompt file to test
+            test_query: Query to test with
+            player_context: Dict containing NLP-extracted player info
+            
+        Returns:
+            Dict containing the test result
+        """
+        try:
+            custom_prompt = self._load_system_prompt_from_file(prompt_file)
+            
+            # Add player context to prompt if available
+            if player_context:
+                context_str = self._format_player_context(player_context)
+                custom_prompt += f"\n\nNLP PLAYER CONTEXT:\n{context_str}"
+                custom_prompt += "\n\nYou can override player info only if you're very confident (95%+) it's wrong."
+            
+            # Add aliases to custom prompt
+            if self.player_aliases:
+                sample_players = list(self.player_aliases.values())[:10]
+                custom_prompt += f"\n\nKNOWN PLAYERS (sample): {', '.join(sample_players)}"
+            
+            if self.team_aliases:
+                custom_prompt += f"\n\nKNOWN TEAMS: {', '.join(self.team_aliases.values())}"
+            
+            result = self.query_llm(test_query, system_prompt=custom_prompt)
+            result["prompt_file"] = prompt_file
+            result["player_context"] = player_context
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Error testing prompt with context: {str(e)}",
+                "prompt_file": prompt_file,
+                "player_context": player_context
+            }
+    
+    def _format_player_context(self, player_context: Dict[str, Any]) -> str:
+        """Format player context for inclusion in LLM prompt"""
+        context_parts = []
+        
+        if player_context.get('player_name'):
+            context_parts.append(f"Main player: {player_context['player_name']}")
+            
+        if player_context.get('players_on'):
+            context_parts.append(f"Players on court: {', '.join(player_context['players_on'])}")
+            
+        if player_context.get('players_off'):
+            context_parts.append(f"Players off court: {', '.join(player_context['players_off'])}")
+            
+        return '\n'.join(context_parts) if context_parts else "No player context provided"
+    
     def test_prompt_file(self, prompt_file: str, test_query: str) -> Dict[str, Any]:
         """
         Test a specific prompt file with a query.

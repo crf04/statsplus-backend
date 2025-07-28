@@ -232,3 +232,136 @@ python run_tests.py
 
 ## Legacy API Support
 The system maintains backward compatibility with legacy endpoints for seamless frontend integration during migration periods.
+
+---
+
+## AI Development Team Configuration
+*Updated by team-configurator on 2025-07-28*
+
+Your project uses: **Flask 2.3.3**, **SQLAlchemy 2.0.31**, **OpenAI GPT-4o-mini**, **spaCy NLP**, **SQLite/MongoDB**
+
+### Specialist Assignments
+
+#### Backend & API Development
+- **API Architecture** → @api-architect
+  - RESTful endpoint design and optimization
+  - API versioning and documentation
+  - Authentication and security patterns
+  
+- **Backend Logic** → @backend-developer
+  - Flask application architecture
+  - Service layer implementation
+  - Business logic optimization
+  
+- **Python/Flask Specialist** → @django-backend-expert
+  - Advanced Python patterns and Flask best practices
+  - ORM optimization and database design
+  - Performance tuning and scalability
+  - *Note: Django expert adapted for Flask - similar Python web framework patterns*
+
+#### Database & Data Management
+- **Database Design** → @django-orm-expert
+  - SQLAlchemy relationship optimization
+  - Query performance and indexing
+  - Database schema evolution
+  - *Note: ORM expertise translates well between Django and SQLAlchemy*
+
+#### AI & Natural Language Processing
+- **LLM Integration** → @backend-developer
+  - OpenAI API integration and optimization
+  - Prompt engineering and response processing
+  - Hybrid AI/traditional query systems
+  
+- **NLP Pipeline** → @performance-optimizer
+  - spaCy and NLTK optimization
+  - Entity recognition improvement
+  - Query parsing performance
+
+#### Code Quality & Architecture
+- **Code Review** → @code-reviewer
+  - Code quality assessment
+  - Architecture validation
+  - Security and best practices review
+  
+- **Performance** → @performance-optimizer
+  - API response time optimization
+  - Database query performance
+  - Caching strategy implementation
+  - LLM response time optimization
+
+#### Documentation & Analysis
+- **Project Analysis** → @project-analyst
+  - Codebase analysis and insights
+  - Architecture documentation
+  - Technical debt assessment
+  
+- **Documentation** → @documentation-specialist
+  - API documentation updates
+  - Code documentation improvement
+  - Technical specification writing
+
+### Task-Based Routing Guide
+
+#### For API Development:
+- "Create new NBA player statistics endpoint" → @api-architect
+- "Optimize game logs API performance" → @performance-optimizer
+- "Add authentication to team endpoints" → @backend-developer
+
+#### For Database Work:
+- "Design new player analytics table" → @django-orm-expert
+- "Optimize game query performance" → @performance-optimizer
+- "Add database indexes for faster lookups" → @django-orm-expert
+
+#### For AI/LLM Features:
+- "Improve natural language query parsing" → @backend-developer
+- "Add new LLM query capabilities" → @backend-developer
+- "Optimize OpenAI API usage and costs" → @performance-optimizer
+
+#### For NLP Processing:
+- "Enhance player name entity recognition" → @performance-optimizer
+- "Add support for new query types" → @backend-developer
+- "Improve fuzzy matching accuracy" → @performance-optimizer
+
+#### For Code Quality:
+- "Review my recent changes" → @code-reviewer
+- "Analyze codebase architecture" → @project-analyst
+- "Document the LLM integration system" → @documentation-specialist
+
+#### For Performance:
+- "Speed up database queries" → @performance-optimizer
+- "Reduce API response times" → @performance-optimizer
+- "Optimize caching strategy" → @performance-optimizer
+
+### Team Collaboration Patterns
+
+#### For Complex Features:
+1. **Planning**: @project-analyst → analyze requirements
+2. **Architecture**: @api-architect → design endpoints
+3. **Implementation**: @backend-developer → core logic
+4. **Database**: @django-orm-expert → data layer
+5. **Review**: @code-reviewer → quality check
+6. **Optimization**: @performance-optimizer → final tuning
+
+#### For Bug Fixes:
+1. **Analysis**: @code-reviewer → identify issue
+2. **Fix**: @backend-developer → implement solution
+3. **Optimization**: @performance-optimizer → if performance-related
+
+#### For New AI Features:
+1. **Design**: @backend-developer → LLM integration approach
+2. **Implementation**: @backend-developer → core AI logic
+3. **Optimization**: @performance-optimizer → speed/cost optimization
+4. **Documentation**: @documentation-specialist → feature docs
+
+### How to Use Your AI Team
+
+Simply tag the appropriate specialist in your requests:
+
+**Examples:**
+- "Build a new endpoint for player comparison analytics" → @api-architect
+- "Optimize the natural language query processing pipeline" → @performance-optimizer
+- "Review my LLM integration code for best practices" → @code-reviewer
+- "Design a better caching strategy for NBA API calls" → @performance-optimizer
+- "Add support for complex multi-player statistical queries" → @backend-developer
+
+Your specialized AI development team is configured and ready to help optimize your NBA backend API!

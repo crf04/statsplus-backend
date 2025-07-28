@@ -55,8 +55,11 @@ class NLService:
         if should_use_llm and self.llm_service:
             logger.info(f"🧠 Routing to LLM (confidence: {parsed_components.confidence:.3f}): {query_text[:50]}...")
             try:
-                # Route to LLM for better accuracy
-                llm_result = self._process_with_llm(query_text, parsed_components)
+                # Extract player context from NLP result
+                player_context = self._extract_player_context(parsed_components)
+                
+                # Route to LLM with player context for hybrid processing
+                llm_result = self._process_with_llm(query_text, parsed_components, player_context)
                 if llm_result:
                     return llm_result
                 else:
@@ -70,13 +73,14 @@ class NLService:
         # Step 3: Use NLP result (fast path or fallback)
         return self._format_nlp_result(parsed_components, query_text)
     
-    def _process_with_llm(self, query_text: str, nlp_fallback):
-        """Process query with LLM and format response"""
+    def _process_with_llm(self, query_text: str, nlp_fallback, player_context=None):
+        """Process query with LLM using player context for hybrid processing"""
         try:
-            # Use optimized prompt for best performance
-            llm_response = self.llm_service.test_prompt_file(
+            # Use enhanced prompt with player context for hybrid processing
+            llm_response = self.llm_service.test_prompt_with_context(
                 "prompts/system_prompt_optimized.txt", 
-                query_text
+                query_text,
+                player_context or {}
             )
             
             if not llm_response.get("success", False):
@@ -85,8 +89,8 @@ class NLService:
             
             llm_content = llm_response.get("content", {})
             
-            # Format LLM response to match frontend expectations
-            return self._format_llm_result(llm_content, query_text, nlp_fallback)
+            # Create hybrid result by merging LLM output with NLP player context
+            return self._create_hybrid_result(llm_content, query_text, nlp_fallback, player_context)
             
         except Exception as e:
             logger.error(f"LLM processing exception: {e}")
@@ -179,4 +183,73 @@ class NLService:
             'parsed_by': 'nlp'  # Flag to indicate NLP was used
         }
         
-        return result 
+        return result
+    
+    def _extract_player_context(self, parsed_components):
+        """Extract player context from NLP result to pass to LLM"""
+        player_context = {}
+        
+        # Extract main player if found with reasonable confidence
+        if parsed_components.player_name:
+            player_context['player_name'] = parsed_components.player_name
+        
+        # Extract players on court if found
+        if parsed_components.players_on:
+            player_context['players_on'] = parsed_components.players_on
+            
+        # Extract players off court if found  
+        if parsed_components.players_off:
+            player_context['players_off'] = parsed_components.players_off
+            
+        logger.info(f"📋 Extracted player context: {player_context}")
+        return player_context
+    
+    def _create_hybrid_result(self, llm_content: dict, query_text: str, nlp_fallback, player_context: dict):
+        """Create hybrid result by intelligently merging LLM output with NLP player context"""
+        try:
+            # Start with LLM result as base
+            hybrid_result = self._format_llm_result(llm_content, query_text, nlp_fallback)
+            
+            if not hybrid_result:
+                return None
+                
+            # Apply selective override logic based on confidence thresholds
+            if player_context:
+                hybrid_result = self._apply_selective_overrides(hybrid_result, llm_content, player_context)
+            
+            # Mark as hybrid processing
+            hybrid_result['parsed_by'] = 'hybrid'
+            hybrid_result['player_context_used'] = player_context
+            
+            logger.info(f"🔄 Created hybrid result with confidence: {hybrid_result.get('confidence', 0):.3f}")
+            return hybrid_result
+            
+        except Exception as e:
+            logger.error(f"Hybrid result creation error: {e}")
+            return None
+    
+    def _apply_selective_overrides(self, llm_result: dict, llm_content: dict, player_context: dict):
+        """Apply selective override logic with confidence thresholds"""
+        
+        # Never override player_name if NLP found it (preserve nickname resolution)
+        if player_context.get('player_name'):
+            llm_result['player_name'] = player_context['player_name']
+            logger.info(f"🔒 Preserved NLP player name: {player_context['player_name']}")
+        
+        # Check if LLM tried to override player info and validate confidence
+        llm_confidence = llm_content.get('confidence', 0)
+        
+        # For other components, only override if LLM confidence >= 0.75
+        override_threshold = 0.75
+        player_override_threshold = 0.95
+        
+        # Handle players_on and players_off with high threshold for overrides
+        for field in ['players_on', 'players_off']:
+            if player_context.get(field) and llm_result.get(field):
+                if llm_confidence >= player_override_threshold:
+                    logger.info(f"⚠️  LLM overriding {field} (confidence: {llm_confidence:.3f})")
+                else:
+                    llm_result[field] = player_context[field]
+                    logger.info(f"🔒 Preserved NLP {field}: {player_context[field]}")
+        
+        return llm_result 
