@@ -12,6 +12,13 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 class GameService:
+    # Whitelist of allowed database tables to prevent SQL injection
+    ALLOWED_TABLES = {
+        'Player_Information', 'team_play_types', 'processed_team_assists', 
+        'processed_player_assists', 'General Opponent Stats', 'Catch and Shoot',
+        'Pullups', 'Less Than 10 Ft'
+    }
+    
     def __init__(self, db_engine, redis_client=None):
         self.engine = db_engine
         self.all_teams = teams.get_teams()
@@ -21,7 +28,7 @@ class GameService:
             redis_client = get_redis_client()
         self.cache = NBAGameCache(redis_client)
         
-        logger.info(f"GameService initialized with cache {'enabled' if self.cache.enabled else 'disabled'}")
+        logger.info(f"GameService initialized with cache {'enabled' if self.cache and self.cache.enabled else 'disabled'}")
 
     def get_player_id(self, player_name):
         player_dict = self._fetch_data_from_table('Player_Information')
@@ -35,6 +42,10 @@ class GameService:
             raise ValueError(f"No matching player found for {player_name}.")
 
     def _fetch_data_from_table(self, table_name):
+        # Validate table name to prevent SQL injection
+        if table_name not in self.ALLOWED_TABLES:
+            raise ValueError(f"Invalid table name: {table_name}. Allowed tables: {list(self.ALLOWED_TABLES)}")
+        
         query = f"SELECT * FROM '{table_name}'"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
@@ -51,24 +62,6 @@ class GameService:
     def _get_player_game_logs_cached(self, player_name, season):
         """Internal cached method for player game logs - uses daily cache strategy"""
         return self._get_game_logs(player_name, season)
-        
-        # Calculate ratings
-        #game_logs_df['PLAYTYPE_RTG'] = game_logs_df.apply(
-        #    lambda row: self.calculate_matchup_rating(
-        #        row['PLAYER_NAME'], 
-        #        get_opponent_team(row['MATCHUP'])
-        #    ), 
-        #    axis=1
-        #)
-        #game_logs_df['AST_LOC_RTG'] = game_logs_df.apply(
-        #    lambda row: self.calculate_assist_location_rating(
-        #        row['PLAYER_NAME'], 
-        #        get_opponent_team(row['MATCHUP'])
-        #    ), 
-        #    axis=1
-        #)
-        
-        return game_logs_df, next_team
 
     @property  
     def daily_cache_decorator(self):
@@ -78,7 +71,7 @@ class GameService:
     def _get_game_logs(self, player_name, season='2024-25'):
         """Get game logs with daily caching - only hits NBA API once per day"""
         # Apply caching manually since we can't use decorators on dynamic methods
-        if self.cache.enabled:
+        if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
             from ..utils.cache_config import get_cache_date_key, CACHE_PREFIXES
             
             # Determine cache strategy based on season
@@ -148,7 +141,8 @@ class GameService:
                 next_team = team1
             else:
                 next_team = team2
-        except:
+        except (Exception, IndexError, KeyError) as e:
+            logger.warning(f"Failed to fetch next game for player {player_id}: {str(e)}")
             next_team = None
         
         
@@ -203,7 +197,7 @@ class GameService:
         
         # Loop through other players and find intersections based on game IDs and team abbreviations
         for player_name in other_players_names:
-            player_id = get_player_id(self.engine, player_name)
+            player_id = self.get_player_id(player_name)
             player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
             player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
             
@@ -221,7 +215,7 @@ class GameService:
         
         # Loop through players_off and union game IDs
         for player_name in players_off_names:
-            player_id = get_player_id(self.engine, player_name)
+            player_id = self.get_player_id(player_name)
             player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
             player_game_ids = set(player_gamelogs['GAME_ID'])
             
@@ -453,9 +447,15 @@ class GameService:
     
     def _fetch_data_from_table(self, table_name):
         """Helper method to fetch data from database table with caching"""
+        # Validate table name to prevent SQL injection
+        if table_name not in self.ALLOWED_TABLES:
+            raise ValueError(f"Invalid table name: {table_name}. Allowed tables: {list(self.ALLOWED_TABLES)}")
+        
+        cache_key = None
+        
         # Check cache first for static tables
-        if self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
-            cache_key = self.cache._generate_key('table_data', table_name)
+        if self.cache and self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+            cache_key = self.cache._generate_key('table_data', False, table_name)
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
                 logger.debug(f"Cache hit for table: {table_name}")
@@ -467,7 +467,7 @@ class GameService:
             result = pd.read_sql(query, conn)
         
         # Cache static tables for longer periods
-        if self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+        if self.cache and self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists'] and cache_key:
             ttl = self.cache._get_ttl('player_info')  # Use longer TTL for static data
             self.cache.set(cache_key, result, ttl)
             logger.debug(f"Cached table data for {table_name}")
