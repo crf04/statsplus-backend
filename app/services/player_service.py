@@ -56,7 +56,7 @@ class PlayerService:
 
     def _get_shooting_type(self, player_name):
         """Get player shooting type data"""
-        player_team = self._fetch_data_from_table('Player_Team_Table')
+        player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
         df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame' ).get_data_frames()[1]
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
@@ -87,7 +87,7 @@ class PlayerService:
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             
-            per36_df = self._fetch_data_from_table('Player_Per36_Stats')
+            per36_df = self._fetch_data_from_table('player_per36_stats')
             
             # Calculate per 36minute stats
             for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
@@ -126,7 +126,7 @@ class PlayerService:
         try:
             player_dict = players.get_players()
             player_df = pd.DataFrame.from_dict(player_dict)
-            player_df.to_sql('Player_Information', self.engine, 
+            player_df.to_sql('player_information', self.engine, 
                            if_exists='replace', index=False)
             return True
         except Exception as e:
@@ -136,7 +136,7 @@ class PlayerService:
     def get_player_id(self, player_name):
         """Get player ID from database"""
         try:
-            df = self._fetch_data_from_table('Player_Information')
+            df = self._fetch_data_from_table('player_information')
             player = df[df['full_name'] == player_name]
             return player['id'].values[0]
         except Exception as e:
@@ -145,7 +145,9 @@ class PlayerService:
 
     def _fetch_data_from_table(self, table_name):
         """Helper method to fetch data from database table"""
-        query = f"SELECT * FROM '{table_name}'"
+        from ..utils.tables import normalize_table_name
+        table_name = normalize_table_name(table_name)
+        query = f"SELECT * FROM {table_name}"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
 

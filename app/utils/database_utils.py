@@ -1,16 +1,18 @@
 import pandas as pd
 from nba_api.stats.static import players
+from .tables import normalize_table_name
 
 def fetch_data_from_table(engine, table_name):
-    """Fetch data from a database table"""
-    query = f"SELECT * FROM '{table_name}'"
+    """Fetch data from a database table (normalized for Postgres)."""
+    normalized = normalize_table_name(table_name)
+    query = f"SELECT * FROM {normalized}"
     with engine.connect() as conn:
         df = pd.read_sql(query, conn)
     return df
 
 def get_player_id(engine, player_name):
     """Get player ID from player name"""
-    player_dict = fetch_data_from_table(engine, 'Player_Information')
+    player_dict = fetch_data_from_table(engine, 'player_information')
     player = player_dict[player_dict['full_name'] == player_name]
     player_id = player['id'].values[0]
     return player_id

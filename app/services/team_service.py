@@ -17,7 +17,7 @@ class TeamService:
 
     def get_team_stats(self, category, team, date=None):
         if category == 'Traditional':
-            df = self._fetch_opponent_data(date) if date else self._fetch_data_from_table('General Opponent Stats')
+            df = self._fetch_opponent_data(date) if date else self._fetch_data_from_table('general_opponent_stats')
             df['OPP_STL+BLK'] = df['OPP_STL'] + df['OPP_BLK']
             df['OPP_STL+BLK_RANK'] = df['OPP_STL+BLK'].rank(method='min', ascending=True)
             team = 'LA Clippers' if team == 'Los Angeles Clippers' else team
@@ -43,7 +43,15 @@ class TeamService:
             types = ['Catch and Shoot', 'Pullups', 'Less Than 10 ft']
 
             for shooting_type in types:
-                df = self._fetch_opp_shooting_data(shooting_type, date) if date else self._fetch_data_from_table(shooting_type)
+                if date:
+                    df = self._fetch_opp_shooting_data(shooting_type, date)
+                else:
+                    name_map = {
+                        'Catch and Shoot': 'catch_and_shoot',
+                        'Pullups': 'pullups',
+                        'Less Than 10 ft': 'less_than_10_ft',
+                    }
+                    df = self._fetch_data_from_table(name_map[shooting_type])
                 if date:
                     df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
                     df['FG3A_RANK'] = df['FG3A'].rank(method='min', ascending=True)
@@ -84,7 +92,9 @@ class TeamService:
     
 
     def _fetch_data_from_table(self, table_name):
-        query = f"SELECT * FROM '{table_name}'"
+        from ..utils.tables import normalize_table_name
+        table_name = normalize_table_name(table_name)
+        query = f"SELECT * FROM {table_name}"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
 

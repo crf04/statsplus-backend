@@ -38,7 +38,7 @@ class DataService:
     def process_opponent_scoring(self):
         """Process and store opponent scoring data"""
         df = self._fetch_opponent_data()
-        df.to_sql('General Opponent Stats', self.engine, if_exists='replace', index=False)
+        df.to_sql('general_opponent_stats', self.engine, if_exists='replace', index=False)
 
     def process_opp_shooting(self):
         """Process and store opponent shooting data"""
@@ -50,7 +50,13 @@ class DataService:
                 df['FG2M_RANK'] = df['FG2M'].rank(method='min', ascending=True)
                 df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
                 df['FG3A_RANK'] = df['FG3A'].rank(method='min', ascending=True)
-                df.to_sql(f'{type}', self.engine, if_exists='replace', index=False)
+                # Normalize table names to snake_case for Postgres
+                table_map = {
+                    'Catch and Shoot': 'catch_and_shoot',
+                    'Pullups': 'pullups',
+                    'Less Than 10 ft': 'less_than_10_ft',
+                }
+                df.to_sql(table_map[type], self.engine, if_exists='replace', index=False)
             except Exception as e:
                 print(f"Error processing {type}: {e}")
                 continue
@@ -277,7 +283,7 @@ class DataService:
         try:
             player_dict = players.get_active_players()
             player_df = pd.DataFrame.from_dict(player_dict)
-            player_df.to_sql('Player_Information', self.engine, 
+            player_df.to_sql('player_information', self.engine, 
                            if_exists='replace', index=False)
             return player_df.to_dict(orient='records')
         except Exception as e:
@@ -288,7 +294,7 @@ class DataService:
         """Store player per36 stats"""
         try:
             df = self._fetch_player_per36_stats()
-            df.to_sql('Player_Per36_Stats', self.engine, if_exists='replace', index=False)
+            df.to_sql('player_per36_stats', self.engine, if_exists='replace', index=False)
             return True
         except Exception as e:
             print(f"Error storing player per36 stats: {e}")
@@ -345,7 +351,9 @@ class DataService:
         ).get_data_frames()[0]
 
     def _fetch_data_from_table(self, table_name):
-        query = f"SELECT * FROM '{table_name}'"
+        from ..utils.tables import normalize_table_name
+        normalized = normalize_table_name(table_name)
+        query = f"SELECT * FROM {normalized}"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
 
@@ -434,20 +442,20 @@ class DataService:
         # Read the Excel file into a DataFrame
         df = pd.read_excel(r'C:\Users\chris\OneDrive\Documents\NBA_PLAYERS.xlsx')
         df = df[['Player','Current Team']]
-        df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)
+        df.to_sql('player_team_table', self.engine, if_exists='replace', index=False)
         return df.to_dict(orient='records')
     
     def save_team(self):
         teams_df = pd.DataFrame(teams.get_teams())
-        teams_df.to_sql('Team_Info', self.engine, if_exists='replace', index=False)
+        teams_df.to_sql('team_info', self.engine, if_exists='replace', index=False)
     
     def map_id_to_team(self):
-        teams_df = self._fetch_data_from_table('Team_Info')
+        teams_df = self._fetch_data_from_table('team_info')
         teams_df['full_name'] = teams_df['full_name'].str.replace('76ers', 'Sixers')
-        df = self._fetch_data_from_table('Player_Team_Table')
+        df = self._fetch_data_from_table('player_team_table')
         df = df.iloc[:-1]
         df['Team_ID'] = df['Current Team'].map(teams_df.set_index('full_name')['id'])
-        df.to_sql('Player_Team_Table', self.engine, if_exists='replace', index=False)
+        df.to_sql('player_team_table', self.engine, if_exists='replace', index=False)
         return df.to_dict(orient='records')
     
     def get_playtypes(self):

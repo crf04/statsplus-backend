@@ -3,6 +3,7 @@ from nba_api.stats import endpoints
 from nba_api.stats.endpoints import playergamelogs
 from nba_api.stats.static import teams
 from ..utils.database_utils import get_opponent_team, nba_team_to_abbreviation, get_player_id, calculate_additional_stats
+from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
 from ..utils.cache_config import get_redis_client
@@ -14,9 +15,9 @@ logger = logging.getLogger(__name__)
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
     ALLOWED_TABLES = {
-        'Player_Information', 'team_play_types', 'processed_team_assists', 
-        'processed_player_assists', 'General Opponent Stats', 'Catch and Shoot',
-        'Pullups', 'Less Than 10 Ft'
+        'player_information', 'team_play_types', 'processed_team_assists', 
+        'processed_player_assists', 'general_opponent_stats', 'catch_and_shoot',
+        'pullups', 'less_than_10_ft'
     }
     
     def __init__(self, db_engine, redis_client=None):
@@ -46,7 +47,9 @@ class GameService:
         if table_name not in self.ALLOWED_TABLES:
             raise ValueError(f"Invalid table name: {table_name}. Allowed tables: {list(self.ALLOWED_TABLES)}")
         
-        query = f"SELECT * FROM '{table_name}'"
+        # Normalize legacy names to Postgres-friendly snake_case
+        table_name = normalize_table_name(table_name)
+        query = f"SELECT * FROM {table_name}"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
 
@@ -431,7 +434,7 @@ class GameService:
         elif filter in overall_opp_types:
             df = self.general_opp_filtering(filter, date_filter)
         elif filter == 'Less Than 10 ft':
-            df = self._fetch_data_from_table('Less Than 10 Ft')
+            df = self._fetch_data_from_table('less_than_10_ft')
             df.sort_values(by = 'FG2M', ascending = False, inplace=True)
             df['team'] = df['TEAM_ABBREVIATION']
         elif filter in assist_types:
@@ -480,7 +483,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             df = endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter).get_data_frames()[0]
         else:
-            df = self._fetch_data_from_table('General Opponent Stats')
+            df = self._fetch_data_from_table('general_opponent_stats')
         df['OPP_STOCKS'] = df['OPP_BLK'] + df['OPP_STL']
         df['team'] = df['TEAM_NAME'].apply(nba_team_to_abbreviation)
         return df.sort_values(by = filter, ascending = False)
@@ -497,7 +500,7 @@ class GameService:
                 date_filter = pd.to_datetime(date_filter)
                 df = endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter).get_data_frames()[0]
         else:
-                df = self._fetch_data_from_table('Catch and Shoot')
+                df = self._fetch_data_from_table('catch_and_shoot')
         df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
         df['team'] = df['TEAM_ABBREVIATION']
         return df.sort_values(by = f_map[filter], ascending = False)
@@ -509,7 +512,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             df = endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter).get_data_frames()[0]
         else:
-            df = self._fetch_data_from_table('Pullups')
+            df = self._fetch_data_from_table('pullups')
         df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
         df['team'] = df['TEAM_ABBREVIATION']
         return df.sort_values(by = f_map[filter], ascending = False) 
