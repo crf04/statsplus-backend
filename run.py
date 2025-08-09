@@ -1,6 +1,7 @@
 from flask import Flask
 from flask_cors import CORS
 from sqlalchemy import create_engine
+import os
 
 # Import blueprints
 from app.routes.player_routes import player_bp
@@ -13,8 +14,10 @@ from app.routes.nl_routes import nl_bp
 app = Flask(__name__)
 CORS(app)
 
-# Set up database connection
-engine = create_engine('sqlite:///nba_play_types.db')
+from app.utils.db import get_engine
+
+# Set up database connection (env-driven)
+engine = get_engine()
 
 # Register blueprints
 app.register_blueprint(player_bp, url_prefix='/api/players')
@@ -76,4 +79,6 @@ def legacy_update_database():
     return update_database()
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Railway provides PORT. Default to 5000 for local dev.
+    port = int(os.getenv('PORT', '5000'))
+    app.run(host='0.0.0.0', port=port, debug=True)

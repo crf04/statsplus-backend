@@ -1,10 +1,11 @@
 from flask import Blueprint, jsonify
 from sqlalchemy import create_engine
+from ..utils.db import get_engine
 from ..services.data_service import DataService
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
-engine = create_engine('sqlite:///nba_play_types.db')
+engine = get_engine()
 data_service = DataService(engine)
 
 @data_bp.route('/update_database', methods=['GET'])

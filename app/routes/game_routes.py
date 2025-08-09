@@ -1,11 +1,12 @@
 from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
+from ..utils.db import get_engine
 from ..services.game_service import GameService
 
 
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
-engine = create_engine('sqlite:///nba_play_types.db')   
+engine = get_engine()
 game_service = GameService(engine)
 
 @game_bp.route('/game_logs', methods=['GET'])

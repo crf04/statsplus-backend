@@ -174,3 +174,15 @@ For issues and questions:
 ## 🚀 Deployment
 
 See `DEPLOYMENT.md` for production deployment instructions.
+
+### Railway
+
+1. Create a new Railway project and connect this repo.
+2. Set service root to `nba-backend/`.
+3. Environment variables:
+   - `OPENAI_API_KEY`
+   - `DATABASE_URL` (use Railway Postgres URL or fallback to SQLite)
+4. Build & start:
+   - Install: `pip install -r requirements.txt`
+   - Start: defined in `Procfile` as `web: gunicorn --bind 0.0.0.0:${PORT} wsgi:app`
+5. Deploy. Railway will expose a URL. API is available under `/api/...`.

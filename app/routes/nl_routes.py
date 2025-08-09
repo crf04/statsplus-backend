@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
+from ..utils.db import get_engine
 from ..services.nl_service import NLService
 
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
-engine = create_engine('sqlite:///nba_play_types.db')   
+engine = get_engine()
 nl_service = NLService(engine)
 
 @nl_bp.route('/nl-query', methods=['POST'])
