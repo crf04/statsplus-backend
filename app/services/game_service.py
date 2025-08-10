@@ -465,7 +465,9 @@ class GameService:
                 return cached_result
         
         # Fetch from database
-        query = f"SELECT * FROM '{table_name}'"
+        # Normalize legacy table names and avoid quoting identifiers for Postgres
+        normalized = normalize_table_name(table_name)
+        query = f"SELECT * FROM {normalized}"
         with self.engine.connect() as conn:
             result = pd.read_sql(query, conn)
         
