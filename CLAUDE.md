@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # NBA Backend API - Claude Context
 
 ## Project Overview
@@ -159,36 +163,65 @@ Runs on http://localhost:5000 with debug mode enabled.
 
 ### Run Tests
 ```bash
+# Run all tests
 python -m pytest tests/
+
+# Run with coverage and verbose output 
+python -m pytest tests/ -v --tb=short
+
+# Run specific test categories using the test runner
+bash run_tests.sh
+
+# Run individual test files
+python -m pytest tests/services/test_llm_service.py -v
+python -m pytest tests/test_nl_query.py -v
 ```
 
-### Update Database
+### Database Management
 ```bash
-python run_tests.py
+# Update NBA data from API
+curl -X GET http://localhost:5000/api/data/update_database
+
+# Clear cache
+python clear_cache.py
 ```
+
+### Code Quality
+Based on .cursorrules, this project emphasizes:
+- Type annotations for all functions and classes
+- PEP257 docstring conventions
+- pytest for all testing (no unittest)
+- Comprehensive error handling and logging
 
 ## Database Schema
 - **SQLite database**: `nba_play_types.db`
 - **Tables**: Players, Games, Teams, PlayByPlay, Statistics
 - **Relationships**: Player-Game, Team-Game, Player-Statistics
 
-## Natural Language Processing Pipeline
+## Architecture Overview
 
-### Query Processing Flow
+### Natural Language Processing Pipeline
+The system uses a hybrid approach combining traditional NLP and LLM integration:
+
 1. **Input Validation**: Sanitize and validate user input
-2. **Entity Recognition**: Extract players, teams, dates, metrics
+2. **Entity Recognition**: Extract players, teams, dates, metrics using spaCy
 3. **Intent Classification**: Determine query type and complexity
 4. **Parameter Mapping**: Map entities to database fields
 5. **Query Generation**: Build SQL queries or use LLM fallback
 6. **Result Processing**: Format and return results
 
-### Supported Query Types
-- Player performance queries
-- Game log filtering
-- Team statistics
-- Comparative analysis
-- Date-based filtering
-- Statistical thresholds
+### Service Layer Architecture
+- **nl_service.py**: Main natural language processing coordinator
+- **llm_service.py**: OpenAI GPT-4o-mini integration with retry logic
+- **data_service.py**: Database query execution and caching
+- **nba_cache.py**: Redis-based caching for API responses
+- **nl_query/**: Modular NL query processing components
+
+### Key Integration Points
+- **app/__init__.py**: Flask app initialization and blueprint registration
+- **routes/**: RESTful API endpoints grouped by functionality
+- **utils/db.py**: Database connection management with environment-driven configuration
+- **config/**: YAML configurations and filter mappings
 
 ## LLM Integration
 
