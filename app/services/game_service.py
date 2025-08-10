@@ -32,7 +32,7 @@ class GameService:
         logger.info(f"GameService initialized with cache {'enabled' if self.cache and self.cache.enabled else 'disabled'}")
 
     def get_player_id(self, player_name):
-        player_dict = self._fetch_data_from_table('Player_Information')
+        player_dict = self._fetch_data_from_table('player_information')
 
         player_names = player_dict['full_name'].tolist()
         closest_match = get_close_matches(player_name, player_names, n=1, cutoff=0.8)
@@ -457,7 +457,7 @@ class GameService:
         cache_key = None
         
         # Check cache first for static tables
-        if self.cache and self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+        if self.cache and self.cache.enabled and table_name in ['player_information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
             cache_key = self.cache._generate_key('table_data', False, table_name)
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
@@ -470,7 +470,7 @@ class GameService:
             result = pd.read_sql(query, conn)
         
         # Cache static tables for longer periods
-        if self.cache and self.cache.enabled and table_name in ['Player_Information', 'team_play_types', 'processed_team_assists', 'processed_player_assists'] and cache_key:
+        if self.cache and self.cache.enabled and table_name in ['player_information', 'team_play_types', 'processed_team_assists', 'processed_player_assists'] and cache_key:
             ttl = self.cache._get_ttl('player_info')  # Use longer TTL for static data
             self.cache.set(cache_key, result, ttl)
             logger.debug(f"Cached table data for {table_name}")
