@@ -962,7 +962,7 @@ class BaseQueryParser:
         """
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(text("SELECT team_name, team_abbreviation FROM teams"))
+                result = conn.execute(text("SELECT full_name, abbreviation FROM team_information"))
                 teams = {}
                 for row in result.fetchall():
                     team_name, abbr = row
