@@ -1,8 +1,11 @@
-"""
-Cache configuration for NBA Backend API
+"""Cache configuration for NBA Backend API.
 
-This module provides Redis client configuration and cache-related utilities
-for the NBA statistics caching system.
+This module configures a Redis client using Railway-style environment
+variables. It first attempts to read a single `REDIS_URL` (e.g.,
+`redis://:password@host:port/0` or `rediss://...`), and falls back to
+individual settings: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, and
+`REDIS_PASSWORD`. TLS is automatically enabled when using a `rediss://`
+scheme, or when `REDIS_TLS=true`.
 """
 
 import os
@@ -31,40 +34,65 @@ CACHE_TTLS = {
 }
 
 def get_redis_client() -> Optional[redis.Redis]:
+    """Create a Redis client from Railway environment variables.
+
+    Precedence:
+    1) `REDIS_URL` (e.g., redis://:password@host:port/db or rediss://...)
+    2) Individual vars: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`
+       Optional TLS via `REDIS_TLS=true`.
+
+    Returns
+    -------
+    Optional[redis.Redis]
+        A configured Redis client, or None if connection fails.
     """
-    Get Redis client instance with configuration from environment variables.
-    
-    Returns:
-        redis.Redis: Configured Redis client or None if connection fails
-    """
+
     try:
-        # Get Redis configuration from environment variables
-        redis_host = os.getenv('REDIS_HOST', 'localhost')
-        redis_port = int(os.getenv('REDIS_PORT', 6379))
-        redis_db = int(os.getenv('REDIS_DB', 0))
-        redis_password = os.getenv('REDIS_PASSWORD', None)
-        
-        # Create Redis client
-        client = redis.Redis(
-            host=redis_host,
-            port=redis_port,
-            db=redis_db,
-            password=redis_password,
-            socket_timeout=5,
-            socket_connect_timeout=5,
-            health_check_interval=30
-        )
-        
+        redis_url = os.getenv("REDIS_URL")
+
+        if redis_url:
+            # Use URL-based configuration; respects rediss:// for TLS
+            client = redis.from_url(
+                redis_url,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                health_check_interval=30,
+            )
+        else:
+            # Fallback to individual env vars
+            redis_host = os.getenv("REDISHOST", "localhost")
+            redis_port = int(os.getenv("REDISPORT", 6379))
+            redis_db = int(os.getenv("REDISDB", 0))
+            redis_password = os.getenv("REDISPASSWORD")
+            use_tls = os.getenv("REDISTLS", "false").lower() in {"1", "true", "yes", "on"}
+
+            client = redis.Redis(
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
+                password=redis_password,
+                ssl=use_tls,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                health_check_interval=30,
+            )
+
         # Test connection
         client.ping()
-        logger.info(f"Redis connected successfully: {redis_host}:{redis_port}/{redis_db}")
+
+        # Log where we connected (mask password if using URL)
+        if redis_url:
+            logger.info("Redis connected successfully via REDIS_URL")
+        else:
+            logger.info("Redis connected successfully via host/port/db env vars")
+
         return client
-        
-    except redis.ConnectionError as e:
-        logger.warning(f"Redis connection failed: {e}. Cache will be disabled.")
+
+    except redis.ConnectionError as exc:
+        logger.warning(f"Redis connection failed: {exc}. Cache will be disabled.")
         return None
-    except Exception as e:
-        logger.error(f"Redis setup error: {e}. Cache will be disabled.")
+    except Exception as exc:
+        logger.error(f"Redis setup error: {exc}. Cache will be disabled.")
         return None
 
 def get_cache_date_key() -> str:

@@ -948,7 +948,8 @@ class BaseQueryParser:
         """
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(text("SELECT DISTINCT PLAYER_NAME FROM player_play_types"))
+                # Quote column to handle case-sensitive identifier created by pandas/SQLAlchemy on Postgres
+                result = conn.execute(text('SELECT DISTINCT "PLAYER_NAME" FROM player_play_types'))
                 return [row[0] for row in result.fetchall()]
         except Exception as e:
             print(f"Warning: Could not load players from database: {e}")
@@ -962,7 +963,8 @@ class BaseQueryParser:
         """
         try:
             with self.engine.connect() as conn:
-                result = conn.execute(text("SELECT full_name, abbreviation FROM team_information"))
+                # Table was normalized to snake_case: team_info
+                result = conn.execute(text("SELECT full_name, abbreviation FROM team_info"))
                 teams = {}
                 for row in result.fetchall():
                     team_name, abbr = row
