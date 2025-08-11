@@ -6,7 +6,7 @@ from ..utils.database_utils import get_opponent_team, nba_team_to_abbreviation, 
 from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
-from ..utils.cache_config import get_redis_client
+from ..utils.cache_config import get_redis_client, set_cache_with_1am_expiry
 import logging
 from datetime import datetime, timedelta
 
@@ -58,13 +58,6 @@ class GameService:
         """Get cache decorator for this instance"""
         return self.cache.cache_player_logs()
     
-    def get_player_game_logs_with_ratings(self, player_name, season='2024-25'):
-        """Retrieve game logs for a player and calculate ratings (cached)"""
-        return self._get_player_game_logs_cached(player_name, season)
-    
-    def _get_player_game_logs_cached(self, player_name, season):
-        """Internal cached method for player game logs - uses daily cache strategy"""
-        return self._get_game_logs(player_name, season)
 
     @property  
     def daily_cache_decorator(self):
@@ -75,7 +68,7 @@ class GameService:
         """Get game logs with daily caching - only hits NBA API once per day"""
         # Apply caching manually since we can't use decorators on dynamic methods
         if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
-            from ..utils.cache_config import get_cache_date_key, CACHE_PREFIXES
+            from ..utils.cache_config import CACHE_PREFIXES
             
             # Determine cache strategy based on season
             if self.cache._is_current_season(season):
@@ -107,10 +100,19 @@ class GameService:
             logger.info(f"Cache miss for player logs: {player_name}, {season} - making NBA API call")
             result = self._fetch_game_logs_from_api(player_name, season)
             
-            # Cache the result
-            ttl = self.cache._get_ttl(cache_type)
-            self.cache.set(cache_key, result, ttl)
-            logger.info(f"Cached NBA API result for {player_name}, {season} until {datetime.now() + timedelta(seconds=ttl)}")
+            # Cache the result with 1 AM CST expiry for current season data
+            if self.cache._is_current_season(season):
+                # Current season - use 1 AM CST expiry
+                if set_cache_with_1am_expiry(self.cache.redis, cache_key, self.cache._serialize(result)):
+                    logger.info(f"Cached NBA API result for {player_name}, {season} until 1 AM CST tomorrow")
+                else:
+                    # Fallback to regular TTL
+                    ttl = self.cache._get_ttl(cache_type)
+                    self.cache.set(cache_key, result, ttl)
+            else:
+                # Historical season - use regular TTL
+                ttl = self.cache._get_ttl(cache_type)
+                self.cache.set(cache_key, result, ttl)
             
             return result
         else:
@@ -165,34 +167,6 @@ class GameService:
         
         return gamelogs, next_team
 
-    def calculate_matchup_rating(self, player_name, team):
-        teams_df = self._fetch_data_from_table('team_play_types')
-        players_df = self._fetch_data_from_table('player_play_types')
-
-        playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 
-                    'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup', 'Transition']
-
-        player_columns = [playtype + '%' for playtype in playtypes]
-        team_columns = playtypes
-
-        player_data = players_df.loc[players_df['PLAYER_NAME'] == player_name, player_columns]
-        team_data = teams_df.loc[teams_df['team'] == team, team_columns]
-
-        matchupRTG = (player_data.values * team_data.values).sum()
-        return round(matchupRTG, 2)
-
-    def calculate_assist_location_rating(self, player_name, team):
-        teams_df = self._fetch_data_from_table('processed_team_assists')
-        players_df = self._fetch_data_from_table('processed_player_assists')
-        
-        cats = ["Arc3Assists", "Corner3Assists", "AtRimAssists", 
-               "ShortMidRangeAssists", "LongMidRangeAssists"]
-        
-        player_data = players_df.loc[players_df['Name'] == player_name, cats]
-        team_data = teams_df.loc[teams_df['Name'] == team, cats]
-
-        matchupRTG = (player_data.values * team_data.values).sum()
-        return round(matchupRTG, 2)
 
     def get_common_games(self, primary_player_logs, other_players_names, season='2024-25'):
         """Find common games between players"""
@@ -200,8 +174,8 @@ class GameService:
         
         # Loop through other players and find intersections based on game IDs and team abbreviations
         for player_name in other_players_names:
-            player_id = self.get_player_id(player_name)
-            player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
+            # Reuse existing cached game logs function - returns tuple (gamelogs, next_team)
+            player_gamelogs, _ = self._get_game_logs(player_name, season)
             player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
             
             primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
@@ -218,8 +192,8 @@ class GameService:
         
         # Loop through players_off and union game IDs
         for player_name in players_off_names:
-            player_id = self.get_player_id(player_name)
-            player_gamelogs = playergamelogs.PlayerGameLogs(player_id_nullable=player_id, season_nullable=season).get_data_frames()[0]
+            # Reuse existing cached game logs function - returns tuple (gamelogs, next_team)
+            player_gamelogs, _ = self._get_game_logs(player_name, season)
             player_game_ids = set(player_gamelogs['GAME_ID'])
             
             # Union with exclude_game_ids to accumulate games where any player_off played
@@ -258,8 +232,6 @@ class GameService:
                 df = df[~df['MATCHUP'].str.contains('@')]
             elif filter_params['location_filter'] == 'Away':
                 df = df[df['MATCHUP'].str.contains('@')]
-
-        
 
         # Apply teams against filter
         if filter_params.get('teams_against'):
@@ -315,7 +287,7 @@ class GameService:
 
     def get_filtered_logs(self, player_name, filter_params):
         """Get filtered game logs based on parameters"""
-        full_game_logs, next_team = self.get_player_game_logs_with_ratings(player_name, filter_params['season_filter'])
+        full_game_logs, next_team = self._get_game_logs(player_name, filter_params['season_filter'])
         
         
         teams_against = None
@@ -383,9 +355,13 @@ class GameService:
             logger.info(f"Cache miss for team filter: {filter} - making NBA API call")
             result = self._filter_teams_uncached(filter, rank_filter, date_filter)
             
-            ttl = self.cache._get_ttl('daily_nba_data')
-            self.cache.set(cache_key, result, ttl)
-            logger.info(f"Cached team filter result for {filter}")
+            # Use 1 AM CST expiry for daily NBA data
+            if set_cache_with_1am_expiry(self.cache.redis, cache_key, self.cache._serialize(result)):
+                logger.info(f"Cached team filter result for {filter} until 1 AM CST tomorrow")
+            else:
+                # Fallback to regular TTL
+                ttl = self.cache._get_ttl('daily_nba_data')
+                self.cache.set(cache_key, result, ttl)
             
             return result
         else:
@@ -525,3 +501,33 @@ class GameService:
             if team['id'] == team_id:
                 return team['full_name']
         return None
+    
+    #Rating functions: currently unused
+    """def calculate_matchup_rating(self, player_name, team):
+        teams_df = self._fetch_data_from_table('team_play_types')
+        players_df = self._fetch_data_from_table('player_play_types')
+
+        playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound', 
+                    'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup', 'Transition']
+
+        player_columns = [playtype + '%' for playtype in playtypes]
+        team_columns = playtypes
+
+        player_data = players_df.loc[players_df['PLAYER_NAME'] == player_name, player_columns]
+        team_data = teams_df.loc[teams_df['team'] == team, team_columns]
+
+        matchupRTG = (player_data.values * team_data.values).sum()
+        return round(matchupRTG, 2)
+
+    def calculate_assist_location_rating(self, player_name, team):
+        teams_df = self._fetch_data_from_table('processed_team_assists')
+        players_df = self._fetch_data_from_table('processed_player_assists')
+        
+        cats = ["Arc3Assists", "Corner3Assists", "AtRimAssists", 
+               "ShortMidRangeAssists", "LongMidRangeAssists"]
+        
+        player_data = players_df.loc[players_df['Name'] == player_name, cats]
+        team_data = teams_df.loc[teams_df['Name'] == team, cats]
+
+        matchupRTG = (player_data.values * team_data.values).sum()
+        return round(matchupRTG, 2)"""

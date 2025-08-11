@@ -11,7 +11,8 @@ scheme, or when `REDIS_TLS=true`.
 import os
 import redis
 import logging
-from datetime import datetime, timezone, timedelta
+import pytz
+from datetime import datetime, timezone, timedelta, time, date
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -126,3 +127,54 @@ def get_ttl_for_cache_type(cache_type: str) -> int:
         int: TTL in seconds
     """
     return CACHE_TTLS.get(cache_type, CACHE_TTLS['intraday_computed'])
+
+def get_next_1am_cst_timestamp() -> int:
+    """
+    Get the Unix timestamp for 1 AM CST the following day.
+    
+    This is used for setting cache expiration to occur at a specific time
+    rather than using a fixed TTL duration.
+    
+    Returns:
+        int: Unix timestamp for next 1 AM CST
+    """
+    cst = pytz.timezone('US/Central')
+    now = datetime.now(cst)
+    
+    # Get tomorrow's date
+    tomorrow = now.date() + timedelta(days=1)
+    
+    # Create 1 AM CST tomorrow
+    next_1am = cst.localize(datetime.combine(tomorrow, time(1, 0)))
+    
+    return int(next_1am.timestamp())
+
+def set_cache_with_1am_expiry(redis_client: redis.Redis, key: str, value: str) -> bool:
+    """
+    Set a cache value that expires at 1 AM CST the following day.
+    
+    Args:
+        redis_client: Redis client instance
+        key: Cache key
+        value: Cache value
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not redis_client:
+        return False
+        
+    try:
+        # Set the value
+        redis_client.set(key, value)
+        
+        # Set expiration to 1 AM CST tomorrow
+        expire_timestamp = get_next_1am_cst_timestamp()
+        redis_client.expireat(key, expire_timestamp)
+        
+        logger.debug(f"Cache key '{key}' set to expire at 1 AM CST tomorrow (timestamp: {expire_timestamp})")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to set cache with 1 AM expiry: {e}")
+        return False
