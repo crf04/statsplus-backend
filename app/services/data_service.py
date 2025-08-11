@@ -10,6 +10,8 @@ from nba_api.stats.endpoints import (
     LeagueDashPlayerStats
 )
 from nba_api.stats.static import teams, players
+from app.utils.nba_api_config import get_shared_nba_session
+from app.utils.performance_monitor import monitor_nba_api_calls, PerformanceTimer
 
 class DataService:
     def __init__(self, db_engine):
@@ -257,8 +259,9 @@ class DataService:
         players_df.to_sql('player_clusters', self.engine, 
                          if_exists='replace', index=False)
 
+    @monitor_nba_api_calls
     def fetch_PBP_data(self, data_type='player'):
-        """Fetch play-by-play data from external API"""
+        """Fetch play-by-play data from external API using optimized session"""
         base_url = 'https://api.pbpstats.com/get-totals/nba'
         params = {
             'Season': '2024-25',
@@ -267,13 +270,25 @@ class DataService:
         }
         
         try:
-            response = requests.get(base_url, params=params)
+            # Use optimized session with connection pooling
+            session = get_shared_nba_session()
+            response = session.get(base_url, params=params, timeout=(10, 30))
             response.raise_for_status()
+            
             data = response.json()
             df = pd.DataFrame(data['multi_row_table_data'])
             table_name = f'pbp_{data_type}_stats'
-            df.to_sql(table_name, self.engine, if_exists='replace', index=False)
+            
+            with PerformanceTimer(f"store_{data_type}_pbp_data"):
+                df.to_sql(table_name, self.engine, if_exists='replace', index=False)
+                
             return True
+        except requests.exceptions.Timeout as e:
+            print(f"Timeout fetching {data_type} PBP data: {e}")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"Request error fetching {data_type} PBP data: {e}")
+            return False
         except Exception as e:
             print(f"Error fetching {data_type} PBP data: {e}")
             return False

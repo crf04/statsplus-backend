@@ -1361,10 +1361,10 @@ class BaseQueryParser:
         
         # Handle ranking patterns (map to actual NBA stat columns)
         ranking_patterns = [
-            (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
-            (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
-            (r'worst\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
-            (r'best\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+            (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+            (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+            (r'worst\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
+            (r'best\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
             (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', 1),
             (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
             (r'worst\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
@@ -2007,8 +2007,8 @@ class BaseQueryParser:
         if filters:
             # Track coverage for ranking patterns (updated to use actual NBA stat columns)
             ranking_patterns = [
-                (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
-                (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+                (r'top\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', -1),
+                (r'bottom\s+(\d+)\s+(?:defenses?|defensive\s+teams?)', 'OPP_PTS', 1),
                 (r'top\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', 1),
                 (r'bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)', 'OPP_PTS', -1),
                 (r'top\s+(\d+)\s+(?:teams?)', 'OPP_PTS', 1),
