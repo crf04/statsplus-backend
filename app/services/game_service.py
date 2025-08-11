@@ -103,7 +103,7 @@ class GameService:
             # Cache the result with 1 AM CST expiry for current season data
             if self.cache._is_current_season(season):
                 # Current season - use 1 AM CST expiry
-                if set_cache_with_1am_expiry(self.cache.redis, cache_key, self.cache._serialize(result)):
+                if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
                     logger.info(f"Cached NBA API result for {player_name}, {season} until 1 AM CST tomorrow")
                 else:
                     # Fallback to regular TTL
@@ -356,7 +356,7 @@ class GameService:
             result = self._filter_teams_uncached(filter, rank_filter, date_filter)
             
             # Use 1 AM CST expiry for daily NBA data
-            if set_cache_with_1am_expiry(self.cache.redis, cache_key, self.cache._serialize(result)):
+            if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
                 logger.info(f"Cached team filter result for {filter} until 1 AM CST tomorrow")
             else:
                 # Fallback to regular TTL
