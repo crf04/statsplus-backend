@@ -83,13 +83,7 @@ def get_nba_api_session():
     adapter = LoggingHTTPAdapter(
         pool_connections=pool_connections,      # Connection pool size per host
         pool_maxsize=pool_maxsize,              # Max connections per pool
-        max_retries=retry_strategy,
-        socket_options=[
-            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),  # Enable keep-alive
-            (socket.SOL_TCP, socket.TCP_KEEPIDLE, 120),   # Keep-alive idle time
-            (socket.SOL_TCP, socket.TCP_KEEPINTVL, 30),   # Keep-alive interval
-            (socket.SOL_TCP, socket.TCP_KEEPCNT, 3)       # Keep-alive probes
-        ] if hasattr(socket, 'SOL_TCP') else [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+        max_retries=retry_strategy
     )
     
     session.mount("http://", adapter)

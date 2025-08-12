@@ -139,7 +139,7 @@ def _check_database_connection() -> Dict[str, Any]:
 
 
 def _check_nba_api_connectivity() -> Dict[str, Any]:
-    """Test NBA API connectivity and response time.
+    """Test NBA API connectivity and response time using game logs endpoint.
     
     Returns
     -------
@@ -150,15 +150,15 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
         start_time = time.time()
         session = get_shared_nba_session()
         
-        # Test with a simple NBA API endpoint
+        # Test with the game logs API endpoint (what you actually use)
         response = session.get(
-            'https://stats.nba.com/stats/leaguestandings',
+            'https://api.pbpstats.com/get-totals/nba',
             params={
-                'LeagueID': '00',
                 'Season': '2024-25',
-                'SeasonType': 'Regular Season'
+                'SeasonType': 'Regular+Season',
+                'Type': 'Player'
             },
-            timeout=(5, 10)
+            timeout=(5, 15)
         )
         
         duration = time.time() - start_time
@@ -167,7 +167,8 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
             'status': 'healthy' if response.status_code == 200 else 'unhealthy',
             'response_time_ms': round(duration * 1000, 2),
             'status_code': response.status_code,
-            'endpoint': 'stats.nba.com/stats/leaguestandings',
+            'endpoint': 'api.pbpstats.com/get-totals/nba',
+            'test_type': 'game_logs_api',
             'using_session_pool': True
         }
         
@@ -176,20 +177,20 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
             'status': 'unhealthy',
             'error': f'Timeout: {str(e)}',
             'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguestandings'
+            'endpoint': 'api.pbpstats.com/get-totals/nba'
         }
     except requests.exceptions.RequestException as e:
         return {
             'status': 'unhealthy',
             'error': f'Request failed: {str(e)}',
             'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguestandings'
+            'endpoint': 'api.pbpstats.com/get-totals/nba'
         }
     except Exception as e:
         return {
             'status': 'unhealthy',
             'error': f'Unexpected error: {str(e)}',
             'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguestandings'
+            'endpoint': 'api.pbpstats.com/get-totals/nba'
         }
 
