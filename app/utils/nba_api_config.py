@@ -5,8 +5,56 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging
 import os
+from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+class LoggingHTTPAdapter(HTTPAdapter):
+    """Custom HTTP adapter that logs retry attempts."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def send(self, request, **kwargs):
+        """Send request with retry logging."""
+        try:
+            response = super().send(request, **kwargs)
+            return response
+        except Exception as e:
+            # Log when we're about to retry due to an exception
+            if hasattr(self.config, 'max_retries') and self.config['max_retries'].total > 0:
+                logger.warning(f"NBA API request to {request.url} failed, will retry: {str(e)}")
+            raise
+
+
+def log_retry_attempt(retry_state):
+    """Callback function to log retry attempts.
+    
+    Args:
+        retry_state: Retry state object containing attempt information
+    """
+    attempt_number = retry_state.attempt_number
+    url = getattr(retry_state, 'url', 'unknown')
+    
+    if attempt_number > 1:
+        logger.warning(f"NBA API retry attempt #{attempt_number-1} for {url}")
+
+
+class RetryWithLogging(Retry):
+    """Custom Retry class that logs retry attempts."""
+    
+    def increment(self, method=None, url=None, response=None, error=None, _pool=None, _stacktrace=None):
+        """Override increment to log retry attempts."""
+        # Log the retry attempt
+        if self.total is not None and self.total > 0:
+            attempt_num = (self.total - (self.total - 1)) if self.total > 1 else 1
+            if response is not None:
+                logger.warning(f"NBA API retry #{attempt_num} for {url} - Status: {response.status}, Reason: {response.reason}")
+            elif error is not None:
+                logger.warning(f"NBA API retry #{attempt_num} for {url} - Error: {str(error)}")
+        
+        return super().increment(method, url, response, error, _pool, _stacktrace)
 
 def get_nba_api_session():
     """Create optimized HTTP session for NBA API calls with connection pooling and retries.
@@ -23,8 +71,8 @@ def get_nba_api_session():
     pool_connections = int(os.getenv('NBA_API_POOL_CONNECTIONS', '10'))
     pool_maxsize = int(os.getenv('NBA_API_POOL_MAXSIZE', '20'))
     
-    # Configure retry strategy with exponential backoff
-    retry_strategy = Retry(
+    # Configure retry strategy with exponential backoff and logging
+    retry_strategy = RetryWithLogging(
         total=max_retries,
         backoff_factor=1,  # Wait 1s, 2s, 4s between retries
         status_forcelist=[429, 500, 502, 503, 504],  # Retry on these HTTP status codes
@@ -32,7 +80,7 @@ def get_nba_api_session():
     )
     
     # Configure adapter with connection pooling and keep-alive
-    adapter = HTTPAdapter(
+    adapter = LoggingHTTPAdapter(
         pool_connections=pool_connections,      # Connection pool size per host
         pool_maxsize=pool_maxsize,              # Max connections per pool
         max_retries=retry_strategy,

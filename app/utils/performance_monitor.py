@@ -122,7 +122,7 @@ class PerformanceTimer:
         return end_time - self.start_time
 
 def log_api_performance(url: str, duration: float, status_code: Optional[int] = None, 
-                       error: Optional[str] = None) -> None:
+                       error: Optional[str] = None, retry_count: Optional[int] = None) -> None:
     """Log API call performance metrics.
     
     Args:
@@ -130,15 +130,20 @@ def log_api_performance(url: str, duration: float, status_code: Optional[int] = 
         duration: Request duration in seconds
         status_code: HTTP status code if successful
         error: Error message if failed
+        retry_count: Number of retries attempted
     """
+    retry_info = f" (after {retry_count} retries)" if retry_count and retry_count > 0 else ""
+    
     if error:
-        logger.error(f"API call to {url} FAILED after {duration:.2f}s: {error}")
+        logger.error(f"API call to {url} FAILED after {duration:.2f}s{retry_info}: {error}")
     elif status_code and status_code >= 400:
-        logger.warning(f"API call to {url} returned {status_code} in {duration:.2f}s")
+        logger.warning(f"API call to {url} returned {status_code} in {duration:.2f}s{retry_info}")
     elif duration > 5.0:
-        logger.warning(f"SLOW API call to {url} completed in {duration:.2f}s (status: {status_code})")
+        logger.warning(f"SLOW API call to {url} completed in {duration:.2f}s{retry_info} (status: {status_code})")
+    elif retry_count and retry_count > 0:
+        logger.info(f"API call to {url} completed in {duration:.2f}s{retry_info} (status: {status_code})")
     else:
-        logger.info(f"API call to {url} completed in {duration:.2f}s (status: {status_code})")
+        logger.debug(f"API call to {url} completed in {duration:.2f}s (status: {status_code})")
 
 # Usage examples:
 # @monitor_nba_api_calls
