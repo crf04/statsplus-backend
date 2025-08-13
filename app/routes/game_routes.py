@@ -10,7 +10,7 @@ engine = get_engine()
 game_service = GameService(engine)
 
 @game_bp.route('/game_logs', methods=['GET'])
-def get_game_logs():
+async def get_game_logs():
     try:
         player_name = request.args.get('player_name')
         filter_params = {
@@ -34,6 +34,6 @@ def get_game_logs():
             }
         }
 
-        return game_service.get_filtered_logs(player_name, filter_params)
+        return await game_service.get_filtered_logs(player_name, filter_params)
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -1,4 +1,5 @@
 import pandas as pd
+import asyncio
 from nba_api.stats import endpoints
 from nba_api.stats.endpoints import playergamelogs
 from nba_api.stats.static import teams
@@ -28,6 +29,9 @@ class GameService:
         if redis_client is None:
             redis_client = get_redis_client()
         self.cache = NBAGameCache(redis_client)
+        
+        # Semaphore to limit concurrent NBA API calls (prevent rate limiting)
+        self.nba_api_semaphore = asyncio.Semaphore(10)
         
         logger.info(f"GameService initialized with cache {'enabled' if self.cache and self.cache.enabled else 'disabled'}")
 
@@ -64,7 +68,7 @@ class GameService:
         """Get daily cache decorator for this instance"""
         return self.cache.cache_daily_nba_data()
     
-    def _get_game_logs(self, player_name, season='2024-25'):
+    async def _get_game_logs(self, player_name, season='2024-25'):
         """Get game logs with daily caching - only hits NBA API once per day"""
         # Apply caching manually since we can't use decorators on dynamic methods
         if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
@@ -98,7 +102,7 @@ class GameService:
             
             # Cache miss - make NBA API call
             logger.info(f"Cache miss for player logs: {player_name}, {season} - making NBA API call")
-            result = self._fetch_game_logs_from_api(player_name, season)
+            result = await self._fetch_game_logs_from_api(player_name, season)
             
             # Cache the result with 1 AM CST expiry for current season data
             if self.cache._is_current_season(season):
@@ -117,14 +121,33 @@ class GameService:
             return result
         else:
             # No cache - direct API call
-            return self._fetch_game_logs_from_api(player_name, season)
+            return await self._fetch_game_logs_from_api(player_name, season)
     
-    def _fetch_game_logs_from_api(self, player_name, season='2024-25'):
+    async def _fetch_game_logs_from_api(self, player_name, season='2024-25'):
         player_id = self.get_player_id(player_name)
-        gamelogs = endpoints.playergamelogs.PlayerGameLogs(
-            player_id_nullable=player_id, 
-            season_nullable=season
-        ).get_data_frames()[0]
+        
+        # Define async wrappers for NBA API calls
+        async def fetch_game_logs():
+            async with self.nba_api_semaphore:
+                return await asyncio.to_thread(
+                    lambda: endpoints.playergamelogs.PlayerGameLogs(
+                        player_id_nullable=player_id, 
+                        season_nullable=season
+                    ).get_data_frames()[0]
+                )
+        
+        async def fetch_next_game():
+            async with self.nba_api_semaphore:
+                try:
+                    return await asyncio.to_thread(
+                        lambda: endpoints.PlayerNextNGames(number_of_games=1, player_id=player_id).get_data_frames()[0]
+                    )
+                except (Exception, IndexError, KeyError) as e:
+                    logger.warning(f"Failed to fetch next game for player {player_id}: {str(e)}")
+                    return None
+        
+        # Run both NBA API calls concurrently
+        gamelogs, next_game_df = await asyncio.gather(fetch_game_logs(), fetch_next_game())
         
         # Clean up columns
         drop_columns = [
@@ -139,17 +162,19 @@ class GameService:
             'BLKA', 'PFD'
         ]
         gamelogs = gamelogs.drop(drop_columns, axis=1)
-        try:
-            next_game = endpoints.PlayerNextNGames(number_of_games=1,player_id=player_id).get_data_frames()[0]
-            team1, team2 = next_game.loc[0,'VISITOR_TEAM_ID'], next_game.loc[0,'HOME_TEAM_ID']
-            if team1 != gamelogs.loc[0, 'TEAM_ID']:
-                next_team = team1
-            else:
-                next_team = team2
-        except (Exception, IndexError, KeyError) as e:
-            logger.warning(f"Failed to fetch next game for player {player_id}: {str(e)}")
-            next_team = None
         
+        # Process next game data
+        next_team = None
+        if next_game_df is not None:
+            try:
+                team1, team2 = next_game_df.loc[0,'VISITOR_TEAM_ID'], next_game_df.loc[0,'HOME_TEAM_ID']
+                if team1 != gamelogs.loc[0, 'TEAM_ID']:
+                    next_team = team1
+                else:
+                    next_team = team2
+            except (Exception, IndexError, KeyError) as e:
+                logger.warning(f"Failed to process next game data for player {player_id}: {str(e)}")
+                next_team = None
         
         # Calculate additional stats
         gamelogs['PRA'] = gamelogs['PTS'] + gamelogs['REB'] + gamelogs['AST']
@@ -168,14 +193,14 @@ class GameService:
         return gamelogs, next_team
 
 
-    def get_common_games(self, primary_player_logs, other_players_names, season='2024-25'):
+    async def get_common_games(self, primary_player_logs, other_players_names, season='2024-25'):
         """Find common games between players"""
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
         
         # Loop through other players and find intersections based on game IDs and team abbreviations
         for player_name in other_players_names:
             # Reuse existing cached game logs function - returns tuple (gamelogs, next_team)
-            player_gamelogs, _ = self._get_game_logs(player_name, season)
+            player_gamelogs, _ = await self._get_game_logs(player_name, season)
             player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
             
             primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
@@ -186,14 +211,14 @@ class GameService:
         common_game_ids = {pair[0] for pair in primary_game_team_pairs}
         return set(common_game_ids)
 
-    def get_games_to_exclude(self, player_logs, players_off_names, season='2024-25'):
+    async def get_games_to_exclude(self, player_logs, players_off_names, season='2024-25'):
         """Find games to exclude due to filtering"""
         exclude_game_ids = set()
         
         # Loop through players_off and union game IDs
         for player_name in players_off_names:
             # Reuse existing cached game logs function - returns tuple (gamelogs, next_team)
-            player_gamelogs, _ = self._get_game_logs(player_name, season)
+            player_gamelogs, _ = await self._get_game_logs(player_name, season)
             player_game_ids = set(player_gamelogs['GAME_ID'])
             
             # Union with exclude_game_ids to accumulate games where any player_off played
@@ -201,19 +226,19 @@ class GameService:
 
         return exclude_game_ids
 
-    def filter_players_on_off(self, df, players_on, players_off, season):
+    async def filter_players_on_off(self, df, players_on, players_off, season):
         """Filter games based on players on/off"""
         if players_on:
-            common_games = self.get_common_games(df, players_on, season)
+            common_games = await self.get_common_games(df, players_on, season)
             df = df[df['GAME_ID'].isin(common_games)]
         
         if players_off:
-            exclude_games = self.get_games_to_exclude(df, players_off, season)
+            exclude_games = await self.get_games_to_exclude(df, players_off, season)
             df = df[~df['GAME_ID'].isin(exclude_games)]
         
         return df
 
-    def apply_filters(self, df, filter_params):
+    async def apply_filters(self, df, filter_params):
         """Apply all filters to game logs dataframe"""
         # Apply minutes filter
         if 'minutes_filter' in filter_params:
@@ -249,7 +274,7 @@ class GameService:
         # Apply players on/off filter
         season = filter_params.get('season_filter', '2024-25')
         if filter_params.get('players_on') or filter_params.get('players_off'):
-            df = self.filter_players_on_off(df, filter_params.get('players_on', []), filter_params.get('players_off', []), season)
+            df = await self.filter_players_on_off(df, filter_params.get('players_on', []), filter_params.get('players_off', []), season)
 
         # Apply self filters (stat ranges)
         if filter_params.get('self_filters'):
@@ -285,14 +310,14 @@ class GameService:
 
         return df
 
-    def get_filtered_logs(self, player_name, filter_params):
+    async def get_filtered_logs(self, player_name, filter_params):
         """Get filtered game logs based on parameters"""
-        full_game_logs, next_team = self._get_game_logs(player_name, filter_params['season_filter'])
+        full_game_logs, next_team = await self._get_game_logs(player_name, filter_params['season_filter'])
         
         
         teams_against = None
         for index, ele in enumerate(filter_params['teams_against']):
-            filtered_teams = set(self.filter_teams(ele, int(filter_params['rank_filter'][index]), filter_params['date_filter']))
+            filtered_teams = set(await self.filter_teams(ele, int(filter_params['rank_filter'][index]), filter_params['date_filter']))
             if teams_against is None:
                 teams_against = filtered_teams
             else:
@@ -302,7 +327,7 @@ class GameService:
             teams_against = set()
         
         filter_params['teams_against'] = teams_against
-        filtered_logs = self.apply_filters(full_game_logs.copy(), filter_params)
+        filtered_logs = await self.apply_filters(full_game_logs.copy(), filter_params)
         
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA', 
@@ -321,7 +346,7 @@ class GameService:
             'next_game': self._get_team_name_by_id(next_team)  # This should be implemented properly
         }
     
-    def filter_teams(self, filter, rank_filter, date_filter=None):
+    async def filter_teams(self, filter, rank_filter, date_filter=None):
         """Filter teams with daily caching - avoids repeated NBA API calls"""
         # Check if this filter type requires NBA API calls
         api_dependent_filters = ['C&S 3s', 'C&S PTS', 'C&S 3A', 'PU 2s', 'PU 3s', 'PU PTS'] + \
@@ -329,12 +354,12 @@ class GameService:
         
         if filter in api_dependent_filters and date_filter is not None:
             # This might make NBA API calls - cache it daily
-            return self._filter_teams_with_api_calls(filter, rank_filter, date_filter)
+            return await self._filter_teams_with_api_calls(filter, rank_filter, date_filter)
         else:
             # Static database lookups - can use shorter cache
-            return self._filter_teams_computed(filter, rank_filter, date_filter)
+            return await self._filter_teams_computed(filter, rank_filter, date_filter)
     
-    def _filter_teams_with_api_calls(self, filter, rank_filter, date_filter=None):
+    async def _filter_teams_with_api_calls(self, filter, rank_filter, date_filter=None):
         """Filter teams that may involve NBA API calls - cached daily"""
         if self.cache.enabled:
             from ..utils.cache_config import CACHE_PREFIXES
@@ -353,7 +378,7 @@ class GameService:
                 return cached_result
             
             logger.info(f"Cache miss for team filter: {filter} - making NBA API call")
-            result = self._filter_teams_uncached(filter, rank_filter, date_filter)
+            result = await self._filter_teams_uncached(filter, rank_filter, date_filter)
             
             # Use 1 AM CST expiry for daily NBA data
             if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
@@ -365,9 +390,9 @@ class GameService:
             
             return result
         else:
-            return self._filter_teams_uncached(filter, rank_filter, date_filter)
+            return await self._filter_teams_uncached(filter, rank_filter, date_filter)
     
-    def _filter_teams_computed(self, filter, rank_filter, date_filter=None):
+    async def _filter_teams_computed(self, filter, rank_filter, date_filter=None):
         """Filter teams using computed/database data - shorter cache"""
         if self.cache.enabled:
             from ..utils.cache_config import CACHE_PREFIXES
@@ -384,16 +409,16 @@ class GameService:
                 logger.debug(f"Cache hit for computed team filter: {filter}")
                 return cached_result
             
-            result = self._filter_teams_uncached(filter, rank_filter, date_filter)
+            result = await self._filter_teams_uncached(filter, rank_filter, date_filter)
             
             ttl = self.cache._get_ttl('intraday_computed')
             self.cache.set(cache_key, result, ttl)
             
             return result
         else:
-            return self._filter_teams_uncached(filter, rank_filter, date_filter)
+            return await self._filter_teams_uncached(filter, rank_filter, date_filter)
     
-    def _filter_teams_uncached(self, filter, rank_filter, date_filter=None):
+    async def _filter_teams_uncached(self, filter, rank_filter, date_filter=None):
         #filter into diff types
         Catch_Shoot_types = ['C&S 3s', 'C&S PTS','C&S 3A']
         Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
@@ -402,13 +427,13 @@ class GameService:
         assist_types = ["TwoPtAssists","ThreePtAssists","Arc3Assists","Corner3Assists","AtRimAssists","ShortMidRangeAssists","LongMidRangeAssists"]
         
         if filter in Catch_Shoot_types:
-            df = self.catch_shoot_filtering(filter, date_filter)
+            df = await self.catch_shoot_filtering(filter, date_filter)
         elif filter in Pullup_types:
-            df = self.pullup_filtering(filter,date_filter)
+            df = await self.pullup_filtering(filter,date_filter)
         elif filter in playtypes:
             df = self.playtype_filtering(filter)
         elif filter in overall_opp_types:
-            df = self.general_opp_filtering(filter, date_filter)
+            df = await self.general_opp_filtering(filter, date_filter)
         elif filter == 'Less Than 10 ft':
             df = self._fetch_data_from_table('less_than_10_ft')
             df.sort_values(by = 'FG2M', ascending = False, inplace=True)
@@ -456,10 +481,13 @@ class GameService:
         return result
 
     # Function that returns general opponent stats sorted by the filter
-    def general_opp_filtering(self, filter, date_filter):
+    async def general_opp_filtering(self, filter, date_filter):
         if date_filter is not None:
             date_filter = pd.to_datetime(date_filter)
-            df = endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter).get_data_frames()[0]
+            async with self.nba_api_semaphore:
+                df = await asyncio.to_thread(
+                    lambda: endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter).get_data_frames()[0]
+                )
         else:
             df = self._fetch_data_from_table('general_opponent_stats')
         df['OPP_STOCKS'] = df['OPP_BLK'] + df['OPP_STL']
@@ -472,11 +500,14 @@ class GameService:
         return df.sort_values(by= filter, ascending=False)
             
     #Function that filters when the user is filtering for catch and shoot teams
-    def catch_shoot_filtering(self, filter, date_filter):
+    async def catch_shoot_filtering(self, filter, date_filter):
         f_map = {'C&S 3s': 'FG3M', 'C&S PTS' : 'PTS', 'C&S 3A' : 'FG3A'}         
         if date_filter is not None:
                 date_filter = pd.to_datetime(date_filter)
-                df = endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter).get_data_frames()[0]
+                async with self.nba_api_semaphore:
+                    df = await asyncio.to_thread(
+                        lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter).get_data_frames()[0]
+                    )
         else:
                 df = self._fetch_data_from_table('catch_and_shoot')
         df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
@@ -484,11 +515,14 @@ class GameService:
         return df.sort_values(by = f_map[filter], ascending = False)
 
     #Function that filters when the user is filtering for pullup teams
-    def pullup_filtering(self, filter, date_filter):
+    async def pullup_filtering(self, filter, date_filter):
         f_map = {'PU 2s': 'FG2M', 'PU 3s': 'FG3M', 'PU PTS' : 'PTS'}
         if date_filter is not None:
             date_filter = pd.to_datetime(date_filter)
-            df = endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter).get_data_frames()[0]
+            async with self.nba_api_semaphore:
+                df = await asyncio.to_thread(
+                    lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter).get_data_frames()[0]
+                )
         else:
             df = self._fetch_data_from_table('pullups')
         df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
