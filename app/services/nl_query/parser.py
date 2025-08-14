@@ -696,7 +696,7 @@ class MasterConfidenceCalculator:
         self.llm_threshold = 0.75
     
     def calculate_confidence(self, query: str, components: QueryComponents, 
-                           coverage: QueryCoverage) -> ConfidenceBreakdown:
+                           coverage: QueryCoverage, parser=None) -> ConfidenceBreakdown:
         """Calculate comprehensive confidence score"""
         
         # 1. Coverage score (0-1, higher is better)
@@ -729,9 +729,20 @@ class MasterConfidenceCalculator:
             completeness_score * self.weights['completeness']
         )
         
+        # Aggressive LLM triggering for opponent filter queries
+        should_use_llm = final_confidence < self.llm_threshold
+        
+        # Force LLM if query has opponent filter keywords but no filters were extracted
+        if parser and hasattr(parser, '_has_opponent_filter_keywords') and parser._has_opponent_filter_keywords(query):
+            has_extracted_filters = len(components.opponent_filters) > 0
+            if not has_extracted_filters:
+                should_use_llm = True
+                # Apply penalty to confidence to reflect the missed opponent filters
+                final_confidence = min(final_confidence * 0.6, 0.7)  # Cap at 0.7 to ensure LLM trigger
+        
         return ConfidenceBreakdown(
             final_confidence=final_confidence,
-            should_use_llm=final_confidence < self.llm_threshold,
+            should_use_llm=should_use_llm,
             coverage_score=coverage_score,
             semantic_score=semantic_score,
             ambiguity_score=ambiguity_score,
@@ -1046,7 +1057,7 @@ class BaseQueryParser:
         components.intent = self._classify_intent(query, components)
         
         # Calculate comprehensive confidence score
-        confidence_breakdown = self.confidence_calculator.calculate_confidence(query, components, coverage)
+        confidence_breakdown = self.confidence_calculator.calculate_confidence(query, components, coverage, parser=self)
         components.confidence = confidence_breakdown.final_confidence
         
         # Store confidence breakdown for debugging
@@ -1440,6 +1451,46 @@ class BaseQueryParser:
         
         # Only return exact matches - no fuzzy matching
         return direct_mappings.get(filter_text)
+    
+    def _has_opponent_filter_keywords(self, query: str) -> bool:
+        """
+        Detect if query contains opponent filter keywords that should trigger aggressive LLM fallback.
+        
+        Args:
+            query (str): The query string to analyze
+            
+        Returns:
+            bool: True if opponent filter keywords are detected
+        """
+        query_lower = query.lower()
+        
+        # Opponent context keywords
+        opponent_keywords = [
+            'against', 'vs', 'versus', 'opponent', 'opponents',
+            'team', 'teams'
+        ]
+        
+        # Quality/ranking keywords that suggest opponent filtering
+        quality_keywords = [
+            'elite', 'strong', 'weak', 'tough', 'good', 'bad',
+            'top', 'bottom', 'best', 'worst', 'leading', 'trailing'
+        ]
+        
+        # Specific opponent filter categories
+        category_keywords = [
+            'defensive', 'defense', 'defenses', 'offensive', 'offense', 'offenses',
+            'rebounding', 'scoring', 'shooting', 'passing',
+            'pullup', 'catch and shoot', 'transition', 'isolation',
+            'spot up', 'handoff', 'post up', 'off screen'
+        ]
+        
+        # Check for opponent context + quality/category combinations
+        has_opponent_context = any(keyword in query_lower for keyword in opponent_keywords)
+        has_quality_descriptor = any(keyword in query_lower for keyword in quality_keywords)
+        has_category_descriptor = any(keyword in query_lower for keyword in category_keywords)
+        
+        # Trigger if we have opponent context AND (quality OR category descriptors)
+        return has_opponent_context and (has_quality_descriptor or has_category_descriptor)
     
     def _extract_minutes_filter(self, query: str) -> Optional[Tuple[int, int]]:
         """
