@@ -1566,38 +1566,6 @@ class BaseQueryParser:
         
         return None
     
-    def _normalize_player_name(self, name: str) -> str:
-        """
-        Normalize player names by removing accents and special characters.
-        Args:
-            name (str): The player name with potential accents.
-        Returns:
-            str: The normalized player name without accents.
-        """
-        if not name:
-            return name
-        
-        # Common accent mappings for NBA players
-        accent_mappings = {
-            'ć': 'c', 'č': 'c', 'ć': 'c', 'Ć': 'C', 'Č': 'C',
-            'ń': 'n', 'ň': 'n', 'Ń': 'N', 'Ň': 'N',
-            'š': 's', 'Š': 'S',
-            'ž': 'z', 'Ž': 'Z',
-            'ö': 'o', 'Ö': 'O',
-            'ü': 'u', 'Ü': 'U',
-            'á': 'a', 'à': 'a', 'ä': 'a', 'Á': 'A', 'À': 'A', 'Ä': 'A',
-            'é': 'e', 'è': 'e', 'ê': 'e', 'É': 'E', 'È': 'E', 'Ê': 'E',
-            'í': 'i', 'ì': 'i', 'î': 'i', 'Í': 'I', 'Ì': 'I', 'Î': 'I',
-            'ó': 'o', 'ò': 'o', 'ô': 'o', 'Ó': 'O', 'Ò': 'O', 'Ô': 'O',
-            'ú': 'u', 'ù': 'u', 'û': 'u', 'Ú': 'U', 'Ù': 'U', 'Û': 'U'
-        }
-        
-        normalized = name
-        for accented, normal in accent_mappings.items():
-            normalized = normalized.replace(accented, normal)
-        
-        return normalized
-    
     def _extract_players_with_syntax(self, query: str, doc) -> Tuple[Optional[str], List[str], List[str]]:
         """
         Extract player relationships (main, ON, OFF) from the query using entity-first approach.
@@ -1708,11 +1676,11 @@ class BaseQueryParser:
             
             if classification == "main":
                 if main_player is None:  # Only set first main player
-                    main_player = self._normalize_player_name(player['name'])
+                    main_player = player['name']
             elif classification == "with":
-                players_on.append(self._normalize_player_name(player['name']))
+                players_on.append(player['name'])
             elif classification == "without":
-                players_off.append(self._normalize_player_name(player['name']))
+                players_off.append(player['name'])
         
         # If no main player found but we have players, use positional logic
         if main_player is None and all_players:

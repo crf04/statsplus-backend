@@ -2,6 +2,8 @@ import pandas as pd
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelogs, PlayerGameLogs, PlayerDashPtShots
 from sqlalchemy import create_engine
+from rapidfuzz import process, fuzz
+from typing import Optional
 
 class PlayerService:
     def __init__(self, db_engine):
@@ -21,6 +23,9 @@ class PlayerService:
         Get player profile data based on category.
         Categories: Playtypes, assists, Archetype
         """
+        
+        #fuzzy match player name
+        player_name = self._fuzzy_match_player_name(player_name)
         try:
             if category == 'Playtypes':
                 return self._get_player_playtypes(player_name)
@@ -36,6 +41,48 @@ class PlayerService:
                 raise ValueError(f"Unknown category: {category}")
         except Exception as e:
             print(f"Error getting player profile: {e}")
+            return None
+        
+    def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
+        """
+        Fuzzy match player name against the player database.
+        
+        Args:
+            player_name (str): The input player name to match
+            
+        Returns:
+            Optional[str]: The best matching player name from database, or None if no good match found
+        """
+        try:
+            # Get all player names from database
+            df = self._fetch_data_from_table('player_information')
+            
+            if df.empty:
+                return None
+                
+            all_player_names = df['PLAYER_NAME'].tolist()
+            
+            # First try exact match (case insensitive)
+            player_name_lower = player_name.lower().strip()
+            for name in all_player_names:
+                if name.lower().strip() == player_name_lower:
+                    return name
+            
+            # If no exact match, use fuzzy matching
+            match = process.extractOne(
+                player_name,
+                all_player_names,
+                scorer=fuzz.token_sort_ratio,
+                score_cutoff=85  # Require 85% similarity
+            )
+            
+            if match:
+                return match[0]  # Return the matched name
+                
+            return None
+            
+        except Exception as e:
+            print(f"Error in fuzzy matching player name '{player_name}': {e}")
             return None
 
     def _get_player_playtypes(self, player_name):

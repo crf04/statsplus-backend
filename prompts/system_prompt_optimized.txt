@@ -25,13 +25,13 @@ OPPONENT FILTERS (teams with best defense in category):
 - PU PTS: pull-up shot defense  
 - Transition: fast-break defense
 - Isolation: iso defense
-- OffRebound: defensive rebounding
+- OffRebound: offensive rebounding
 - Spotup: spot-up defense
 - Handoff: handoff defense
 - OffScreen: off-screen defense
 - Postup: post-up defense
 - Less Than 10 ft: paint protection
-- OPP_PTS: overall points allowed
+- OPP_PTS: overall points allowed, overall defense
 - OPP_REB: rebounds allowed
 - OPP_AST: assists allowed
 - OPP_STOCKS: steals+blocks allowed
@@ -41,7 +41,6 @@ OPPONENT FILTERS (teams with best defense in category):
 - OPP_STL: steals generated
 - OPP_FG3M: threes allowed
 - OPP_FG3A: three attempts allowed
-- C&S 3s: catch-shoot threes allowed
 - C&S 3A: catch-shoot 3PT attempts
 - PU 2s: pull-up twos allowed
 - PU 3s: pull-up threes allowed
@@ -49,7 +48,7 @@ OPPONENT FILTERS (teams with best defense in category):
 - PRRollMan: pick-roll roll-man defense
 - Cut: cutting defense
 
-RANKING: "top X" = X best defenses (+X), "worst X" = X worst defenses (-X)
+RANKING: "top X" = X best defenses (+X), "worst X" = X worst defenses (-X). A negative number corresponds to the best matchups for the player, and vice versa.
 
 EXAMPLES:
 "LeBron last 10 games with 30+ points" →
