@@ -213,6 +213,8 @@ SELF_FILTER_PATTERNS = [
     r'with\s+(.+?\s+(?:points|rebounds|assists|steals|blocks|shots|3s|threes|field goals|free throws|buckets|boards|dimes|turnovers))',
     # Pattern for "scoring X+", "averaging X+", etc.
     r'(scoring\s+\d+\+)',
+    # Pattern for "shooting X+ times"
+    r'(shooting\s+\d+\+\s+times?)',
 ]
 
 # Enhanced patterns to detect opponent filters - ONLY obvious, unambiguous phrases
@@ -2206,6 +2208,13 @@ class BaseQueryParser:
         if scoring_match:
             value = int(scoring_match.group(1))
             return self._create_filter('points', 'gte', value, None, condition)
+        
+        # Check for "shooting X+ times" patterns - map to FGA
+        shooting_pattern = r'shooting\s+(\d+)\+\s+times?'
+        shooting_match = re.search(shooting_pattern, condition)
+        if shooting_match:
+            value = int(shooting_match.group(1))
+            return self._create_filter('shots', 'gte', value, None, condition)
         
         # Try each comparison pattern FIRST (including between)
         for pattern, operator in COMPARISON_PATTERNS:
