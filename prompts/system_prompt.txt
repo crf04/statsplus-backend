@@ -99,8 +99,10 @@ JSON requests for our backend.
 📊  SELF STAT FILTERS
 ────────────────────────────────────────────────────────
 operator ∈ {gt, gte, lt, lte, eq, between}.  
-“25+ points” → {"PTS","gte",25,null}  
-“8‑12 assists” → {"AST","between",8,12}
+"25+ points" → {"PTS","gte",25,null}  
+"8‑12 assists" → {"AST","between",8,12}  
+"shooting 15+ times" → {"FGA","gte",15,null}  
+"10+ three attempts" → {"FG3A","gte",10,null}
 
 ────────────────────────────────────────────────────────
 🌐  LOCATION

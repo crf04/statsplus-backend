@@ -208,6 +208,7 @@ SELF_FILTER_PATTERNS = [
     r'when\s+he\s+(.+)',
     # Pattern for "30+ point games", "10+ rebound games", etc.
     r'(\d+\+?\s*(?:points?|rebounds?|assists?|steals?|blocks?|threes?|buckets?|boards?|dimes?))\s+games',
+    r'games\s+making\s+(.+)',
     r'games\s+with\s+(.+)',
     r'with\s+(.+?\s+(?:points|rebounds|assists|steals|blocks|shots|3s|threes|field goals|free throws|buckets|boards|dimes|turnovers))',
     # Pattern for "scoring X+", "averaging X+", etc.
@@ -692,8 +693,8 @@ class MasterConfidenceCalculator:
             'completeness': 0.20
         }
         
-        # Conservative threshold for LLM fallback
-        self.llm_threshold = 0.75
+        # Lowered threshold for better LLM fallback on self-filter patterns
+        self.llm_threshold = 0.9
     
     def calculate_confidence(self, query: str, components: QueryComponents, 
                            coverage: QueryCoverage, parser=None) -> ConfidenceBreakdown:
@@ -1187,6 +1188,11 @@ class BaseQueryParser:
                             return self.player_aliases[alias]
         
         
+        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
+        last_name_match = self._extract_last_name(text)
+        if last_name_match:
+            return last_name_match
+        
         # STEP 5: Try fuzzy matching on word combinations (more conservative)
         for i in range(len(words)):
             for j in range(i + 1, min(i + 4, len(words) + 1)):
@@ -1214,11 +1220,6 @@ class BaseQueryParser:
         if match:
             return match[0]
         return None
-
-        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
-        last_name_match = self._extract_last_name(text)
-        if last_name_match:
-            return last_name_match
     
     def _extract_team_name(self, query: str, doc) -> Optional[str]:
         """

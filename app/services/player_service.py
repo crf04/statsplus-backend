@@ -60,7 +60,7 @@ class PlayerService:
             if df.empty:
                 return None
                 
-            all_player_names = df['PLAYER_NAME'].tolist()
+            all_player_names = df['full_name'].tolist()
             
             # First try exact match (case insensitive)
             player_name_lower = player_name.lower().strip()
