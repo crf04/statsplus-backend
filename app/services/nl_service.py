@@ -28,9 +28,9 @@ class NLService:
                 logger.warning("   Will continue with NLP-only mode")
                 self.llm_service = None
             
-            print("✅ Natural Language Query System initialized successfully")
+            print("Natural Language Query System initialized successfully")
         except Exception as e:
-            print(f"❌ Failed to initialize NL Query System: {e}")
+            print(f"Failed to initialize NL Query System: {e}")
     
     def process_query(self, query):
         """Process natural language query with hybrid NLP+LLM routing"""

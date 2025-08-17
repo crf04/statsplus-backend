@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.player_service import PlayerService
+from ..utils.auth import require_auth, require_auth_optional, get_current_user
 
 # Initialize blueprint and services
 player_bp = Blueprint('players', __name__)
@@ -9,6 +10,7 @@ engine = get_engine()
 player_service = PlayerService(engine)
 
 @player_bp.route('', methods=['GET'])
+@require_auth_optional
 def get_players():
     try:
         players = player_service.get_all_players()
@@ -17,6 +19,7 @@ def get_players():
         return jsonify({'error': str(e)}), 500
 
 @player_bp.route('/profile', methods=['GET'])
+@require_auth
 def get_player_profile():
     try:
         player = request.args.get('player_name')

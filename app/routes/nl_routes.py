@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.nl_service import NLService
+from ..utils.auth import require_auth, get_current_user
 
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
@@ -9,15 +10,23 @@ engine = get_engine()
 nl_service = NLService(engine)
 
 @nl_bp.route('/nl-query', methods=['POST'])
+@require_auth
 def process_natural_language_query():
     """Process natural language queries and return structured results"""
     try:
+        # Get authenticated user
+        user = get_current_user()
+        
         # Get query from request
         data = request.get_json()
         if not data or 'query' not in data:
             return jsonify({'error': 'No query provided'}), 400
         
         query = data['query']
+        
+        # Log the query with user context (for analytics/debugging)
+        print(f"NL Query from {user['email']} ({user['uid']}): {query}")
+        
         result = nl_service.process_query(query)
         return jsonify(result)
         

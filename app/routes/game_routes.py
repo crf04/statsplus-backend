@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.game_service import GameService
+from ..utils.auth import require_auth, get_current_user
 
 
 # Initialize blueprint and services
@@ -10,6 +11,7 @@ engine = get_engine()
 game_service = GameService(engine)
 
 @game_bp.route('/game_logs', methods=['GET'])
+@require_auth
 async def get_game_logs():
     try:
         player_name = request.args.get('player_name')

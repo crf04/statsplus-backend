@@ -47,6 +47,9 @@ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1
 # LLM Integration
 openai>=1.0.0
 
+# Firebase Authentication
+firebase-admin>=6.5.0
+
 # Caching
 redis==4.5.4
 

@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.team_service import TeamService
+from ..utils.auth import require_auth, require_auth_optional, get_current_user
 
 # Initialize blueprint and services
 team_bp = Blueprint('teams', __name__)
@@ -9,6 +10,7 @@ engine = get_engine()
 team_service = TeamService(engine)
 
 @team_bp.route('/stats', methods=['GET'])
+@require_auth
 def get_team_stats():
     try:
         category = request.args.get('category')
@@ -23,6 +25,7 @@ def get_team_stats():
         return jsonify({'error': str(e)}), 500
 
 @team_bp.route('', methods=['GET'])
+@require_auth_optional
 def get_teams():
     try:
         teams = team_service.get_all_teams()
