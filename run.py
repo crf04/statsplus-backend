@@ -2,6 +2,10 @@ from flask import Flask
 from flask_cors import CORS
 from sqlalchemy import create_engine
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import blueprints
 from app.routes.player_routes import player_bp
