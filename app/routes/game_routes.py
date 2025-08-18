@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from sqlalchemy import create_engine
+import asyncio
 from ..utils.db import get_engine
 from ..services.game_service import GameService
 from ..utils.auth import require_auth, get_current_user
@@ -12,7 +13,7 @@ game_service = GameService(engine)
 
 @game_bp.route('/game_logs', methods=['GET'])
 @require_auth
-async def get_game_logs():
+def get_game_logs():
     try:
         player_name = request.args.get('player_name')
         filter_params = {
@@ -36,6 +37,6 @@ async def get_game_logs():
             }
         }
 
-        return await game_service.get_filtered_logs(player_name, filter_params)
+        return asyncio.run(game_service.get_filtered_logs(player_name, filter_params))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
