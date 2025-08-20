@@ -10,7 +10,7 @@ engine = get_engine()
 team_service = TeamService(engine)
 
 @team_bp.route('/stats', methods=['GET'])
-@require_auth
+@require_auth_optional
 def get_team_stats():
     try:
         category = request.args.get('category')

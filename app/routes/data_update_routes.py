@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify
 from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.data_service import DataService
+from ..utils.auth import require_auth_optional
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
@@ -9,6 +10,7 @@ engine = get_engine()
 data_service = DataService(engine)
 
 @data_bp.route('/update_database', methods=['GET'])
+@require_auth_optional
 def update_database():
     try:
         success = data_service.update_all_data()
@@ -20,6 +22,7 @@ def update_database():
         return jsonify({'error': str(e)}), 500
 
 @data_bp.route('/player_PBP', methods=['PUT'])
+@require_auth_optional
 def store_player_PBP():
     try:
         success = data_service.fetch_PBP_data('player')
@@ -31,6 +34,7 @@ def store_player_PBP():
         return jsonify({'error': str(e)}), 500
 
 @data_bp.route('/opponent_PBP', methods=['PUT'])
+@require_auth_optional
 def store_opponent_PBP():
     try:
         success = data_service.fetch_PBP_data('opponent')
@@ -42,6 +46,7 @@ def store_opponent_PBP():
         return jsonify({'error': str(e)}), 500
 
 @data_bp.route('/fetch_players_with_teams', methods=['GET'])
+@require_auth_optional
 def fetch_players_with_teams():
     try:
         data_service.save_team()
@@ -51,6 +56,7 @@ def fetch_players_with_teams():
         return jsonify({'error': str(e)}), 500
     
 @data_bp.route('/fetch_playtypes', methods=['GET'])
+@require_auth_optional
 def fetch_playtypes():
     try:
         return jsonify(data_service.get_playtypes())

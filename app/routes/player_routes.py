@@ -19,7 +19,7 @@ def get_players():
         return jsonify({'error': str(e)}), 500
 
 @player_bp.route('/profile', methods=['GET'])
-@require_auth
+@require_auth_optional
 def get_player_profile():
     try:
         player = request.args.get('player_name')
@@ -32,6 +32,7 @@ def get_player_profile():
         return jsonify({'error': str(e)}), 500
 
 @player_bp.route('/fetch', methods=['PUT','GET'])
+@require_auth_optional
 def fetch_players():
     try:
         success = player_service.store_player_information()
@@ -43,6 +44,7 @@ def fetch_players():
         return jsonify({'error': str(e)}), 500
 
 @player_bp.route('/test', methods=['PUT','GET'])
+@require_auth_optional
 def test():
     try:
         success = player_service._get_shooting_type('LeBron James')
