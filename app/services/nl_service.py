@@ -136,7 +136,7 @@ class NLService:
                 'date_filter': llm_content.get('date_range'),
                 'self_filters': self_filters,
                 'rank_filter': rank_filter,
-                'season': llm_content.get('season', '2024-25'),
+                'season': llm_content.get('season', '2025-26'),
                 'confidence': llm_content.get('confidence', 0.9),  # LLM typically has high confidence
                 'intent': llm_content.get('intent', 'game_logs'),
                 'time_period': llm_content.get('time_period'),
