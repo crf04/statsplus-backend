@@ -138,6 +138,7 @@ class GameService:
                 )
         
         async def fetch_next_game():
+            return
             async with self.nba_api_semaphore:
                 try:
                     return await asyncio.to_thread(
