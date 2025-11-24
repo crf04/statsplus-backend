@@ -212,7 +212,7 @@ class GameService:
         common_game_ids = {pair[0] for pair in primary_game_team_pairs}
         return set(common_game_ids)
 
-    async def get_games_to_exclude(self, player_logs, players_off_names, season='2024-25'):
+    async def get_games_to_exclude(self, player_logs, players_off_names, season='2025-26'):
         """Find games to exclude due to filtering"""
         exclude_game_ids = set()
         

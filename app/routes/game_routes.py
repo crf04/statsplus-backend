@@ -25,7 +25,7 @@ def get_game_logs():
             'rank_filter': request.args.getlist('rank_filter[]'),
             'location_filter': request.args.get('location_filter', 'Both'),
             'game_filter': request.args.get('game_filter'),
-            'season_filter': request.args.get('season_filter','2024-25'),
+            'season_filter': request.args.get('season_filter','2025-26'),
             'playstyle_range': [
                 float(request.args.get('playstyle_RTG_min', '0')),
                 float(request.args.get('playstyle_RTG_max', '200'))
