@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
     ALLOWED_TABLES = {
@@ -68,7 +69,7 @@ class GameService:
         """Get daily cache decorator for this instance"""
         return self.cache.cache_daily_nba_data()
     
-    async def _get_game_logs(self, player_name, season='2024-25'):
+    async def _get_game_logs(self, player_name, season='2025-26'):
         """Get game logs with daily caching - only hits NBA API once per day"""
         # Apply caching manually since we can't use decorators on dynamic methods
         if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
@@ -123,7 +124,7 @@ class GameService:
             # No cache - direct API call
             return await self._fetch_game_logs_from_api(player_name, season)
     
-    async def _fetch_game_logs_from_api(self, player_name, season='2024-25'):
+    async def _fetch_game_logs_from_api(self, player_name, season='2025-26'):
         player_id = self.get_player_id(player_name)
         
         # Define async wrappers for NBA API calls
@@ -193,7 +194,7 @@ class GameService:
         return gamelogs, next_team
 
 
-    async def get_common_games(self, primary_player_logs, other_players_names, season='2024-25'):
+    async def get_common_games(self, primary_player_logs, other_players_names, season='2025-26'):
         """Find common games between players"""
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
         
@@ -272,7 +273,7 @@ class GameService:
                 df = df[(df['PLAYTYPE_RTG'] >= min_rating) & (df['PLAYTYPE_RTG'] <= max_rating)]
 
         # Apply players on/off filter
-        season = filter_params.get('season_filter', '2024-25')
+        season = filter_params.get('season_filter', '2025-26')
         if filter_params.get('players_on') or filter_params.get('players_off'):
             df = await self.filter_players_on_off(df, filter_params.get('players_on', []), filter_params.get('players_off', []), season)
 

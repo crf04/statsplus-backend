@@ -125,7 +125,7 @@ class PlayerService:
             
             # Get game logs
             gl = playergamelogs.PlayerGameLogs(
-                season_nullable='2024-25',
+                season_nullable='2025-26',
                 opp_team_id_nullable=team_id
             ).get_data_frames()[0]
             
