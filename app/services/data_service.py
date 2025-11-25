@@ -28,7 +28,7 @@ class DataService:
             self.process_opp_shooting_zone()
             self.process_playstyles()
             self.process_player_zone()
-            self.process_clusters()
+            #self.process_clusters()
             self.fetch_PBP_data()
             self.fetch_PBP_data(data_type = 'Opponent')
             self.process_assist_data()

@@ -133,7 +133,8 @@ class GameService:
                 return await asyncio.to_thread(
                     lambda: endpoints.playergamelogs.PlayerGameLogs(
                         player_id_nullable=player_id, 
-                        season_nullable=season
+                        season_nullable=season,
+                        season_type_nullable='Regular Season'
                     ).get_data_frames()[0]
                 )
         
