@@ -53,7 +53,8 @@ TIME_PERIOD_SYNONYMS = {
 
 # Season format mappings for specific NBA seasons
 SEASON_MAPPINGS = {
-    "2024-25": ["2024-25", "2024-2025", "current season", "this season", "this year"],
+    "2025-26": ["2025-26", "2025-2026", "current season", "this season", "this year"],
+    "2024-25": ["2024-25", "2024-2025"],
     "2023-24": ["2023-24", "2023-2024", "last season", "previous season"],
     "2022-23": ["2022-23", "2022-2023"],
     "2021-22": ["2021-22", "2021-2022"],

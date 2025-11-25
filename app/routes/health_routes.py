@@ -154,7 +154,7 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
         response = session.get(
             'https://api.pbpstats.com/get-totals/nba',
             params={
-                'Season': '2024-25',
+                'Season': '2025-26',
                 'SeasonType': 'Regular+Season',
                 'Type': 'Player'
             },

@@ -18,7 +18,7 @@ class ParameterMapper:
         self.season_mappings = SEASON_MAPPINGS
         
         # Season mappings
-        self.current_season = "2024-25"  # Updated to match route default
+        self.current_season = "2025-26"  # Updated to match route default
         
         # Location mappings
         self.location_mapping = {

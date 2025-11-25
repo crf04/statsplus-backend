@@ -144,7 +144,7 @@ class QueryExecutor:
             'rank_filter': [],
             'location_filter': 'Both',
             'game_filter': None,
-            'season_filter': '2024-25',
+            'season_filter': '2025-26',
             'playstyle_range': [0, 200],
             'self_filters': {}
         }

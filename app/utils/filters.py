@@ -56,7 +56,7 @@ def apply_filters(df, filter_params):
         df = df.head(int(game_filter))
         
     # Apply players on/off filters
-    df = filter_players_on_off(df, players_on, players_off, '2024-25')
+    df = filter_players_on_off(df, players_on, players_off, '2025-26')
     
     return df
 
@@ -71,7 +71,7 @@ def filter_players_on_off(df, players_on, players_off, season):
     
     return df
 
-def get_games_to_exclude(player_logs, players_off_names, season='2024-25'):
+def get_games_to_exclude(player_logs, players_off_names, season='2025-26'):
     exclude_game_ids = set()
     
     # Loop through players_off and union game IDs
@@ -88,7 +88,7 @@ def get_games_to_exclude(player_logs, players_off_names, season='2024-25'):
 
     return exclude_game_ids
 
-def get_common_games(primary_player_logs, other_players_names, season='2024-25'):
+def get_common_games(primary_player_logs, other_players_names, season='2025-26'):
     primary_game_team_pairs = set(zip(
         primary_player_logs['GAME_ID'], 
         primary_player_logs['TEAM_ABBREVIATION']

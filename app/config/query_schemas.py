@@ -50,9 +50,9 @@ ENDPOINT_SCHEMAS = {
             },
             "season_filter": {
                 "type": "str",
-                "default": "2024-25",
+                "default": "2025-26",
                 "description": "NBA season in YYYY-YY format",
-                "example": "2024-25"
+                "example": "2025-26"
             },
             "players_on": {
                 "type": "list",

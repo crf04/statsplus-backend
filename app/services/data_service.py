@@ -264,7 +264,7 @@ class DataService:
         """Fetch play-by-play data from external API using optimized session"""
         base_url = 'https://api.pbpstats.com/get-totals/nba'
         params = {
-            'Season': '2024-25',
+            'Season': '2025-26',
             'SeasonType': 'Regular+Season',
             'Type': 'Player' if data_type == 'player' else 'Opponent'
         }
