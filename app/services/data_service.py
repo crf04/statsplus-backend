@@ -320,14 +320,16 @@ class DataService:
         return LeagueDashTeamStats(
             measure_type_detailed_defense='Opponent',
             per_mode_detailed='Per48',
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_data(self, type, date_filter=None):
         return LeagueDashOppPtShot(
             general_range_nullable=type,
             date_from_nullable=date_filter,
-            per_mode_simple = 'PerGame'
+            per_mode_simple='PerGame',
+            league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -335,34 +337,39 @@ class DataService:
             distance_range='By Zone',
             measure_type_simple='Opponent',
             per_mode_detailed='PerGame',
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_player_zone_data(self, date_filter=None):
         return LeagueDashPlayerShotLocations(
             distance_range='By Zone',
             per_mode_detailed='PerGame',
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_team_play_type_data(self, play_type):
         return SynergyPlayTypes(
             play_type_nullable=play_type,
             player_or_team_abbreviation='T',
-            type_grouping_nullable='Defensive'
+            type_grouping_nullable='Defensive',
+            league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_play_type_data(self, play_type):
         return SynergyPlayTypes(
             play_type_nullable=play_type,
             player_or_team_abbreviation='P',
-            type_grouping_nullable='Offensive'
+            type_grouping_nullable='Offensive',
+            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
     
     def _fetch_player_per36_stats(self):
         return LeagueDashPlayerStats(
             measure_type_detailed_defense='Base',
-            per_mode_detailed='Per36'
+            per_mode_detailed='Per36',
+            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_data_from_table(self, table_name):
@@ -486,7 +493,8 @@ class DataService:
             df = SynergyPlayTypes(
                 play_type_nullable=play_type,
                 player_or_team_abbreviation='T',
-                type_grouping_nullable='Defensive'
+                type_grouping_nullable='Defensive',
+                league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
             ).get_data_frames()[0]
             df['PLAY_TYPE'] = play_type
             df['PTS/G'] = df['PTS'] / df['GP']
