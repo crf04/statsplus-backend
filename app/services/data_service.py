@@ -346,7 +346,6 @@ class DataService:
             distance_range='By Zone',
             per_mode_detailed='PerGame',
             date_from_nullable=date_filter,
-            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_team_play_type_data(self, play_type):
@@ -354,7 +353,6 @@ class DataService:
             play_type_nullable=play_type,
             player_or_team_abbreviation='T',
             type_grouping_nullable='Defensive',
-            league_id_nullable='00'  # Filter for NBA teams only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_play_type_data(self, play_type):
@@ -362,14 +360,12 @@ class DataService:
             play_type_nullable=play_type,
             player_or_team_abbreviation='P',
             type_grouping_nullable='Offensive',
-            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
     
     def _fetch_player_per36_stats(self):
         return LeagueDashPlayerStats(
             measure_type_detailed_defense='Base',
             per_mode_detailed='Per36',
-            league_id_nullable='00'  # Filter for NBA players only (excludes WNBA/G-League)
         ).get_data_frames()[0]
 
     def _fetch_data_from_table(self, table_name):
