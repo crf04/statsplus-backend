@@ -156,6 +156,7 @@ tmp/
 # Logs
 logs/
 *.log
+firebase-debug.log*
 
 # Database
 *.db
