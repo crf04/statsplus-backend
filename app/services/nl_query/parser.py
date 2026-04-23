@@ -11,11 +11,14 @@ import pandas as pd
 import re
 import yaml
 import os
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from rapidfuzz import process, fuzz
 from sqlalchemy import text
 from ...utils.date_parser import NBADateParser
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SelfFilter:
@@ -794,13 +797,12 @@ class BaseQueryParser:
         # Initialize date parser
         self.date_parser = NBADateParser()
         
-        # Debug: Print loaded data
-        print(f"DEBUG: Loaded {len(self.players)} players")
-        print(f"DEBUG: Loaded {len(self.player_aliases)} aliases")
+        logger.debug("Loaded %s players", len(self.players))
+        logger.debug("Loaded %s player aliases", len(self.player_aliases))
         if self.players:
-            print(f"DEBUG: Sample players: {self.players[:5]}")
+            logger.debug("Sample players: %s", self.players[:5])
         if self.player_aliases:
-            print(f"DEBUG: Sample aliases: {list(self.player_aliases.keys())[:5]}")
+            logger.debug("Sample aliases: %s", list(self.player_aliases.keys())[:5])
         
         # Setup spaCy components for enhanced parsing
         self._setup_spacy_components()
@@ -966,7 +968,7 @@ class BaseQueryParser:
                 result = conn.execute(text('SELECT DISTINCT "PLAYER_NAME" FROM player_play_types'))
                 return [row[0] for row in result.fetchall()]
         except Exception as e:
-            print(f"Warning: Could not load players from database: {e}")
+            logger.warning("Could not load players from database: %s", e)
             return []
     
     def _load_teams(self) -> Dict[str, str]:
@@ -999,7 +1001,7 @@ class BaseQueryParser:
                         teams["san antonio"] = abbr
                 return teams
         except Exception as e:
-            print(f"Warning: Could not load teams from database: {e}")
+            logger.warning("Could not load teams from database: %s", e)
             return {}
     
     def _load_player_aliases(self) -> Dict[str, str]:
@@ -1019,7 +1021,7 @@ class BaseQueryParser:
                     # Fallback: assume the entire file is aliases
                     return yaml_data or {}
         except Exception as e:
-            print(f"Warning: Could not load player aliases: {e}")
+            logger.warning("Could not load player aliases: %s", e)
             return {}
     
     def parse(self, query: str) -> QueryComponents:
@@ -1066,7 +1068,7 @@ class BaseQueryParser:
         # Store confidence breakdown for debugging
         components.confidence_breakdown = confidence_breakdown
         
-        print(components)
+        logger.debug("Parsed query components: %s", components)
         return components
     
     def _preprocess_query(self, query: str) -> str:
@@ -1302,7 +1304,7 @@ class BaseQueryParser:
         try:
             return self.date_parser.parse_date_from_query(query)
         except Exception as e:
-            print(f"Warning: Date parsing failed for '{query}': {e}")
+            logger.warning("Date parsing failed for %r: %s", query, e)
             return None
     
     def _extract_location(self, query: str) -> Optional[str]:
@@ -1904,7 +1906,7 @@ class BaseQueryParser:
         query_lower = query.lower()
         if any(word in query_lower for word in ["game log", "game logs", "performance", "stats", "statistics"]):
             return "game_logs"
-        elif any(word in query_lower for word in ["profile", "overview", "summary"]):
+        elif any(word in query_lower for word in ["profile", "overview", "summary", "playstyle", "playing style", "archetype"]):
             return "player_profile"
         elif any(word in query_lower for word in ["team", "teams"]):
             return "team_stats"
@@ -1977,7 +1979,7 @@ class BaseQueryParser:
                             extraction_method="nba_date_parser"
                         ))
             except Exception as e:
-                print(f"Warning: Date coverage tracking failed: {e}")
+                logger.warning("Date coverage tracking failed: %s", e)
         
         return date_filter
     
@@ -2296,49 +2298,51 @@ class BaseQueryParser:
         processed_query = self._preprocess_query(query)
         doc = self.nlp(processed_query)
         
-        print(f"DEBUG spaCy Analysis for: '{query}'")
-        print(f"Processed query: '{processed_query}'")
-        print(f"Total players loaded: {len(self.players)}")
-        print(f"Total aliases loaded: {len(self.player_aliases)}")
+        logger.debug("spaCy analysis for %r", query)
+        logger.debug("Processed query: %r", processed_query)
+        logger.debug("Total players loaded: %s", len(self.players))
+        logger.debug("Total aliases loaded: %s", len(self.player_aliases))
         
         # Show all entities found
-        print("\nspaCy Entities Found:")
         for ent in doc.ents:
-            print(f"  - Text: '{ent.text}', Label: {ent.label_}, ID: {ent.ent_id_}, Start: {ent.start_char}, End: {ent.end_char}")
+            logger.debug(
+                "Entity text=%r label=%s id=%s start=%s end=%s",
+                ent.text,
+                ent.label_,
+                ent.ent_id_,
+                ent.start_char,
+                ent.end_char,
+            )
         
         # Show tokens
-        print("\nTokens:")
         for token in doc:
-            print(f"  - '{token.text}' (pos: {token.pos_}, dep: {token.dep_})")
+            logger.debug("Token text=%r pos=%s dep=%s", token.text, token.pos_, token.dep_)
         
         # Check if our target players are in the loaded data
         test_players = ["LeBron James", "Anthony Davis", "Anthony Edwards"]
-        print(f"\nTarget players in database:")
         for player in test_players:
             in_players = player in self.players
             in_aliases = any(alias_player == player for alias_player in self.player_aliases.values())
-            print(f"  - {player}: in_players={in_players}, in_aliases={in_aliases}")
+            logger.debug("Target player %s in_players=%s in_aliases=%s", player, in_players, in_aliases)
         
         # Check entity ruler patterns
-        print(f"\nEntity ruler patterns for target players:")
         for player in test_players:
             # Check if pattern exists in entity ruler
             found_pattern = False
             for pattern_dict in self.nlp.get_pipe("entity_ruler").patterns:
                 if pattern_dict.get("pattern") == player:
                     found_pattern = True
-                    print(f"  - {player}: Pattern found - {pattern_dict}")
+                    logger.debug("Pattern found for %s: %s", player, pattern_dict)
                     break
             if not found_pattern:
-                print(f"  - {player}: Pattern NOT found!")
+                logger.debug("Pattern not found for %s", player)
         
         # Also check for case variations
-        print(f"\nChecking case variations:")
         for player in test_players:
             variations = [player, player.lower(), player.upper()]
             for var in variations:
                 if var in [p.get("pattern") for p in self.nlp.get_pipe("entity_ruler").patterns]:
-                    print(f"  - {var}: Found in patterns")
+                    logger.debug("Case variation found in patterns: %s", var)
         
         return {
             'processed_query': processed_query,
@@ -2379,60 +2383,3 @@ class BaseQueryParser:
             'confidence_breakdown': confidence_breakdown,
             'components': components
         }
-
-
-def test_opponent_filter_mapping():
-    """Test the new opponent filter mapping system"""
-    class MockEngine:
-        def connect(self):
-            return self
-        
-        def execute(self, query):
-            # Mock team data
-            class MockResult:
-                def fetchall(self):
-                    return [('LAL',), ('GSW',), ('BOS',)]
-            return MockResult()
-        
-        def __enter__(self):
-            return self
-        
-        def __exit__(self, *args):
-            pass
-    
-    # Create a mock parser instance
-    parser = BaseQueryParser(MockEngine())
-    parser.teams = {'lal': 'LAL', 'gsw': 'GSW', 'bos': 'BOS'}
-    
-    # Test cases - only obvious, unambiguous phrases
-    test_queries = [
-        "LeBron James against catch and shoot teams",
-        "Stephen Curry vs transition teams", 
-        "Kevin Durant vs pullup teams",
-        "Luka Doncic vs isolation teams",
-        "Giannis against offensive rebound teams",
-        "LeBron James vs LAL",
-        "Stephen Curry vs top 10 catch and shoot teams",
-        "Luka Doncic against close range teams",
-        "Giannis vs spot up teams",
-        "LeBron James vs handoff teams",
-        "Stephen Curry against off screen teams",
-        "Kevin Durant vs post up teams",
-        "Luka Doncic vs inside 10 feet teams"
-    ]
-    
-    print("Testing Opponent Filter Mapping System")
-    print("=" * 50)
-    
-    for query in test_queries:
-        print(f"\nQuery: {query}")
-        filters = parser._extract_opponent_filters(query)
-        if filters:
-            for filter_type, rank in filters:
-                print(f"  → {filter_type}: {rank}")
-        else:
-            print("  → No filters found")
-    
-    print("\n" + "=" * 50)
-    print("Test completed!")
-

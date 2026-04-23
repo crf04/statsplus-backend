@@ -1,9 +1,8 @@
 from flask import Blueprint, request, jsonify
-from sqlalchemy import create_engine
 import asyncio
 from ..utils.db import get_engine
 from ..services.game_service import GameService
-from ..utils.auth import require_auth, get_current_user
+from ..utils.auth import require_auth
 
 
 # Initialize blueprint and services

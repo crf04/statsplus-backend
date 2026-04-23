@@ -108,6 +108,7 @@ dmypy.json
 .pyre/
 
 # IDEs
+.claude/
 .vscode/
 .idea/
 *.swp
@@ -132,11 +133,19 @@ yarn-error.log*
 # NBA Backend specific
 /cache
 *.db
+!nba_play_types.db
 *.sqlite
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+AGENTS.md
+
+# Local credentials
+*serviceAccount*.json
+*service-account*.json
+*firebase-adminsdk*.json
+app/config/*firebase*.json
 
 # Temporary files
 *.tmp
@@ -150,6 +159,7 @@ logs/
 
 # Database
 *.db
+!nba_play_types.db
 *.sqlite3
 
 .cursorrules

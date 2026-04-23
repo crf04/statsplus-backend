@@ -1,5 +1,6 @@
 import pandas as pd
 import requests
+import logging
 from nba_api.stats.endpoints import (
     LeagueDashTeamStats,
     LeagueDashOppPtShot,
@@ -12,6 +13,8 @@ from nba_api.stats.endpoints import (
 from nba_api.stats.static import teams, players
 from app.utils.nba_api_config import get_shared_nba_session
 from app.utils.performance_monitor import monitor_nba_api_calls, PerformanceTimer
+
+logger = logging.getLogger(__name__)
 
 class DataService:
     def __init__(self, db_engine):
@@ -34,7 +37,7 @@ class DataService:
             self.process_assist_data()
             return True
         except Exception as e:
-            print(f"Error updating database: {e}")
+            logger.error("Error updating database: %s", e)
             return False
 
     def process_opponent_scoring(self):
@@ -60,7 +63,7 @@ class DataService:
                 }
                 df.to_sql(table_map[type], self.engine, if_exists='replace', index=False)
             except Exception as e:
-                print(f"Error processing {type}: {e}")
+                logger.error("Error processing %s: %s", type, e)
                 continue
 
     def process_opp_shooting_zone(self):
@@ -94,7 +97,7 @@ class DataService:
                 df['PTS/G'] = df['PTS'] / df['GP']
                 team_dfs.append(df)
             except Exception as e:
-                print(f"Error fetching data for play type {play_type}: {e}")
+                logger.error("Error fetching data for play type %s: %s", play_type, e)
                 continue
 
         combined_team_df = pd.concat(team_dfs, ignore_index=True)
@@ -147,7 +150,7 @@ class DataService:
                 df = self._fetch_play_type_data(play_type)
                 dfs.append(df)
             except Exception as e:
-                print(f"Error fetching data for play type {play_type}: {e}")
+                logger.error("Error fetching data for play type %s: %s", play_type, e)
                 continue
 
         combined_df = pd.concat(dfs, ignore_index=True)
@@ -253,7 +256,7 @@ class DataService:
                         'PlayerID': player_id
                     })
                 except Exception as e:
-                    print(f"Error processing player {player_name}: {e}")
+                    logger.error("Error processing player %s: %s", player_name, e)
 
         players_df = pd.DataFrame(player_data)
         players_df.to_sql('player_clusters', self.engine, 
@@ -284,13 +287,13 @@ class DataService:
                 
             return True
         except requests.exceptions.Timeout as e:
-            print(f"Timeout fetching {data_type} PBP data: {e}")
+            logger.error("Timeout fetching %s PBP data: %s", data_type, e)
             return False
         except requests.exceptions.RequestException as e:
-            print(f"Request error fetching {data_type} PBP data: {e}")
+            logger.error("Request error fetching %s PBP data: %s", data_type, e)
             return False
         except Exception as e:
-            print(f"Error fetching {data_type} PBP data: {e}")
+            logger.error("Error fetching %s PBP data: %s", data_type, e)
             return False
 
     def store_player_information(self):
@@ -302,7 +305,7 @@ class DataService:
                            if_exists='replace', index=False)
             return player_df.to_dict(orient='records')
         except Exception as e:
-            print(f"Error storing player information: {e}")
+            logger.error("Error storing player information: %s", e)
             return False
     
     def store_player_per36_stats(self):
@@ -312,7 +315,7 @@ class DataService:
             df.to_sql('player_per36_stats', self.engine, if_exists='replace', index=False)
             return True
         except Exception as e:
-            print(f"Error storing player per36 stats: {e}")
+            logger.error("Error storing player per36 stats: %s", e)
             return False
 
     # Helper methods
@@ -452,7 +455,7 @@ class DataService:
             return True
                     
         except Exception as e:
-            print(f"Error processing assist data: {e}")
+            logger.error("Error processing assist data: %s", e)
             return False
         
     import openpyxl

@@ -1,9 +1,12 @@
 import pandas as pd
+import logging
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelogs, PlayerGameLogs, PlayerDashPtShots
 from sqlalchemy import create_engine
 from rapidfuzz import process, fuzz
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 class PlayerService:
     def __init__(self, db_engine):
@@ -15,7 +18,7 @@ class PlayerService:
             df = self._fetch_data_from_table('player_play_types')
             return df['PLAYER_NAME'].values.tolist()
         except Exception as e:
-            print(f"Error fetching players: {e}")
+            logger.error("Error fetching players: %s", e)
             return []
 
     def get_player_profile(self, player_name, category, opp_team=None):
@@ -40,7 +43,7 @@ class PlayerService:
             else:
                 raise ValueError(f"Unknown category: {category}")
         except Exception as e:
-            print(f"Error getting player profile: {e}")
+            logger.error("Error getting player profile: %s", e)
             return None
         
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
@@ -82,7 +85,7 @@ class PlayerService:
             return None
             
         except Exception as e:
-            print(f"Error in fuzzy matching player name '{player_name}': {e}")
+            logger.error("Error fuzzy matching player name %r: %s", player_name, e)
             return None
 
     def _get_player_playtypes(self, player_name):
@@ -140,7 +143,7 @@ class PlayerService:
             for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
                 gl[f'{col}/36MIN'] = (gl[col] / gl['MIN']) * 36
             
-            print(gl)
+            logger.debug("Archetype game logs rows: %s", len(gl))
             merged_df = gl.merge(per36_df, left_on="PLAYER_ID", right_on="PLAYER_ID", suffixes=('', '_season'))
             #get percentage diff between game and season
             for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
@@ -154,7 +157,7 @@ class PlayerService:
 
             return merged_df.to_dict(orient='records')
         except Exception as e:
-            print(f"Error getting archetype gamelogs: {e}")
+            logger.error("Error getting archetype gamelogs: %s", e)
             return []
 
     def _get_archetype_players_from_player(self, player_name):
@@ -165,7 +168,7 @@ class PlayerService:
             result = players_df[players_df['ClusterID'] == cluster_id]['PlayerID']
             return result.tolist()
         except Exception as e:
-            print(f"Error getting archetype players: {e}")
+            logger.error("Error getting archetype players: %s", e)
             return []
 
     def store_player_information(self):
@@ -177,7 +180,7 @@ class PlayerService:
                            if_exists='replace', index=False)
             return True
         except Exception as e:
-            print(f"Error storing player information: {e}")
+            logger.error("Error storing player information: %s", e)
             return False
 
     def get_player_id(self, player_name):
@@ -187,7 +190,7 @@ class PlayerService:
             player = df[df['full_name'] == player_name]
             return player['id'].values[0]
         except Exception as e:
-            print(f"Error getting player ID: {e}")
+            logger.error("Error getting player ID: %s", e)
             return None
 
     def _fetch_data_from_table(self, table_name):

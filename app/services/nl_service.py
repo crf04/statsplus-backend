@@ -22,15 +22,15 @@ class NLService:
             # Initialize LLM service for fallback
             try:
                 self.llm_service = LLMService()
-                logger.info("✅ LLM Service initialized for fallback routing")
+                logger.info("LLM Service initialized for fallback routing")
             except Exception as llm_error:
-                logger.warning(f"⚠️  LLM Service initialization failed: {llm_error}")
-                logger.warning("   Will continue with NLP-only mode")
+                logger.warning("LLM Service initialization failed: %s", llm_error)
+                logger.warning("Will continue with NLP-only mode")
                 self.llm_service = None
             
-            print("Natural Language Query System initialized successfully")
+            logger.info("Natural language query system initialized")
         except Exception as e:
-            print(f"Failed to initialize NL Query System: {e}")
+            logger.exception("Failed to initialize natural language query system: %s", e)
     
     def process_query(self, query):
         """Process natural language query with hybrid NLP+LLM routing"""
@@ -53,7 +53,7 @@ class NLService:
         )
         
         if should_use_llm and self.llm_service:
-            logger.info(f"🧠 Routing to LLM (confidence: {parsed_components.confidence:.3f}): {query_text[:50]}...")
+            logger.info("Routing to LLM (confidence %.3f): %s", parsed_components.confidence, query_text[:50])
             try:
                 # Extract player context from NLP result
                 player_context = self._extract_player_context(parsed_components)
@@ -63,12 +63,12 @@ class NLService:
                 if llm_result:
                     return llm_result
                 else:
-                    logger.warning("⚠️  LLM processing failed, falling back to NLP result")
+                    logger.warning("LLM processing failed, falling back to NLP result")
             except Exception as e:
-                logger.error(f"❌ LLM processing error: {e}")
-                logger.info("   Falling back to NLP result")
+                logger.error("LLM processing error: %s", e)
+                logger.info("Falling back to NLP result")
         else:
-            logger.info(f"⚡ Using NLP (confidence: {parsed_components.confidence:.3f}): {query_text[:50]}...")
+            logger.info("Using NLP (confidence %.3f): %s", parsed_components.confidence, query_text[:50])
         
         # Step 3: Use NLP result (fast path or fallback)
         return self._format_nlp_result(parsed_components, query_text)

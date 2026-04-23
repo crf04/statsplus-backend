@@ -19,36 +19,37 @@ MarkupSafe==3.0.2
 nba_api==1.4.1
 numpy==1.26.4
 pandas==2.2.2
-PyJWT==2.9.0
+PyJWT==2.10.1
 pymongo==4.3.3
 python-dateutil==2.9.0.post0
 python-dotenv==0.21.0
-pytz==2024.1
+pytz==2024.2
 requests==2.32.2
 six==1.16.0
 SQLAlchemy==2.0.31
-typing_extensions==4.12.2
+typing_extensions==4.15.0
 tzdata==2024.1
 urllib3==2.2.1
 Werkzeug==3.0.3
 
 # Natural Language Processing
-spacy>=3.7.0
-rapidfuzz>=3.0.0
-dateparser>=1.1.0
-nltk>=3.8.0
-word2number>=1.1.0
+spacy==3.7.2
+rapidfuzz==3.13.0
+dateparser==1.2.2
+nltk==3.9.2
+word2number==1.1
 pyarrow==15.0.2
-PyYAML>=6.0.0
+PyYAML==6.0.3
+pydantic==2.5.3
 
 # spaCy English model (NER)
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 # LLM Integration
-openai>=1.0.0
+openai==2.32.0
 
 # Firebase Authentication
-firebase-admin>=6.5.0
+firebase-admin==7.4.0
 
 # Caching
 redis==4.5.4

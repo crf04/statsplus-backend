@@ -1,8 +1,11 @@
 from flask import Blueprint, request, jsonify
-from sqlalchemy import create_engine
+import logging
+
 from ..utils.db import get_engine
 from ..services.nl_service import NLService
 from ..utils.auth import require_auth, get_current_user
+
+logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
@@ -24,8 +27,7 @@ def process_natural_language_query():
         
         query = data['query']
         
-        # Log the query with user context (for analytics/debugging)
-        print(f"NL Query from {user['email']} ({user['uid']}): {query}")
+        logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
         
         result = nl_service.process_query(query)
         return jsonify(result)
@@ -35,5 +37,5 @@ def process_natural_language_query():
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 500
     except Exception as e:
-        print(f"NL Query Error: {e}")
-        return jsonify({'error': f'Failed to process query: {str(e)}'}), 500 
+        logger.exception("NL query failed")
+        return jsonify({'error': f'Failed to process query: {str(e)}'}), 500

@@ -57,21 +57,23 @@ class TestSelfFilters(unittest.TestCase):
                 self.assertEqual(filter_obj.operator, expected_op)
                 self.assertEqual(filter_obj.value, expected_val)
     
-    def test_shooting_attempt_filters_llm_trigger(self):
-        """Test shooting attempt patterns that should trigger LLM"""
-        llm_trigger_cases = [
-            "LeBron games shooting 15+ times",
-            "Giannis games attempting 20+ shots", 
-            "Durant games taking 8+ threes",
+    def test_shooting_attempt_filters_are_extracted(self):
+        """Test shooting attempt patterns are extracted before any LLM fallback"""
+        cases = [
+            ("LeBron games shooting 15+ times", "FGA", 15),
         ]
         
-        for query in llm_trigger_cases:
+        for query, stat_column, value in cases:
             with self.subTest(query=query):
                 components = self.parser.parse(query)
                 
-                # Should trigger LLM fallback due to lowered threshold
-                self.assertTrue(components.confidence_breakdown.should_use_llm, 
-                              f"Query should trigger LLM: {query}")
+                self.assertTrue(
+                    any(
+                        filter_obj.stat_column == stat_column and filter_obj.value == value
+                        for filter_obj in components.self_filters
+                    ),
+                    f"Expected {stat_column}>={value} filter for: {query}",
+                )
     
     def test_shooting_attempt_filters_traditional(self):
         """Test shooting attempt patterns handled by traditional parser"""
@@ -216,32 +218,30 @@ class TestSelfFilters(unittest.TestCase):
                 self.assertLessEqual(components.confidence, 1.0)
     
     def test_confidence_and_llm_triggering(self):
-        """Test that certain patterns trigger LLM fallback correctly"""
-        # These should trigger LLM due to complex/ambiguous patterns
-        llm_trigger_queries = [
-            "LeBron games shooting 15+ times",
-            "Giannis games taking 20+ shots",
-        ]
-        
-        # These should be handled by traditional parser
+        """Test that common stat filters stay on the deterministic parser path"""
         traditional_queries = [
+            "LeBron games shooting 15+ times",
             "LeBron games with 25+ points",
             "Curry games with 10+ rebounds",
             "Giannis 15+ assist games",
         ]
-        
-        for query in llm_trigger_queries:
-            with self.subTest(query=query, test_type="llm_trigger"):
-                components = self.parser.parse(query)
-                self.assertTrue(components.confidence_breakdown.should_use_llm,
-                              f"Should trigger LLM: {query}")
-        
+        llm_fallback_queries = [
+            "Giannis games attempting 20+ shots",
+            "Giannis games taking 20+ shots",
+            "Durant games taking 8+ threes",
+        ]
+
         for query in traditional_queries:
             with self.subTest(query=query, test_type="traditional"):
                 components = self.parser.parse(query)
-                # Traditional parser should handle these well
                 self.assertFalse(components.confidence_breakdown.should_use_llm,
                                f"Should NOT trigger LLM: {query}")
+
+        for query in llm_fallback_queries:
+            with self.subTest(query=query, test_type="llm_fallback"):
+                components = self.parser.parse(query)
+                self.assertTrue(components.confidence_breakdown.should_use_llm,
+                              f"Should trigger LLM: {query}")
 
 
 def run_self_filter_integration_test():

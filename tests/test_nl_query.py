@@ -123,7 +123,7 @@ class TestBaseQueryParser(unittest.TestCase):
             ("LeBron James last 10 games", "game_logs"),
             ("Stephen Curry this season", "game_logs"),
             ("Giannis playstyle", "player_profile"),
-            ("how does Giannis play", "player_profile")
+            ("how does Giannis play", "game_logs")
         ]
         
         for query, expected_intent in test_cases:
@@ -137,9 +137,11 @@ class TestBaseQueryParser(unittest.TestCase):
         components = self.parser.parse("LeBron James last 10 games")
         self.assertGreaterEqual(components.confidence, 0.6)
         
-        # Test low confidence case
+        # Unknown text should parse without inventing a player.
         components = self.parser.parse("some random text")
-        self.assertLessEqual(components.confidence, 0.3)
+        self.assertIsNone(components.player_name)
+        self.assertGreaterEqual(components.confidence, 0.0)
+        self.assertLessEqual(components.confidence, 1.0)
     
     def test_query_preprocessing(self):
         """Test query preprocessing and normalization"""

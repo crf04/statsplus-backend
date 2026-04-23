@@ -1,188 +1,108 @@
-# NBA Backend API
+# StatsPlus NBA Backend
 
-A Flask-based REST API backend that provides NBA statistics, game logs, and natural language query processing with AI-powered LLM integration.
+Flask API for NBA player stats, game logs, team context, and natural-language stat queries. The project combines deterministic query parsing with optional OpenAI fallback so a frontend can ask questions like "LeBron last 10 home games with 25+ points" and receive structured filters for the game-log API.
 
-## 🏀 Features
+## What It Shows
 
-- **NBA Statistics & Game Logs**: Comprehensive player and team statistics
-- **Natural Language Queries**: Ask questions in plain English about NBA data
-- **AI-Powered Processing**: OpenAI GPT-4o-mini integration for complex queries
-- **Real-time Data**: Integration with official NBA API
-- **Advanced Filtering**: Multi-dimensional data filtering and search
-- **Hybrid Query System**: Traditional NLP + LLM fallback for optimal results
+- Flask app factory with grouped REST blueprints.
+- SQLite demo database with public NBA-derived data for immediate local use.
+- Natural-language query parsing with spaCy/rule-based extraction and optional LLM fallback.
+- Firebase-authenticated user routes, while public stat routes support optional auth where appropriate.
+- Health checks for database and NBA API connectivity.
 
-## 🚀 Quick Start
+## Quick Start
 
-### Prerequisites
+Use Python 3.11, matching `runtime.txt`.
 
-- Python 3.8+
-- OpenAI API key
-
-### Installation
-
-1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd nba-backend
-```
-
-2. Install dependencies:
-```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-3. Set up environment variables:
-```bash
 cp .env.example .env
-# Edit .env with your OpenAI API key and other configurations
-```
-
-4. Initialize the database:
-```bash
 python run.py
 ```
 
-The server will start on `http://localhost:5000`
+The API runs at `http://localhost:5000`.
 
-## 📚 API Documentation
+The bundled `nba_play_types.db` is intentionally tracked as a demo database so reviewers can run the project without a separate data import. It should contain public NBA data only; the `users` table is expected to be empty in the public repo.
 
-### Core Endpoints
+## Configuration
 
-#### Players
-- `GET /api/players` - Get all players
-- `GET /api/players/profile` - Get player profile
-- `PUT /api/players/fetch` - Fetch/update player data
-
-#### Games
-- `GET /api/games/logs` - Get game logs with filtering
-
-#### Natural Language
-- `POST /api/nl_query` - Process natural language queries
-- `POST /api/llm_query` - Direct LLM query processing
-
-### Example Queries
-
-**Natural Language Examples:**
-```bash
-curl -X POST http://localhost:5000/api/nl_query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Show me LeBron James games with 30+ points this season"}'
-```
-
-**Traditional API:**
-```bash
-curl "http://localhost:5000/api/games/logs?player=LeBron James&min_points=30"
-```
-
-## 🛠️ Technology Stack
-
-- **Framework**: Flask 2.3.3
-- **Database**: SQLite with SQLAlchemy 2.0.31
-- **AI/LLM**: OpenAI GPT-4o-mini
-- **NLP**: spaCy, NLTK, rapidfuzz
-- **Data**: pandas, numpy, nba_api
-- **Authentication**: Flask-JWT-Extended (ready)
-
-## 📁 Project Structure
-
-```
-app/
-├── routes/          # API endpoints
-├── services/        # Business logic
-├── models/          # Database models
-├── utils/           # Utility functions
-└── config/          # Configuration files
-```
-
-## 🔧 Configuration
-
-### Environment Variables
+`DATABASE_URL` defaults to the bundled SQLite database:
 
 ```bash
-# LLM Configuration
-OPENAI_API_KEY=your_openai_api_key
-LLM_MODEL=gpt-4o-mini
-LLM_TEMPERATURE=0
-LLM_MAX_TOKENS=512
-ENABLE_LLM_FALLBACK=True
-
-# Database
 DATABASE_URL=sqlite:///nba_play_types.db
-
-# Flask
-FLASK_ENV=development
-DEBUG=True
 ```
 
-## 🧪 Testing
+OpenAI fallback is optional. If `OPENAI_API_KEY` is missing, the app continues in deterministic NLP mode.
+
+Firebase Admin credentials are required only for routes protected by Firebase auth. Provide them through environment variables, never through committed JSON files.
+
+## API Snapshot
+
+Health:
+
+- `GET /api/health/db`
+- `GET /api/health/detailed`
+- `GET /api/health/nba-api`
+
+Players and teams:
+
+- `GET /api/players`
+- `GET /api/players/profile?player_name=LeBron%20James&category=Playtypes`
+- `GET /api/teams`
+- `GET /api/teams/stats?team=LAL&category=Defense`
+
+Game logs and natural language:
+
+- `GET /api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48`
+- `POST /api/nl-query`
+
+Example:
+
+```bash
+curl -X POST http://localhost:5000/api/nl-query \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
+  -d '{"query": "Stephen Curry last 10 home games with 25+ points"}'
+```
+
+Data refresh endpoints are under `/api/data/*` and call external NBA/PBP APIs. They are useful for maintenance, but the bundled DB is enough for demo exploration.
+
+## Auth Behavior
+
+- Required Firebase auth: `/api/games/game_logs`, `/api/nl-query`, and most `/api/user/*` routes.
+- Optional Firebase auth: player, team, and data-management routes.
+- Firebase Admin can initialize from `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, individual Firebase env vars, or Google application default credentials.
+
+## Development
+
+Install development tools separately:
+
+```bash
+pip install -r requirements-dev.txt
+```
 
 Run tests:
+
 ```bash
-python -m pytest tests/
+python -m pytest
 ```
 
-Run specific test categories:
-```bash
-# NLP tests
-python -m pytest tests/services/test_nl_service.py
+Or use the thin wrapper:
 
-# Integration tests
-python -m pytest tests/integration/
+```bash
+./run_tests.sh
 ```
 
-## 📊 Natural Language Processing
+Detailed API and NLP notes live in `docs/`.
 
-The system supports two query processing approaches:
+## Deployment
 
-1. **Traditional NLP**: Fast, rule-based parsing using spaCy and NLTK
-2. **LLM Integration**: AI-powered understanding for complex queries
+The included `Procfile` runs:
 
-### Supported Query Types
-
-- Player performance: "Show me Curry's best games this month"
-- Team statistics: "Lakers vs Warriors head-to-head this season"
-- Comparative analysis: "Compare LeBron and Jordan playoff stats"
-- Date filtering: "Games from last week with overtime"
-- Statistical thresholds: "Triple-doubles in January"
-
-## 🔄 Data Updates
-
-Update NBA data:
 ```bash
-curl -X GET http://localhost:5000/api/data/update_database
+gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --bind 0.0.0.0:${PORT} wsgi:app
 ```
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License.
-
-## 🆘 Support
-
-For issues and questions:
-- Create an issue on GitHub
-- Check the API documentation
-- Review the development guidelines
-
-## 🚀 Deployment
-
-See `DEPLOYMENT.md` for production deployment instructions.
-
-### Railway
-
-1. Create a new Railway project and connect this repo.
-2. Set service root to `nba-backend/`.
-3. Environment variables:
-   - `OPENAI_API_KEY`
-   - `DATABASE_URL` (use Railway Postgres URL or fallback to SQLite)
-4. Build & start:
-   - Install: `pip install -r requirements.txt`
-   - Start: defined in `Procfile` as `web: gunicorn --bind 0.0.0.0:${PORT} wsgi:app`
-5. Deploy. Railway will expose a URL. API is available under `/api/...`.
+Set production secrets through your hosting provider environment. Before publishing this repo, rotate any previously exposed Firebase service-account key and publish from a clean history that does not contain credential JSON.

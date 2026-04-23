@@ -1,8 +1,7 @@
 from flask import Blueprint, request, jsonify
-from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.team_service import TeamService
-from ..utils.auth import require_auth, require_auth_optional, get_current_user
+from ..utils.auth import require_auth_optional
 
 # Initialize blueprint and services
 team_bp = Blueprint('teams', __name__)

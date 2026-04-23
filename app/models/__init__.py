@@ -8,6 +8,9 @@ the foundation for ORM models.
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.utils.db import get_engine
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Create the declarative base for all models
 Base = declarative_base()
@@ -30,7 +33,7 @@ def create_all_tables():
     """
     engine = get_engine()
     Base.metadata.create_all(engine)
-    print("Database tables created successfully")
+    logger.info("Database tables are ready")
 
 # Import all models here to ensure they're registered with Base.metadata
 from .user import User

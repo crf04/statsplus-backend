@@ -5,7 +5,7 @@ Provides endpoints for user profile management, account information,
 and basic user statistics.
 """
 
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify
 from app.utils.auth import require_auth, require_auth_optional, get_current_user
 from app.services.user_service import UserService
 import logging
@@ -252,27 +252,3 @@ def sync_user():
     except Exception as e:
         logger.error(f"Error in sync_user: {e}")
         return jsonify({'error': f'Sync failed: {str(e)}'}), 500
-
-@user_bp.route('/debug/all', methods=['GET'])
-def debug_all_users():
-    """
-    Debug endpoint to see all users in database.
-    WARNING: Remove this in production!
-    """
-    try:
-        from app.models import get_session, User
-        session = get_session()
-        
-        users = session.query(User).all()
-        user_data = [user.to_dict() for user in users]
-        session.close()
-        
-        return jsonify({
-            'success': True,
-            'total_users': len(user_data),
-            'users': user_data
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in debug_all_users: {e}")
-        return jsonify({'error': f'Database error: {str(e)}'}), 500

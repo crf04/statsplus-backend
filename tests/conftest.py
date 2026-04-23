@@ -78,7 +78,17 @@ def setup_logging():
     
 @pytest.fixture
 def app():
-    """Create Flask app instance for testing"""
-    # This would be used for route testing
-    # You can expand this if needed for integration tests
-    pass
+    """Create a Flask app instance for route tests."""
+    from app import create_app
+
+    return create_app({
+        "TESTING": True,
+        "SKIP_FIREBASE_INIT": True,
+        "SKIP_TABLE_CREATE": True,
+    })
+
+
+@pytest.fixture
+def client(app):
+    """Create a Flask test client."""
+    return app.test_client()

@@ -31,7 +31,7 @@ This backend uses a hybrid Natural Language Processing (NLP) system to turn free
 
 The NL system is set up in `NLService`:
 
-```1:34:nba-backend/app/services/nl_service.py
+```1:34:statsplus-backend/app/services/nl_service.py
 from app.services.nl_query.parser import BaseQueryParser
 from app.services.nl_query.executor import QueryExecutor
 from app.services.llm_service import LLMService
@@ -153,4 +153,3 @@ curl -Method Post `
 - Pin spaCy model wheel in `requirements.txt` to avoid runtime downloads.
 - Keep ENABLE_LLM_FALLBACK=True for complex user queries.
 - Log confidence and parsed fields for continuous improvement.
-

@@ -1,8 +1,7 @@
 from flask import Blueprint, request, jsonify
-from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.player_service import PlayerService
-from ..utils.auth import require_auth, require_auth_optional, get_current_user
+from ..utils.auth import require_auth_optional
 
 # Initialize blueprint and services
 player_bp = Blueprint('players', __name__)
@@ -36,18 +35,6 @@ def get_player_profile():
 def fetch_players():
     try:
         success = player_service.store_player_information()
-        if success:
-            return jsonify({'message': 'Player data processed and stored successfully'})
-        else:
-            return jsonify({'error': 'Failed to store player data'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@player_bp.route('/test', methods=['PUT','GET'])
-@require_auth_optional
-def test():
-    try:
-        success = player_service._get_shooting_type('LeBron James')
         if success:
             return jsonify({'message': 'Player data processed and stored successfully'})
         else:
