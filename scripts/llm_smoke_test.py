@@ -14,6 +14,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app.services.llm_service import LLMService, LLMError
 
+# This file is a manual live-API smoke script, not a pytest test module.
+__test__ = False
+
 
 def test_basic_queries():
     """Test basic NBA query parsing"""
