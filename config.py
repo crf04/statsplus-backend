@@ -1,5 +1,3 @@
-import os
-
 class Config:
     SQLALCHEMY_DATABASE_URI = 'sqlite:///nba_play_types.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False

@@ -12,7 +12,7 @@ import os
 import redis
 import logging
 import pytz
-from datetime import datetime, timezone, timedelta, time, date
+from datetime import datetime, timezone, timedelta, time
 from typing import Optional
 
 logger = logging.getLogger(__name__)

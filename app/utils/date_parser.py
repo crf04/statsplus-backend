@@ -7,7 +7,7 @@ and converts them to the YYYY-MM-DD format required by the API.
 
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 import dateparser
 from dateutil.relativedelta import relativedelta
 
@@ -179,7 +179,7 @@ class NBADateParser:
                 )
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")
-            except:
+            except Exception:
                 continue
         
         return None

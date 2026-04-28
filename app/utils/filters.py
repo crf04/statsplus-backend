@@ -1,13 +1,11 @@
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs
-from nba_api.stats import endpoints
 from sqlalchemy import create_engine
-from ..utils.helpers import get_opponent_team
 
 # Function to get player ID from database
 def get_player_id(player_name):
     engine = create_engine('sqlite:///nba_play_types.db')
-    query = f"SELECT * FROM 'Player_Information'"
+    query = "SELECT * FROM 'Player_Information'"
     with engine.connect() as conn:
         player_dict = pd.read_sql(query, conn)
     player = player_dict[player_dict['full_name'] == player_name]
@@ -114,4 +112,3 @@ def get_common_games(primary_player_logs, other_players_names, season='2025-26')
             break
     
     return {pair[0] for pair in primary_game_team_pairs}
-
