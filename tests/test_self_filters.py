@@ -7,13 +7,13 @@ Tests both traditional NLP parser and LLM fallback for various self-filter patte
 import unittest
 import sys
 import os
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 import pandas as pd
 
 # Add the app directory to the path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from app.services.nl_query.parser import BaseQueryParser, SelfFilter
+from app.services.nl_query.parser import BaseQueryParser
 
 
 class TestSelfFilters(unittest.TestCase):

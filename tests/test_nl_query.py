@@ -7,7 +7,7 @@ This module tests the core functionality of the NL query parser.
 import unittest
 import sys
 import os
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 import pandas as pd
 
 # Add the app directory to the path for imports

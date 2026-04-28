@@ -5,18 +5,16 @@ This test suite validates the hybrid processing system with realistic game_logs 
 focusing on nickname preservation, confidence thresholds, and component override logic.
 """
 
-import unittest
 import sys
 import os
-from unittest.mock import Mock, MagicMock, patch
-import json
+from unittest.mock import MagicMock
 from datetime import datetime
 
 # Add the app directory to the path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app.services.nl_service import NLService
-from app.services.nl_query.parser import QueryComponents, ConfidenceBreakdown
+from app.services.nl_query.parser import QueryComponents
 
 class HybridSystemTestSuite:
     """Comprehensive test suite for hybrid NLP-LLM system"""
@@ -385,7 +383,7 @@ class HybridSystemTestSuite:
                     result = self.nl_service.process_query(case['query'])
                     # Verify LLM was not called
                     if not self.mock_llm_service.test_prompt_with_context.called:
-                        print(f"✓ LLM correctly not called for high confidence query")
+                        print("✓ LLM correctly not called for high confidence query")
                     
                     test_result = {
                         'test_name': case['name'],
