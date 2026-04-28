@@ -9,7 +9,6 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import logging
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from app.models import get_session, User
 

@@ -7,7 +7,6 @@ into structured components that can be mapped to API parameters.
 
 import spacy
 from spacy.matcher import Matcher
-import pandas as pd
 import re
 import yaml
 import os
@@ -1268,9 +1267,9 @@ class BaseQueryParser:
                         try:
                             from word2number import w2n
                             return "recent", w2n.word_to_num(number_str)
-                        except:
+                        except Exception:
                             pass
-                except:
+                except Exception:
                     pass
         season_patterns = [
             r'(?:this|current)\s+season',
@@ -1733,11 +1732,9 @@ class BaseQueryParser:
         """
         query_lower = query.lower()
         start_pos = player['start']
-        end_pos = player['end']
         
-        # Get context before and after the player name
+        # Get context before the player name
         context_before = query_lower[:start_pos].strip()
-        context_after = query_lower[end_pos:].strip()
         
         # Check for "without" patterns first (more specific)
         without_patterns = [
@@ -1788,7 +1785,6 @@ class BaseQueryParser:
         but_without_match = re.search(r'(.+?)\s+but\s+without\s+(.+)', query_lower)
         if but_without_match:
             with_part = but_without_match.group(1)
-            without_part = but_without_match.group(2)
             
             # Check which part contains this player
             if start_pos <= len(with_part):

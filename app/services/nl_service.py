@@ -240,7 +240,6 @@ class NLService:
         llm_confidence = llm_content.get('confidence', 0)
         
         # For other components, only override if LLM confidence >= 0.75
-        override_threshold = 0.75
         player_override_threshold = 0.95
         
         # Handle players_on and players_off with high threshold for overrides

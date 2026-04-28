@@ -77,12 +77,6 @@ class ParameterMapper:
         """Generate parameters for the specific endpoint"""
         params = {}
         
-        # Get base parameters from schema
-        if endpoint in self.endpoint_schemas:
-            base_params = self.endpoint_schemas[endpoint].get("optional_params", {}).copy()
-        else:
-            base_params = {}
-        
         # Map player information
         if components.player_name:
             params["player_name"] = components.player_name
@@ -207,7 +201,6 @@ class ParameterMapper:
         if endpoint not in self.endpoint_schemas:
             return params
             
-        schema = self.endpoint_schemas[endpoint]
         mapped_params = {}
         
         # Handle game_logs endpoint mapping
