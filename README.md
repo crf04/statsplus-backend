@@ -22,7 +22,7 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 ## Setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/crf04/statsplus-backend.git
 cd statsplus-backend
 python3.11 -m venv .venv
 source .venv/bin/activate
@@ -182,7 +182,8 @@ docs/
   API_DOCUMENTATION.md     Endpoint reference
   NLP_SYSTEM.md            Natural-language query architecture
 prompts/
-  system_prompt_optimized.txt
+  system_prompt_optimized.txt  Production prompt loaded by NLService
+  system_prompt.txt            Reference prompt used by the LLM smoke script
 tests/
   pytest suite
 ```
