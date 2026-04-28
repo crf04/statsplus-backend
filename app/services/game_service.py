@@ -1,15 +1,13 @@
 import pandas as pd
 import asyncio
 from nba_api.stats import endpoints
-from nba_api.stats.endpoints import playergamelogs
 from nba_api.stats.static import teams
-from ..utils.database_utils import get_opponent_team, nba_team_to_abbreviation, get_player_id, calculate_additional_stats
+from ..utils.database_utils import nba_team_to_abbreviation
 from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
 from ..utils.cache_config import get_redis_client, set_cache_with_1am_expiry
 import logging
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 

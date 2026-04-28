@@ -1,8 +1,7 @@
 import pandas as pd
 import logging
 from nba_api.stats.static import players
-from nba_api.stats.endpoints import playergamelogs, PlayerGameLogs, PlayerDashPtShots
-from sqlalchemy import create_engine
+from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
 

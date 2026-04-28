@@ -9,7 +9,6 @@ import os
 import json
 import asyncio
 from typing import Optional, Dict, Any, List
-from dataclasses import asdict
 import logging
 from openai import OpenAI, AsyncOpenAI
 from openai.types.chat import ChatCompletion

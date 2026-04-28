@@ -6,8 +6,7 @@ and returns real data from the services.
 """
 
 import json
-import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 class QueryExecutor:
     """Executes natural language queries against real NBA services"""

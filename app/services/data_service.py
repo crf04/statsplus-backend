@@ -7,7 +7,6 @@ from nba_api.stats.endpoints import (
     LeagueDashTeamShotLocations,
     SynergyPlayTypes,
     LeagueDashPlayerShotLocations,
-    commonplayerinfo,
     LeagueDashPlayerStats
 )
 from nba_api.stats.static import teams, players
