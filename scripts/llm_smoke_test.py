@@ -111,7 +111,7 @@ def test_complex_queries():
             result = llm_service.query_llm(query)
             
             if result["success"]:
-                print(f"✅ Success")
+                print("✅ Success")
                 content = result["content"]
                 
                 if isinstance(content, dict) and "parsing_error" not in content:
