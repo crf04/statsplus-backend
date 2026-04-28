@@ -1,5 +1,4 @@
 import pandas as pd
-from nba_api.stats.static import players
 from .tables import normalize_table_name
 
 def fetch_data_from_table(engine, table_name):

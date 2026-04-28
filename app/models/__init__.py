@@ -36,6 +36,6 @@ def create_all_tables():
     logger.info("Database tables are ready")
 
 # Import all models here to ensure they're registered with Base.metadata
-from .user import User
+from .user import User  # noqa: E402
 
 __all__ = ['Base', 'get_session', 'create_all_tables', 'User']

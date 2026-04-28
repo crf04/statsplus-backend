@@ -1,5 +1,4 @@
 from flask import Blueprint, jsonify
-from sqlalchemy import create_engine
 from ..utils.db import get_engine
 from ..services.data_service import DataService
 from ..utils.auth import require_auth_optional
