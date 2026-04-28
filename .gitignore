@@ -82,6 +82,8 @@ celerybeat-schedule
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -136,10 +138,6 @@ yarn-error.log*
 *.db
 !nba_play_types.db
 *.sqlite
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
 AGENTS.md
 
 # Local credentials
@@ -147,6 +145,28 @@ AGENTS.md
 *service-account*.json
 *firebase-adminsdk*.json
 app/config/*firebase*.json
+application_default_credentials.json
+credentials.json
+client_secret*.json
+secrets.json
+*.pem
+*.key
+*.p12
+*.p8
+*.crt
+*.csr
+*.keystore
+*.jks
+
+# Public-release artifacts
+*.dump
+*.sql
+*.bak
+*.orig
+*.tar
+*.tar.gz
+*.tgz
+*.zip
 
 # Temporary files
 *.tmp
@@ -160,8 +180,6 @@ logs/
 firebase-debug.log*
 
 # Database
-*.db
-!nba_play_types.db
 *.sqlite3
 
 .cursorrules
