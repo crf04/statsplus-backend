@@ -1,155 +1,131 @@
-### NLP System Overview
+# NLP System
 
-This backend uses a hybrid Natural Language Processing (NLP) system to turn free‑text NBA questions into structured parameters for the API.
+The backend turns free-text NBA stat questions into structured API parameters. It uses deterministic parsing first, then optional LLM fallback when the parser marks a query as low-confidence or complex.
 
-- Fast path: Deterministic NLP parser (spaCy + rule/pattern logic) → produces QueryComponents
-- Safe fallback: LLM parser (OpenAI) when the NLP confidence is low or the query is complex
+## Request path
 
-### Architecture
+1. Client calls `POST /api/nl-query` with `{ "query": "LeBron last 10 home games" }`.
+2. `app/routes/nl_routes.py` requires Firebase auth when Firebase Admin is configured.
+3. `NLService.process_query()` validates the query and runs `BaseQueryParser`.
+4. The parser returns query components and confidence metadata.
+5. If the confidence breakdown recommends LLM fallback and `OPENAI_API_KEY` is configured, `LLMService` parses the query with the optimized prompt.
+6. `NLService` formats the response for the frontend. LLM responses may be merged with NLP player context and marked as `hybrid`.
 
-- `app/services/nl_service.py`
-  - Orchestrates the pipeline: initializes NLP, routes to LLM fallback when needed, merges results.
-- `app/services/nl_query/parser.py`
-  - Core NLP parser. Uses spaCy pipeline (tokenization, NER if available) plus custom pattern logic to extract:
-    - player_name, team_name
-    - game_count, date_range, time_period
-    - opponent_filters (e.g., catch-and-shoot, pullups)
-    - location (home/away)
-    - minutes_filter, self_filters
-    - intent (game_logs, player_profile, team_stats)
-    - confidence and field-level confidence
-- `app/services/nl_query/parameter_mapper.py`
-  - Maps QueryComponents into API route parameter shapes.
-- `app/services/nl_query/validators.py`
-  - Validates ranges, enum values, consistency.
-- `app/services/nl_query/executor.py`
-  - Executes mapped queries (joins to services).
-- `app/services/llm_service.py`
-  - LLM fallback with prompt management, retries, and result shaping.
+## Main modules
 
-### Initialization flow
+- `app/services/nl_service.py`: Orchestrates NLP parsing, LLM fallback, and response formatting.
+- `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, seasons, and intent.
+- `app/services/nl_query/parameter_mapper.py`: Converts parsed components into route/service parameter shapes.
+- `app/services/nl_query/validators.py`: Validates parsed ranges and enum-like fields.
+- `app/services/nl_query/executor.py`: Executes mapped queries against the service layer.
+- `app/services/llm_service.py`: Wraps OpenAI calls, prompt loading, retries, and JSON response handling.
+- `prompts/system_prompt_optimized.txt`: LLM parsing instructions.
 
-The NL system is set up in `NLService`:
+## Response shape
 
-```1:34:statsplus-backend/app/services/nl_service.py
-from app.services.nl_query.parser import BaseQueryParser
-from app.services.nl_query.executor import QueryExecutor
-from app.services.llm_service import LLMService
+`POST /api/nl-query` returns structured fields rather than executing the game-log endpoint directly:
 
-class NLService:
-    def __init__(self, engine):
-        self.engine = engine
-        self.nl_parser = None
-        self.query_executor = None
-        self.llm_service = None
-        self.initialize_nl_system()
-
-    def initialize_nl_system(self):
-        try:
-            self.nl_parser = BaseQueryParser(self.engine)
-            self.query_executor = QueryExecutor(self.engine)
-            try:
-                self.llm_service = LLMService()
-            except Exception:
-                self.llm_service = None
-            print("✅ Natural Language Query System initialized successfully")
-        except Exception as e:
-            print(f"❌ Failed to initialize NL Query System: {e}")
+```json
+{
+  "player_name": "Stephen Curry",
+  "team_name": null,
+  "game_count": 10,
+  "location": "Home",
+  "players_on": [],
+  "players_off": [],
+  "teams_against": [],
+  "minutes_filter": null,
+  "date_filter": null,
+  "self_filters": [
+    {
+      "stat_column": "PTS",
+      "operator": "gte",
+      "value": 25
+    }
+  ],
+  "rank_filter": [],
+  "season": "2025-26",
+  "confidence": 0.9,
+  "intent": "game_logs",
+  "time_period": null,
+  "original_query": "Stephen Curry last 10 home games with 25+ points",
+  "parsed_by": "nlp"
+}
 ```
 
-### spaCy model and NER
+`parsed_by` can be `nlp`, `llm`, or `hybrid`.
 
-The parser expects a spaCy English pipeline. If a model is not installed/loaded, the pipeline may be empty and accessing NER will fail with:
+## spaCy and aliases
 
-- [E001] No component 'ner' found in pipeline. Available names: []
+The parser depends on spaCy and project-specific rule logic. `requirements.txt` includes the `en_core_web_sm` model wheel. If installation cannot fetch the wheel, install it manually:
 
-Install the small English model for dev and production:
-
-- Local (PowerShell)
-  - `python -m spacy download en_core_web_sm`
-- Or pin the wheel in `requirements.txt` so deploys include it automatically:
-  - `https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl`
-
-Then load it in your parser code (example):
-
-```python
-import spacy
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    nlp = spacy.blank("en")
-    if nlp.has_factory("ner") and not nlp.has_pipe("ner"):
-        nlp.add_pipe("ner")
+```bash
+python -m spacy download en_core_web_sm
 ```
 
-Notes:
-- If your pipeline logic relies on entities (players/teams), the model must be present at runtime.
-- The rule/pattern logic remains functional even with a blank model, but entity accuracy will be reduced.
+Player aliases live in `app/config/player_aliases.yaml`, and fuzzy matching is used where services need to resolve names against database tables.
 
-### How parsing works (high level)
+## LLM fallback
 
-1. Preprocessing and tokenization (spaCy)
-2. Rule/pattern extraction for:
-   - player names and team names (fuzzy match and aliasing)
-   - time expressions (see NBADateParser)
-   - filters like catch‑and‑shoot, pullups, playtype terms
-   - numeric/stat thresholds (e.g., "30+ points", minutes ranges)
-3. Build QueryComponents with confidence scores (field‑level and overall)
-4. If confidence < threshold (configurable), route to LLM fallback
-5. Merge LLM output with NLP context using selective overrides
+LLM fallback is optional. Required environment:
 
-### Configuration
-
-Environment variables (see README.md for full list):
-
-- LLM
-  - OPENAI_API_KEY (required for fallback)
-  - LLM_MODEL (default: gpt-4o-mini)
-  - LLM_TEMPERATURE (default: 0)
-  - LLM_MAX_TOKENS (default: 512)
-  - LLM_CONFIDENCE_THRESHOLD (default: 0.7)
-  - ENABLE_LLM_FALLBACK (default: True)
-
-- NLP
-  - spaCy model is brought in via requirements or `python -m spacy download ...`
-
-### End-to-end request path
-
-- Frontend calls `POST /api/nl-query` with `{ "query": "LeBron last 10 games at home" }`
-- Backend:
-  - NLP parser → QueryComponents with confidence and extracted parameters
-  - If low confidence → LLM fallback parses JSON intent & fields
-  - Parameter mapper → route/service params
-  - Executor → service calls to fetch/aggregate data
-  - Response contains structured results and provenance (parsed_by: nlp/llm/hybrid)
-
-### Troubleshooting
-
-- Error: [E001] No component 'ner' found in pipeline.
-  - Install `en_core_web_sm` locally or include its wheel in `requirements.txt` for deploys.
-  - Ensure your parser loads `en_core_web_sm` with a blank fallback.
-
-- LLM fallback not available / failing
-  - Verify OPENAI_API_KEY is set.
-  - Check network egress and model name.
-
-- Unexpected parsing output
-  - Inspect confidence breakdown and raw tokens.
-  - Tweak pattern rules or add aliases.
-
-### Local testing
-
-- Quick NL endpoint test (PowerShell example):
-
-```powershell
-curl -Method Post `
-  -Uri http://localhost:5000/api/nl-query `
-  -Headers @{"Content-Type"="application/json"} `
-  -Body '{"query": "Show me LeBron James last 10 games at home"}'
+```bash
+OPENAI_API_KEY=...
 ```
 
-### Production recommendations
+Common optional settings:
 
-- Pin spaCy model wheel in `requirements.txt` to avoid runtime downloads.
-- Keep ENABLE_LLM_FALLBACK=True for complex user queries.
-- Log confidence and parsed fields for continuous improvement.
+```bash
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0
+LLM_MAX_TOKENS=512
+LLM_TIMEOUT=10.0
+LLM_MAX_RETRIES=3
+ENABLE_LLM_FALLBACK=True
+LLM_CONFIDENCE_THRESHOLD=0.7
+```
+
+If the OpenAI client cannot initialize or a call fails, the service logs the failure and returns the NLP result when available.
+
+## Supported concepts
+
+The rule parser is designed around:
+
+- Player and team names, including aliases and nicknames.
+- Game counts, such as "last 10".
+- Locations, such as home, away, or both.
+- Date expressions, such as "since January 1".
+- Stat thresholds, such as "30+ points" or "under 5 turnovers".
+- Opponent ranking filters, such as "top 5 defenses" or "worst 10 three-point defenses".
+- Teammate on/off filters.
+- Intent detection for game logs, player profiles, and team stats.
+
+## Local testing
+
+With the app running:
+
+```bash
+curl -X POST http://localhost:5000/api/nl-query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Show me LeBron James last 10 games at home"}'
+```
+
+If Firebase Admin is configured, include:
+
+```bash
+-H "Authorization: Bearer <firebase-id-token>"
+```
+
+Unit and integration coverage lives in the pytest suite:
+
+```bash
+python -m pytest
+```
+
+## Troubleshooting
+
+- Empty query: the route returns `400`.
+- Firebase credentials configured but no token sent: protected route returns `401`.
+- No OpenAI key: LLM fallback is unavailable, but deterministic NLP can still run.
+- Unexpected player resolution: check `player_aliases.yaml`, fuzzy-match thresholds, and whether the bundled database contains the player.
+- External NBA data failures: queries that depend on live rankings or data refreshes can fail when upstream APIs are unavailable.
