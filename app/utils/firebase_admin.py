@@ -16,10 +16,16 @@ _firebase_app: Optional[firebase_admin.App] = None
 def initialize_firebase_admin():
     """Initialize Firebase Admin SDK with service account credentials"""
     global _firebase_app
-    
+
     if _firebase_app is not None:
         return _firebase_app
-    
+
+    # Local-dev opt-out (user-approved): when FIREBASE_ADMIN_DISABLED is set,
+    # routes fall back to require_auth's dev-user passthrough. Prod unaffected.
+    if os.getenv('FIREBASE_ADMIN_DISABLED', '').lower() in {'1', 'true'}:
+        logger.warning("Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only")
+        return None
+
     try:
         # Method 1: Try to load from service account JSON file
         service_account_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
