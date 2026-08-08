@@ -59,11 +59,13 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
             request.args.get("playstyle_RTG_min", "0"),
             request.args.get("playstyle_RTG_max", "200"),
         ],
-        "self_filters": {
-            key[len("self_filters[") : -1]: value.split(",")
-            for key, value in request.args.items()
+        # Keep repeated ``self_filters[STAT]`` parameters as ordered pairs;
+        # collapsing them into a dict would silently drop same-stat bounds.
+        "self_filters": [
+            (key[len("self_filters[") : -1], value)
+            for key, value in request.args.items(multi=True)
             if key.startswith("self_filters[") and key.endswith("]")
-        },
+        ],
     }
 
     try:

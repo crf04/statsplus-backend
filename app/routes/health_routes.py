@@ -7,8 +7,6 @@ translate its result into the existing public status contract, and jsonify it.
 
 from __future__ import annotations
 
-from typing import Any
-
 from flask import Blueprint, jsonify
 
 from app.errors import AppError, ProviderUnavailableError
@@ -28,7 +26,7 @@ health_service = CurrentAppService(
 def database_healthcheck():
     """Return the small database health payload used by readiness checks."""
 
-    result = _check_database_connection()
+    result = health_service.check_database()
     if result.get("status") != "healthy":
         raise AppError(
             "The database health check failed.",
@@ -56,7 +54,7 @@ def detailed_health():
 def nba_api_health():
     """Return the NBA Stats provider health signal."""
 
-    result = _check_nba_api_connectivity()
+    result = health_service.check_nba_api()
     if result.get("status") != "healthy":
         raise ProviderUnavailableError(
             "The NBA API health check failed.",
@@ -70,27 +68,13 @@ def nba_api_health():
 def pbp_stats_health():
     """Return the PBP Stats provider health signal."""
 
-    result = _check_pbp_stats_connectivity()
+    result = health_service.check_pbp_api()
     if result.get("status") != "healthy":
         raise ProviderUnavailableError(
             "The PBP Stats health check failed.",
             detail=result.get("error") or result,
         )
     return jsonify(result), 200
-
-
-# Kept as tiny route-level seams for callers that patch individual checks.
-# They perform no I/O; all work remains in the app-scoped service.
-def _check_database_connection() -> dict[str, Any]:
-    return health_service.check_database()
-
-
-def _check_nba_api_connectivity() -> dict[str, Any]:
-    return health_service.check_nba_api()
-
-
-def _check_pbp_stats_connectivity() -> dict[str, Any]:
-    return health_service.check_pbp_api()
 
 
 __all__ = [

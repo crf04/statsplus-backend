@@ -63,8 +63,8 @@ ENDPOINT_SCHEMAS = {
                 "description": "Players that must NOT be playing in filtered games"
             },
             "self_filters": {
-                "type": "dict",
-                "description": "Custom statistical filters on player's own stats, e.g. 'points > 10' or 'rebounds > 5'"
+                "type": "list",
+                "description": "Ordered custom statistical filters; multiple entries may target the same stat, e.g. 'points >= 20' and 'points < 30'"
             }
         }
     },

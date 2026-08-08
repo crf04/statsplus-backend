@@ -39,7 +39,7 @@ def test_game_log_query_accepts_typed_and_raw_filters():
     assert query.teams_against == ["OPP_PTS"]
     assert query.location_filter == "Home"
     assert query.game_filter == 5
-    self_filter = query.self_filters["PTS"]
+    self_filter = query.self_filters[0]
     assert self_filter.stat == "PTS"
     assert self_filter.operator == "between"
     assert self_filter.value == 25.0
@@ -99,7 +99,7 @@ def test_documented_self_filter_stats_are_accepted(stat):
         self_filters={stat: "0,100"},
     )
 
-    assert stat in query.self_filters
+    assert any(self_filter.stat == stat for self_filter in query.self_filters)
 
 
 @pytest.mark.parametrize(
@@ -151,10 +151,41 @@ def test_game_query_normalizes_legacy_nlp_self_filter_object():
         ],
     )
 
-    self_filter = query.self_filters["PTS"]
+    self_filter = query.self_filters[0]
     assert self_filter.stat == "PTS"
     assert self_filter.operator == "lte"
     assert self_filter.value == 25
+
+
+def test_repeated_same_stat_filters_survive_legacy_normalization_and_filtering(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """Conjunctions retain both bounds when they target the same stat."""
+
+    from app.services.nl_query.executor import QueryExecutor
+    from app.services.nl_query.parser import SelfFilter as ParsedSelfFilter
+
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    executor = object.__new__(QueryExecutor)
+    executor.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season="2024-25"),
+    )
+    query = executor._convert_to_game_query(
+        {
+            "self_filters": [
+                ParsedSelfFilter(stat_column="PTS", operator="gte", value=20),
+                ParsedSelfFilter(stat_column="PTS", operator="lt", value=30),
+            ]
+        }
+    )
+
+    assert [(item.stat, item.operator.value, item.value) for item in query.self_filters] == [
+        ("PTS", "gte", 20.0),
+        ("PTS", "lt", 30.0),
+    ]
+    filtered = service.apply_filters(_game_logs_frame(), query)
+    assert set(filtered["PTS"]) == {25}
 
 
 @pytest.mark.parametrize("legacy", ["<10 Ft", "<10 ft", "Less Than 10 Ft"])
@@ -414,6 +445,36 @@ def test_filter_pipeline_applies_location_and_self_filters(
 
     assert len(filtered) == 1
     assert filtered.iloc[0]["MATCHUP"] == "BOS @ MIA"
+
+
+def test_route_preserves_repeated_same_stat_self_filters(client, monkeypatch):
+    from app.routes import game_routes
+
+    captured = {}
+
+    def fake_get_filtered_logs(player_name, query):
+        captured["query"] = query
+        return {
+            "game_logs": [],
+            "averages": [],
+            "season_averages": [],
+            "next_game": None,
+        }
+
+    _stub_route_settings(monkeypatch)
+    monkeypatch.setattr(
+        game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+    )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James"
+        "&self_filters[PTS]=20,48&self_filters[PTS]=0,30"
+    )
+
+    assert response.status_code == 200
+    assert [item.stat for item in captured["query"].self_filters] == ["PTS", "PTS"]
+    assert [item.value for item in captured["query"].self_filters] == [20.0, 0.0]
+    assert [item.value2 for item in captured["query"].self_filters] == [48.0, 30.0]
 
 
 def test_apply_filters_with_no_opponent_query_keeps_all_games(

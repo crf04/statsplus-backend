@@ -150,7 +150,7 @@ class QueryExecutor:
             location_filter=params.get("location_filter", "Both"),
             game_filter=params.get("game_filter"),
             playstyle_range=params.get("playstyle_range", (0, 200)),
-            self_filters=params.get("self_filters", {}),
+            self_filters=params.get("self_filters", []),
         )
     
     def _generate_summary(self, data: Any, endpoint: str) -> Dict[str, Any]:

@@ -377,7 +377,7 @@ class GameService:
         # Apply typed self filters.  HTTP ``min,max`` ranges have already been
         # normalized to ``between`` by GameLogQuery; NLP operator semantics
         # remain exact here rather than being reduced to an implicit range.
-        for self_filter in query.self_filters.values():
+        for self_filter in query.self_filters:
             stat = self_filter.stat
             if stat not in df.columns:
                 continue

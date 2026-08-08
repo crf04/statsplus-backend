@@ -135,6 +135,9 @@ python -m pytest
 
 The parser may emit its legacy `SelfFilter(stat_column, operator, value,
 value2)` objects, and the HTTP route still accepts `self_filters[STAT]=min,max`.
-`GameLogQuery` normalizes both forms to the typed `app.models.game_logs.SelfFilter`
-model. The range form means inclusive `between`; typed inputs preserve the
-exact `gte`, `gt`, `lt`, `lte`, `eq`, or `between` operator.
+`GameLogQuery` normalizes both forms to an ordered list of typed
+`app.models.game_logs.SelfFilter` models. The range form means inclusive
+`between`; typed inputs preserve the exact `gte`, `gt`, `lt`, `lte`, `eq`, or
+`between` operator. Repeating a stat preserves each constraint in order, so
+`self_filters[PTS]=20,48&self_filters[PTS]=0,30` remains two filters rather
+than silently overwriting the first one.

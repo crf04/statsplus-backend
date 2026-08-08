@@ -216,7 +216,7 @@ Query parameters:
 | `season_filter` | No | Season. Default is the current season |
 | `playstyle_RTG_min` | No | Default `0` |
 | `playstyle_RTG_max` | No | Default `200` |
-| `self_filters[STAT]` | No | Inclusive stat range as `min,max` (normalized to the typed `between` operator); supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
 
 Example:
 
@@ -413,18 +413,21 @@ Ranking convention:
 
 ### Self Filters
 
-Format:
+Format (repeat the parameter when combining constraints for the same stat):
 
 ```text
+self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
 Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
 
 The query-string form is retained for compatibility and means an inclusive
-`between` comparison. Natural-language and typed executor inputs use the
-canonical comparison model with `operator` set to one of `gte`, `gt`, `lt`,
-`lte`, `eq`, or `between`; `value2` is required only for `between`.
+`between` comparison. Natural-language and typed executor inputs use an
+ordered list of canonical comparison models with `operator` set to one of
+`gte`, `gt`, `lt`, `lte`, `eq`, or `between`; `value2` is required only for
+`between`. For example, `PTS >= 20` and `PTS < 30` are represented as two
+list entries and are applied sequentially.
 
 ## Development Notes
 

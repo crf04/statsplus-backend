@@ -9,7 +9,8 @@ inside the response JSON.  These models replace that implicit contract:
 * :class:`SelfFilter` is the canonical comparison model.  Query-string
   ``STAT=min,max`` input is normalized to ``between``; natural-language
   ``gte``, ``gt``, ``lt``, ``lte``, and ``eq`` comparisons retain their exact
-  operator semantics.
+  operator semantics.  The ordered list preserves multiple constraints for
+  the same stat (for example, ``PTS >= 20`` and ``PTS < 30``).
 * :class:`GameLogResponse` describes the top-level response contract, where
   the logs and averages fields are ordinary JSON arrays (fresh records) rather
   than strings produced by ``DataFrame.to_json``.
@@ -247,7 +248,9 @@ class GameLogQuery(BaseModel):
     location_filter: Location = "Both"
     game_filter: int | None = Field(default=None, ge=1)
     playstyle_range: tuple[float, float] = (0.0, 200.0)
-    self_filters: dict[str, SelfFilter] = Field(default_factory=dict)
+    # Keep this as a sequence rather than a stat-keyed mapping: conjunctions
+    # can contain more than one constraint for the same stat.
+    self_filters: list[SelfFilter] = Field(default_factory=list)
 
     @field_validator("minutes_filter", mode="before")
     @classmethod
@@ -301,21 +304,29 @@ class GameLogQuery(BaseModel):
 
     @field_validator("self_filters", mode="before")
     @classmethod
-    def normalize_self_filters(cls, value: Any) -> dict[str, SelfFilter]:
+    def normalize_self_filters(cls, value: Any) -> list[SelfFilter]:
         if value is None:
-            return {}
-        normalized: dict[str, SelfFilter] = {}
+            return []
         if isinstance(value, Mapping):
             entries = value.items()
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            entries = ((None, entry) for entry in value)
+            # The route uses ``(stat, raw_range)`` pairs so repeated query
+            # parameters retain their order.  Typed mappings and legacy NLP
+            # objects continue to use the single-entry form.
+            entries = (
+                (entry[0], entry[1])
+                if isinstance(entry, (list, tuple)) and len(entry) == 2
+                else (None, entry)
+                for entry in value
+            )
         else:
             raise ValueError(
                 "self_filters must be a stat range mapping or a list of typed filters"
             )
+        normalized: list[SelfFilter] = []
         for stat, raw in entries:
             entry = _normalize_self_filter_entry(stat, raw)
-            normalized[entry.stat] = entry
+            normalized.append(entry)
         return normalized
 
     @field_validator("teams_against")
