@@ -32,6 +32,16 @@ SHOOTING_TYPES: tuple[str, ...] = (
     "Pullups",
     "Less Than 10 ft",
 )
+LESS_THAN_TEN_FEET_FILTER = SHOOTING_TYPES[2]
+
+# Values accepted from older clients.  The service normalizes these to the
+# canonical catalog value before selecting a table or provider category.
+TEAM_FILTER_ALIASES: dict[str, str] = {
+    "<10 Ft": "Less Than 10 ft",
+    "<10 ft": "Less Than 10 ft",
+    "Less Than 10 Ft": "Less Than 10 ft",
+    "Less than 10 ft": "Less Than 10 ft",
+}
 
 #: PBP totals data kinds the adapter accepts.
 PBPDataKind = Literal["player", "opponent"]
@@ -71,12 +81,15 @@ SUPPORTED_TEAM_FILTERS: tuple[str, ...] = (
     *OPPONENT_FILTERS,
     *CATCH_SHOOT_FILTERS,
     *PULLUP_FILTERS,
+    LESS_THAN_TEN_FEET_FILTER,
     *PLAY_TYPES,
+    *ASSIST_LOCATION_FILTERS,
 )
 
-#: Stat columns that may be filtered by the player-self filters.  Minutes use
-#: the dedicated ``minutes_filter`` parameter, so ``MIN`` is intentionally absent.
+#: Stat columns that may be filtered by the player-self filters.  The service
+# computes the derived columns before applying these ranges.
 SUPPORTED_SELF_FILTER_STATS: tuple[str, ...] = (
+    "MIN",
     "PTS",
     "REB",
     "AST",
@@ -89,6 +102,17 @@ SUPPORTED_SELF_FILTER_STATS: tuple[str, ...] = (
     "FGM",
     "FG3M",
     "FTM",
+    "FG_PCT",
+    "OREB",
+    "DREB",
+    "PF",
+    "PLUS_MINUS",
+    "PRA",
+    "PA",
+    "PR",
+    "RA",
+    "STKS",
+    "FD_PTS",
 )
 
 
@@ -101,6 +125,8 @@ __all__ = [
     "PLAY_TYPES",
     "PULLUP_FILTERS",
     "SHOOTING_TYPES",
+    "LESS_THAN_TEN_FEET_FILTER",
+    "TEAM_FILTER_ALIASES",
     "SUPPORTED_SELF_FILTER_STATS",
     "SUPPORTED_TEAM_FILTERS",
 ]

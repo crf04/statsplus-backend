@@ -67,7 +67,6 @@ def test_game_log_query_rejects_malformed_filters(kwargs):
     [
         {"teams_against": ["NOT_A_FILTER"]},
         {"self_filters": {"YOLO": "1,10"}},
-        {"self_filters": {"MIN": "5,10"}},
     ],
 )
 def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
@@ -81,7 +80,33 @@ def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
 
     assert "OPP_PTS" in SUPPORTED_TEAM_FILTERS
     assert "PTS" in SUPPORTED_SELF_FILTER_STATS
-    assert "MIN" not in SUPPORTED_SELF_FILTER_STATS
+
+
+@pytest.mark.parametrize(
+    "stat",
+    [
+        "MIN", "FG_PCT", "OREB", "DREB", "PF", "PLUS_MINUS", "PRA",
+        "PA", "PR", "RA", "STKS", "FD_PTS",
+    ],
+)
+def test_documented_self_filter_stats_are_accepted(stat):
+    query = GameLogQuery(
+        season_filter="2024-25",
+        self_filters={stat: "0,100"},
+    )
+
+    assert stat in query.self_filters
+
+
+@pytest.mark.parametrize("legacy", ["<10 Ft", "<10 ft", "Less Than 10 Ft"])
+def test_less_than_ten_feet_filter_aliases_are_normalized(legacy):
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=[legacy],
+        rank_filter=[1],
+    )
+
+    assert query.teams_against == ["Less Than 10 ft"]
 
 
 # ------------------------------------------------------------- response model

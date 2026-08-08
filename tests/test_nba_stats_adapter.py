@@ -14,8 +14,14 @@ import pandas as pd
 import pytest
 from nba_api.stats import endpoints
 
-from app.config.settings import ProviderSettings, RuntimeSettings
-from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.config.settings import (
+    AuthenticationSettings,
+    CacheSettings,
+    DatabaseSettings,
+    ProviderSettings,
+    RuntimeSettings,
+)
+from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
 
 
 class _ConcurrencyProbe:
@@ -48,7 +54,9 @@ def _probe_endpoint(probe):
 
         def get_data_frames(self, *args, **kwargs):
             frame = probe.run(
-                lambda: pd.DataFrame({"GAME_ID": ["1"], "PTS": [1]})
+                lambda: pd.DataFrame(
+                    {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                )
             )
             return [frame]
 
@@ -95,6 +103,91 @@ def test_adapter_enforces_concurrency_bound_with_concurrent_calls(monkeypatch):
     assert all(isinstance(frame, pd.DataFrame) for frame in frames)
 
 
+def test_http_game_log_requests_share_gate_across_app_service_instances(monkeypatch):
+    """Prove the advertised worker bound at the Flask HTTP seam."""
+    from app import create_app
+
+    probe = _ConcurrencyProbe(hold=0.05)
+    settings = RuntimeSettings(
+        environment="testing",
+        database=DatabaseSettings(),
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        providers=ProviderSettings(nba_stats_max_concurrency=2),
+        nba={"current_season": "2024-25"},
+    )
+
+    class ProbePlayerGameLogs:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            def frame():
+                values = {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                values.update(
+                    {
+                        "GAME_DATE": ["2024-01-01"],
+                        "PLAYER_NAME": ["LeBron James"],
+                        "MATCHUP": ["BOS vs. LAL"],
+                        "MIN": [30],
+                        "PTS": [25],
+                        "REB": [8],
+                        "AST": [7],
+                        "FGM": [9],
+                        "FGA": [16],
+                        "FG3M": [3],
+                        "FG3A": [7],
+                        "FTM": [4],
+                        "FTA": [5],
+                        "NBA_FANTASY_PTS": [44.2],
+                    }
+                )
+                return pd.DataFrame(values)
+
+            return [probe.run(frame)]
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs, "PlayerGameLogs", ProbePlayerGameLogs
+    )
+
+    # Separate apps create separate GameService/NBAStatsAdapter instances,
+    # while the shared process setting gives both adapters one semaphore.
+    apps = [
+        create_app(
+            {
+                "RUNTIME_SETTINGS": settings,
+                "TESTING": True,
+                "SKIP_FIREBASE_INIT": True,
+                "SKIP_TABLE_CREATE": True,
+            }
+        )
+        for _ in range(2)
+    ]
+
+    def request(app):
+        with app.test_client() as client:
+            return client.get(
+                "/api/games/game_logs?player_name=LeBron%20James"
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = [
+            future.result()
+            for future in (
+                pool.submit(request, apps[index % len(apps)])
+                for index in range(8)
+            )
+        ]
+
+    assert all(response.status_code == 200 for response in responses)
+    assert probe.calls == 8
+    assert probe.max_active <= settings.providers.nba_stats_max_concurrency
+    service_adapters = [
+        app.extensions["request_services"]["game"].nba_stats for app in apps
+    ]
+    assert service_adapters[0]._bound is service_adapters[1]._bound
+
+
 def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
     captured = {}
     adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1, timeout=7.5))
@@ -105,7 +198,11 @@ def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
 
     class FakeEndpoint:
         def get_data_frames(self):
-            return [pd.DataFrame({"GAME_ID": ["1"], "PTS": [1]})]
+            return [
+                pd.DataFrame(
+                    {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                )
+            ]
 
     monkeypatch.setattr(
         endpoints.playergamelogs,
@@ -151,7 +248,9 @@ class _StatusResponse:
     def get_data_frames(self):
         if self.nba_response.status_code >= 400:
             raise AssertionError("run_endpoint must raise before parsing")
-        return [pd.DataFrame({"GAME_ID": ["1"], "PTS": [1]})]
+        return [
+            pd.DataFrame({column: [1] for column in GAME_LOG_REQUIRED_COLUMNS})
+        ]
 
 
 def test_adapter_records_upstream_status_on_provider_event(monkeypatch):
@@ -200,3 +299,33 @@ def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
     events = telemetry.get_recorded_provider_events()
     assert events[-1]["status_code"] == 503
     assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+
+
+@pytest.mark.parametrize(
+    "frame, required_columns",
+    [
+        (pd.DataFrame(), ()),
+        (pd.DataFrame({"GAME_ID": ["1"]}), ("GAME_ID", "PTS")),
+    ],
+)
+def test_adapter_classifies_empty_or_invalid_schema_as_malformed(
+    monkeypatch, frame, required_columns
+):
+    from app.utils import telemetry
+
+    class Endpoint:
+        def get_data_frames(self):
+            return [frame]
+
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    telemetry.clear_recorded_provider_events()
+
+    with pytest.raises(telemetry.ProviderResponseError):
+        adapter.run_endpoint(
+            "schema_probe",
+            lambda timeout: Endpoint(),
+            required_columns=required_columns,
+        )
+
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["outcome"] == telemetry.OUTCOME_MALFORMED

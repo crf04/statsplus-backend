@@ -297,11 +297,19 @@ def test_publisher_rolls_back_all_tables_on_swap_failure(
     publisher_engine, monkeypatch
 ):
     publisher = AtomicTablePublisher(publisher_engine)
+    original_swap = publisher._swap
+    swaps = 0
 
-    def fail_swap(connection, staging_name, target_name):
+    def fail_second_swap(connection, staging_name, target_name):
+        nonlocal swaps
+        swaps += 1
+        if swaps == 1:
+            # The first live table has already been dropped and replaced when
+            # the second swap fails; the transaction must restore it too.
+            return original_swap(connection, staging_name, target_name)
         raise RuntimeError("swap failed")
 
-    monkeypatch.setattr(publisher, "_swap", fail_swap)
+    monkeypatch.setattr(publisher, "_swap", fail_second_swap)
 
     with pytest.raises(RuntimeError):
         publisher.publish(
@@ -310,6 +318,8 @@ def test_publisher_rolls_back_all_tables_on_swap_failure(
                 "beta": pd.DataFrame({"value": ["new-beta"]}),
             }
         )
+
+    assert swaps == 2
 
     with publisher_engine.connect() as connection:
         assert (

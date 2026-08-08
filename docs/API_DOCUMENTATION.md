@@ -66,7 +66,8 @@ The public error categories and HTTP statuses are:
 
 Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the
-response. Successful response shapes are unchanged.
+response. Game-log records and averages are ordinary JSON arrays, not nested
+pandas JSON strings.
 
 For local, credential-free development only, set
 `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
@@ -90,7 +91,18 @@ Runs `SELECT 1` against the configured SQLAlchemy engine and returns the dialect
 GET /api/health/nba-api
 ```
 
-Checks connectivity to the pbpstats NBA totals endpoint. This endpoint depends on external network access.
+Checks connectivity to `stats.nba.com` through `NBAStatsAdapter`. This endpoint
+depends on external network access.
+
+### PBP Stats Health
+
+```http
+GET /api/health/pbp-api
+```
+
+Checks connectivity to `api.pbpstats.com` through its own adapter and
+connect/read timeout settings. `/api/health/pbp-stats` is an equivalent
+compatibility path.
 
 ### Detailed Health
 
@@ -98,7 +110,9 @@ Checks connectivity to the pbpstats NBA totals endpoint. This endpoint depends o
 GET /api/health/detailed
 ```
 
-Combines database and NBA API checks. Returns `503` when a dependency is degraded.
+Combines database, `stats.nba.com`, and `api.pbpstats.com` checks. The response
+distinguishes them as `checks.nba_api` and `checks.pbp_stats` and returns `503`
+when a dependency is degraded.
 
 ## Natural Language Query
 
@@ -165,7 +179,11 @@ Common query types:
 GET /api/games/game_logs
 ```
 
-Returns filtered game logs, filtered averages, season averages, and the next opponent. The `game_logs` array contains one object per game, and `averages` / `season_averages` are arrays holding a single averages object; all three fields are ordinary JSON arrays, never JSON strings.
+Returns filtered game logs, filtered averages, and season averages. The
+`next_game` field remains `null` under the existing contract. The `game_logs`
+array contains one object per game, and `averages` / `season_averages` are
+arrays holding a single averages object; all three fields are ordinary JSON
+arrays, never JSON strings.
 
 ### Contract and migration note (#9)
 
@@ -174,10 +192,10 @@ Returns filtered game logs, filtered averages, season averages, and the next opp
   `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
   per one) return a `400` error with code `invalid_input` and message:
   `One or more game log filters are invalid.`
-- The response shape is unchanged from earlier versions: `game_logs`,
-  `averages`, and `season_averages` were previously JSON strings produced by
-  pandas. Callers that parsed those strings must instead read the arrays
-  directly. `next_game` remains the full opponent name or `null`.
+- `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
+  Earlier versions nested pandas JSON strings in these fields; callers that
+  parsed those strings must instead read the arrays directly. `next_game`
+  remains `null` under the existing contract.
 - Empty result sets return empty arrays (`[]`) for `game_logs` and `averages`;
   `season_averages` still carries the season aggregate when the full season has
   games. `next_game` may be `null`.
@@ -198,7 +216,7 @@ Query parameters:
 | `season_filter` | No | Season. Default is the current season |
 | `playstyle_RTG_min` | No | Default `0` |
 | `playstyle_RTG_max` | No | Default `200` |
-| `self_filters[STAT]` | No | Stat range as `min,max`, for example `self_filters[PTS]=25,60` |
+| `self_filters[STAT]` | No | Stat range as `min,max`; supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
 
 Example:
 
@@ -385,7 +403,7 @@ POST /api/user/activity/ping
 Common opponent filters include:
 
 - Traditional: `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_STOCKS`, `OPP_FTA`, `OPP_TOV`, `OPP_BLK`, `OPP_STL`, `OPP_FG3M`, `OPP_FG3A`
-- Shooting: `C&S PTS`, `C&S 3s`, `C&S 3A`, `PU PTS`, `PU 2s`, `PU 3s`, `Less Than 10 ft`
+- Shooting: `C&S PTS`, `C&S 3s`, `C&S 3A`, `PU PTS`, `PU 2s`, `PU 3s`, `Less Than 10 ft` (legacy `<10 Ft` is accepted and normalized)
 - Play types: `PRBallHandler`, `PRRollMan`, `Transition`, `Isolation`, `Spotup`, `Cut`, `Handoff`, `OffScreen`, `Postup`, `OffRebound`, `Misc`
 
 Ranking convention:
@@ -401,7 +419,7 @@ Format:
 self_filters[STAT]=min,max
 ```
 
-Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
 
 ## Development Notes
 

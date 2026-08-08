@@ -91,6 +91,26 @@ class PBPTotalsAdapter:
                 ) from error
             return type(self).parse_totals(payload)
 
+    def health_probe(self) -> int:
+        """Check ``api.pbpstats.com`` using its own timeout and telemetry seam."""
+        with provider_call(
+            PROVIDER_PBP_STATS,
+            "health_probe",
+            cache_status=CACHE_DISABLED,
+        ) as tracker:
+            response = self.session.get(
+                self.base_url,
+                params={
+                    "Season": self.settings.nba.current_season,
+                    "SeasonType": "Regular+Season",
+                    "Type": "Player",
+                },
+                timeout=(self.connect_timeout, self.read_timeout),
+            )
+            tracker.status_code = response.status_code
+            response.raise_for_status()
+            return response.status_code
+
     @staticmethod
     def parse_totals(payload: Any) -> pd.DataFrame:
         """Validate and normalize a recorded PBP totals payload.

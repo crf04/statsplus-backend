@@ -43,6 +43,7 @@ def test_recorded_fixtures_have_the_documented_shape(fixture):
 
 
 def test_recorded_nba_game_logs_parse_through_the_live_path():
+    telemetry.clear_recorded_provider_events()
     frame = parse_recorded_game_logs(_load("nba_stats/game_logs.valid.json"))
 
     assert isinstance(frame, pd.DataFrame)
@@ -64,11 +65,19 @@ def test_recorded_nba_game_logs_parse_through_the_live_path():
         "AST",
     ]
     assert set(frame["PLAYER_NAME"]) == {"LeBron James"}
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["provider"] == telemetry.PROVIDER_NBA_STATS
+    assert event["outcome"] == telemetry.OUTCOME_SUCCESS
 
 
 def test_malformed_nba_game_logs_raise_provider_response_error():
+    telemetry.clear_recorded_provider_events()
     with pytest.raises(telemetry.ProviderResponseError):
         parse_recorded_game_logs(_load("nba_stats/game_logs.malformed.json"))
+
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["provider"] == telemetry.PROVIDER_NBA_STATS
+    assert event["outcome"] == telemetry.OUTCOME_MALFORMED
 
 
 def test_recorded_pbp_totals_parse_through_the_live_path():

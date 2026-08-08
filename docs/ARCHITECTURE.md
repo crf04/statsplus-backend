@@ -39,7 +39,7 @@ The app reads from three distinct sources:
 | --- | --- | --- |
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `nba_api` → `stats.nba.com` | Live game logs and selected team/player data; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
-| PBP Stats | shared `requests.Session` → `api.pbpstats.com` | Play-by-play aggregates and the existing external health probe |
+| PBP Stats | shared `requests.Session` → `api.pbpstats.com` | Play-by-play aggregates and the PBP-specific health probe |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
@@ -64,8 +64,8 @@ Provider calls at the two external seams are wrapped in one structured event
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | `player_game_logs`, `player_next_game`, `league_opponent_team_stats`, `league_opponent_shot_chart` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | `get_totals_player`, `get_totals_opponent`, live `health_probe` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | `player_game_logs`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `health_probe` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | `get_totals_player`, `get_totals_opponent`, `health_probe` |
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (thread-safe counter incremented by
@@ -170,10 +170,12 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   parses query parameters into one typed `GameLogQuery`, and the service runs
   under Flask's threaded gunicorn model (`--workers 4 --threads 2`). NBA Stats
   provider calls go through `NBAStatsAdapter`, which applies a
-  `threading.BoundedSemaphore` sized by `NBA_STATS_MAX_CONCURRENCY` (default
-  10) and shares the provider timeout from `NBA_STATS_TIMEOUT_SECONDS`.
+  process-shared `threading.BoundedSemaphore` sized by
+  `NBA_STATS_MAX_CONCURRENCY` (default 10) and shares the provider timeout from
+  `NBA_STATS_TIMEOUT_SECONDS`.  All adapter instances using the same configured
+  limit in one worker reuse that gate.
 - The `NBA_STATS_MAX_CONCURRENCY` bound is per worker **process**, not global:
-  each worker builds its own adapter instance, so worst-case provider
+  all adapters in each worker share one gate, so worst-case provider
   concurrency is `workers × NBA_STATS_MAX_CONCURRENCY` (4 × 10 = 40 with the
   Procfile defaults). A true cross-process bound would need shared locking
   (e.g. Redis) and is intentionally out of scope; operators scale the bound and

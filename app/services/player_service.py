@@ -142,6 +142,7 @@ class PlayerService:
                 timeout=timeout,
             ),
             frame_index=1,
+            required_columns=("SHOT_TYPE",),
         )
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
@@ -167,6 +168,20 @@ class PlayerService:
                     season_nullable=self.settings.nba.current_season,
                     opp_team_id_nullable=team_id,
                     timeout=timeout,
+                ),
+                required_columns=(
+                    "PLAYER_ID",
+                    "PLAYER_NAME",
+                    "GAME_DATE",
+                    "MIN",
+                    "FGM",
+                    "FGA",
+                    "FG3M",
+                    "FG3A",
+                    "FTM",
+                    "FTA",
+                    "PTS",
+                    "TOV",
                 ),
             )
             

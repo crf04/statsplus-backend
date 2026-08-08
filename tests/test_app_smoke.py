@@ -8,6 +8,8 @@ def test_app_factory_registers_expected_routes(app):
 
     assert "/api/health/db" in routes
     assert "/api/health/detailed" in routes
+    assert "/api/health/nba-api" in routes
+    assert "/api/health/pbp-api" in routes
     assert "/api/players" in routes
     assert "/api/players/profile" in routes
     assert "/api/teams" in routes
@@ -37,13 +39,18 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
         def raise_for_status(self):
             raise requests.exceptions.HTTPError("503 Service Unavailable")
 
-    class FailingSession:
-        def get(self, *args, **kwargs):
-            return FailingResponse()
-
     monkeypatch.setattr(
-        health_routes, "get_shared_nba_session", lambda settings: FailingSession()
+        health_routes.endpoints,
+        "LeagueDashTeamStats",
+        lambda *args, **kwargs: FailingEndpoint(),
     )
+
+    class FailingEndpoint:
+        nba_response = FailingResponse()
+
+        def get_data_frames(self):
+            raise AssertionError("health probe must fail on status before parsing")
+
     telemetry.clear_recorded_provider_events()
 
     response = client.get("/api/health/nba-api")
@@ -53,9 +60,69 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
 
     events = telemetry.get_recorded_provider_events()
     assert events
+    assert events[-1]["provider"] == telemetry.PROVIDER_NBA_STATS
     assert events[-1]["operation"] == "health_probe"
     assert events[-1]["status_code"] == 503
     assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+
+
+def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
+    from app.routes import health_routes
+    from app.utils import telemetry
+
+    class FailingResponse:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise requests.exceptions.HTTPError("502 Service Unavailable")
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            return FailingResponse()
+
+    monkeypatch.setattr(
+        health_routes,
+        "get_shared_nba_session",
+        lambda settings: FailingSession(),
+    )
+    telemetry.clear_recorded_provider_events()
+
+    response = client.get("/api/health/pbp-api")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["provider"] == telemetry.PROVIDER_PBP_STATS
+    assert event["operation"] == "health_probe"
+    assert event["status_code"] == 502
+    assert event["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+
+
+def test_detailed_health_reports_both_providers(client, monkeypatch):
+    from app.routes import health_routes
+
+    monkeypatch.setattr(
+        health_routes,
+        "_check_database_connection",
+        lambda: {"status": "healthy"},
+    )
+    monkeypatch.setattr(
+        health_routes,
+        "_check_nba_api_connectivity",
+        lambda: {"status": "healthy", "provider": "nba_stats"},
+    )
+    monkeypatch.setattr(
+        health_routes,
+        "_check_pbp_stats_connectivity",
+        lambda: {"status": "healthy", "provider": "pbp_stats"},
+    )
+
+    response = client.get("/api/health/detailed")
+
+    assert response.status_code == 200
+    checks = response.get_json()["checks"]
+    assert checks["nba_api"]["provider"] == "nba_stats"
+    assert checks["pbp_stats"]["provider"] == "pbp_stats"
 
 
 def test_players_endpoint_smoke(client):

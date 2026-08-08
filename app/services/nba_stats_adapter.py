@@ -5,13 +5,12 @@ served by Gunicorn worker threads and provider calls execute on the calling
 thread through the blocking ``nba_api`` package.  This adapter is that seam.
 
 Every live ``stats.nba.com`` call in the application flows through
-:meth:`NBAStatsAdapter.run_endpoint`: game logs, next-game lookups, opponent
-team/shot data, play types, and player shot-location data.  Each call is
-wrapped in one explicit bound, a ``threading.BoundedSemaphore`` sized by
+:meth:`NBAStatsAdapter.run_endpoint`: game logs, opponent team/shot data, play
+types, and player shot-location data.  Each call is wrapped in one explicit
+bound, a process-shared ``threading.BoundedSemaphore`` sized by
 ``NBA_STATS_MAX_CONCURRENCY`` (``ProviderSettings.nba_stats_max_concurrency``),
-so the number of in-flight calls can never exceed the configured limit
-regardless of how many request threads arrive.  Providing one adapter shared by
-a service instance keeps the bound unambiguous within a worker.
+so the number of in-flight calls can never exceed the configured limit across
+all service/adapter instances in a worker process.
 
 Each invocation also records one structured provider-telemetry event via
 :mod:`app.utils.telemetry`.  The per-call ``timeout`` comes from
@@ -35,7 +34,7 @@ not routed through this adapter.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import requests
@@ -44,6 +43,7 @@ from nba_api.stats import endpoints
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
+    CACHE_DISABLED,
     CACHE_HIT,
     CACHE_MISS,
     PROVIDER_NBA_STATS,
@@ -51,6 +51,100 @@ from app.utils.telemetry import (
     provider_call,
     record_cached_provider_event,
 )
+
+
+# These are the columns consumed by ``GameService._fetch_game_logs_from_api``.
+# The recorded fixture uses the smaller parser contract below because it is a
+# raw provider fixture rather than the fully enriched live service frame.
+GAME_LOG_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "GAME_ID",
+    "GAME_DATE",
+    "PLAYER_NAME",
+    "TEAM_ID",
+    "TEAM_ABBREVIATION",
+    "MATCHUP",
+    "MIN",
+    "FGM",
+    "FGA",
+    "FG_PCT",
+    "FG3M",
+    "FG3A",
+    "FTM",
+    "FTA",
+    "OREB",
+    "DREB",
+    "TOV",
+    "STL",
+    "BLK",
+    "PF",
+    "PTS",
+    "REB",
+    "AST",
+    "PLUS_MINUS",
+    "NBA_FANTASY_PTS",
+)
+RECORDED_GAME_LOG_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "GAME_ID",
+    "GAME_DATE",
+    "PLAYER_NAME",
+    "MIN",
+    "PTS",
+    "REB",
+    "AST",
+)
+
+_bound_lock = threading.Lock()
+_shared_bounds: dict[int, threading.BoundedSemaphore] = {}
+
+
+def _shared_concurrency_bound(limit: int) -> threading.BoundedSemaphore:
+    """Return the one configured NBA gate for this worker process.
+
+    The limit is the configuration identity: every app/service instance using
+    the same production setting shares this gate, while tests that configure a
+    different limit remain isolated.  A semaphore has no request state once
+    its callers leave the context, so retaining it for the process lifetime is
+    safe and avoids constructing one gate per service.
+    """
+    with _bound_lock:
+        bound = _shared_bounds.get(limit)
+        if bound is None:
+            bound = threading.BoundedSemaphore(limit)
+            _shared_bounds[limit] = bound
+        return bound
+
+
+def _validate_frame(
+    frame: Any,
+    *,
+    required_columns: Iterable[str] = (),
+    validator: Callable[[pd.DataFrame], Any] | None = None,
+) -> pd.DataFrame:
+    """Validate one NBA frame without retaining provider data in errors."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise ProviderResponseError(
+            "NBA Stats returned an empty or invalid data frame."
+        )
+    required = tuple(required_columns)
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ProviderResponseError(
+            "NBA Stats returned a data frame with an invalid schema."
+        )
+    if validator is not None:
+        try:
+            valid = validator(frame)
+        except ProviderResponseError:
+            raise
+        except (AttributeError, ValueError, TypeError, KeyError, IndexError) as error:
+            raise ProviderResponseError(
+                "NBA Stats returned a data frame with an invalid schema."
+            ) from error
+        if valid is False:
+            raise ProviderResponseError(
+                "NBA Stats returned a data frame with an invalid schema."
+            )
+    return frame
 
 
 def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
@@ -66,22 +160,30 @@ def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
 
     from nba_api.stats.library.http import NBAStatsResponse
 
-    try:
-        response = NBAStatsResponse(
-            response=json.dumps(payload),
-            status_code=200,
-            url="https://stats.nba.com/stats/playergamelogs",
-        )
-        endpoint = endpoints.PlayerGameLogs(get_request=False)
-        endpoint.nba_response = response
-        endpoint.load_response()
-        return endpoint.get_data_frames()[0]
-    except ProviderResponseError:
-        raise
-    except (ValueError, TypeError, KeyError, IndexError) as error:
-        raise ProviderResponseError(
-            "The recorded NBA Stats response could not be parsed into game logs."
-        ) from error
+    with provider_call(
+        PROVIDER_NBA_STATS,
+        "player_game_logs_recorded",
+        cache_status=CACHE_DISABLED,
+    ):
+        try:
+            response = NBAStatsResponse(
+                response=json.dumps(payload),
+                status_code=200,
+                url="https://stats.nba.com/stats/playergamelogs",
+            )
+            endpoint = endpoints.PlayerGameLogs(get_request=False)
+            endpoint.nba_response = response
+            endpoint.load_response()
+            frame = endpoint.get_data_frames()[0]
+            return _validate_frame(
+                frame, required_columns=RECORDED_GAME_LOG_REQUIRED_COLUMNS
+            )
+        except ProviderResponseError:
+            raise
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            raise ProviderResponseError(
+                "The recorded NBA Stats response could not be parsed into game logs."
+            ) from error
 
 
 def _response_status(endpoint: object) -> int | None:
@@ -107,15 +209,19 @@ class NBAStatsAdapter:
     def __init__(self, settings: RuntimeSettings | None = None):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
-        self._bound = threading.BoundedSemaphore(
-            self.settings.providers.nba_stats_max_concurrency
-        )
         self._concurrency_limit = self.settings.providers.nba_stats_max_concurrency
+        self._bound = _shared_concurrency_bound(self._concurrency_limit)
+        self._last_status_code: int | None = None
 
     @property
     def max_concurrency(self) -> int:
         """The configured ``nba_stats_max_concurrency`` bound."""
         return self._concurrency_limit
+
+    @property
+    def last_status_code(self) -> int | None:
+        """Return the most recent upstream status observed by this adapter."""
+        return self._last_status_code
 
     def run_endpoint(
         self,
@@ -124,13 +230,18 @@ class NBAStatsAdapter:
         *,
         frame_index: int = 0,
         cache_status: str = CACHE_MISS,
+        required_columns: Iterable[str] = (),
+        validator: Callable[[pd.DataFrame], Any] | None = None,
     ) -> pd.DataFrame | None:
         """Run one typed ``nba_api`` endpoint under the bound and telemetry.
 
         ``build`` receives the shared provider timeout and must return the
         endpoint instance (constructed so the blocking request has been made).
-        The primary frame (``None`` when the response carries no data sets) is
-        returned.  The upstream HTTP status is recorded on the provider event;
+        Every response must contain a non-empty :class:`~pandas.DataFrame`;
+        callers may additionally provide required columns or a validator for
+        endpoint-specific schemas.  Invalid provider frames are classified as
+        ``malformed`` by the telemetry context rather than as application
+        failures.  The upstream HTTP status is recorded on the provider event;
         a non-2xx response is classified as an ``http_error``.
         """
         with self._bound:
@@ -139,8 +250,26 @@ class NBAStatsAdapter:
                 operation,
                 cache_status=cache_status,
             ) as tracker:
-                endpoint = build(self.timeout)
+                try:
+                    endpoint = build(self.timeout)
+                except ProviderResponseError:
+                    raise
+                except (
+                    AttributeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                ) as error:
+                    raise ProviderResponseError(
+                        "NBA Stats returned a response with an invalid schema."
+                    ) from error
+                if endpoint is None:
+                    raise ProviderResponseError(
+                        "NBA Stats returned an invalid endpoint response."
+                    )
                 tracker.status_code = _response_status(endpoint)
+                self._last_status_code = tracker.status_code
                 if (
                     tracker.status_code is not None
                     and tracker.status_code >= 400
@@ -148,10 +277,26 @@ class NBAStatsAdapter:
                     raise requests.exceptions.HTTPError(
                         f"{operation} responded {tracker.status_code}"
                     )
-                frames = endpoint.get_data_frames()
-                if not frames:
-                    return None
-                return frames[frame_index]
+                try:
+                    frames = endpoint.get_data_frames()
+                    frame = frames[frame_index]
+                except ProviderResponseError:
+                    raise
+                except (
+                    AttributeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                ) as error:
+                    raise ProviderResponseError(
+                        "NBA Stats returned a response with an invalid schema."
+                    ) from error
+                return _validate_frame(
+                    frame,
+                    required_columns=required_columns,
+                    validator=validator,
+                )
 
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a game served without a provider call."""
@@ -175,26 +320,10 @@ class NBAStatsAdapter:
             )
 
         return self.run_endpoint(
-            "player_game_logs", build, cache_status=cache_status
-        )
-
-    def fetch_player_next_game(
-        self,
-        player_id: int,
-        *,
-        cache_status: str = CACHE_MISS,
-    ) -> pd.DataFrame | None:
-        """Fetch the player's next scheduled game, if one exists."""
-
-        def build(timeout: float) -> object:
-            return endpoints.PlayerNextNGames(
-                number_of_games=1,
-                player_id=player_id,
-                timeout=timeout,
-            )
-
-        return self.run_endpoint(
-            "player_next_game", build, cache_status=cache_status
+            "player_game_logs",
+            build,
+            cache_status=cache_status,
+            required_columns=GAME_LOG_REQUIRED_COLUMNS,
         )
 
     def fetch_opponent_team_stats(
@@ -214,7 +343,10 @@ class NBAStatsAdapter:
             )
 
         return self.run_endpoint(
-            "league_opponent_team_stats", build, cache_status=cache_status
+            "league_opponent_team_stats",
+            build,
+            cache_status=cache_status,
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
     def fetch_opponent_shot_chart(
@@ -234,8 +366,15 @@ class NBAStatsAdapter:
             )
 
         return self.run_endpoint(
-            "league_opponent_shot_chart", build, cache_status=cache_status
+            "league_opponent_shot_chart",
+            build,
+            cache_status=cache_status,
+            required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
         )
 
 
-__all__ = ["NBAStatsAdapter", "parse_recorded_game_logs"]
+__all__ = [
+    "GAME_LOG_REQUIRED_COLUMNS",
+    "NBAStatsAdapter",
+    "parse_recorded_game_logs",
+]

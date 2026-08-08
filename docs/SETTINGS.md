@@ -21,10 +21,11 @@ General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
 and `LOG_LEVEL`.
 
-`NBA_STATS_MAX_CONCURRENCY` is a **per-worker-process** bound: `NBAStatsAdapter`
-builds one `threading.BoundedSemaphore` per adapter instance, and each Gunicorn
-worker instantiates its own service adapters. It is not a cross-process lock, so
-the maximum simultaneous calls the whole application can make is
+`NBA_STATS_MAX_CONCURRENCY` is a **per-worker-process** bound: all
+`NBAStatsAdapter` instances in one worker share one
+`threading.BoundedSemaphore`, while each Gunicorn worker has its own gate. It
+is not a cross-process lock, so the maximum simultaneous calls the whole
+application can make is
 `workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
 
 ## Defaults and validation

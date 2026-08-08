@@ -17,6 +17,14 @@ import pandas as pd
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.models.catalogs import (
+    ASSIST_LOCATION_FILTERS,
+    CATCH_SHOOT_FILTERS,
+    LESS_THAN_TEN_FEET_FILTER,
+    OPPONENT_FILTERS,
+    PLAY_TYPES,
+    PULLUP_FILTERS,
+)
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.utils.cache_config import get_redis_client, set_cache_with_1am_expiry
 from app.utils.database_utils import nba_team_to_abbreviation
@@ -157,15 +165,6 @@ class GameService:
             player_id, season, cache_status=cache_status
         )
 
-        next_game_df = None
-        try:
-            next_game_df = self.nba_stats.fetch_player_next_game(
-                player_id, cache_status=cache_status
-            )
-        except (Exception, IndexError, KeyError) as error:
-            logger.warning(f"Failed to fetch next game for player {player_id}: {str(error)}")
-            next_game_df = None
-
         # Clean up columns
         drop_columns = [
             'SEASON_YEAR', 'PLAYER_ID', 'GP_RANK', 'W_RANK', 'L_RANK',
@@ -180,18 +179,9 @@ class GameService:
         ]
         gamelogs = gamelogs.drop(drop_columns, axis=1, errors='ignore')
 
-        # Process next game data
+        # The pre-issues-9 contract deliberately leaves next_game unset.  Keep
+        # that behavior until a separately specified provider seam exists.
         next_team = None
-        if next_game_df is not None and not next_game_df.empty:
-            try:
-                team1, team2 = next_game_df.loc[0, 'VISITOR_TEAM_ID'], next_game_df.loc[0, 'HOME_TEAM_ID']
-                if team1 != gamelogs.loc[0, 'TEAM_ID']:
-                    next_team = team1
-                else:
-                    next_team = team2
-            except (Exception, IndexError, KeyError) as error:
-                logger.warning(f"Failed to process next game data for player {player_id}: {str(error)}")
-                next_team = None
 
         # Calculate additional stats
         gamelogs['PRA'] = gamelogs['PTS'] + gamelogs['REB'] + gamelogs['AST']
@@ -348,8 +338,7 @@ class GameService:
     def filter_teams(self, filter, rank_filter, date_filter=None):
         """Filter teams with daily caching - avoids repeated NBA API calls"""
         # Check if this filter type requires NBA API calls
-        api_dependent_filters = ['C&S 3s', 'C&S PTS', 'C&S 3A', 'PU 2s', 'PU 3s', 'PU PTS'] + \
-                               ['OPP_AST', 'OPP_PTS', 'OPP_REB', 'OPP_STOCKS', 'OPP_FTA', 'OPP_TOV', 'OPP_BLK', 'OPP_STL', 'OPP_FG3M', 'OPP_FG3A', 'OPP_FTA']
+        api_dependent_filters = (*CATCH_SHOOT_FILTERS, *PULLUP_FILTERS, *OPPONENT_FILTERS)
 
         if filter in api_dependent_filters and date_filter is not None:
             # This might make NBA API calls - cache it daily
@@ -427,26 +416,21 @@ class GameService:
             )
 
     def _filter_teams_uncached(self, filter, rank_filter, date_filter=None, *, cache_status=CACHE_MISS):
-        #filter into diff types
-        Catch_Shoot_types = ['C&S 3s', 'C&S PTS', 'C&S 3A']
-        Pullup_types = ['PU 2s', 'PU 3s', 'PU PTS']
-        playtypes = ['Transition', 'Isolation', 'PRBallHandler', 'PRRollMan', 'OffRebound', 'Spotup', 'Cut', 'Handoff', 'OffScreen', 'Misc', 'Postup']
-        overall_opp_types = ['OPP_AST', 'OPP_PTS', 'OPP_REB', 'OPP_STOCKS', 'OPP_FTA', 'OPP_TOV', 'OPP_BLK', 'OPP_STL', 'OPP_FG3M', 'OPP_FG3A', 'OPP_FTA']
-        assist_types = ["TwoPtAssists", "ThreePtAssists", "Arc3Assists", "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists", "LongMidRangeAssists"]
-
-        if filter in Catch_Shoot_types:
+        # Keep category membership in the central catalog so validation and
+        # dispatch cannot drift apart.
+        if filter in CATCH_SHOOT_FILTERS:
             df = self.catch_shoot_filtering(filter, date_filter, cache_status=cache_status)
-        elif filter in Pullup_types:
+        elif filter in PULLUP_FILTERS:
             df = self.pullup_filtering(filter, date_filter, cache_status=cache_status)
-        elif filter in playtypes:
+        elif filter in PLAY_TYPES:
             df = self.playtype_filtering(filter)
-        elif filter in overall_opp_types:
+        elif filter in OPPONENT_FILTERS:
             df = self.general_opp_filtering(filter, date_filter, cache_status=cache_status)
-        elif filter == 'Less Than 10 ft':
+        elif filter == LESS_THAN_TEN_FEET_FILTER:
             df = self._fetch_data_from_table('less_than_10_ft')
             df.sort_values(by='FG2M', ascending=False, inplace=True)
             df['team'] = df['TEAM_ABBREVIATION']
-        elif filter in assist_types:
+        elif filter in ASSIST_LOCATION_FILTERS:
             df = self._fetch_data_from_table('processed_team_assists')
             df.sort_values(by=filter, ascending=False, inplace=True)
             df['team'] = df['Name']

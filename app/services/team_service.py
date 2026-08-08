@@ -91,6 +91,7 @@ class TeamService:
                 per_mode_simple='PerGame',
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
         )
     
 
@@ -110,6 +111,7 @@ class TeamService:
                 date_from_nullable=date_filter,
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -122,6 +124,7 @@ class TeamService:
                 date_from_nullable=date_filter,
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
         opp_zone_df.columns = ['_'.join(filter(None, col)).strip() for col in opp_zone_df.columns]
         

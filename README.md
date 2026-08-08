@@ -128,7 +128,10 @@ curl http://localhost:5000/api/players
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
 ```
 
-`GET /api/health/nba-api` and `/api/health/detailed` call an external NBA data endpoint, so they can fail if the network or upstream API is unavailable.
+`GET /api/health/nba-api` checks `stats.nba.com`; `GET /api/health/pbp-api`
+checks `api.pbpstats.com`; and `/api/health/detailed` reports both providers
+under distinct `nba_api` and `pbp_stats` keys. These endpoints can fail if the
+network or either upstream API is unavailable.
 
 Every response carries an `X-Request-ID` used to correlate a request, its
 provider calls, and its logs; safe inbound values are echoed, otherwise one is
@@ -143,10 +146,11 @@ of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
 
 `NBA_STATS_MAX_CONCURRENCY` bounds in-flight NBA Stats provider calls per
-worker process: each Gunicorn worker builds its own bounded adapter, so the
-maximum calls the whole application can issue at once is workers ×
-`NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers, so up to 4 × the
-bound). This is a per-process bound, not a cluster-global lock.
+worker process: all adapters in one worker share the configured gate, while
+each Gunicorn worker has its own gate. The maximum calls the whole application
+can issue at once is workers × `NBA_STATS_MAX_CONCURRENCY` (the Procfile runs
+4 workers, so up to 4 × the bound). This is a per-process bound, not a
+cluster-global lock.
 
 Application failures use a documented structured JSON error response with
 stable category codes, including `invalid_input`, `resource_not_found`,

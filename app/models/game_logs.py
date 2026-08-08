@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.catalogs import (
     SUPPORTED_SELF_FILTER_STATS,
+    TEAM_FILTER_ALIASES,
     SUPPORTED_TEAM_FILTERS,
 )
 
@@ -136,6 +137,10 @@ class GameLogQuery(BaseModel):
     @field_validator("teams_against")
     @classmethod
     def reject_unsupported_team_filters(cls, value: list[str]) -> list[str]:
+        # Normalize legacy spellings (notably ``<10 Ft``) before validation so
+        # callers can migrate without changing the canonical service/table
+        # value they receive back.
+        value = [TEAM_FILTER_ALIASES.get(item, item) for item in value]
         unsupported = [
             item for item in value if item not in SUPPORTED_TEAM_FILTERS
         ]
@@ -166,8 +171,8 @@ class GameLogResponse(BaseModel):
     """The public game-log response contract.
 
     ``game_logs``, ``averages``, and ``season_averages`` are ordinary JSON
-    arrays; ``next_game`` is the full name of the player's next opponent, or
-    ``null`` when it cannot be determined.
+    arrays; ``next_game`` remains ``null`` under the existing game-log
+    contract.
     """
 
     game_logs: list[dict[str, Any]]

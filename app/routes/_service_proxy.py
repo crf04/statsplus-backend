@@ -14,6 +14,20 @@ from app.utils.db import get_engine
 ServiceFactory = Callable[[Any, RuntimeSettings], Any]
 
 
+def build_data_refresh_job_service(engine: Any, settings: RuntimeSettings) -> Any:
+    """Build the app-scoped durable refresh coordinator used by admin routes."""
+    from app.services.job_service import (
+        DataRefreshJobService,
+        build_default_refresh_handlers,
+    )
+
+    return DataRefreshJobService(
+        engine,
+        settings=settings,
+        handlers=build_default_refresh_handlers(engine, settings),
+    )
+
+
 class CurrentAppService:
     """Lazy service handle that keeps service state scoped to one Flask app.
 

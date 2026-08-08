@@ -110,6 +110,7 @@ class DataService:
                     league_id_nullable="00",
                     timeout=timeout,
                 ),
+                required_columns=("TEAM_NAME", "GP", "PTS"),
             )
             df["PLAY_TYPE"] = play_type
             df["PTS/G"] = df["PTS"] / df["GP"]
@@ -465,6 +466,7 @@ class DataService:
                 league_id_nullable="00",
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
     def _fetch_opp_shooting_data(self, play_type, date_filter=None):
@@ -477,6 +479,7 @@ class DataService:
                 league_id_nullable="00",
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
         )
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -490,6 +493,7 @@ class DataService:
                 league_id_nullable="00",
                 timeout=timeout,
             ),
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
     def _fetch_player_zone_data(self, date_filter=None):
@@ -501,6 +505,7 @@ class DataService:
                 date_from_nullable=date_filter,
                 timeout=timeout,
             ),
+            required_columns=("PLAYER_ID", "PLAYER_NAME", "TEAM_ID"),
         )
 
     def _fetch_team_play_type_data(self, play_type):
@@ -512,6 +517,7 @@ class DataService:
                 type_grouping_nullable="Defensive",
                 timeout=timeout,
             ),
+            required_columns=("TEAM_NAME", "GP", "PTS"),
         )
 
     def _fetch_play_type_data(self, play_type):
@@ -523,6 +529,7 @@ class DataService:
                 type_grouping_nullable="Offensive",
                 timeout=timeout,
             ),
+            required_columns=("PLAYER_NAME", "TEAM_ABBREVIATION", "PTS"),
         )
 
     def _fetch_player_per36_stats(self):
@@ -533,6 +540,7 @@ class DataService:
                 per_mode_detailed="Per36",
                 timeout=timeout,
             ),
+            required_columns=("PLAYER_ID",),
         )
 
     def _fetch_data_from_table(self, table_name):
