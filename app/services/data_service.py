@@ -25,7 +25,7 @@ from app.models.catalogs import (
 from app.services.nba_stats_adapter import NBAStatsAdapter
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 from app.services.progress import RefreshProgress
-from app.services.table_publisher import AtomicTablePublisher
+from app.services.table_publisher import AtomicTablePublisher, PublicationFence
 from app.utils.performance_monitor import monitor_nba_api_calls
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,12 @@ class DataService:
         self.pbp = PBPTotalsAdapter(settings=self.settings)
         self.nba_stats = NBAStatsAdapter(settings=self.settings)
 
-    def update_all_data(self, progress_callback: Callable | None = None):
+    def update_all_data(
+        self,
+        *,
+        progress_callback: Callable | None = None,
+        publication_fence: PublicationFence | None = None,
+    ):
         """Fetch every provider frame, then publish the full set atomically.
 
         Provider and transformation failures happen before any table is
@@ -50,7 +55,7 @@ class DataService:
         frames = self._collect_all_frames()
         progress.transform("Transforming provider data")
         progress.publish("Publishing refreshed tables")
-        self.publisher.publish(frames)
+        self.publisher.publish(frames, publication_fence=publication_fence)
         progress.complete()
         return True
 
@@ -58,7 +63,9 @@ class DataService:
     def fetch_PBP_data(
         self,
         data_type: PBPDataKind = "player",
+        *,
         progress_callback: Callable | None = None,
+        publication_fence: PublicationFence | None = None,
     ):
         """Fetch one PBP totals set and publish it under its live table name."""
         self._validate_pbp_data_type(data_type)
@@ -68,11 +75,18 @@ class DataService:
         frame = self._collect_pbp_frame(data_type)
         progress.transform("Transforming PBP totals")
         progress.publish("Publishing PBP totals")
-        self.publisher.publish({table_name: frame})
+        self.publisher.publish(
+            {table_name: frame}, publication_fence=publication_fence
+        )
         progress.complete()
         return True
 
-    def fetch_players_with_teams(self, progress_callback: Callable | None = None):
+    def fetch_players_with_teams(
+        self,
+        *,
+        progress_callback: Callable | None = None,
+        publication_fence: PublicationFence | None = None,
+    ):
         """Fetch teams, map players to them, and publish both tables at once."""
         progress = RefreshProgress(progress_callback)
         progress.fetch("Fetching players and teams")
@@ -80,7 +94,7 @@ class DataService:
         progress.transform("Transforming player-team mapping")
         records = frames["player_team_table"].to_dict(orient="records")
         progress.publish("Publishing player-team mapping")
-        self.publisher.publish(frames)
+        self.publisher.publish(frames, publication_fence=publication_fence)
         progress.complete()
         return records
 

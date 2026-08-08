@@ -239,7 +239,12 @@ claimed with expiring leases by the app-scoped dispatcher, so queued work and
 work abandoned by a crashed process can be recovered after restart. Operation
 names and request IDs are persisted; executable handlers are registered at app
 startup. `progress` moves through fetch/transform/publish phases and remains
-safe to retry after a failed attempt.
+safe to retry after a failed attempt. Execution is at-least-once: an expired
+lease may rerun a handler. Every claim has an `attempt_count` fencing token;
+the publisher renews that token inside the same database transaction as the
+live-table swap, so stale attempts cannot overwrite a newer publication. This
+fences publication but does not cancel provider calls that were already in
+flight when the lease expired.
 
 See [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) for endpoint details and [docs/NLP_SYSTEM.md](docs/NLP_SYSTEM.md) for the natural-language pipeline.
 

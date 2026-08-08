@@ -129,6 +129,16 @@ for restart recovery. The service takes an injectable executor and clock;
 tests use a `SynchronousExecutor` and `dispatch_once()` so job completion is
 deterministic.
 
+Execution is at-least-once: a process crash or an expired lease can cause a
+refresh handler to run again, so handlers must tolerate repeated provider
+work. Each claim increments `attempt_count`, which is also the fencing token.
+Before a handler swaps its staged tables, `AtomicTablePublisher` renews the
+claim through a conditional update on the *same* `engine.begin()` connection.
+That update and all table swaps commit atomically; a stale attempt therefore
+fails before changing a live table and cannot overwrite a newer attempt. This
+protects publication and durable job state, but it cannot cancel provider work
+that was already in flight before a lease expired.
+
 The `DataService` refresh callables first collect every provider frame in
 memory (failures stop the job before any write), then hand the whole related
 set to `AtomicTablePublisher`, which stages each `DataFrame` under a unique

@@ -22,6 +22,7 @@ from typing import Any, Final
 
 from sqlalchemy import case, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import sessionmaker
 
 from app.errors import (
@@ -46,6 +47,7 @@ from app.utils.telemetry import (
     current_request_id,
     set_request_id,
 )
+from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +73,26 @@ RefreshCallable = Callable[..., Any]
 ProgressCallback = Callable[[float, str | None], None]
 
 
+class StaleLeaseError(RuntimeError):
+    """Raised when a worker no longer owns its claimed job attempt."""
+
+    def __init__(self) -> None:
+        super().__init__("The refresh job lease is no longer owned by this worker.")
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimedJob:
     """Immutable identity of a job together with the lease that owns it."""
 
     job_id: str
     owner: str
+    attempt_count: int
+
+    @property
+    def fencing_token(self) -> int:
+        """Return the immutable database attempt used as the fence token."""
+
+        return self.attempt_count
 
 
 __all__ = [
@@ -88,6 +104,7 @@ __all__ = [
     "build_default_refresh_handlers",
     "build_data_refresh_job_service",
     "adapt_zero_arg_handler",
+    "StaleLeaseError",
 ]
 
 
@@ -115,8 +132,13 @@ def adapt_zero_arg_handler(handler: Callable[[], Any]) -> RefreshCallable:
     worker itself never inspects or branches on handler signatures.
     """
 
-    def wrapped(*, progress_callback: ProgressCallback) -> Any:
+    def wrapped(
+        *,
+        progress_callback: ProgressCallback,
+        publication_fence: PublicationFence | None = None,
+    ) -> Any:
         del progress_callback
+        del publication_fence
         return handler()
 
     return wrapped
@@ -137,14 +159,26 @@ def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCall
     data_service = DataService(engine, settings=settings)
     player_service = PlayerService(engine, settings=settings)
 
-    def player_pbp(*, progress_callback: ProgressCallback) -> Any:
+    def player_pbp(
+        *,
+        progress_callback: ProgressCallback,
+        publication_fence: PublicationFence | None = None,
+    ) -> Any:
         return data_service.fetch_PBP_data(
-            "player", progress_callback=progress_callback
+            "player",
+            progress_callback=progress_callback,
+            publication_fence=publication_fence,
         )
 
-    def opponent_pbp(*, progress_callback: ProgressCallback) -> Any:
+    def opponent_pbp(
+        *,
+        progress_callback: ProgressCallback,
+        publication_fence: PublicationFence | None = None,
+    ) -> Any:
         return data_service.fetch_PBP_data(
-            "opponent", progress_callback=progress_callback
+            "opponent",
+            progress_callback=progress_callback,
+            publication_fence=publication_fence,
         )
 
     return {
@@ -304,12 +338,15 @@ class DataRefreshJobService:
         note: str | None = None,
         *,
         lease_owner: str | None = None,
+        attempt_count: int | None = None,
     ) -> None:
         """Record monotonic coarse progress and renew the worker lease."""
 
         if lease_owner:
+            if attempt_count is None:
+                raise StaleLeaseError()
             self._update_owned_progress(
-                ClaimedJob(job_id, lease_owner), progress, note
+                ClaimedJob(job_id, lease_owner, attempt_count), progress, note
             )
         else:
             # Retain the small public test seam used by older callers.  Worker
@@ -447,8 +484,19 @@ class DataRefreshJobService:
                 if result.rowcount != 1:
                     session.rollback()
                     return None
+                attempt_count = session.execute(
+                    select(DataRefreshJob.attempt_count).where(
+                        DataRefreshJob.job_id == job_id,
+                        DataRefreshJob.status == JOB_STATUS_RUNNING,
+                        DataRefreshJob.lease_owner == self._owner,
+                    )
+                ).scalar_one()
                 session.commit()
-                return ClaimedJob(job_id=job_id, owner=self._owner)
+                return ClaimedJob(
+                    job_id=job_id,
+                    owner=self._owner,
+                    attempt_count=int(attempt_count),
+                )
         except OperationalError:
             logger.debug("Could not claim refresh job %s", job_id, exc_info=True)
             return None
@@ -475,7 +523,8 @@ class DataRefreshJobService:
             result = handler(
                 progress_callback=lambda progress, note=None: self._update_owned_progress(
                     claimed_job, progress, note
-                )
+                ),
+                publication_fence=self._publication_fence(claimed_job),
             )
             if result is False:
                 self._fail(claimed_job, OperationFailedError())
@@ -508,6 +557,8 @@ class DataRefreshJobService:
                         DataRefreshJob.job_id == claimed_job.job_id,
                         DataRefreshJob.status == JOB_STATUS_RUNNING,
                         DataRefreshJob.lease_owner == claimed_job.owner,
+                        DataRefreshJob.attempt_count == claimed_job.attempt_count,
+                        DataRefreshJob.lease_expires_at > now,
                     )
                     .values(
                         lease_expires_at=now + timedelta(seconds=self._lease_seconds),
@@ -531,6 +582,8 @@ class DataRefreshJobService:
                     DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
                     DataRefreshJob.lease_owner == claimed_job.owner,
+                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
+                    DataRefreshJob.lease_expires_at > self._clock(),
                 )
             ).scalars().first()
 
@@ -561,6 +614,12 @@ class DataRefreshJobService:
                 lease_expires_at=None,
                 heartbeat_at=None,
             )
+        except StaleLeaseError:
+            logger.info(
+                "Skipping failure update for stale refresh job %s",
+                claimed_job.job_id,
+            )
+            return
         except Exception:
             logger.exception(
                 "Could not record failure for job %s", claimed_job.job_id
@@ -573,14 +632,20 @@ class DataRefreshJobService:
         )
 
     def _update_owned(self, claimed_job: ClaimedJob, **fields: Any) -> None:
+        now = self._clock()
         with self._session_factory() as session:
-            session.execute(
+            result = session.execute(
                 update(DataRefreshJob).where(
                     DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
                     DataRefreshJob.lease_owner == claimed_job.owner,
+                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
+                    DataRefreshJob.lease_expires_at > now,
                 ).values(**fields)
             )
+            if result.rowcount != 1:
+                session.rollback()
+                raise StaleLeaseError()
             session.commit()
 
     def _update_owned_progress(
@@ -592,12 +657,14 @@ class DataRefreshJobService:
         now = self._clock()
         bounded = max(0.0, min(float(progress), 1.0))
         with self._session_factory() as session:
-            session.execute(
+            result = session.execute(
                 update(DataRefreshJob)
                 .where(
                     DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
                     DataRefreshJob.lease_owner == claimed_job.owner,
+                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
+                    DataRefreshJob.lease_expires_at > now,
                 )
                 .values(
                     progress=case(
@@ -609,7 +676,34 @@ class DataRefreshJobService:
                     lease_expires_at=now + timedelta(seconds=self._lease_seconds),
                 )
             )
+            if result.rowcount != 1:
+                session.rollback()
+                raise StaleLeaseError()
             session.commit()
+
+    def _publication_fence(self, claimed_job: ClaimedJob) -> PublicationFence:
+        """Return the transaction-bound lease fence for one job attempt."""
+
+        def fence(connection: Connection) -> None:
+            now = self._clock()
+            result = connection.execute(
+                update(DataRefreshJob)
+                .where(
+                    DataRefreshJob.job_id == claimed_job.job_id,
+                    DataRefreshJob.status == JOB_STATUS_RUNNING,
+                    DataRefreshJob.lease_owner == claimed_job.owner,
+                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
+                    DataRefreshJob.lease_expires_at > now,
+                )
+                .values(
+                    lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+                    heartbeat_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                raise StaleLeaseError()
+
+        return fence
 
     def _handler_for(self, operation: str) -> RefreshCallable | None:
         return self._handlers.get(operation)

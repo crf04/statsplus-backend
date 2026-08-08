@@ -14,6 +14,7 @@ from ..errors import (
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services.nba_stats_adapter import NBAStatsAdapter
 from app.services.progress import RefreshProgress
+from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,12 @@ class PlayerService:
             logger.error("Error getting archetype players: %s", e)
             return []
 
-    def store_player_information(self, progress_callback: Callable | None = None):
+    def store_player_information(
+        self,
+        *,
+        progress_callback: Callable | None = None,
+        publication_fence: PublicationFence | None = None,
+    ):
         """Store basic player information in database.
 
         Fetching completes before the table is replaced, so a provider failure
@@ -213,7 +219,10 @@ class PlayerService:
         from app.services.table_publisher import AtomicTablePublisher
 
         progress.publish("Publishing player information")
-        AtomicTablePublisher(self.engine).publish({"player_information": player_df})
+        AtomicTablePublisher(self.engine).publish(
+            {"player_information": player_df},
+            publication_fence=publication_fence,
+        )
         progress.complete()
         return True
 

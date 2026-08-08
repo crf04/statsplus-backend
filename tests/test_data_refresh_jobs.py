@@ -7,7 +7,7 @@ bundled ``nba_play_types.db`` fixture and external providers are never touched.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
 
 import pandas as pd
 import pytest
@@ -192,6 +192,85 @@ def test_restart_recovers_expired_lease_but_not_healthy_running_job(job_engine):
     second.shutdown()
 
 
+def test_expired_worker_cannot_publish_after_reclaim(job_engine):
+    """A reclaimed attempt cannot overwrite the newer fenced publication."""
+
+    from app.models.job import DataRefreshJob
+
+    now = [_fixed_clock()]
+    old_started = Event()
+    release_old = Event()
+    old_executor = _ManualExecutor()
+
+    def old_refresh(*, progress_callback, publication_fence):
+        del progress_callback
+        old_started.set()
+        assert release_old.wait(timeout=5)
+        AtomicTablePublisher(job_engine).publish(
+            {"race": pd.DataFrame({"value": ["stale"]})},
+            publication_fence=publication_fence,
+        )
+
+    first = DataRefreshJobService(
+        job_engine,
+        executor=old_executor,
+        clock=lambda: now[0],
+        handlers={"update_database": old_refresh},
+        lease_seconds=60,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    queued = first.start("update_database")
+    old_worker = Thread(
+        target=old_executor.calls[0][0], args=old_executor.calls[0][1]
+    )
+    old_worker.start()
+    assert old_started.wait(timeout=5)
+
+    now[0] += timedelta(seconds=61)
+
+    def new_refresh(*, progress_callback, publication_fence):
+        del progress_callback
+        AtomicTablePublisher(job_engine).publish(
+            {"race": pd.DataFrame({"value": ["new"]})},
+            publication_fence=publication_fence,
+        )
+
+    second = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        clock=lambda: now[0],
+        handlers={"update_database": new_refresh},
+        lease_seconds=60,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    assert second.dispatch_once() == 1
+
+    release_old.set()
+    old_worker.join(timeout=5)
+    assert not old_worker.is_alive()
+
+    with job_engine.connect() as connection:
+        assert connection.execute(text("SELECT value FROM race")).scalar() == "new"
+
+    final = second.get(queued["job_id"])
+    assert final["status"] == JOB_STATUS_SUCCEEDED
+    assert final["attempt_count"] == 2
+    assert final["progress_note"] == "Completed"
+    assert final["failure_summary"] is None
+
+    with Session(job_engine) as session:
+        row = session.get(DataRefreshJob, queued["job_id"])
+        assert row is not None
+        assert row.status == JOB_STATUS_SUCCEEDED
+        assert row.attempt_count == 2
+        assert row.lease_owner is None
+
+    first.shutdown()
+    second.shutdown()
+
+
 def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
     executor = _ManualExecutor()
     seed = DataRefreshJobService(
@@ -246,7 +325,8 @@ def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
 def test_worker_request_id_and_progress_are_isolated(job_engine):
     observed = []
 
-    def refresh(progress_callback):
+    def refresh(progress_callback, publication_fence=None):
+        del publication_fence
         observed.append(telemetry.current_request_id())
         progress_callback(0.25, "Fetched")
         progress_callback(0.75, "Transformed")
@@ -443,8 +523,10 @@ def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(
         job_engine,
         executor=SynchronousExecutor(),
         handlers={
-            "player_pbp": lambda *, progress_callback: service.fetch_PBP_data(
-                "player", progress_callback=progress_callback
+            "player_pbp": lambda *, progress_callback, publication_fence: service.fetch_PBP_data(
+                "player",
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             )
         },
         dispatch_on_startup=False,
@@ -515,20 +597,27 @@ def job_app(tmp_path, monkeypatch):
         executor=SynchronousExecutor(),
         clock=_fixed_clock,
         handlers={
-            "update_database": lambda *, progress_callback: data_update_routes.data_service.update_all_data(
-                progress_callback=progress_callback
+            "update_database": lambda *, progress_callback, publication_fence: data_update_routes.data_service.update_all_data(
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             ),
-            "player_pbp": lambda *, progress_callback: data_update_routes.data_service.fetch_PBP_data(
-                "player", progress_callback=progress_callback
+            "player_pbp": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_PBP_data(
+                "player",
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             ),
-            "opponent_pbp": lambda *, progress_callback: data_update_routes.data_service.fetch_PBP_data(
-                "opponent", progress_callback=progress_callback
+            "opponent_pbp": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_PBP_data(
+                "opponent",
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             ),
-            "fetch_players_with_teams": lambda *, progress_callback: data_update_routes.data_service.fetch_players_with_teams(
-                progress_callback=progress_callback
+            "fetch_players_with_teams": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_players_with_teams(
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             ),
-            "fetch_players": lambda *, progress_callback: player_routes.player_service.store_player_information(
-                progress_callback=progress_callback
+            "fetch_players": lambda *, progress_callback, publication_fence: player_routes.player_service.store_player_information(
+                progress_callback=progress_callback,
+                publication_fence=publication_fence,
             ),
         },
     )

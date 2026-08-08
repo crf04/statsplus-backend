@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import pandas as pd
 from sqlalchemy import text
@@ -31,6 +31,14 @@ class TablePublicationError(ValueError):
     """A table name or publication payload is invalid."""
 
 
+# The callback deliberately receives the transaction's live connection.  A
+# job lease renewal performed through a separate Session would commit before
+# the table swap and leave a window in which a competing worker could reclaim
+# the job.  Keeping this callback typed at the publisher boundary makes the
+# transaction/fencing contract explicit to every caller.
+PublicationFence = Callable[[Connection], None]
+
+
 class AtomicTablePublisher:
     """Write frames to unique staging tables and swap them in one transaction.
 
@@ -41,7 +49,12 @@ class AtomicTablePublisher:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def publish(self, frames: Mapping[str, pd.DataFrame]) -> None:
+    def publish(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        *,
+        publication_fence: PublicationFence | None = None,
+    ) -> None:
         """Publish ``frames`` (named by target table) as one atomic set.
 
         A failure at any point leaves the previously named tables untouched:
@@ -67,6 +80,13 @@ class AtomicTablePublisher:
                     self._stage_frame(
                         connection, staging_names[table], targets[table]
                     )
+                # Stage every frame before touching a live table.  The fence
+                # is deliberately the final action before the first swap and
+                # runs on this same transaction connection, so the lease
+                # renewal and every table rename commit (or roll back) as one
+                # unit.
+                if publication_fence is not None:
+                    publication_fence(connection)
                 for table in targets:
                     self._swap(connection, staging_names[table], table)
         except BaseException:

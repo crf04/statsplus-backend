@@ -302,6 +302,14 @@ refreshes are durable jobs: the route returns `202 Accepted` immediately with
 second request for an already active operation (queued or running) returns
 `409 Conflict` with code `duplicate_active_operation`.
 
+Queue execution is at-least-once.  A crashed worker or expired lease can
+cause the registered handler to run again; `attempt_count` identifies each
+claim.  Before replacing any live table, the handler renews that claim as a
+fencing check inside the same database transaction as the table swap.  A
+stale attempt is rejected and cannot overwrite the newer attempt, although
+provider calls already in flight when a lease expires are not cancellable by
+this mechanism.
+
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
 `progress`, timestamps, and a sanitized `failure_summary` (provider or
