@@ -1,5 +1,4 @@
 from app.services.nl_query.parser import BaseQueryParser
-from app.services.nl_query.executor import QueryExecutor
 from app.services.llm_service import LLMService
 from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
@@ -11,7 +10,6 @@ class NLService:
         self.engine = engine
         self.settings = settings or get_runtime_settings()
         self.nl_parser = None
-        self.query_executor = None
         self.llm_service = None
         self.initialize_nl_system()
     
@@ -19,7 +17,6 @@ class NLService:
         """Initialize the natural language query system with LLM fallback"""
         try:
             self.nl_parser = BaseQueryParser(self.engine, settings=self.settings)
-            self.query_executor = QueryExecutor(self.engine, settings=self.settings)
             
             # Initialize LLM service for fallback
             try:
@@ -40,7 +37,7 @@ class NLService:
             raise ValueError("Empty query provided")
         
         # Check if NL system is initialized
-        if not self.nl_parser or not self.query_executor:
+        if not self.nl_parser:
             raise RuntimeError("Natural language system not initialized")
         
         query_text = query.strip()
