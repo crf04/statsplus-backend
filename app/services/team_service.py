@@ -6,10 +6,12 @@ from nba_api.stats.endpoints import (
     LeagueDashTeamShotLocations
 )
 from ..utils.nba_api_config import get_nba_stats_timeout
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 class TeamService:
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
         
     def get_all_teams(self):
         team = teams.get_teams()
@@ -89,7 +91,7 @@ class TeamService:
             general_range_nullable=type,
             date_from_nullable=date_filter,
             per_mode_simple='PerGame',
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
     
 
@@ -105,7 +107,7 @@ class TeamService:
             measure_type_detailed_defense='Opponent',
             per_mode_detailed='Per48',
             date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         )
         return response.get_data_frames()[0]
 
@@ -115,7 +117,7 @@ class TeamService:
             measure_type_simple='Opponent',
             per_mode_detailed='PerGame',
             date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         )
         opp_zone_df = response.get_data_frames()[0]
         opp_zone_df.columns = ['_'.join(filter(None, col)).strip() for col in opp_zone_df.columns]

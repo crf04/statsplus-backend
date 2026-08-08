@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read supported Python version
         id: runtime
@@ -31,7 +31,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.runtime.outputs.version }}
           cache: pip
@@ -39,6 +39,16 @@ jobs:
 
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
+
+      - name: Verify database schema workflow
+        shell: bash
+        run: |
+          migration_database="$(mktemp)"
+          trap 'rm -f "$migration_database"' EXIT
+          migration_database_url="sqlite:///${migration_database}"
+          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
+          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
+          .venv/bin/python scripts/validate_demo_db.py
 
       - name: Run checks
         run: ./scripts/check.sh

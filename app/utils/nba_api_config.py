@@ -3,30 +3,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging
-import os
+
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_NBA_STATS_TIMEOUT_SECONDS = 10.0
 
 
-def get_nba_stats_timeout() -> float:
+def get_nba_stats_timeout(settings: RuntimeSettings | None = None) -> float:
     """Return the timeout used by calls made through the ``nba_api`` package."""
-    raw_timeout = os.getenv(
-        'NBA_STATS_TIMEOUT_SECONDS', str(DEFAULT_NBA_STATS_TIMEOUT_SECONDS)
-    )
-    try:
-        timeout = float(raw_timeout)
-        if timeout <= 0:
-            raise ValueError
-        return timeout
-    except ValueError:
-        logger.warning(
-            "Invalid NBA_STATS_TIMEOUT_SECONDS=%r; using %.1f seconds",
-            raw_timeout,
-            DEFAULT_NBA_STATS_TIMEOUT_SECONDS,
-        )
-        return DEFAULT_NBA_STATS_TIMEOUT_SECONDS
+    runtime_settings = settings or get_runtime_settings()
+    return runtime_settings.providers.nba_stats_timeout_seconds
 
 
 class LoggingHTTPAdapter(HTTPAdapter):
@@ -75,20 +63,20 @@ class RetryWithLogging(Retry):
         
         return super().increment(method, url, response, error, _pool, _stacktrace)
 
-def get_nba_api_session():
+def get_nba_api_session(settings: RuntimeSettings | None = None):
     """Create optimized HTTP session for NBA API calls with connection pooling and retries.
     
     Returns:
         requests.Session: Configured session for NBA API requests
     """
+    runtime_settings = settings or get_runtime_settings()
     session = requests.Session()
-    
-    # Get configuration from environment variables
-    connect_timeout = int(os.getenv('NBA_API_TIMEOUT_CONNECT', '10'))
-    read_timeout = int(os.getenv('NBA_API_TIMEOUT_READ', '30'))
-    max_retries = int(os.getenv('NBA_API_MAX_RETRIES', '3'))
-    pool_connections = int(os.getenv('NBA_API_POOL_CONNECTIONS', '10'))
-    pool_maxsize = int(os.getenv('NBA_API_POOL_MAXSIZE', '20'))
+
+    connect_timeout = runtime_settings.providers.pbp_connect_timeout_seconds
+    read_timeout = runtime_settings.providers.pbp_read_timeout_seconds
+    max_retries = runtime_settings.providers.pbp_max_retries
+    pool_connections = runtime_settings.providers.pbp_pool_connections
+    pool_maxsize = runtime_settings.providers.pbp_pool_maxsize
     
     # Configure retry strategy with exponential backoff and logging
     retry_strategy = RetryWithLogging(
@@ -127,7 +115,7 @@ def get_nba_api_session():
 # Global session instance for reuse across requests
 _nba_session = None
 
-def get_shared_nba_session():
+def get_shared_nba_session(settings: RuntimeSettings | None = None):
     """Get shared NBA API session instance for maximum connection reuse.
     
     Returns:
@@ -135,7 +123,7 @@ def get_shared_nba_session():
     """
     global _nba_session
     if _nba_session is None:
-        _nba_session = get_nba_api_session()
+        _nba_session = get_nba_api_session(settings)
     return _nba_session
 
 def close_nba_session():

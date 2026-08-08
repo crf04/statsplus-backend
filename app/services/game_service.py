@@ -8,6 +8,7 @@ from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
 from ..utils.cache_config import get_redis_client, set_cache_with_1am_expiry
+from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,14 +22,15 @@ class GameService:
         'pullups', 'less_than_10_ft'
     }
     
-    def __init__(self, db_engine, redis_client=None):
+    def __init__(self, db_engine, redis_client=None, settings: RuntimeSettings | None = None):
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
         
         # Initialize cache
         if redis_client is None:
-            redis_client = get_redis_client()
-        self.cache = NBAGameCache(redis_client)
+            redis_client = get_redis_client(self.settings)
+        self.cache = NBAGameCache(redis_client, settings=self.settings)
         
         # Semaphore to limit concurrent NBA API calls (prevent rate limiting)
         self.nba_api_semaphore = asyncio.Semaphore(10)
@@ -68,8 +70,9 @@ class GameService:
         """Get daily cache decorator for this instance"""
         return self.cache.cache_daily_nba_data()
     
-    async def _get_game_logs(self, player_name, season='2025-26'):
+    async def _get_game_logs(self, player_name, season=None):
         """Get game logs with daily caching - only hits NBA API once per day"""
+        season = season or self.settings.nba.current_season
         # Apply caching manually since we can't use decorators on dynamic methods
         if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
             from ..utils.cache_config import CACHE_PREFIXES
@@ -123,7 +126,8 @@ class GameService:
             # No cache - direct API call
             return await self._fetch_game_logs_from_api(player_name, season)
     
-    async def _fetch_game_logs_from_api(self, player_name, season='2025-26'):
+    async def _fetch_game_logs_from_api(self, player_name, season=None):
+        season = season or self.settings.nba.current_season
         player_id = self.get_player_id(player_name)
         
         # Define async wrappers for NBA API calls
@@ -134,7 +138,7 @@ class GameService:
                         player_id_nullable=player_id, 
                         season_nullable=season,
                         season_type_nullable='Regular Season',
-                        timeout=get_nba_stats_timeout(),
+                        timeout=get_nba_stats_timeout(self.settings),
                     ).get_data_frames()[0]
                 )
         
@@ -196,8 +200,9 @@ class GameService:
         return gamelogs, next_team
 
 
-    async def get_common_games(self, primary_player_logs, other_players_names, season='2025-26'):
+    async def get_common_games(self, primary_player_logs, other_players_names, season=None):
         """Find common games between players"""
+        season = season or self.settings.nba.current_season
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
         
         # Loop through other players and find intersections based on game IDs and team abbreviations
@@ -214,8 +219,9 @@ class GameService:
         common_game_ids = {pair[0] for pair in primary_game_team_pairs}
         return set(common_game_ids)
 
-    async def get_games_to_exclude(self, player_logs, players_off_names, season='2025-26'):
+    async def get_games_to_exclude(self, player_logs, players_off_names, season=None):
         """Find games to exclude due to filtering"""
+        season = season or self.settings.nba.current_season
         exclude_game_ids = set()
         
         # Loop through players_off and union game IDs
@@ -275,7 +281,7 @@ class GameService:
                 df = df[(df['PLAYTYPE_RTG'] >= min_rating) & (df['PLAYTYPE_RTG'] <= max_rating)]
 
         # Apply players on/off filter
-        season = filter_params.get('season_filter', '2025-26')
+        season = filter_params.get('season_filter') or self.settings.nba.current_season
         if filter_params.get('players_on') or filter_params.get('players_off'):
             df = await self.filter_players_on_off(df, filter_params.get('players_on', []), filter_params.get('players_off', []), season)
 
@@ -489,7 +495,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             async with self.nba_api_semaphore:
                 df = await asyncio.to_thread(
-                    lambda: endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
+                    lambda: endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter, timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[0]
                 )
         else:
             df = self._fetch_data_from_table('general_opponent_stats')
@@ -509,7 +515,7 @@ class GameService:
                 date_filter = pd.to_datetime(date_filter)
                 async with self.nba_api_semaphore:
                     df = await asyncio.to_thread(
-                        lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
+                        lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter, timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[0]
                     )
         else:
                 df = self._fetch_data_from_table('catch_and_shoot')
@@ -524,7 +530,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             async with self.nba_api_semaphore:
                 df = await asyncio.to_thread(
-                    lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
+                    lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter, timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[0]
                 )
         else:
             df = self._fetch_data_from_table('pullups')

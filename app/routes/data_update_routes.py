@@ -1,63 +1,56 @@
 from flask import Blueprint, jsonify
-from ..utils.db import get_engine
+from ..errors import OperationFailedError, route_error_boundary
 from ..services.data_service import DataService
 from ..utils.auth import require_admin
+from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
-engine = get_engine()
-data_service = DataService(engine)
+
+
+def _build_data_service(engine, settings):
+    return DataService(engine, settings=settings)
+
+
+data_service = CurrentAppService("data", _build_data_service)
 
 @data_bp.route('/update_database', methods=['POST'])
 @require_admin
+@route_error_boundary("Failed to update database.")
 def update_database():
-    try:
-        success = data_service.update_all_data()
-        if success:
-            return jsonify({'message': 'Database updated successfully'})
-        else:
-            return jsonify({'error': 'Failed to update database'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    success = data_service.update_all_data()
+    if success:
+        return jsonify({'message': 'Database updated successfully'})
+    raise OperationFailedError("Failed to update database.")
 
 @data_bp.route('/player_PBP', methods=['PUT'])
 @require_admin
+@route_error_boundary("Failed to store player PBP data.")
 def store_player_PBP():
-    try:
-        success = data_service.fetch_PBP_data('player')
-        if success:
-            return jsonify({'message': 'Player PBP data processed and stored successfully'})
-        else:
-            return jsonify({'error': 'Failed to store player PBP data'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    success = data_service.fetch_PBP_data('player')
+    if success:
+        return jsonify({'message': 'Player PBP data processed and stored successfully'})
+    raise OperationFailedError("Failed to store player PBP data.")
 
 @data_bp.route('/opponent_PBP', methods=['PUT'])
 @require_admin
+@route_error_boundary("Failed to store opponent PBP data.")
 def store_opponent_PBP():
-    try:
-        success = data_service.fetch_PBP_data('opponent')
-        if success:
-            return jsonify({'message': 'Opponent PBP data processed and stored successfully'})
-        else:
-            return jsonify({'error': 'Failed to store opponent PBP data'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    success = data_service.fetch_PBP_data('opponent')
+    if success:
+        return jsonify({'message': 'Opponent PBP data processed and stored successfully'})
+    raise OperationFailedError("Failed to store opponent PBP data.")
 
 @data_bp.route('/fetch_players_with_teams', methods=['POST'])
 @require_admin
+@route_error_boundary("Failed to fetch players with their teams.")
 def fetch_players_with_teams():
-    try:
-        data_service.save_team()
-        player_list = data_service.map_id_to_team()
-        return jsonify(player_list)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    data_service.save_team()
+    player_list = data_service.map_id_to_team()
+    return jsonify(player_list)
     
 @data_bp.route('/fetch_playtypes', methods=['GET'])
 @require_admin
+@route_error_boundary("Failed to fetch play types.")
 def fetch_playtypes():
-    try:
-        return jsonify(data_service.get_playtypes())
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    return jsonify(data_service.get_playtypes())

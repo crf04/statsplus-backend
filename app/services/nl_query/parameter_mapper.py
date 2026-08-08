@@ -8,17 +8,26 @@ actual API calls that can be executed.
 from datetime import datetime, timedelta
 from app.config.query_schemas import ENDPOINT_SCHEMAS
 from app.config.filter_mappings import SEASON_MAPPINGS
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 class ParameterMapper:
     """Maps QueryComponents to API call parameters"""
     
-    def __init__(self):
+    def __init__(self, settings: RuntimeSettings | None = None):
         """Initialize the parameter mapper"""
         self.endpoint_schemas = ENDPOINT_SCHEMAS
-        self.season_mappings = SEASON_MAPPINGS
-        
-        # Season mappings
-        self.current_season = "2025-26"  # Updated to match route default
+        runtime_settings = settings or get_runtime_settings()
+        self.current_season = runtime_settings.nba.current_season
+        # Keep explicit historical aliases, but attach generic phrases to the
+        # same current-season value used by game-log requests.
+        generic_aliases = {"current season", "this season", "this year"}
+        self.season_mappings = {
+            season: [alias for alias in aliases if alias not in generic_aliases]
+            for season, aliases in SEASON_MAPPINGS.items()
+        }
+        self.season_mappings.setdefault(self.current_season, []).extend(
+            sorted(generic_aliases)
+        )
         
         # Location mappings
         self.location_mapping = {

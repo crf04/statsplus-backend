@@ -8,12 +8,13 @@ individual settings: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, and
 scheme, or when `REDIS_TLS=true`.
 """
 
-import os
 import redis
 import logging
 import pytz
 from datetime import datetime, timezone, timedelta, time
 from typing import Optional
+
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ CACHE_TTLS = {
     'player_info': 24 * 60 * 60,        # 24 hours - player information
 }
 
-def get_redis_client() -> Optional[redis.Redis]:
+def get_redis_client(settings: RuntimeSettings | None = None) -> Optional[redis.Redis]:
     """Create a Redis client from Railway environment variables.
 
     Precedence:
@@ -48,8 +49,10 @@ def get_redis_client() -> Optional[redis.Redis]:
         A configured Redis client, or None if connection fails.
     """
 
+    runtime_settings = settings or get_runtime_settings()
+
     try:
-        redis_url = os.getenv("REDIS_URL")
+        redis_url = runtime_settings.cache.url
 
         if redis_url:
             # Use URL-based configuration; respects rediss:// for TLS
@@ -61,11 +64,11 @@ def get_redis_client() -> Optional[redis.Redis]:
             )
         else:
             # Fallback to individual env vars
-            redis_host = os.getenv("REDISHOST", "localhost")
-            redis_port = int(os.getenv("REDISPORT", 6379))
-            redis_db = int(os.getenv("REDISDB", 0))
-            redis_password = os.getenv("REDISPASSWORD")
-            use_tls = os.getenv("REDISTLS", "false").lower() in {"1", "true", "yes", "on"}
+            redis_host = runtime_settings.cache.host
+            redis_port = runtime_settings.cache.port
+            redis_db = runtime_settings.cache.database
+            redis_password = runtime_settings.cache.password
+            use_tls = runtime_settings.cache.tls
 
             client = redis.Redis(
                 host=redis_host,
@@ -107,14 +110,15 @@ def get_cache_date_key() -> str:
     """
     return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-def is_cache_enabled() -> bool:
+def is_cache_enabled(settings: RuntimeSettings | None = None) -> bool:
     """
     Check if caching is enabled via environment variable.
     
     Returns:
         bool: True if caching is enabled, False otherwise
     """
-    return os.getenv('ENABLE_CACHE', 'true').lower() in ('true', '1', 'yes', 'on')
+    runtime_settings = settings or get_runtime_settings()
+    return runtime_settings.cache.enabled
 
 def get_ttl_for_cache_type(cache_type: str) -> int:
     """

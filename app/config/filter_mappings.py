@@ -5,6 +5,8 @@ This file maps natural language descriptions to the existing filter_teams
 function parameters in GameService.
 """
 
+from .settings import current_nba_season
+
 FILTER_MAPPINGS = {
     "defense": {
         "api_filters": ["OPP_PTS"],
@@ -51,9 +53,21 @@ TIME_PERIOD_SYNONYMS = {
     "week": ["this week", "past week", "last week", "recent week"]
 }
 
-# Season format mappings for specific NBA seasons
+# Season format mappings for specific NBA seasons.  Generic "current season"
+# phrases are attached to the startup-derived season so this parser cannot
+# drift away from the route/service default.
+
+CURRENT_SEASON = current_nba_season()
+CURRENT_SEASON_FULL = f"{int(CURRENT_SEASON[:4])}-{int(CURRENT_SEASON[:4]) + 1}"
+
 SEASON_MAPPINGS = {
-    "2025-26": ["2025-26", "2025-2026", "current season", "this season", "this year"],
+    CURRENT_SEASON: [
+        CURRENT_SEASON,
+        CURRENT_SEASON_FULL,
+        "current season",
+        "this season",
+        "this year",
+    ],
     "2024-25": ["2024-25", "2024-2025"],
     "2023-24": ["2023-24", "2023-2024", "last season", "previous season"],
     "2022-23": ["2022-23", "2022-2023"],
@@ -73,4 +87,4 @@ NUMBER_WORDS = {
 RANKING_TERMS = {
     "positive": ["top", "best", "elite", "good", "strong", "leading"],
     "negative": ["worst", "bad", "bottom", "weak", "poor", "struggling"]
-} 
+}

@@ -12,6 +12,12 @@ def _raise(*args, **kwargs):
     raise RuntimeError("database is down")
 
 
+def assert_error(response, status, code, message):
+    """Assert the sanitized error envelope returned by route_error_boundary."""
+    assert response.status_code == status
+    assert response.get_json()["error"] == {"code": code, "message": message}
+
+
 # --- authentication --------------------------------------------------------
 
 
@@ -84,8 +90,7 @@ def test_profile_returns_not_found_when_the_user_is_absent(
 
     response = client.get("/api/user/profile", headers=headers)
 
-    assert response.status_code == 404
-    assert response.get_json() == {"error": "User not found in database"}
+    assert_error(response, 404, "resource_not_found", "User not found in database.")
 
 
 def test_profile_returns_server_error_when_the_lookup_fails(
@@ -98,8 +103,7 @@ def test_profile_returns_server_error_when_the_lookup_fails(
 
     response = client.get("/api/user/profile", headers=headers)
 
-    assert response.status_code == 500
-    assert response.get_json() == {"error": "Failed to retrieve user profile"}
+    assert_error(response, 500, "operation_failed", "Failed to retrieve user profile.")
 
 
 # --- PUT /profile ----------------------------------------------------------
@@ -110,8 +114,7 @@ def test_profile_update_rejects_an_empty_body(client, authenticate):
 
     response = client.put("/api/user/profile", headers=headers, json={})
 
-    assert response.status_code == 400
-    assert response.get_json() == {"error": "No data provided"}
+    assert_error(response, 400, "invalid_input", "No profile data was provided.")
 
 
 def test_profile_update_returns_not_found_for_an_unknown_user(
@@ -128,8 +131,7 @@ def test_profile_update_returns_not_found_for_an_unknown_user(
         "/api/user/profile", headers=headers, json={"display_name": "New Name"}
     )
 
-    assert response.status_code == 404
-    assert response.get_json() == {"error": "User not found in database"}
+    assert_error(response, 404, "resource_not_found", "User not found in database.")
 
 
 def test_profile_update_forwards_the_submitted_fields(
@@ -215,8 +217,7 @@ def test_profile_update_reports_a_failed_save(
         "/api/user/profile", headers=headers, json={"display_name": "New Name"}
     )
 
-    assert response.status_code == 500
-    assert response.get_json() == {"error": "Failed to update user profile"}
+    assert_error(response, 500, "operation_failed", "Failed to update user profile.")
 
 
 # --- GET /stats ------------------------------------------------------------
@@ -248,8 +249,7 @@ def test_stats_returns_not_found_when_the_service_returns_none(
 
     response = client.get("/api/user/stats", headers=headers)
 
-    assert response.status_code == 404
-    assert response.get_json() == {"error": "User not found"}
+    assert_error(response, 404, "resource_not_found", "User not found.")
 
 
 def test_stats_returns_server_error_when_the_service_raises(
@@ -262,8 +262,7 @@ def test_stats_returns_server_error_when_the_service_raises(
 
     response = client.get("/api/user/stats", headers=headers)
 
-    assert response.status_code == 500
-    assert response.get_json() == {"error": "Failed to retrieve user statistics"}
+    assert_error(response, 500, "operation_failed", "Failed to retrieve user statistics.")
 
 
 # --- POST /activity/ping ---------------------------------------------------
@@ -311,11 +310,7 @@ def test_activity_ping_reports_an_unsuccessful_update(
 
     response = client.post("/api/user/activity/ping", headers=headers)
 
-    assert response.status_code == 200
-    assert response.get_json() == {
-        "success": False,
-        "message": "Failed to update activity",
-    }
+    assert_error(response, 500, "operation_failed", "Failed to update user activity.")
 
 
 # --- POST /deactivate ------------------------------------------------------
@@ -346,8 +341,7 @@ def test_deactivate_reports_a_failed_soft_delete(client, monkeypatch, authentica
 
     response = client.post("/api/user/deactivate", headers=headers)
 
-    assert response.status_code == 500
-    assert response.get_json() == {"error": "Failed to deactivate account"}
+    assert_error(response, 500, "operation_failed", "Failed to deactivate account.")
 
 
 # --- POST /sync ------------------------------------------------------------
@@ -366,16 +360,9 @@ def test_sync_confirms_a_user_already_persisted_by_the_middleware(
     assert payload["user"]["firebase_uid"] == "test-uid"
 
 
-def test_sync_reports_failure_and_echoes_the_firebase_identity(client, authenticate):
+def test_sync_reports_failure_when_the_user_was_not_persisted(client, authenticate):
     headers = authenticate(db_user=None)
 
     response = client.post("/api/user/sync", headers=headers)
 
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["success"] is False
-    assert payload["firebase_user"] == {
-        "uid": "test-uid",
-        "email": "user@example.com",
-        "name": "Test User",
-    }
+    assert_error(response, 500, "operation_failed", "User synchronization failed.")

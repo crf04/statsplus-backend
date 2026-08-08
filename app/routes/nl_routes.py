@@ -1,41 +1,50 @@
 from flask import Blueprint, request, jsonify
 import logging
 
-from ..utils.db import get_engine
+from ..errors import InvalidInputError, OperationFailedError, route_error_boundary
 from ..services.nl_service import NLService
 from ..utils.auth import require_auth, get_current_user
+from ._service_proxy import CurrentAppService
 
 logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
-engine = get_engine()
-nl_service = NLService(engine)
+
+
+def _build_nl_service(engine, settings):
+    return NLService(engine, settings=settings)
+
+
+nl_service = CurrentAppService("nl", _build_nl_service)
 
 @nl_bp.route('/nl-query', methods=['POST'])
 @require_auth
+@route_error_boundary("Failed to process the natural-language query.")
 def process_natural_language_query():
     """Process natural language queries and return structured results"""
+    # Get authenticated user
+    user = get_current_user()
+
+    # Get query from request
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'query' not in data:
+        raise InvalidInputError("A query is required.")
+
+    query = data['query']
+    if not isinstance(query, str) or not query.strip():
+        raise InvalidInputError("A non-empty query is required.")
+
+    logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
+
     try:
-        # Get authenticated user
-        user = get_current_user()
-        
-        # Get query from request
-        data = request.get_json()
-        if not data or 'query' not in data:
-            return jsonify({'error': 'No query provided'}), 400
-        
-        query = data['query']
-        
-        logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
-        
         result = nl_service.process_query(query)
         return jsonify(result)
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except RuntimeError as e:
-        return jsonify({'error': str(e)}), 500
-    except Exception as e:
-        logger.exception("NL query failed")
-        return jsonify({'error': f'Failed to process query: {str(e)}'}), 500
+    except ValueError as error:
+        raise InvalidInputError(
+            "The natural-language query is invalid.", detail=error
+        ) from error
+    except RuntimeError as error:
+        raise OperationFailedError(
+            "The natural-language query service is unavailable.", detail=error
+        ) from error

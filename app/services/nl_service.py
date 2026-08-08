@@ -1,13 +1,15 @@
 from app.services.nl_query.parser import BaseQueryParser
 from app.services.nl_query.executor import QueryExecutor
 from app.services.llm_service import LLMService
+from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
 
 logger = logging.getLogger(__name__)
 
 class NLService:
-    def __init__(self, engine):
+    def __init__(self, engine, settings: RuntimeSettings | None = None):
         self.engine = engine
+        self.settings = settings or get_runtime_settings()
         self.nl_parser = None
         self.query_executor = None
         self.llm_service = None
@@ -16,12 +18,12 @@ class NLService:
     def initialize_nl_system(self):
         """Initialize the natural language query system with LLM fallback"""
         try:
-            self.nl_parser = BaseQueryParser(self.engine)
-            self.query_executor = QueryExecutor(self.engine)
+            self.nl_parser = BaseQueryParser(self.engine, settings=self.settings)
+            self.query_executor = QueryExecutor(self.engine, settings=self.settings)
             
             # Initialize LLM service for fallback
             try:
-                self.llm_service = LLMService()
+                self.llm_service = LLMService(settings=self.settings)
                 logger.info("LLM Service initialized for fallback routing")
             except Exception as llm_error:
                 logger.warning("LLM Service initialization failed: %s", llm_error)
@@ -136,7 +138,7 @@ class NLService:
                 'date_filter': llm_content.get('date_range'),
                 'self_filters': self_filters,
                 'rank_filter': rank_filter,
-                'season': llm_content.get('season', '2025-26'),
+                'season': llm_content.get('season', self.settings.nba.current_season),
                 'confidence': llm_content.get('confidence', 0.9),  # LLM typically has high confidence
                 'intent': llm_content.get('intent', 'game_logs'),
                 'time_period': llm_content.get('time_period'),
@@ -175,7 +177,9 @@ class NLService:
             'date_filter': parsed_components.date_range,
             'self_filters': parsed_components.self_filters,
             'rank_filter': rank_filter,      
-            'season': getattr(parsed_components, 'season', '2025-26'),
+            'season': getattr(
+                parsed_components, 'season', self.settings.nba.current_season
+            ),
             'confidence': parsed_components.confidence,
             'intent': parsed_components.intent,
             'time_period': parsed_components.time_period,

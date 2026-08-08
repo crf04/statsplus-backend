@@ -96,7 +96,7 @@ SEEDED_PLAYER_NAMES = ["LeBron James", "Stephen Curry", "Nikola Jokic"]
 
 
 @pytest.fixture
-def seeded_engine(tmp_path):
+def seeded_db_url(tmp_path):
     """Create a temporary SQLite database holding known player rows.
 
     Route tests assert against these exact names so that a query returning an
@@ -104,7 +104,8 @@ def seeded_engine(tmp_path):
     """
     from sqlalchemy import create_engine, text
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'seeded.db'}")
+    path = tmp_path / "seeded.db"
+    engine = create_engine(f"sqlite:///{path}")
     with engine.begin() as connection:
         connection.execute(text('CREATE TABLE player_play_types ("PLAYER_NAME" TEXT)'))
         for name in SEEDED_PLAYER_NAMES:
@@ -112,15 +113,39 @@ def seeded_engine(tmp_path):
                 text('INSERT INTO player_play_types ("PLAYER_NAME") VALUES (:name)'),
                 {"name": name},
             )
-    return engine
+    engine.dispose()
+    return f"sqlite:///{path}"
 
 
 @pytest.fixture
-def empty_engine(tmp_path):
-    """Create a temporary SQLite database with no tables at all."""
-    from sqlalchemy import create_engine
+def empty_db_url(tmp_path):
+    """Point at a temporary SQLite database with no tables at all."""
+    return f"sqlite:///{tmp_path / 'empty.db'}"
 
-    return create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+
+@pytest.fixture
+def make_client(monkeypatch):
+    """Build a test client whose services are bound to a given database URL.
+
+    Services resolve their engine from the app's runtime settings, so the
+    database is chosen at app-creation time rather than by patching a service.
+    """
+
+    def _make_client(database_url):
+        from app import create_app
+
+        monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+        monkeypatch.setenv("FLASK_ENV", "testing")
+
+        app = create_app({
+            "TESTING": True,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+            "DATABASE_URL": database_url,
+        })
+        return app.test_client()
+
+    return _make_client
 
 
 @pytest.fixture

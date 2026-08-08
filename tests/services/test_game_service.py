@@ -88,7 +88,7 @@ def service(game_engine, monkeypatch):
     """Build a GameService with caching disabled and no Redis connection."""
     from app.services import game_service as game_service_module
 
-    monkeypatch.setattr(game_service_module, "get_redis_client", lambda: None)
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     built = game_service_module.GameService(game_engine)
     assert built.cache.enabled is False
     return built

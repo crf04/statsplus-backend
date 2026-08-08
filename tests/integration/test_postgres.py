@@ -43,16 +43,14 @@ def pg_engine(postgres_url):
 
 
 @pytest.fixture
-def user_service(pg_engine, monkeypatch):
+def user_service(pg_engine, postgres_url):
     """Point UserService at the Postgres test database."""
-    from sqlalchemy.orm import sessionmaker
+    from app.config.settings import load_settings
+    from app.services.user_service import UserService
 
-    from app.services import user_service as user_service_module
+    settings = load_settings(overrides={"DATABASE_URL": postgres_url})
 
-    session_factory = sessionmaker(bind=pg_engine)
-    monkeypatch.setattr(user_service_module, "get_session", session_factory)
-
-    return user_service_module.UserService()
+    return UserService(pg_engine, settings=settings)
 
 
 FIREBASE_USER = {
@@ -189,7 +187,9 @@ def test_game_service_reads_a_normalized_table_on_postgres(pg_engine, monkeypatc
         ]
     ).to_sql("team_play_types", pg_engine, index=False, if_exists="replace")
 
-    monkeypatch.setattr(game_service_module, "get_redis_client", lambda: None)
+    monkeypatch.setattr(
+        game_service_module, "get_redis_client", lambda *args, **kwargs: None
+    )
     service = game_service_module.GameService(pg_engine)
 
     df = service._fetch_data_from_table("team_play_types")

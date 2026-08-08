@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 import logging
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.models import get_session, User
+from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +42,14 @@ class UserService:
     using SQLAlchemy ORM.
     """
     
-    def __init__(self):
-        """Initialize the UserService."""
-        pass
+    def __init__(self, db_engine=None, settings: RuntimeSettings | None = None):
+        """Initialize the service with the active app's engine and settings."""
+        self.settings = settings or get_runtime_settings()
+        self.engine = db_engine or get_engine(self.settings)
+
+    def _get_session(self):
+        """Create a session bound to this service's app-scoped engine."""
+        return get_session(self.engine)
     
     def create_or_update_user(self, firebase_user_data: Dict[str, Any]) -> Optional[User]:
         """
@@ -58,7 +65,7 @@ class UserService:
         Returns:
             User: The created or updated User instance, or None if error
         """
-        session = get_session()
+        session = self._get_session()
         try:
             firebase_uid = firebase_user_data.get('uid')
             if not firebase_uid:
@@ -115,7 +122,7 @@ class UserService:
         Returns:
             User: User instance or None if not found
         """
-        session = get_session()
+        session = self._get_session()
         try:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             return user
@@ -135,7 +142,7 @@ class UserService:
         Returns:
             User: User instance or None if not found
         """
-        session = get_session()
+        session = self._get_session()
         try:
             user = session.query(User).filter_by(email=email).first()
             return user
@@ -155,7 +162,7 @@ class UserService:
         Returns:
             bool: True if update successful, False otherwise
         """
-        session = get_session()
+        session = self._get_session()
         try:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             if user:
@@ -183,7 +190,7 @@ class UserService:
         Returns:
             bool: True if deactivation successful, False otherwise
         """
-        session = get_session()
+        session = self._get_session()
         try:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             if user:
@@ -236,7 +243,7 @@ class UserService:
         Returns:
             int: Number of active users
         """
-        session = get_session()
+        session = self._get_session()
         try:
             count = session.query(User).filter_by(is_active=True).count()
             return count
