@@ -2,6 +2,8 @@
 
 import requests
 
+from tests.conftest import SEEDED_PLAYER_NAMES
+
 
 def test_app_factory_registers_expected_routes(app):
     routes = {str(rule) for rule in app.url_map.iter_rules()}
@@ -18,18 +20,61 @@ def test_app_factory_registers_expected_routes(app):
     assert "/api/user/debug/all" not in routes
 
 
-def test_database_healthcheck(client):
+def test_database_healthcheck_reports_ok_for_a_reachable_database(
+    client, monkeypatch, seeded_engine
+):
+    from app.routes import health_routes
+
+    monkeypatch.setattr(health_routes, "get_engine", lambda: seeded_engine)
+
     response = client.get("/api/health/db")
 
     assert response.status_code == 200
-    assert response.get_json()["status"] == "ok"
+    payload = response.get_json()
+    assert payload["status"] == "ok"
+    assert payload["dialect"] == "sqlite"
 
 
-def test_players_endpoint_smoke(client):
+def test_database_healthcheck_reports_error_for_an_unreachable_database(
+    client, monkeypatch
+):
+    from sqlalchemy import create_engine
+
+    from app.routes import health_routes
+
+    unreachable = create_engine("sqlite:////nonexistent-directory/missing.db")
+    monkeypatch.setattr(health_routes, "get_engine", lambda: unreachable)
+
+    response = client.get("/api/health/db")
+
+    assert response.status_code == 500
+    assert response.get_json()["status"] == "error"
+
+
+def test_players_endpoint_returns_the_names_stored_in_the_database(
+    client, monkeypatch, seeded_engine
+):
+    from app.routes import player_routes
+
+    monkeypatch.setattr(player_routes.player_service, "engine", seeded_engine)
+
     response = client.get("/api/players")
 
     assert response.status_code == 200
-    assert isinstance(response.get_json(), list)
+    assert response.get_json() == SEEDED_PLAYER_NAMES
+
+
+def test_players_endpoint_reports_failure_when_the_table_is_missing(
+    client, monkeypatch, empty_engine
+):
+    from app.routes import player_routes
+
+    monkeypatch.setattr(player_routes.player_service, "engine", empty_engine)
+
+    response = client.get("/api/players")
+
+    assert response.status_code == 500
+    assert "error" in response.get_json()
 
 
 def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):

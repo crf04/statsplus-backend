@@ -90,3 +90,34 @@ def app(monkeypatch):
 def client(app):
     """Create a Flask test client."""
     return app.test_client()
+
+
+SEEDED_PLAYER_NAMES = ["LeBron James", "Stephen Curry", "Nikola Jokic"]
+
+
+@pytest.fixture
+def seeded_engine(tmp_path):
+    """Create a temporary SQLite database holding known player rows.
+
+    Route tests assert against these exact names so that a query returning an
+    empty result is a failure rather than a pass.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'seeded.db'}")
+    with engine.begin() as connection:
+        connection.execute(text('CREATE TABLE player_play_types ("PLAYER_NAME" TEXT)'))
+        for name in SEEDED_PLAYER_NAMES:
+            connection.execute(
+                text('INSERT INTO player_play_types ("PLAYER_NAME") VALUES (:name)'),
+                {"name": name},
+            )
+    return engine
+
+
+@pytest.fixture
+def empty_engine(tmp_path):
+    """Create a temporary SQLite database with no tables at all."""
+    from sqlalchemy import create_engine
+
+    return create_engine(f"sqlite:///{tmp_path / 'empty.db'}")

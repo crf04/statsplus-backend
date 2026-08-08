@@ -6,13 +6,31 @@ including creating, updating, and retrieving user information.
 """
 
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import get_session, User
 
 logger = logging.getLogger(__name__)
+
+
+def _days_since(timestamp: Optional[datetime]) -> int:
+    """Return whole days elapsed since a stored timestamp.
+
+    The user timestamps are declared ``DateTime(timezone=True)``, which Postgres
+    returns as timezone-aware while SQLite returns naive. Comparing the wrong
+    kind against "now" raises TypeError, so match the stored value.
+    """
+
+    if timestamp is None:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        now = now.replace(tzinfo=None)
+
+    return (now - timestamp).days
 
 class UserService:
     """
@@ -63,7 +81,7 @@ class UserService:
                     firebase_user_data.get('photo_url') or 
                     existing_user.photo_url
                 )
-                existing_user.last_login = datetime.utcnow()
+                existing_user.last_login = datetime.now(timezone.utc)
                 
                 session.commit()
                 logger.info(f"Updated user: {existing_user.email}")
@@ -141,7 +159,7 @@ class UserService:
         try:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             if user:
-                user.last_login = datetime.utcnow()
+                user.last_login = datetime.now(timezone.utc)
                 session.commit()
                 logger.debug(f"Updated last login for user: {user.email}")
                 return True
@@ -198,10 +216,10 @@ class UserService:
             return None
         
         # Calculate account age in days
-        account_age_days = (datetime.utcnow() - user.created_at).days if user.created_at else 0
-        
+        account_age_days = _days_since(user.created_at)
+
         # Calculate days since last login
-        days_since_login = (datetime.utcnow() - user.last_login).days if user.last_login else 0
+        days_since_login = _days_since(user.last_login)
         
         return {
             'account_age_days': account_age_days,
