@@ -11,11 +11,13 @@ else
 fi
 
 # Coverage floor. Raise this as tests are added; never lower it to make CI pass.
-COVERAGE_MIN=52
+# Branch coverage, so a half-exercised if/else does not read as covered.
+COVERAGE_MIN=55
 
 "$PYTHON_BIN" -m ruff check app tests scripts
 "$PYTHON_BIN" -m pytest \
     --cov=app \
+    --cov-branch \
     --cov-report=term-missing \
     --cov-fail-under="$COVERAGE_MIN"
 

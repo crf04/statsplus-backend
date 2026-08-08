@@ -14,6 +14,29 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# Columns discarded from a PlayerGameLogs response before it reaches callers.
+# Module level so the provider contract test can check them against the
+# schema nba_api declares, rather than discovering drift in production.
+GAME_LOG_DROP_COLUMNS = [
+    'SEASON_YEAR', 'PLAYER_ID', 'GP_RANK', 'W_RANK', 'L_RANK',
+    'W_PCT_RANK', 'MIN_RANK', 'FGM_RANK', 'FGA_RANK', 'FG_PCT_RANK',
+    'FG3M_RANK', 'FG3A_RANK', 'FG3_PCT_RANK', 'FTM_RANK', 'FTA_RANK',
+    'FT_PCT_RANK', 'OREB_RANK', 'DREB_RANK', 'REB_RANK', 'AST_RANK',
+    'TOV_RANK', 'STL_RANK', 'BLK_RANK', 'BLKA_RANK', 'PF_RANK',
+    'PFD_RANK', 'PTS_RANK', 'PLUS_MINUS_RANK', 'NBA_FANTASY_PTS_RANK',
+    'DD2_RANK', 'TD3_RANK', 'WNBA_FANTASY_PTS_RANK', 'AVAILABLE_FLAG',
+    'NICKNAME', 'TEAM_NAME', 'DD2', 'TD3', 'WNBA_FANTASY_PTS',
+    'BLKA', 'PFD'
+]
+
+# Columns read directly when deriving combined stats such as PRA and STKS.
+GAME_LOG_REQUIRED_COLUMNS = [
+    'PTS', 'REB', 'AST', 'STL', 'BLK', 'NBA_FANTASY_PTS', 'PLUS_MINUS',
+    'MIN', 'FGM', 'FG3M', 'FGA', 'FG3A', 'GAME_DATE', 'GAME_ID', 'TEAM_ID',
+    'TEAM_ABBREVIATION',
+]
+
+
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
     ALLOWED_TABLES = {
@@ -156,19 +179,10 @@ class GameService:
         # Run both NBA API calls concurrently
         gamelogs, next_game_df = await asyncio.gather(fetch_game_logs(), fetch_next_game())
         
-        # Clean up columns
-        drop_columns = [
-            'SEASON_YEAR', 'PLAYER_ID', 'GP_RANK', 'W_RANK', 'L_RANK', 
-            'W_PCT_RANK', 'MIN_RANK', 'FGM_RANK', 'FGA_RANK', 'FG_PCT_RANK',
-            'FG3M_RANK', 'FG3A_RANK', 'FG3_PCT_RANK', 'FTM_RANK', 'FTA_RANK',
-            'FT_PCT_RANK', 'OREB_RANK', 'DREB_RANK', 'REB_RANK', 'AST_RANK',
-            'TOV_RANK', 'STL_RANK', 'BLK_RANK', 'BLKA_RANK', 'PF_RANK',
-            'PFD_RANK', 'PTS_RANK', 'PLUS_MINUS_RANK', 'NBA_FANTASY_PTS_RANK',
-            'DD2_RANK', 'TD3_RANK', 'WNBA_FANTASY_PTS_RANK', 'AVAILABLE_FLAG',
-            'NICKNAME', 'TEAM_NAME', 'DD2', 'TD3', 'WNBA_FANTASY_PTS',
-            'BLKA', 'PFD'
-        ]
-        gamelogs = gamelogs.drop(drop_columns, axis=1)
+        # Clean up columns. errors='ignore' because these are all columns we do
+        # not want: if the provider stops returning one, that is not a reason to
+        # fail the request.
+        gamelogs = gamelogs.drop(GAME_LOG_DROP_COLUMNS, axis=1, errors='ignore')
         
         # Process next game data
         next_team = None
