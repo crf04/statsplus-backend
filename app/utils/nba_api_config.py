@@ -46,16 +46,22 @@ class RetryWithLogging(Retry):
         retries for the operation.  Query strings and exception text are
         never logged.
         """
+        # ``Retry.increment`` raises ``MaxRetryError`` when this call would
+        # exhaust the budget.  Count only the transitions that return a new
+        # retry state; counting before the superclass call records one retry
+        # too many for terminal failures (and records a retry when total=0).
+        next_retry = super().increment(
+            method, url, response, error, _pool, _stacktrace
+        )
         increment_retry_count()
-        if self.total is not None and self.total > 0:
-            if url is not None:
-                logger.warning(
-                    "NBA API retrying after status %s for %s",
-                    getattr(response, "status", "error"),
-                    _safe_url_path(url),
-                )
+        if url is not None:
+            logger.warning(
+                "NBA API retrying after status %s for %s",
+                getattr(response, "status", "error"),
+                _safe_url_path(url),
+            )
 
-        return super().increment(method, url, response, error, _pool, _stacktrace)
+        return next_retry
 
 def get_nba_api_session(settings: RuntimeSettings | None = None):
     """Create optimized HTTP session for NBA API calls with connection pooling and retries.
