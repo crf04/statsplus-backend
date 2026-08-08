@@ -310,18 +310,6 @@ self_filters[STAT]=min,max
 
 Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
 
-## Error Format
-
-Most route errors use:
-
-```json
-{
-  "error": "Detailed error message"
-}
-```
-
-Authentication errors include an `error` and `message` field.
-
 ## Development Notes
 
 - The app uses `DATABASE_URL` and defaults to `sqlite:///nba_play_types.db`.

@@ -10,6 +10,7 @@ details can be logged without being returned to a caller.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ClassVar, ParamSpec, TypeVar
@@ -22,6 +23,121 @@ logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_REDACTED_VALUE = "\x00redacted-value\x00"
+_REDACTED_PEM = "\x00redacted-pem\x00"
+
+
+_PEM_MATERIAL_RE = re.compile(
+    r"-----BEGIN [^-]+-----.*?-----END [^-]+-----",
+    re.IGNORECASE | re.DOTALL,
+)
+_DATABASE_URL_CREDENTIALS_RE = re.compile(
+    r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)"
+    r"(?P<username>[^/?#\s@]*):(?P<password>[^/?#\s@]+)(?P<delimiter>@)",
+    re.IGNORECASE,
+)
+_SENSITIVE_KEY_NAME_ALTERNATIVES = (
+    r"api[-_ ]*key|openai[-_ ]*key|access[-_ ]*token|refresh[-_ ]*token|"
+    r"id[-_ ]*token|auth[-_ ]*token|firebase[-_ ]*token|oauth[-_ ]*token|"
+    r"token|password|passwd|pwd|db[-_ ]*password|secret|private[-_ ]*key|"
+    r"service[-_ ]*account|credential(?:s)?|jwt"
+)
+_NON_AUTH_SENSITIVE_KEY_NAMES = rf"(?:{_SENSITIVE_KEY_NAME_ALTERNATIVES})"
+_SENSITIVE_KEY_NAMES = (
+    rf"(?:{_SENSITIVE_KEY_NAME_ALTERNATIVES}|authorization|"
+    r"proxy[-_ ]*authorization)"
+)
+_SENSITIVE_QUOTED_VALUE_RE = re.compile(
+    rf"(?P<prefix>(?<![A-Za-z0-9])['\"]?{_SENSITIVE_KEY_NAMES}"
+    r"['\"]?\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>(?!\x00redacted-pem\x00).*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_AUTHORIZATION_BEARER_VALUE_RE = re.compile(
+    r"(?P<prefix>(?<![A-Za-z0-9])['\"]?(?:authorization|"
+    r"proxy[-_ ]*authorization)['\"]?\s*[:=]\s*)"
+    r"(?:(?P<scheme>Bearer|Basic|Token)\s+)?"
+    r"(?P<value>[^\s,'\";}\]\)]+)",
+    re.IGNORECASE,
+)
+_SENSITIVE_UNQUOTED_VALUE_RE = re.compile(
+    rf"(?P<prefix>(?<![A-Za-z0-9])['\"]?{_NON_AUTH_SENSITIVE_KEY_NAMES}"
+    r"['\"]?\s*[:=]\s*)"
+    r"(?P<value>[^\s,'\";{}\]\)]+)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_diagnostic_detail(detail: Any) -> str | None:
+    """Redact credentials and key material before writing diagnostic detail."""
+
+    if detail is None:
+        return None
+
+    sanitized = str(detail)
+    sanitized = _PEM_MATERIAL_RE.sub(_REDACTED_PEM, sanitized)
+    sanitized = _DATABASE_URL_CREDENTIALS_RE.sub(
+        lambda match: (
+            f"{match.group('scheme')}{match.group('username')}:{_REDACTED_VALUE}"
+            f"{match.group('delimiter')}"
+        ),
+        sanitized,
+    )
+    sanitized = _SENSITIVE_QUOTED_VALUE_RE.sub(
+        lambda match: f"{match.group('prefix')}{_REDACTED_VALUE}",
+        sanitized,
+    )
+    sanitized = _AUTHORIZATION_BEARER_VALUE_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}"
+            f"{match.group('scheme') + ' ' if match.group('scheme') else ''}"
+            f"{_REDACTED_VALUE}"
+        ),
+        sanitized,
+    )
+    sanitized = _SENSITIVE_UNQUOTED_VALUE_RE.sub(
+        lambda match: f"{match.group('prefix')}{_REDACTED_VALUE}",
+        sanitized,
+    )
+    return sanitized.replace(_REDACTED_VALUE, "[REDACTED]").replace(
+        _REDACTED_PEM,
+        "[REDACTED PEM]",
+    )
+
+
+def _log_application_error(
+    error: AppError,
+    *,
+    http_status: int | None = None,
+) -> None:
+    """Emit one sanitized diagnostic event for an application error."""
+
+    detail = _sanitize_diagnostic_detail(error.detail)
+    if http_status is not None:
+        if detail:
+            logger.error(
+                "HTTP error status=%s code=%s detail=%s",
+                http_status,
+                error.code,
+                detail,
+            )
+        else:
+            logger.error(
+                "HTTP error status=%s code=%s",
+                http_status,
+                error.code,
+            )
+        return
+
+    if detail:
+        logger.error(
+            "Application error code=%s detail=%s",
+            error.code,
+            detail,
+        )
+    else:
+        logger.error("Application error code=%s", error.code)
 
 
 class AppError(Exception):
@@ -135,7 +251,6 @@ def route_error_boundary(
             except AppError:
                 raise
             except Exception as error:
-                logger.exception("Route operation failed: %s", safe_message)
                 raise error_type(safe_message, detail=error) from error
 
         return wrapped
@@ -154,14 +269,7 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(AppError)
     def handle_app_error(error: AppError):  # type: ignore[no-untyped-def]
-        if error.detail:
-            logger.error(
-                "Application error code=%s detail=%s",
-                error.code,
-                error.detail,
-            )
-        else:
-            logger.error("Application error code=%s", error.code)
+        _log_application_error(error)
 
         return _error_response(error.code, error.public_message, error.status_code)
 
@@ -180,12 +288,7 @@ def register_error_handlers(app: Flask) -> None:
         else:
             app_error = AppError(detail=error.description)
 
-        logger.error(
-            "HTTP error status=%s code=%s detail=%s",
-            error.code,
-            app_error.code,
-            app_error.detail,
-        )
+        _log_application_error(app_error, http_status=error.code)
         return _error_response(
             app_error.code,
             app_error.public_message,
@@ -199,10 +302,5 @@ def register_error_handlers(app: Flask) -> None:
         if isinstance(error, HTTPException):
             return handle_http_error(error)
 
-        logger.exception("Unhandled application exception: %s", error)
         app_error = AppError(detail=error)
-        return _error_response(
-            app_error.code,
-            app_error.public_message,
-            app_error.status_code,
-        )
+        return handle_app_error(app_error)

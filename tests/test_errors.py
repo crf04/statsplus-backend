@@ -53,7 +53,21 @@ def error_app() -> Flask:
 
     @app.get("/unexpected")
     def unexpected() -> None:
-        raise RuntimeError("unexpected provider response: secret-provider-detail")
+        raise RuntimeError(
+            "unexpected provider response: token=token-secret api_key=api-secret"
+        )
+
+    @app.get("/wrapped-unexpected")
+    @route_error_boundary("The wrapped operation failed.")
+    def wrapped_unexpected() -> None:
+        raise RuntimeError(
+            "provider request failed: "
+            "DATABASE_URL=postgresql://db-user:db-password@example.invalid/stats "
+            "token=token-secret api_key=api-secret password=password-secret "
+            "private_key=private-key-secret Authorization: Bearer bearer-secret "
+            "-----BEGIN PRIVATE KEY-----\nprivate-key-material\n"
+            "-----END PRIVATE KEY-----"
+        )
 
     return app
 
@@ -103,7 +117,7 @@ def test_public_error_categories_have_stable_responses(
     assert response.get_json() == {"error": {"code": code, "message": message}}
 
 
-def test_internal_exception_details_are_logged_but_not_exposed(
+def test_internal_exception_details_are_sanitized_and_logged_once(
     error_app: Flask, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.ERROR)
@@ -117,7 +131,45 @@ def test_internal_exception_details_are_logged_but_not_exposed(
             "message": "An unexpected server error occurred.",
         }
     }
-    assert "secret-provider-detail" in caplog.text
+    assert "unexpected provider response" in caplog.text
+    assert "token-secret" not in caplog.text
+    assert "api-secret" not in caplog.text
+    assert len([record for record in caplog.records if record.name == "app.errors"]) == 1
+
+
+def test_sensitive_diagnostic_details_are_redacted_without_losing_context(
+    error_app: Flask, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR)
+
+    response = error_app.test_client().get("/wrapped-unexpected")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": {
+            "code": "operation_failed",
+            "message": "The wrapped operation failed.",
+        }
+    }
+    assert "provider request failed" in caplog.text
+    for secret in (
+        "db-password",
+        "token-secret",
+        "api-secret",
+        "password-secret",
+        "private-key-secret",
+        "bearer-secret",
+        "private-key-material",
+    ):
+        assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+    assert "[REDACTED PEM]" in caplog.text
+    assert len([record for record in caplog.records if record.name == "app.errors"]) == 1
+    assert not any(
+        record.exc_info
+        for record in caplog.records
+        if record.name == "app.errors"
+    )
 
 
 def test_app_error_defaults_to_safe_public_message() -> None:
@@ -140,7 +192,7 @@ def test_route_error_boundary_preserves_expected_application_errors() -> None:
     assert raised.value is expected
 
 
-def test_route_error_boundary_translates_unexpected_errors(caplog) -> None:
+def test_route_error_boundary_translates_unexpected_errors_without_logging(caplog) -> None:
     @route_error_boundary("The operation failed.")
     def handler() -> None:
         raise RuntimeError("private provider detail")
@@ -150,7 +202,7 @@ def test_route_error_boundary_translates_unexpected_errors(caplog) -> None:
 
     assert raised.value.public_message == "The operation failed."
     assert raised.value.detail == "private provider detail"
-    assert "private provider detail" in caplog.text
+    assert not caplog.records
 
 
 def test_game_logs_invalid_input_uses_central_handler(client) -> None:
