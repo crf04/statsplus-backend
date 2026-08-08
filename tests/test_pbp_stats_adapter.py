@@ -93,6 +93,17 @@ def test_fetch_totals_opponent_uses_opponent_operation():
     assert event["operation"] == "get_totals_opponent"
 
 
+def test_fetch_totals_rejects_unsupported_data_type():
+    from app.errors import InvalidInputError
+
+    fake_session = requests.Session()
+
+    with pytest.raises(InvalidInputError):
+        _adapter(fake_session).fetch_totals_frame("everything")
+
+    assert telemetry.get_recorded_provider_events() == []
+
+
 def test_timeout_is_recorded_and_raised(monkeypatch):
     def timeout(*a, **k):
         raise requests.exceptions.ReadTimeout("pbp timed out")

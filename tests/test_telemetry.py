@@ -188,6 +188,28 @@ def test_provider_events_never_write_secret_text(caplog):
     assert "raw body" not in log_text
 
 
+def test_cache_hit_ignores_retries_accrued_by_an_earlier_call():
+    telemetry.clear_recorded_provider_events()
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        with telemetry.provider_call(
+            telemetry.PROVIDER_PBP_STATS, "timed_out_before_hit"
+        ):
+            telemetry.increment_retry_count()
+            telemetry.increment_retry_count()
+            raise requests.exceptions.ReadTimeout("nope")
+
+    telemetry.record_cached_provider_event(
+        telemetry.PROVIDER_NBA_STATS, "player_game_logs"
+    )
+
+    events = telemetry.get_recorded_provider_events()
+    hit_event = [e for e in events if e["outcome"] == telemetry.OUTCOME_SUCCESS][-1]
+    assert hit_event["provider"] == telemetry.PROVIDER_NBA_STATS
+    assert hit_event["cache_status"] == telemetry.CACHE_HIT
+    assert hit_event["retry_count"] == 0
+
+
 @pytest.fixture
 def error_app() -> Flask:
     app = Flask(__name__)

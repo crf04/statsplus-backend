@@ -142,6 +142,12 @@ provider times out, game-log requests return `503 Service Unavailable` instead
 of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
 
+`NBA_STATS_MAX_CONCURRENCY` bounds in-flight NBA Stats provider calls per
+worker process: each Gunicorn worker builds its own bounded adapter, so the
+maximum calls the whole application can issue at once is workers ×
+`NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers, so up to 4 × the
+bound). This is a per-process bound, not a cluster-global lock.
+
 Application failures use a documented structured JSON error response with
 stable category codes, including `invalid_input`, `resource_not_found`,
 `provider_unavailable`, `authentication_required`, `invalid_token`, and
@@ -224,7 +230,12 @@ Refresh endpoints schedule durable jobs: they return `202 Accepted` with a
 `job_id`, and the refresh runs afterward; poll
 `GET /api/data/jobs/<job_id>` (admin-only) for status. They call external
 NBA/PBP APIs and may replace local tables. The bundled database is enough for
-exploring read-only routes.
+exploring read-only routes. Jobs are stored in the application database and
+claimed with expiring leases by the app-scoped dispatcher, so queued work and
+work abandoned by a crashed process can be recovered after restart. Operation
+names and request IDs are persisted; executable handlers are registered at app
+startup. `progress` moves through fetch/transform/publish phases and remains
+safe to retry after a failed attempt.
 
 See [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) for endpoint details and [docs/NLP_SYSTEM.md](docs/NLP_SYSTEM.md) for the natural-language pipeline.
 

@@ -135,3 +135,68 @@ def test_adapter_propagates_provider_timeout(monkeypatch):
 
     with pytest.raises(requests.exceptions.ReadTimeout):
         adapter.fetch_player_game_logs("123", "2024-25")
+
+
+class _SimpleNamespace:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _StatusResponse:
+    """Fake endpoint that exposes ``nba_response.status_code`` only."""
+
+    def __init__(self, status_code):
+        self.nba_response = _SimpleNamespace(status_code=status_code)
+
+    def get_data_frames(self):
+        if self.nba_response.status_code >= 400:
+            raise AssertionError("run_endpoint must raise before parsing")
+        return [pd.DataFrame({"GAME_ID": ["1"], "PTS": [1]})]
+
+
+def test_adapter_records_upstream_status_on_provider_event(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    def fake_endpoint(**kwargs):
+        return _StatusResponse(200)
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: fake_endpoint(**kwargs),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs("123", "2024-25")
+    events = telemetry.get_recorded_provider_events()
+    assert events
+    assert events[-1]["operation"] == "player_game_logs"
+    assert events[-1]["status_code"] == 200
+    assert events[-1]["outcome"] == telemetry.OUTCOME_SUCCESS
+
+
+def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
+    import requests
+
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    def error_endpoint(**kwargs):
+        return _StatusResponse(503)
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: error_endpoint(**kwargs),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    with pytest.raises(requests.exceptions.HTTPError):
+        adapter.fetch_player_game_logs("123", "2024-25")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[-1]["status_code"] == 503
+    assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR

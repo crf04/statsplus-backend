@@ -62,6 +62,28 @@ def test_game_log_query_rejects_malformed_filters(kwargs):
         GameLogQuery(season_filter="2024-25", **dict(kwargs))
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"teams_against": ["NOT_A_FILTER"]},
+        {"self_filters": {"YOLO": "1,10"}},
+        {"self_filters": {"MIN": "5,10"}},
+    ],
+)
+def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
+    from app.models.catalogs import (
+        SUPPORTED_SELF_FILTER_STATS,
+        SUPPORTED_TEAM_FILTERS,
+    )
+
+    with pytest.raises(Exception):
+        GameLogQuery(season_filter="2024-25", **dict(kwargs))
+
+    assert "OPP_PTS" in SUPPORTED_TEAM_FILTERS
+    assert "PTS" in SUPPORTED_SELF_FILTER_STATS
+    assert "MIN" not in SUPPORTED_SELF_FILTER_STATS
+
+
 # ------------------------------------------------------------- response model
 
 
@@ -181,6 +203,28 @@ def test_service_returns_empty_arrays_when_no_games_match(
     assert len(result["season_averages"]) == 1
 
 
+def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+
+    def empty_filter_teams(team_filter, rank, date_filter=None):
+        return []
+
+    monkeypatch.setattr(service, "filter_teams", empty_filter_teams)
+
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=["OPP_PTS"],
+        rank_filter=[1],
+    )
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert result["game_logs"] == []
+    assert result["averages"] == []
+
+
 def test_service_surfaces_provider_timeout(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
@@ -214,6 +258,36 @@ def test_filter_pipeline_applies_location_and_self_filters(
 
     assert len(filtered) == 1
     assert filtered.iloc[0]["MATCHUP"] == "BOS @ MIA"
+
+
+def test_apply_filters_with_no_opponent_query_keeps_all_games(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    frame = _game_logs_frame()
+
+    filtered = service.apply_filters(
+        frame,
+        GameLogQuery(season_filter="2024-25", minutes_filter="0,48"),
+        teams_against=None,
+    )
+
+    assert len(filtered) == len(frame)
+
+
+def test_apply_filters_with_empty_resolved_opponent_set_matches_zero_games(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    frame = _game_logs_frame()
+
+    filtered = service.apply_filters(
+        frame,
+        GameLogQuery(season_filter="2024-25", minutes_filter="0,48"),
+        teams_against=set(),
+    )
+
+    assert filtered.empty
 
 
 # --------------------------------------------------------- route-level contract

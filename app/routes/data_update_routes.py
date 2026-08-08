@@ -4,7 +4,10 @@ from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
 from ..services.data_service import DataService
-from ..services.job_service import DataRefreshJobService
+from ..services.job_service import (
+    DataRefreshJobService,
+    build_default_refresh_handlers,
+)
 from ..utils.auth import require_admin
 from ..utils.telemetry import snapshot_metrics, snapshot_recent_events
 from ._service_proxy import CurrentAppService
@@ -18,11 +21,15 @@ def _build_data_service(engine, settings):
 
 
 def _build_job_service(engine, settings):
-    return DataRefreshJobService(engine)
+    return DataRefreshJobService(
+        engine,
+        settings=settings,
+        handlers=build_default_refresh_handlers(engine, settings),
+    )
 
 
 data_service = CurrentAppService("data", _build_data_service)
-data_jobs_service = CurrentAppService("data_jobs", _build_job_service)
+data_jobs_service = CurrentAppService("data_refresh_jobs", _build_job_service)
 
 
 @data_bp.route('/update_database', methods=['POST'])

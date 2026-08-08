@@ -89,6 +89,31 @@ def _initialize_dependencies(app: Flask) -> None:
         except Exception as error:
             logger.warning("Firebase Admin initialization skipped: %s", error)
 
+    # Construct one app-scoped queue coordinator with the complete registered
+    # operation set.  The route proxies use this same extension, while the
+    # defensive guard keeps read-only/demo and explicitly schema-less test apps
+    # bootable.
+    if not app.config.get("SKIP_TABLE_CREATE", False):
+        try:
+            from app.services.job_service import (
+                DataRefreshJobService,
+                build_default_refresh_handlers,
+            )
+            from app.utils.db import get_engine, is_demo_database_url
+
+            settings = app.extensions["runtime_settings"]
+            if not is_demo_database_url(settings.database.url):
+                engine = get_engine(settings)
+                app.extensions.setdefault("request_services", {})[
+                    "data_refresh_jobs"
+                ] = DataRefreshJobService(
+                    engine,
+                    settings=settings,
+                    handlers=build_default_refresh_handlers(engine, settings),
+                )
+        except Exception as error:
+            logger.warning("Data refresh queue initialization skipped: %s", error)
+
 
 def _register_blueprints(app: Flask) -> None:
     """Register the public API blueprints in one place."""

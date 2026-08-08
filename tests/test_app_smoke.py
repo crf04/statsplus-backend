@@ -25,6 +25,39 @@ def test_database_healthcheck(client):
     assert response.get_json()["status"] == "ok"
 
 
+def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
+    client, monkeypatch
+):
+    from app.routes import health_routes
+    from app.utils import telemetry
+
+    class FailingResponse:
+        status_code = 503
+
+        def raise_for_status(self):
+            raise requests.exceptions.HTTPError("503 Service Unavailable")
+
+    class FailingSession:
+        def get(self, *args, **kwargs):
+            return FailingResponse()
+
+    monkeypatch.setattr(
+        health_routes, "get_shared_nba_session", lambda settings: FailingSession()
+    )
+    telemetry.clear_recorded_provider_events()
+
+    response = client.get("/api/health/nba-api")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+    events = telemetry.get_recorded_provider_events()
+    assert events
+    assert events[-1]["operation"] == "health_probe"
+    assert events[-1]["status_code"] == 503
+    assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+
+
 def test_players_endpoint_smoke(client):
     response = client.get("/api/players")
 

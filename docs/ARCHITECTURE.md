@@ -118,8 +118,16 @@ Every mutating refresh is recorded in the application-owned
 `DataRefreshJobService` writes queued/running/succeeded/failed transitions and
 a sanitized `failure_summary` (exception/provider text is never stored), and
 its partial unique index enforces at most one queued or running job per
-operation. The service takes an injectable executor and clock; tests use a
-`SynchronousExecutor` so job completion is deterministic.
+operation. Migration 003 adds the request ID plus an owner, expiry, heartbeat,
+and attempt count. A process claims queued or expired rows with a conditional
+SQL update, renews its lease while the registered handler runs, and clears the
+lease on completion/failure. The app factory creates one coordinator per app
+with the closed registry for `update_database`, both PBP refreshes,
+`fetch_players_with_teams`, and `fetch_players`; operation names, not callbacks,
+are persisted. A bounded dispatcher wakes immediately after enqueue and polls
+for restart recovery. The service takes an injectable executor and clock;
+tests use a `SynchronousExecutor` and `dispatch_once()` so job completion is
+deterministic.
 
 The `DataService` refresh callables first collect every provider frame in
 memory (failures stop the job before any write), then hand the whole related
@@ -164,6 +172,12 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   provider calls go through `NBAStatsAdapter`, which applies a
   `threading.BoundedSemaphore` sized by `NBA_STATS_MAX_CONCURRENCY` (default
   10) and shares the provider timeout from `NBA_STATS_TIMEOUT_SECONDS`.
+- The `NBA_STATS_MAX_CONCURRENCY` bound is per worker **process**, not global:
+  each worker builds its own adapter instance, so worst-case provider
+  concurrency is `workers × NBA_STATS_MAX_CONCURRENCY` (4 × 10 = 40 with the
+  Procfile defaults). A true cross-process bound would need shared locking
+  (e.g. Redis) and is intentionally out of scope; operators scale the bound and
+  worker count together.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
 - The bundled provider-generated tables are validated as a public fixture; they
   are not application migration targets.

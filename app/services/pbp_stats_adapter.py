@@ -17,6 +17,8 @@ from typing import Any
 import pandas as pd
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.errors import InvalidInputError
+from app.models.catalogs import PBPDataKind, PBP_DATA_KINDS
 from app.utils.nba_api_config import get_shared_nba_session
 from app.utils.telemetry import (
     CACHE_DISABLED,
@@ -49,7 +51,7 @@ class PBPTotalsAdapter:
     def read_timeout(self) -> float:
         return self.settings.providers.pbp_read_timeout_seconds
 
-    def fetch_totals_frame(self, data_type: str = "player") -> pd.DataFrame:
+    def fetch_totals_frame(self, data_type: PBPDataKind = "player") -> pd.DataFrame:
         """Fetch one PBP totals frame (``player`` or ``opponent``).
 
         Retries happen inside the shared session's urllib3 adapter; each
@@ -57,6 +59,11 @@ class PBPTotalsAdapter:
         Timeouts, HTTP errors, invalid JSON, and malformed shapes are each
         recorded as the relevant provider outcome.
         """
+        if data_type not in PBP_DATA_KINDS:
+            raise InvalidInputError(
+                f"Unsupported PBP data type {data_type!r}. "
+                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+            )
         params = {
             "Season": self.settings.nba.current_season,
             "SeasonType": "Regular+Season",

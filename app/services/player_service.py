@@ -1,6 +1,7 @@
 import pandas as pd
 import logging
 import requests
+from collections.abc import Callable
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
 from rapidfuzz import process, fuzz
@@ -11,8 +12,8 @@ from ..errors import (
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..utils.nba_api_config import get_nba_stats_timeout
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.services.nba_stats_adapter import NBAStatsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class PlayerService:
     def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
+        self.nba_stats = NBAStatsAdapter(settings=self.settings)
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -131,7 +133,16 @@ class PlayerService:
         """Get player shooting type data"""
         player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame', timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[1]
+        df = self.nba_stats.run_endpoint(
+            'player_shot_chart',
+            lambda timeout: PlayerDashPtShots(
+                player_id=self.get_player_id(player_name),
+                team_id=int(team_id),
+                per_mode_simple='PerGame',
+                timeout=timeout,
+            ),
+            frame_index=1,
+        )
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
@@ -150,11 +161,14 @@ class PlayerService:
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
             
             # Get game logs
-            gl = playergamelogs.PlayerGameLogs(
-                season_nullable=self.settings.nba.current_season,
-                opp_team_id_nullable=team_id,
-                timeout=get_nba_stats_timeout(self.settings),
-            ).get_data_frames()[0]
+            gl = self.nba_stats.run_endpoint(
+                "player_gamelogs_against",
+                lambda timeout: playergamelogs.PlayerGameLogs(
+                    season_nullable=self.settings.nba.current_season,
+                    opp_team_id_nullable=team_id,
+                    timeout=timeout,
+                ),
+            )
             
             # Filter and process game logs
             gl = gl[gl["PLAYER_ID"].isin(player_ids)]
@@ -195,17 +209,25 @@ class PlayerService:
             logger.error("Error getting archetype players: %s", e)
             return []
 
-    def store_player_information(self):
+    def store_player_information(self, progress_callback: Callable | None = None):
         """Store basic player information in database.
 
         Fetching completes before the table is replaced, so a provider failure
         leaves the existing player list untouched.
         """
+        if progress_callback is not None:
+            progress_callback(0.1, "Fetching player information")
         player_dict = players.get_players()
         player_df = pd.DataFrame.from_dict(player_dict)
+        if progress_callback is not None:
+            progress_callback(0.75, "Transforming player information")
         from app.services.table_publisher import AtomicTablePublisher
 
+        if progress_callback is not None:
+            progress_callback(0.9, "Publishing player information")
         AtomicTablePublisher(self.engine).publish({"player_information": player_df})
+        if progress_callback is not None:
+            progress_callback(1.0, "Completed")
         return True
 
     def get_player_id(self, player_name):

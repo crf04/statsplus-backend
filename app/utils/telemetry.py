@@ -127,6 +127,11 @@ def set_request_id(request_id: str) -> None:
     _request_id_local.request_id = request_id
 
 
+def clear_request_id() -> None:
+    """Clear a worker correlation ID so a thread cannot leak it to later work."""
+    _request_id_local.__dict__.pop("request_id", None)
+
+
 def reset_retry_count() -> None:
     _retry_local.count = 0
 
@@ -187,8 +192,11 @@ def record_cached_provider_event(
 
     Cache hits never reach an upstream provider, so no patience context
     manager is involved;  a zero-duration event keeps cache behaviour
-    observable on the same shape as every other provider event.
+    observable on the same shape as every other provider event.  Any retries
+    accrued by an earlier call on this thread must not leak into the cache-hit
+    event, so the counter is reset and the event reports ``retry_count=0``.
     """
+    reset_retry_count()
     record_provider_event(
         ProviderEvent(
             provider=provider,
@@ -361,6 +369,7 @@ __all__ = [
     "reset_retry_count",
     "set_clock",
     "set_request_id",
+    "clear_request_id",
     "snapshot_metrics",
     "snapshot_recent_events",
 ]

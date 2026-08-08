@@ -287,7 +287,9 @@ second request for an already active operation (queued or running) returns
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
 `progress`, timestamps, and a sanitized `failure_summary` (provider or
-exception text is never written there).
+exception text is never written there). It also includes the captured
+`request_id`, `attempt_count`, and latest `heartbeat_at`; lease owner and
+expiry remain internal queue metadata.
 
 ```http
 POST /api/data/update_database
@@ -341,7 +343,10 @@ Example start response (`202 Accepted`):
   "created_at": "2025-01-15T12:00:00+00:00",
   "started_at": null,
   "finished_at": null,
-  "failure_summary": null
+  "failure_summary": null,
+  "request_id": "a1b2…",
+  "attempt_count": 0,
+  "heartbeat_at": null
 }
 ```
 

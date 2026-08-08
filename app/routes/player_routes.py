@@ -7,7 +7,10 @@ from ..errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..services.job_service import DataRefreshJobService
+from ..services.job_service import (
+    DataRefreshJobService,
+    build_default_refresh_handlers,
+)
 from ..services.player_service import PlayerService
 from ..utils.auth import require_admin, require_auth_optional
 from ._service_proxy import CurrentAppService
@@ -21,11 +24,15 @@ def _build_player_service(engine, settings):
 
 
 def _build_job_service(engine, settings):
-    return DataRefreshJobService(engine)
+    return DataRefreshJobService(
+        engine,
+        settings=settings,
+        handlers=build_default_refresh_handlers(engine, settings),
+    )
 
 
 player_service = CurrentAppService("player", _build_player_service)
-player_jobs_service = CurrentAppService("player_jobs", _build_job_service)
+player_jobs_service = CurrentAppService("data_refresh_jobs", _build_job_service)
 
 @player_bp.route('', methods=['GET'])
 @require_auth_optional

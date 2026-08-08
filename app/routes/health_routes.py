@@ -180,9 +180,10 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
                 )
             )
             tracker.status_code = response.status_code
-        
+            response.raise_for_status()
+
         duration = time.time() - start_time
-        
+
         return {
             'status': 'healthy' if response.status_code == 200 else 'unhealthy',
             'response_time_ms': round(duration * 1000, 2),

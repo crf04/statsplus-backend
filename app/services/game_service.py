@@ -273,8 +273,10 @@ class GameService:
             else:
                 df = df[matchup.str.contains('@')]
 
-        # Apply teams-against filter (resolved opponent set from the query)
-        if teams_against:
+        # Apply teams-against filter (resolved opponent set from the query).
+        # None means the query had no opponent filter; an empty set is a
+        # resolved-but-emptied filter and must match zero games, not all games.
+        if teams_against is not None:
             # Extract opponent team ("LAL@ HOU" -> "HOU"), then keep matches
             opponents = df['MATCHUP'].astype(str).str.extract(r'(?:vs\.|@)\s*([A-Z]{2,3})')[0]
             df = df[opponents.isin(teams_against)]

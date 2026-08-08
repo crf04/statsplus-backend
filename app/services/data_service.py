@@ -9,6 +9,7 @@ transaction and preserves the previous tables if anything fails.
 """
 
 import logging
+from collections.abc import Callable
 
 import pandas as pd
 from nba_api.stats.endpoints import (
@@ -22,9 +23,16 @@ from nba_api.stats.endpoints import (
 from nba_api.stats.static import players, teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.errors import InvalidInputError
+from app.models.catalogs import (
+    PBPDataKind,
+    PBP_DATA_KINDS,
+    PLAY_TYPES,
+    SHOOTING_TYPES,
+)
+from app.services.nba_stats_adapter import NBAStatsAdapter
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 from app.services.table_publisher import AtomicTablePublisher
-from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.performance_monitor import monitor_nba_api_calls
 
 logger = logging.getLogger(__name__)
@@ -36,57 +44,73 @@ class DataService:
         self.settings = settings or get_runtime_settings()
         self.publisher = AtomicTablePublisher(db_engine)
         self.pbp = PBPTotalsAdapter(settings=self.settings)
+        self.nba_stats = NBAStatsAdapter(settings=self.settings)
 
-    def update_all_data(self):
+    def update_all_data(self, progress_callback: Callable | None = None):
         """Fetch every provider frame, then publish the full set atomically.
 
         Provider and transformation failures happen before any table is
         touched, so an interrupted refresh leaves the previous tables intact.
         """
+        self._report_progress(progress_callback, 0.05, "Fetching provider data")
         frames = self._collect_all_frames()
+        self._report_progress(progress_callback, 0.75, "Transforming provider data")
+        self._report_progress(progress_callback, 0.9, "Publishing refreshed tables")
         self.publisher.publish(frames)
+        self._report_progress(progress_callback, 1.0, "Completed")
         return True
 
     @monitor_nba_api_calls
-    def fetch_PBP_data(self, data_type="player"):
+    def fetch_PBP_data(
+        self,
+        data_type: PBPDataKind = "player",
+        progress_callback: Callable | None = None,
+    ):
         """Fetch one PBP totals set and publish it under its live table name."""
+        self._validate_pbp_data_type(data_type)
         table_name = f"pbp_{data_type}_stats"
+        self._report_progress(progress_callback, 0.1, "Fetching PBP totals")
         frame = self._collect_pbp_frame(data_type)
+        self._report_progress(progress_callback, 0.75, "Transforming PBP totals")
+        self._report_progress(progress_callback, 0.9, "Publishing PBP totals")
         self.publisher.publish({table_name: frame})
+        self._report_progress(progress_callback, 1.0, "Completed")
         return True
 
-    def fetch_players_with_teams(self):
+    def fetch_players_with_teams(self, progress_callback: Callable | None = None):
         """Fetch teams, map players to them, and publish both tables at once."""
+        self._report_progress(progress_callback, 0.1, "Fetching players and teams")
         frames = self._collect_players_with_teams()
+        self._report_progress(progress_callback, 0.75, "Transforming player-team mapping")
         records = frames["player_team_table"].to_dict(orient="records")
+        self._report_progress(progress_callback, 0.9, "Publishing player-team mapping")
         self.publisher.publish(frames)
+        self._report_progress(progress_callback, 1.0, "Completed")
         return records
 
-    def get_playtypes(self):
-        play_types = [
-            "Transition",
-            "Isolation",
-            "PRBallHandler",
-            "PRRollMan",
-            "OffRebound",
-            "Spotup",
-            "Cut",
-            "Handoff",
-            "OffScreen",
-            "Misc",
-            "Postup",
-        ]
+    @staticmethod
+    def _report_progress(
+        progress_callback: Callable | None,
+        progress: float,
+        note: str,
+    ) -> None:
+        if progress_callback is not None:
+            progress_callback(progress, note)
 
+    def get_playtypes(self):
         combined_df = pd.DataFrame()
 
-        for play_type in play_types:
-            df = SynergyPlayTypes(
-                play_type_nullable=play_type,
-                player_or_team_abbreviation="T",
-                type_grouping_nullable="Defensive",
-                league_id_nullable="00",
-                timeout=get_nba_stats_timeout(self.settings),
-            ).get_data_frames()[0]
+        for play_type in PLAY_TYPES:
+            df = self.nba_stats.run_endpoint(
+                "synergy_team_play_types",
+                lambda timeout, play_type=play_type: SynergyPlayTypes(
+                    play_type_nullable=play_type,
+                    player_or_team_abbreviation="T",
+                    type_grouping_nullable="Defensive",
+                    league_id_nullable="00",
+                    timeout=timeout,
+                ),
+            )
             df["PLAY_TYPE"] = play_type
             df["PTS/G"] = df["PTS"] / df["GP"]
             combined_df = pd.concat([combined_df, df], ignore_index=True)
@@ -131,9 +155,8 @@ class DataService:
     def _collect_opp_shooting(self):
         """Build the three opponent shooting-type frames."""
         types_table_names = [
-            ("Catch and Shoot", "catch_and_shoot"),
-            ("Pullups", "pullups"),
-            ("Less Than 10 ft", "less_than_10_ft"),
+            (shooting_type, shooting_type.replace(" ", "_").lower())
+            for shooting_type in SHOOTING_TYPES
         ]
         frames = {}
         for play_type, table_name in types_table_names:
@@ -165,19 +188,7 @@ class DataService:
 
     def _collect_team_play_types(self):
         """Build the team play-type frame."""
-        playtypes = [
-            "Transition",
-            "Isolation",
-            "PRBallHandler",
-            "PRRollMan",
-            "OffRebound",
-            "Spotup",
-            "Cut",
-            "Handoff",
-            "OffScreen",
-            "Misc",
-            "Postup",
-        ]
+        playtypes = PLAY_TYPES
         team_dfs = []
 
         for play_type in playtypes:
@@ -235,19 +246,7 @@ class DataService:
 
     def _collect_playtypes_frame(self):
         """Build the player play-type frame."""
-        playtypes = [
-            "Transition",
-            "Isolation",
-            "PRBallHandler",
-            "PRRollMan",
-            "OffRebound",
-            "Spotup",
-            "Cut",
-            "Handoff",
-            "OffScreen",
-            "Misc",
-            "Postup",
-        ]
+        playtypes = PLAY_TYPES
         dfs = []
 
         for play_type in playtypes:
@@ -428,8 +427,9 @@ class DataService:
             "processed_player_assists": players_df,
         }
 
-    def _collect_pbp_frame(self, data_type="player"):
+    def _collect_pbp_frame(self, data_type: PBPDataKind = "player"):
         """Fetch one PBP frame without writing anything yet."""
+        self._validate_pbp_data_type(data_type)
         return self.pbp.fetch_totals_frame(data_type)
 
     def _collect_players_with_teams(self):
@@ -448,64 +448,92 @@ class DataService:
         return {"team_info": raw_teams, "player_team_table": df}
 
     # Helper methods
+    def _validate_pbp_data_type(self, data_type):
+        if data_type not in PBP_DATA_KINDS:
+            raise InvalidInputError(
+                f"Unsupported PBP data type {data_type!r}. "
+                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+            )
+
     def _fetch_opponent_data(self, date_filter=None):
-        return LeagueDashTeamStats(
-            measure_type_detailed_defense="Opponent",
-            per_mode_detailed="Per48",
-            date_from_nullable=date_filter,
-            league_id_nullable="00",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "opponent_team_stats",
+            lambda timeout: LeagueDashTeamStats(
+                measure_type_detailed_defense="Opponent",
+                per_mode_detailed="Per48",
+                date_from_nullable=date_filter,
+                league_id_nullable="00",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_opp_shooting_data(self, play_type, date_filter=None):
-        return LeagueDashOppPtShot(
-            general_range_nullable=play_type,
-            date_from_nullable=date_filter,
-            per_mode_simple="PerGame",
-            league_id_nullable="00",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "opp_shooting",
+            lambda timeout: LeagueDashOppPtShot(
+                general_range_nullable=play_type,
+                date_from_nullable=date_filter,
+                per_mode_simple="PerGame",
+                league_id_nullable="00",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
-        return LeagueDashTeamShotLocations(
-            distance_range="By Zone",
-            measure_type_simple="Opponent",
-            per_mode_detailed="PerGame",
-            date_from_nullable=date_filter,
-            league_id_nullable="00",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "opp_shooting_zone",
+            lambda timeout: LeagueDashTeamShotLocations(
+                distance_range="By Zone",
+                measure_type_simple="Opponent",
+                per_mode_detailed="PerGame",
+                date_from_nullable=date_filter,
+                league_id_nullable="00",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_player_zone_data(self, date_filter=None):
-        return LeagueDashPlayerShotLocations(
-            distance_range="By Zone",
-            per_mode_detailed="PerGame",
-            date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "player_shooting_zone",
+            lambda timeout: LeagueDashPlayerShotLocations(
+                distance_range="By Zone",
+                per_mode_detailed="PerGame",
+                date_from_nullable=date_filter,
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_team_play_type_data(self, play_type):
-        return SynergyPlayTypes(
-            play_type_nullable=play_type,
-            player_or_team_abbreviation="T",
-            type_grouping_nullable="Defensive",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "team_play_types",
+            lambda timeout, play_type=play_type: SynergyPlayTypes(
+                play_type_nullable=play_type,
+                player_or_team_abbreviation="T",
+                type_grouping_nullable="Defensive",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_play_type_data(self, play_type):
-        return SynergyPlayTypes(
-            play_type_nullable=play_type,
-            player_or_team_abbreviation="P",
-            type_grouping_nullable="Offensive",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "player_play_types",
+            lambda timeout, play_type=play_type: SynergyPlayTypes(
+                play_type_nullable=play_type,
+                player_or_team_abbreviation="P",
+                type_grouping_nullable="Offensive",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_player_per36_stats(self):
-        return LeagueDashPlayerStats(
-            measure_type_detailed_defense="Base",
-            per_mode_detailed="Per36",
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+        return self.nba_stats.run_endpoint(
+            "player_per36_stats",
+            lambda timeout: LeagueDashPlayerStats(
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="Per36",
+                timeout=timeout,
+            ),
+        )
 
     def _fetch_data_from_table(self, table_name):
         from ..utils.tables import normalize_table_name

@@ -37,7 +37,11 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert first.applied == ("001_create_users", "002_create_data_refresh_jobs")
+    assert first.applied == (
+        "001_create_users",
+        "002_create_data_refresh_jobs",
+        "003_durable_data_refresh_queue",
+    )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
         ["schema_migrations", "users", "data_refresh_jobs"]
@@ -65,12 +69,21 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "started_at",
         "finished_at",
         "error_summary",
+        "request_id",
+        "lease_owner",
+        "lease_expires_at",
+        "heartbeat_at",
+        "attempt_count",
     }
 
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
-        ).all() == [(1, "001_create_users"), (2, "002_create_data_refresh_jobs")]
+        ).all() == [
+            (1, "001_create_users"),
+            (2, "002_create_data_refresh_jobs"),
+            (3, "003_durable_data_refresh_queue"),
+        ]
 
 
 def test_run_migrations_upgrades_existing_app_database(tmp_path):
@@ -83,7 +96,11 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
 
     result = run_migrations(engine)
 
-    assert result.applied == ("001_create_users", "002_create_data_refresh_jobs")
+    assert result.applied == (
+        "001_create_users",
+        "002_create_data_refresh_jobs",
+        "003_durable_data_refresh_queue",
+    )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
 

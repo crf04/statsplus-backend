@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Final, Optional
 
-from sqlalchemy import Column, DateTime, Float, Index, String, Text, text
+from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, text
 
 from . import Base
 
@@ -47,6 +47,14 @@ class DataRefreshJob(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     error_summary = Column(Text, nullable=True)
+    # Queue execution metadata.  These columns are deliberately separate from
+    # the public job state so a worker can atomically claim a row and renew
+    # its lease without storing an executable callback in the database.
+    request_id = Column(String(128), nullable=True)
+    lease_owner = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
         # A database-enforced partial unique index: at most one active job
@@ -77,6 +85,9 @@ class DataRefreshJob(Base):
             "started_at": _isoformat(self.started_at),
             "finished_at": _isoformat(self.finished_at),
             "failure_summary": self.error_summary,
+            "request_id": self.request_id,
+            "attempt_count": self.attempt_count or 0,
+            "heartbeat_at": _isoformat(self.heartbeat_at),
         }
 
 

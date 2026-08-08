@@ -21,39 +21,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-Location = Literal["Home", "Away", "Both"]
-
-# Supported opponent-filter names defined here once so filters and docs stay
-# in sync.  The service still interprets the full set of rank-able categories.
-SUPPORTED_TEAM_FILTERS = (
-    "OPP_PTS",
-    "OPP_REB",
-    "OPP_AST",
-    "OPP_STOCKS",
-    "OPP_FTA",
-    "OPP_TOV",
-    "OPP_BLK",
-    "OPP_STL",
-    "OPP_FG3M",
-    "OPP_FG3A",
-    "C&S 3s",
-    "C&S PTS",
-    "C&S 3A",
-    "PU 2s",
-    "PU 3s",
-    "PU PTS",
-    "Transition",
-    "Isolation",
-    "PRBallHandler",
-    "PRRollMan",
-    "OffRebound",
-    "Spotup",
-    "Cut",
-    "Handoff",
-    "OffScreen",
-    "Misc",
-    "Postup",
+from app.models.catalogs import (
+    SUPPORTED_SELF_FILTER_STATS,
+    SUPPORTED_TEAM_FILTERS,
 )
+
+Location = Literal["Home", "Away", "Both"]
 
 
 class GameLogQuery(BaseModel):
@@ -144,6 +117,35 @@ class GameLogQuery(BaseModel):
                 )
             normalized[str(stat)] = (float(bounds[0]), float(bounds[1]))
         return normalized
+
+    @field_validator("self_filters")
+    @classmethod
+    def reject_unsupported_self_filter_stats(
+        cls, value: dict[str, tuple[float, float]]
+    ) -> dict[str, tuple[float, float]]:
+        unsupported = [
+            stat for stat in value if stat not in SUPPORTED_SELF_FILTER_STATS
+        ]
+        if unsupported:
+            raise ValueError(
+                f"self_filters contains unsupported stats: {unsupported}. "
+                f"Supported stats are: {', '.join(SUPPORTED_SELF_FILTER_STATS)}"
+            )
+        return value
+
+    @field_validator("teams_against")
+    @classmethod
+    def reject_unsupported_team_filters(cls, value: list[str]) -> list[str]:
+        unsupported = [
+            item for item in value if item not in SUPPORTED_TEAM_FILTERS
+        ]
+        if unsupported:
+            raise ValueError(
+                f"teams_against contains unsupported filters: {unsupported}. "
+                "Supported filters are: "
+                + ", ".join(SUPPORTED_TEAM_FILTERS)
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_rank_alignment(self) -> "GameLogQuery":

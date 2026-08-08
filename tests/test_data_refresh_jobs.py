@@ -6,7 +6,8 @@ bundled ``nba_play_types.db`` fixture and external providers are never touched.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 
 import pandas as pd
 import pytest
@@ -22,6 +23,7 @@ from app.services.job_service import (
     SynchronousExecutor,
 )
 from app.services.table_publisher import AtomicTablePublisher, TablePublicationError
+from app.utils import telemetry
 
 
 def _fixed_clock() -> datetime:
@@ -130,6 +132,128 @@ def test_get_unknown_job_raises_not_found(job_service):
 
     with pytest.raises(ResourceNotFoundError):
         job_service.get("missing-job")
+
+
+class _ManualExecutor:
+    """Executor seam that records work without running it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, fn, *args):
+        self.calls.append((fn, args))
+
+
+def test_restart_recovers_expired_lease_but_not_healthy_running_job(job_engine):
+    now = [_fixed_clock()]
+    first_executor = _ManualExecutor()
+    first = DataRefreshJobService(
+        job_engine,
+        executor=first_executor,
+        handlers={"update_database": lambda: True},
+        clock=lambda: now[0],
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    queued = first.start("update_database")
+    assert first.get(queued["job_id"])["status"] == "running"
+    assert len(first_executor.calls) == 1
+
+    second = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        handlers={"update_database": lambda: True},
+        clock=lambda: now[0],
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    assert second.dispatch_once() == 0
+
+    now[0] += timedelta(seconds=61)
+    assert second.dispatch_once() == 1
+    assert second.get(queued["job_id"])["status"] == JOB_STATUS_SUCCEEDED
+    first.shutdown()
+    second.shutdown()
+
+
+def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
+    executor = _ManualExecutor()
+    seed = DataRefreshJobService(
+        job_engine,
+        executor=executor,
+        handlers={"update_database": lambda: True},
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    queued = seed.start("update_database")
+    # The first service has already claimed the job.  Release it back to the
+    # queue so two fresh coordinators race over the same row.
+    with job_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE data_refresh_jobs SET status='queued', "
+                "lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL "
+                "WHERE job_id=:job_id"
+            ),
+            {"job_id": queued["job_id"]},
+        )
+
+    barrier = Barrier(2)
+    claimed = []
+    services = [
+        DataRefreshJobService(
+            job_engine,
+            executor=_ManualExecutor(),
+            handlers={"update_database": lambda: True},
+            dispatch_on_startup=False,
+            start_poller=False,
+        )
+        for _ in range(2)
+    ]
+
+    def dispatch(service):
+        barrier.wait()
+        claimed.append(service.dispatch_once())
+
+    threads = [Thread(target=dispatch, args=(service,)) for service in services]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(claimed) == [0, 1]
+    seed.shutdown()
+    for service in services:
+        service.shutdown()
+
+
+def test_worker_request_id_and_progress_are_isolated(job_engine):
+    observed = []
+
+    def refresh(progress_callback):
+        observed.append(telemetry.current_request_id())
+        progress_callback(0.25, "Fetched")
+        progress_callback(0.75, "Transformed")
+        observed.append(telemetry.current_request_id())
+        return True
+
+    service = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        handlers={"update_database": refresh},
+        clock=_fixed_clock,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    queued = service.start("update_database", request_id="job-request-42")
+    final = service.get(queued["job_id"])
+
+    assert observed == ["job-request-42", "job-request-42"]
+    assert final["status"] == JOB_STATUS_SUCCEEDED
+    assert final["progress"] == 1.0
+    assert final["progress_note"] == "Completed"
+    assert telemetry.current_request_id() == "-"
+    service.shutdown()
 
 
 # --- Atomic publication -------------------------------------------------
