@@ -65,7 +65,7 @@ def _team_filter_strategies() -> dict[str, TeamFilterStrategy]:
         **{
             team_filter: TeamFilterStrategy(
                 category="catch_shoot",
-                handler="catch_shoot_filtering",
+                handler="_shooting_filtering",
                 provider_operation="league_opponent_shot_chart",
                 cache_policy="daily_nba_data",
                 provider_category="Catch and Shoot",
@@ -81,7 +81,7 @@ def _team_filter_strategies() -> dict[str, TeamFilterStrategy]:
         **{
             team_filter: TeamFilterStrategy(
                 category="pullup",
-                handler="pullup_filtering",
+                handler="_shooting_filtering",
                 provider_operation="league_opponent_shot_chart",
                 cache_policy="daily_nba_data",
                 provider_category="Pullups",
@@ -641,14 +641,6 @@ class GameService:
         df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
         df['team'] = df['TEAM_ABBREVIATION']
         return df.sort_values(by=strategy.sort_column, ascending=False)
-
-    def catch_shoot_filtering(
-        self, team_filter, date_filter, *, cache_status=CACHE_MISS
-    ):
-        return self._shooting_filtering(team_filter, date_filter, cache_status=cache_status)
-
-    def pullup_filtering(self, team_filter, date_filter, *, cache_status=CACHE_MISS):
-        return self._shooting_filtering(team_filter, date_filter, cache_status=cache_status)
 
     def less_than_ten_feet_filtering(self, team_filter):
         del team_filter

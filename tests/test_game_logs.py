@@ -39,7 +39,11 @@ def test_game_log_query_accepts_typed_and_raw_filters():
     assert query.teams_against == ["OPP_PTS"]
     assert query.location_filter == "Home"
     assert query.game_filter == 5
-    assert query.self_filters == {"PTS": (25.0, 60.0)}
+    self_filter = query.self_filters["PTS"]
+    assert self_filter.stat == "PTS"
+    assert self_filter.operator == "between"
+    assert self_filter.value == 25.0
+    assert self_filter.value2 == 60.0
 
 
 @pytest.mark.parametrize(

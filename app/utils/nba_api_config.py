@@ -1,6 +1,5 @@
 """NBA API configuration with connection pooling and optimized timeouts."""
 import requests
-from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging
 
@@ -16,22 +15,6 @@ def get_nba_stats_timeout(settings: RuntimeSettings | None = None) -> float:
     """Return the timeout used by calls made through the ``nba_api`` package."""
     runtime_settings = settings or get_runtime_settings()
     return runtime_settings.providers.nba_stats_timeout_seconds
-
-
-class LoggingHTTPAdapter(HTTPAdapter):
-    """Custom HTTP adapter that observes retry attempts."""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def send(self, request, **kwargs):
-        """Send request, observing retry activity without leaking secrets.
-
-        The internal retry class already increments the telemetry retry
-        counter; no URL query string, credentials, response body, or exception
-        message is written to the log here.
-        """
-        return super().send(request, **kwargs)
 
 
 def _safe_url_path(url):
@@ -98,7 +81,7 @@ def get_nba_api_session(settings: RuntimeSettings | None = None):
     )
     
     # Configure adapter with connection pooling and keep-alive
-    adapter = LoggingHTTPAdapter(
+    adapter = requests.adapters.HTTPAdapter(
         pool_connections=pool_connections,      # Connection pool size per host
         pool_maxsize=pool_maxsize,              # Max connections per pool
         max_retries=retry_strategy

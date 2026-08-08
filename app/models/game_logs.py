@@ -98,24 +98,6 @@ class SelfFilter(BaseModel):
             )
         return self
 
-    def __eq__(self, other: object) -> bool:
-        """Keep equality with the legacy ``(min,max)`` value shape temporary.
-
-        This only supports callers comparing a model snapshot to the old
-        public value in tests or logs; filtering itself never consumes a
-        tuple/dict and always uses this typed object.
-        """
-
-        if isinstance(other, tuple) and len(other) == 2:
-            return self.operator == "between" and (
-                self.value,
-                self.value2,
-            ) == (float(other[0]), float(other[1]))
-        if isinstance(other, SelfFilter):
-            return self.model_dump() == other.model_dump()
-        return super().__eq__(other)
-
-
 def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
     """Convert one HTTP, NLP, or typed self-filter entry."""
 

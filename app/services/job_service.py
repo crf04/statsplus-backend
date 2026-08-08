@@ -79,16 +79,12 @@ class ClaimedJob:
     owner: str
 
 
-# Explicit alias for callers that prefer to name the value by its lease role.
-ClaimedJobLease = ClaimedJob
-
 __all__ = [
     "DataRefreshJobService",
     "SynchronousExecutor",
     "DEFAULT_FAILURE_SUMMARY",
     "KNOWN_REFRESH_OPERATIONS",
     "ClaimedJob",
-    "ClaimedJobLease",
     "build_default_refresh_handlers",
     "build_data_refresh_job_service",
     "adapt_zero_arg_handler",
