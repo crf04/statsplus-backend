@@ -17,6 +17,7 @@ from sqlalchemy import text
 from ..errors import AppError, ProviderUnavailableError
 from ..utils.db import get_engine
 from ..utils.nba_api_config import get_shared_nba_session
+from ..utils.telemetry import PROVIDER_PBP_STATS, provider_call
 from app.config.settings import get_runtime_settings
 
 
@@ -163,20 +164,22 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
         start_time = time.time()
         settings = get_runtime_settings()
         session = get_shared_nba_session(settings)
-        
+
         # Test with the game logs API endpoint (what you actually use)
-        response = session.get(
-            'https://api.pbpstats.com/get-totals/nba',
-            params={
-                'Season': settings.nba.current_season,
-                'SeasonType': 'Regular+Season',
-                'Type': 'Player'
-            },
-            timeout=(
-                settings.providers.pbp_connect_timeout_seconds,
-                settings.providers.pbp_read_timeout_seconds,
+        with provider_call(PROVIDER_PBP_STATS, "health_probe") as tracker:
+            response = session.get(
+                'https://api.pbpstats.com/get-totals/nba',
+                params={
+                    'Season': settings.nba.current_season,
+                    'SeasonType': 'Regular+Season',
+                    'Type': 'Player'
+                },
+                timeout=(
+                    settings.providers.pbp_connect_timeout_seconds,
+                    settings.providers.pbp_read_timeout_seconds,
+                )
             )
-        )
+            tracker.status_code = response.status_code
         
         duration = time.time() - start_time
         

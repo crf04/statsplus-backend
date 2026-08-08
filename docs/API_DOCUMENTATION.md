@@ -22,11 +22,20 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Required: `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
-- Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint, and `PUT /api/players/fetch`.
+- Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
+
+## Correlation headers
+
+Every response carries an `X-Request-ID`. If the request sends a safe inbound
+`X-Request-ID` (letters, digits, `_`, `.`, `:`, `-`, up to 128 characters) it is
+echoed back and used as the correlation ID; otherwise the server generates one.
+Provider-telemetry events raised during the request carry the same ID, so a
+response header, a duration, and a provider event share one key.
+`X-Request-ID` is always set, including on error responses.
 
 ## Error responses
 
@@ -53,6 +62,7 @@ The public error categories and HTTP statuses are:
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
+| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
 
 Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the
@@ -155,7 +165,22 @@ Common query types:
 GET /api/games/game_logs
 ```
 
-Returns filtered game logs, filtered averages, season averages, and the next opponent. The `game_logs`, `averages`, and `season_averages` fields are JSON strings produced by pandas.
+Returns filtered game logs, filtered averages, season averages, and the next opponent. The `game_logs` array contains one object per game, and `averages` / `season_averages` are arrays holding a single averages object; all three fields are ordinary JSON arrays, never JSON strings.
+
+### Contract and migration note (#9)
+
+- Filters are validated into one typed `GameLogQuery` before the service runs.
+  Malformed values (non-numeric `minutes_filter`, an unparsable `date_filter`,
+  `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
+  per one) return a `400` error with code `invalid_input` and message:
+  `One or more game log filters are invalid.`
+- The response shape is unchanged from earlier versions: `game_logs`,
+  `averages`, and `season_averages` were previously JSON strings produced by
+  pandas. Callers that parsed those strings must instead read the arrays
+  directly. `next_game` remains the full opponent name or `null`.
+- Empty result sets return empty arrays (`[]`) for `game_logs` and `averages`;
+  `season_averages` still carries the season aggregate when the full season has
+  games. `next_game` may be `null`.
 
 Query parameters:
 
@@ -165,12 +190,12 @@ Query parameters:
 | `minutes_filter` | No | Comma-separated min,max minutes. Default `0,48` |
 | `players_on[]` | No | Teammates required on court |
 | `players_off[]` | No | Teammates required off court |
-| `date_filter` | No | Date string passed to NBA/team filter logic |
+| `date_filter` | No | `YYYY-MM-DD` start date passed to NBA/team filter logic |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS` |
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Season. Default `2025-26` |
+| `season_filter` | No | Season. Default is the current season |
 | `playstyle_RTG_min` | No | Default `0` |
 | `playstyle_RTG_max` | No | Default `200` |
 | `self_filters[STAT]` | No | Stat range as `min,max`, for example `self_filters[PTS]=25,60` |
@@ -217,7 +242,10 @@ PUT /api/players/fetch
 ```
 
 Requires an admin claim. Fetches current NBA player metadata through
-`nba_api` and replaces the local `player_information` table.
+`nba_api` and replaces the local `player_information` table.  Returns
+`202 Accepted` with a durable job (`operation: "fetch_players"`); the refresh
+runs after the response is sent.  Its completion can be observed through
+`GET /api/data/jobs/<job_id>`.
 
 ## Team Endpoints
 
@@ -250,15 +278,75 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 ## Data Management Endpoints
 
 These endpoints require an authenticated Firebase token with an admin claim.
-They can call external NBA/PBP APIs or replace local tables.
+They can call external NBA/PBP APIs or replace local tables.  All mutating
+refreshes are durable jobs: the route returns `202 Accepted` immediately with
+`job_id` and the queued job state, and the refresh runs in the background.  A
+second request for an already active operation (queued or running) returns
+`409 Conflict` with code `duplicate_active_operation`.
+
+The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
+one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
+`progress`, timestamps, and a sanitized `failure_summary` (provider or
+exception text is never written there).
 
 ```http
 POST /api/data/update_database
 PUT /api/data/player_PBP
 PUT /api/data/opponent_PBP
 POST /api/data/fetch_players_with_teams
+GET /api/data/jobs/<job_id>
 GET /api/data/fetch_playtypes
+GET /api/data/telemetry
 ```
+
+`GET /api/data/telemetry` returns bounded, sanitized provider and application
+telemetry counters on the documented provider seams, with the most recent 50
+provider events. Provider failures are counted at the provider seams and
+application failures by the central error handler; neither list ever carries
+credentials, URLs, bodies, or exception text. Example shape:
+
+```json
+{
+  "provider_events_total": 1,
+  "provider_failures": { "nba_stats": { "timeout": 1 } },
+  "application_failures": { "internal_error": 2 },
+  "cache": { "nba_stats": { "hit": 3, "miss": 1 } },
+  "buffered_events": 5,
+  "buffered_capacity": 5000,
+  "recent_provider_events": [
+    {
+      "provider": "nba_stats",
+      "operation": "player_game_logs",
+      "outcome": "malformed",
+      "started_at": "2025-03-04T05:00:00+00:00",
+      "duration_ms": 4.2,
+      "retry_count": 2,
+      "cache_status": "miss",
+      "request_id": "a1b2…",
+      "status_code": 200
+    }
+  ]
+}
+```
+
+Example start response (`202 Accepted`):
+
+```json
+{
+  "job_id": "9f8c…",
+  "operation": "update_database",
+  "status": "queued",
+  "progress": 0.0,
+  "progress_note": null,
+  "created_at": "2025-01-15T12:00:00+00:00",
+  "started_at": null,
+  "finished_at": null,
+  "failure_summary": null
+}
+```
+
+`GET /api/data/fetch_playtypes` is unchanged: it still returns the defensively
+shaped play-type table directly with `200 OK`.
 
 Use the bundled database for read-only demo exploration before running refresh endpoints.
 
@@ -317,3 +405,7 @@ Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`,
 - `OPENAI_API_KEY` is optional; without it the NL endpoint uses deterministic parsing only.
 - Redis is optional; cache initialization should not be required for local development.
 - Legacy routes from earlier versions are not currently registered in `app/__init__.py`; use the blueprint paths documented here.
+- The recorded provider fixtures under `tests/fixtures/` are parsed through the
+  production seams with no network. Live provider-contract tests in
+  `tests/live/` are marked `live` and excluded from the default gate; opt in
+  with `LIVE_CONTRACT_TESTS=true` plus `-m live`.

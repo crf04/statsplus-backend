@@ -102,6 +102,7 @@ class ProviderSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     nba_stats_timeout_seconds: float = Field(default=10.0, gt=0)
+    nba_stats_max_concurrency: int = Field(default=10, ge=1, le=100)
     pbp_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     pbp_read_timeout_seconds: float = Field(default=30.0, gt=0)
     pbp_max_retries: int = Field(default=3, ge=0)
@@ -242,6 +243,7 @@ def _build_settings(
     providers = _validated_model(
         ProviderSettings,
         nba_stats_timeout_seconds=reader.decimal("NBA_STATS_TIMEOUT_SECONDS", 10.0),
+        nba_stats_max_concurrency=reader.integer("NBA_STATS_MAX_CONCURRENCY", 10),
         pbp_connect_timeout_seconds=reader.decimal(
             "NBA_API_TIMEOUT_CONNECT", 10.0
         ),

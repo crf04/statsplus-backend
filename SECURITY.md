@@ -74,6 +74,7 @@ The following mutation or administrative routes are admin-only:
 - `PUT /api/data/player_PBP`
 - `PUT /api/data/opponent_PBP`
 - `GET /api/data/fetch_playtypes`
+- `GET /api/data/jobs/<job_id>`
 - `PUT /api/players/fetch`
 - `GET /api/user/admin/stats`
 

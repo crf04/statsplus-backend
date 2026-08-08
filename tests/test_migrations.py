@@ -37,9 +37,11 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert first.applied == ("001_create_users",)
+    assert first.applied == ("001_create_users", "002_create_data_refresh_jobs")
     assert second.applied == ()
-    assert inspect(engine).get_table_names() == ["schema_migrations", "users"]
+    assert sorted(inspect(engine).get_table_names()) == sorted(
+        ["schema_migrations", "users", "data_refresh_jobs"]
+    )
     assert {
         column["name"] for column in inspect(engine).get_columns("users")
     } == {
@@ -51,11 +53,24 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "last_login",
         "is_active",
     }
+    assert {
+        column["name"] for column in inspect(engine).get_columns("data_refresh_jobs")
+    } == {
+        "job_id",
+        "operation",
+        "status",
+        "progress",
+        "progress_note",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "error_summary",
+    }
 
     with engine.connect() as connection:
         assert connection.execute(
-            text("SELECT version, name FROM schema_migrations")
-        ).all() == [(1, "001_create_users")]
+            text("SELECT version, name FROM schema_migrations ORDER BY version")
+        ).all() == [(1, "001_create_users"), (2, "002_create_data_refresh_jobs")]
 
 
 def test_run_migrations_upgrades_existing_app_database(tmp_path):
@@ -68,8 +83,9 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
 
     result = run_migrations(engine)
 
-    assert result.applied == ("001_create_users",)
+    assert result.applied == ("001_create_users", "002_create_data_refresh_jobs")
     assert inspect(engine).has_table("users")
+    assert inspect(engine).has_table("data_refresh_jobs")
 
 
 def test_demo_database_validation_is_read_only():
@@ -117,7 +133,9 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
     )
 
     engine = create_engine(database_url)
-    assert inspect(engine).get_table_names() == ["schema_migrations", "users"]
+    assert sorted(inspect(engine).get_table_names()) == sorted(
+        ["schema_migrations", "users", "data_refresh_jobs"]
+    )
 
 
 def test_demo_database_validation_reports_missing_tables(tmp_path):

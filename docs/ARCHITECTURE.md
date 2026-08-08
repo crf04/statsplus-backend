@@ -50,6 +50,36 @@ Runtime configuration is loaded and validated once by
 object is attached to the app and passed into request services; see
 [SETTINGS.md](SETTINGS.md) for the field and environment-variable contract.
 
+## Provider telemetry and correlation IDs
+
+Every request is correlated with one safe ID. `app.utils.request_id` accepts an
+inbound `X-Request-ID` only when it matches `^[A-Za-z0-9._:-]{1,128}$` and
+otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
+`before_request` and echoes it on the `X-Request-ID` response header. The same
+ID flows into provider telemetry events, so a log, a provider event, and a
+response header share one correlation key.
+
+Provider calls at the two external seams are wrapped in one structured event
+(`app.utils.telemetry.ProviderEvent`):
+
+| Provider | Seam | Operations |
+| --- | --- | --- |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | `player_game_logs`, `player_next_game`, `league_opponent_team_stats`, `league_opponent_shot_chart` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | `get_totals_player`, `get_totals_opponent`, live `health_probe` |
+
+An event records provider, operation, outcome (success/timeout/http_error/
+malformed/error), duration, retry count (thread-safe counter incremented by
+`RetryWithLogging`), cache status (hit/miss/disabled), HTTP status, and the
+request ID. Events are written as one structured log line and retained in a
+bounded, thread-safe buffer (capacity 5000); credentials, authorization
+headers, URLs, raw bodies, and exception messages are never captured.
+
+Provider failures are counted at the provider seam. The central error handler
+in `app.errors` counts only *application* failures (actual `AppError` codes and
+HTTP >= 500 responses) and skips `provider_unavailable` so the same provider
+error is never double counted. Operators read the bounded counters and recent
+events from the admin-only `GET /api/data/telemetry` endpoint.
+
 ## Request flows
 
 Game logs:
@@ -58,7 +88,7 @@ Game logs:
 GET /api/games/game_logs
   → Firebase auth (or explicit local-only bypass)
   → GameService.get_filtered_logs
-  → cached nba_api PlayerGameLogs request
+  → cached NBAStatsAdapter call (telemetry event per call)
   → local/database and request filters
   → serialized logs and averages
 ```
@@ -76,13 +106,27 @@ POST /api/nl-query
 Data refresh:
 
 ```text
-/api/data route
-  → DataService provider calls
-  → dataframe transformations
-  → replace one or more database tables
+POST /api/data/update_database (or a PBP/PUT refresh)
+  → schedule durable DataRefreshJob (HTTP 202, job_id)
+  → DataRefreshJobService runs the refresh in the background
+  → AtomicTablePublisher stages frames → single transaction name swap
+  → GET /api/data/jobs/<job_id> reports queued/running/succeeded/failed
 ```
 
-Data refreshes are mutations, not health checks. Use a disposable database and mocked providers when testing them.
+Every mutating refresh is recorded in the application-owned
+`data_refresh_jobs` table before the request returns `202 Accepted`.
+`DataRefreshJobService` writes queued/running/succeeded/failed transitions and
+a sanitized `failure_summary` (exception/provider text is never stored), and
+its partial unique index enforces at most one queued or running job per
+operation. The service takes an injectable executor and clock; tests use a
+`SynchronousExecutor` so job completion is deterministic.
+
+The `DataService` refresh callables first collect every provider frame in
+memory (failures stop the job before any write), then hand the whole related
+set to `AtomicTablePublisher`, which stages each `DataFrame` under a unique
+name and swaps every name inside one `engine.begin()` transaction. Readers
+never observe a mixed old/new set, and a failed swap rolls back to the
+previous tables.
 
 ## Schema maintenance
 
@@ -103,6 +147,8 @@ validator must not be used to repair the fixture.
 - App and route behavior: use the `app` and `client` fixtures in `tests/conftest.py`.
 - Route/service interaction: patch the module-level service on the route module.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
+- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `PBPTotalsAdapter.parse_totals`) with no network.
+- Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.
 
@@ -112,7 +158,12 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 
 - The lazy request-service registry keeps app-factory isolation explicit while
   avoiding database, Redis, and parser initialization during route imports.
-- The request layer mixes synchronous Flask handlers with `asyncio.run` for game-log work.
+- The game-log request path is fully synchronous and bounded: the route
+  parses query parameters into one typed `GameLogQuery`, and the service runs
+  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). NBA Stats
+  provider calls go through `NBAStatsAdapter`, which applies a
+  `threading.BoundedSemaphore` sized by `NBA_STATS_MAX_CONCURRENCY` (default
+  10) and shares the provider timeout from `NBA_STATS_TIMEOUT_SECONDS`.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
 - The bundled provider-generated tables are validated as a public fixture; they
   are not application migration targets.

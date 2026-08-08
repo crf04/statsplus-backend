@@ -55,14 +55,22 @@ _schema_migrations = Table(
 
 
 def _create_users_table(connection: Connection) -> None:
-    """Create all SQLAlchemy models registered by the application."""
-    from app.models import Base
+    """Create the application-owned ``users`` table."""
+    from app.models.user import User
 
-    Base.metadata.create_all(connection)
+    User.__table__.create(connection, checkfirst=True)
+
+
+def _create_data_refresh_jobs_table(connection: Connection) -> None:
+    """Create the durable ``data_refresh_jobs`` table."""
+    from app.models.job import DataRefreshJob
+
+    DataRefreshJob.__table__.create(connection, checkfirst=True)
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
+    Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
 )
 
 

@@ -130,6 +130,13 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 
 `GET /api/health/nba-api` and `/api/health/detailed` call an external NBA data endpoint, so they can fail if the network or upstream API is unavailable.
 
+Every response carries an `X-Request-ID` used to correlate a request, its
+provider calls, and its logs; safe inbound values are echoed, otherwise one is
+generated. Every call to `stats.nba.com` (via `nba_api`) and
+`api.pbpstats.com` is recorded as one sanitized provider event with outcome,
+duration, retry count, cache status, and HTTP status — operator counters and
+recent events are available on the admin-only `GET /api/data/telemetry`.
+
 Live requests to `stats.nba.com` use a 10-second timeout by default. If that
 provider times out, game-log requests return `503 Service Unavailable` instead
 of exposing a generic internal-server error. Override the timeout with
@@ -203,13 +210,21 @@ curl -X PUT http://localhost:5000/api/data/player_PBP \
   -H "Authorization: Bearer <firebase-admin-token>"
 curl -X PUT http://localhost:5000/api/data/opponent_PBP \
   -H "Authorization: Bearer <firebase-admin-token>"
+curl -X PUT http://localhost:5000/api/players/fetch \
+  -H "Authorization: Bearer <firebase-admin-token>"
 curl http://localhost:5000/api/data/fetch_playtypes \
   -H "Authorization: Bearer <firebase-admin-token>"
-curl -X PUT http://localhost:5000/api/players/fetch \
+curl http://localhost:5000/api/data/jobs/<job_id> \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl http://localhost:5000/api/data/telemetry \
   -H "Authorization: Bearer <firebase-admin-token>"
 ```
 
-Refresh endpoints call external NBA/PBP APIs and may replace local tables. They require an admin claim. The bundled database is enough for exploring read-only routes.
+Refresh endpoints schedule durable jobs: they return `202 Accepted` with a
+`job_id`, and the refresh runs afterward; poll
+`GET /api/data/jobs/<job_id>` (admin-only) for status. They call external
+NBA/PBP APIs and may replace local tables. The bundled database is enough for
+exploring read-only routes.
 
 See [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) for endpoint details and [docs/NLP_SYSTEM.md](docs/NLP_SYSTEM.md) for the natural-language pipeline.
 
@@ -236,6 +251,13 @@ Run the same lint and test gate used by CI:
 `./run_tests.sh` remains available when only pytest is needed.
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
+
+Live provider-contract tests hit the real providers and are excluded from the
+default gate (registered `live` marker). Opt in explicitly:
+
+```bash
+LIVE_CONTRACT_TESTS=true python -m pytest -m live
+```
 
 ## Project map
 

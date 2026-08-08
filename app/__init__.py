@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, g, request
 from flask_cors import CORS
 
 from app.config.settings import (
@@ -14,6 +14,7 @@ from app.config.settings import (
     load_settings,
     set_runtime_settings,
 )
+from app.utils.request_id import HEADER_NAME, resolve_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +47,28 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
     CORS(app)
 
+    _register_request_headers(app)
     _initialize_dependencies(app)
     _register_error_handlers(app)
     _register_blueprints(app)
 
     return app
+
+
+def _register_request_headers(app: Flask) -> None:
+    """Correlate every request with one safe ID and echo it to callers."""
+
+    @app.before_request
+    def bind_request_id() -> None:
+        g.request_id = resolve_request_id(request.headers.get(HEADER_NAME))
+
+    @app.after_request
+    def attach_request_id(response):  # type: ignore[no-untyped-def]
+        request_id = getattr(g, "request_id", None)
+        if not request_id:
+            request_id = resolve_request_id(request.headers.get(HEADER_NAME))
+        response.headers.setdefault(HEADER_NAME, request_id)
+        return response
 
 
 def _initialize_dependencies(app: Flask) -> None:

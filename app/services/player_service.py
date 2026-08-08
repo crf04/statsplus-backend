@@ -196,16 +196,17 @@ class PlayerService:
             return []
 
     def store_player_information(self):
-        """Store basic player information in database"""
-        try:
-            player_dict = players.get_players()
-            player_df = pd.DataFrame.from_dict(player_dict)
-            player_df.to_sql('player_information', self.engine, 
-                           if_exists='replace', index=False)
-            return True
-        except Exception as e:
-            logger.error("Error storing player information: %s", e)
-            return False
+        """Store basic player information in database.
+
+        Fetching completes before the table is replaced, so a provider failure
+        leaves the existing player list untouched.
+        """
+        player_dict = players.get_players()
+        player_df = pd.DataFrame.from_dict(player_dict)
+        from app.services.table_publisher import AtomicTablePublisher
+
+        AtomicTablePublisher(self.engine).publish({"player_information": player_df})
+        return True
 
     def get_player_id(self, player_name):
         """Get player ID from database"""

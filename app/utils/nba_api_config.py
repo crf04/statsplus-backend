@@ -5,6 +5,7 @@ from urllib3.util.retry import Retry
 import logging
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.utils.telemetry import increment_retry_count
 
 logger = logging.getLogger(__name__)
 
@@ -18,49 +19,59 @@ def get_nba_stats_timeout(settings: RuntimeSettings | None = None) -> float:
 
 
 class LoggingHTTPAdapter(HTTPAdapter):
-    """Custom HTTP adapter that logs retry attempts."""
+    """Custom HTTP adapter that observes retry attempts."""
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-    
+
     def send(self, request, **kwargs):
-        """Send request with retry logging."""
-        try:
-            response = super().send(request, **kwargs)
-            return response
-        except Exception as e:
-            # Log when we're about to retry due to an exception
-            if hasattr(self.config, 'max_retries') and self.config['max_retries'].total > 0:
-                logger.warning(f"NBA API request to {request.url} failed, will retry: {str(e)}")
-            raise
+        """Send request, observing retry activity without leaking secrets.
+
+        The internal retry class already increments the telemetry retry
+        counter; no URL query string, credentials, response body, or exception
+        message is written to the log here.
+        """
+        return super().send(request, **kwargs)
+
+
+def _safe_url_path(url):
+    """Return a URL without its query string for operator logs."""
+    return url.split("?", 1)[0] if url else "unknown"
 
 
 def log_retry_attempt(retry_state):
-    """Callback function to log retry attempts.
-    
+    """Callback function to log retry attempts without exposing query strings.
+
     Args:
         retry_state: Retry state object containing attempt information
     """
     attempt_number = retry_state.attempt_number
-    url = getattr(retry_state, 'url', 'unknown')
-    
+    url = _safe_url_path(getattr(retry_state, "url", "unknown"))
+
     if attempt_number > 1:
-        logger.warning(f"NBA API retry attempt #{attempt_number-1} for {url}")
+        logger.warning("NBA API retry attempt #%d for %s", attempt_number - 1, url)
 
 
 class RetryWithLogging(Retry):
-    """Custom Retry class that logs retry attempts."""
-    
+    """Custom Retry class that counts retries for provider telemetry."""
+
     def increment(self, method=None, url=None, response=None, error=None, _pool=None, _stacktrace=None):
-        """Override increment to log retry attempts."""
-        # Log the retry attempt
+        """Override increment to count retries for telemetry.
+
+        Each retry increments the thread-local counter read by the enclosing
+        provider tracker, so provider events expose the number of upstream
+        retries for the operation.  Query strings and exception text are
+        never logged.
+        """
+        increment_retry_count()
         if self.total is not None and self.total > 0:
-            attempt_num = (self.total - (self.total - 1)) if self.total > 1 else 1
-            if response is not None:
-                logger.warning(f"NBA API retry #{attempt_num} for {url} - Status: {response.status}, Reason: {response.reason}")
-            elif error is not None:
-                logger.warning(f"NBA API retry #{attempt_num} for {url} - Error: {str(error)}")
-        
+            if url is not None:
+                logger.warning(
+                    "NBA API retrying after status %s for %s",
+                    getattr(response, "status", "error"),
+                    _safe_url_path(url),
+                )
+
         return super().increment(method, url, response, error, _pool, _stacktrace)
 
 def get_nba_api_session(settings: RuntimeSettings | None = None):

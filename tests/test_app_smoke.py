@@ -33,27 +33,36 @@ def test_players_endpoint_smoke(client):
 
 
 def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):
-    from flask import jsonify
-
     import app.utils.auth as auth
+    from app.models.game_logs import GameLogQuery
     from app.routes import game_routes
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
 
-    async def fake_get_filtered_logs(player_name, filter_params):
-        return jsonify({
-            "player_name": player_name,
-            "season_filter": filter_params["season_filter"],
-        })
+    captured = {}
+
+    def fake_get_filtered_logs(player_name, query):
+        assert isinstance(query, GameLogQuery)
+        captured["player_name"] = player_name
+        captured["season_filter"] = query.season_filter
+        return {
+            "game_logs": [],
+            "averages": [],
+            "season_averages": [],
+            "next_game": None,
+        }
 
     monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
     assert response.status_code == 200
+    assert captured["player_name"] == "LeBron James"
     assert response.get_json() == {
-        "player_name": "LeBron James",
-        "season_filter": "2025-26",
+        "game_logs": [],
+        "averages": [],
+        "season_averages": [],
+        "next_game": None,
     }
 
 
@@ -65,7 +74,7 @@ def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
 
-    async def timed_out(*args, **kwargs):
+    def timed_out(*args, **kwargs):
         raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
 
     monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", timed_out)
