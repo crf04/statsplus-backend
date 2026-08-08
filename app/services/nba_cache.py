@@ -9,7 +9,6 @@ import json
 import pickle
 import logging
 import hashlib
-from datetime import datetime
 from typing import Any, Optional, Union, Callable
 from functools import wraps
 
@@ -22,6 +21,7 @@ from ..utils.cache_config import (
     get_cache_date_key,
     is_cache_enabled
 )
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +33,20 @@ class NBAGameCache:
     based on data type (current season vs historical, computed vs raw API data).
     """
     
-    def __init__(self, redis_client: Optional[redis.Redis] = None):
+    def __init__(
+        self,
+        redis_client: Optional[redis.Redis] = None,
+        settings: RuntimeSettings | None = None,
+    ):
         """
         Initialize NBA cache with Redis client.
         
         Args:
             redis_client: Redis client instance. If None, caching is disabled.
         """
+        self.settings = settings or get_runtime_settings()
         self.redis_client = redis_client
-        self.enabled = redis_client is not None and is_cache_enabled()
+        self.enabled = redis_client is not None and is_cache_enabled(self.settings)
         
         if self.enabled:
             logger.info("NBA cache initialized with Redis backend")
@@ -259,19 +264,11 @@ class NBAGameCache:
         Returns:
             bool: True if current season, False otherwise
         """
-        # Extract year from season string
+        # Compare against the one startup-derived season rather than repeating
+        # calendar arithmetic in each cache/request path.
         try:
-            current_year = datetime.now().year
-            season_start_year = int(season.split('-')[0])
-            
-            # NBA season typically starts in October and ends in June
-            # Current season determination based on current date
-            if datetime.now().month >= 10:  # October or later
-                return season_start_year == current_year
-            else:  # Before October
-                return season_start_year == current_year - 1
-                
-        except (ValueError, IndexError):
+            return season == self.settings.nba.current_season
+        except (AttributeError, TypeError):
             logger.warning(f"Could not parse season string: {season}")
             return False
     

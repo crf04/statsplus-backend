@@ -28,6 +28,36 @@ Authentication levels:
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
 
+## Error responses
+
+Expected application failures use one stable JSON shape:
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "The request contains invalid input."
+  }
+}
+```
+
+The public error categories and HTTP statuses are:
+
+| Category | Code | Status | Use |
+| --- | --- | ---: | --- |
+| Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
+| Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
+| Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
+| Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
+| Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
+| Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
+| Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
+| Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
+
+Unexpected failures return `internal_error` with status `500`. Internal
+exception details are logged for operators and are never included in the
+response. Successful response shapes are unchanged.
+
 For local, credential-free development only, set
 `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
 for local requests. The bypass is rejected when `FLASK_ENV=production`; never
@@ -279,18 +309,6 @@ self_filters[STAT]=min,max
 ```
 
 Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
-
-## Error Format
-
-Most route errors use:
-
-```json
-{
-  "error": "Detailed error message"
-}
-```
-
-Authentication errors include an `error` and `message` field.
 
 ## Development Notes
 

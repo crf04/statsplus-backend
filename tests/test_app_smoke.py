@@ -74,8 +74,10 @@ def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
 
     assert response.status_code == 503
     assert response.get_json() == {
-        "error": "NBA Stats API unavailable",
-        "message": "The upstream stats provider timed out. Please try again shortly.",
+        "error": {
+            "code": "provider_unavailable",
+            "message": "The upstream stats provider timed out. Please try again shortly.",
+        }
     }
 
 

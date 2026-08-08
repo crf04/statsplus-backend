@@ -5,6 +5,10 @@ This file maps the existing API structure to enable natural language processing.
 Based on analysis of the existing GameService.get_filtered_logs method.
 """
 
+from .settings import current_nba_season
+
+CURRENT_SEASON = current_nba_season()
+
 ENDPOINT_SCHEMAS = {
     "game_logs": {
         "service": "GameService",
@@ -50,9 +54,9 @@ ENDPOINT_SCHEMAS = {
             },
             "season_filter": {
                 "type": "str",
-                "default": "2025-26",
+                "default": CURRENT_SEASON,
                 "description": "NBA season in YYYY-YY format",
-                "example": "2025-26"
+                "example": CURRENT_SEASON
             },
             "players_on": {
                 "type": "list",
@@ -121,4 +125,4 @@ INTENT_PATTERNS = {
         r"(\w+(?:\s+\w+)?)\s+(?:team\s+)?(?:offense|offensive)",
         r"(\w+(?:\s+\w+)?)\s+team\s+stats"
     ]
-} 
+}

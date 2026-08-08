@@ -1,10 +1,11 @@
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs
-from sqlalchemy import create_engine
+from app.config.settings import get_runtime_settings
+from app.utils.db import get_engine
 
 # Function to get player ID from database
 def get_player_id(player_name):
-    engine = create_engine('sqlite:///nba_play_types.db')
+    engine = get_engine()
     query = "SELECT * FROM 'Player_Information'"
     with engine.connect() as conn:
         player_dict = pd.read_sql(query, conn)
@@ -54,7 +55,12 @@ def apply_filters(df, filter_params):
         df = df.head(int(game_filter))
         
     # Apply players on/off filters
-    df = filter_players_on_off(df, players_on, players_off, '2025-26')
+    df = filter_players_on_off(
+        df,
+        players_on,
+        players_off,
+        get_runtime_settings().nba.current_season,
+    )
     
     return df
 
@@ -69,7 +75,8 @@ def filter_players_on_off(df, players_on, players_off, season):
     
     return df
 
-def get_games_to_exclude(player_logs, players_off_names, season='2025-26'):
+def get_games_to_exclude(player_logs, players_off_names, season=None):
+    season = season or get_runtime_settings().nba.current_season
     exclude_game_ids = set()
     
     # Loop through players_off and union game IDs
@@ -86,7 +93,8 @@ def get_games_to_exclude(player_logs, players_off_names, season='2025-26'):
 
     return exclude_game_ids
 
-def get_common_games(primary_player_logs, other_players_names, season='2025-26'):
+def get_common_games(primary_player_logs, other_players_names, season=None):
+    season = season or get_runtime_settings().nba.current_season
     primary_game_team_pairs = set(zip(
         primary_player_logs['GAME_ID'], 
         primary_player_logs['TEAM_ABBREVIATION']

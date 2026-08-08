@@ -1,10 +1,8 @@
-import os
-
 from app import create_app
+from app.config.settings import get_runtime_settings
 
 app = create_app()
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', '5000'))
-    debug = os.getenv("FLASK_DEBUG", "1").lower() in {"1", "true", "yes"}
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    settings = get_runtime_settings()
+    app.run(host='0.0.0.0', port=settings.port, debug=settings.debug)

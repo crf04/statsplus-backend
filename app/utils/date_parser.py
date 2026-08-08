@@ -10,15 +10,17 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import dateparser
 from dateutil.relativedelta import relativedelta
+from app.config.settings import RuntimeSettings, current_nba_season, get_runtime_settings
 
 
 class NBADateParser:
     """Parse natural language date expressions for NBA contexts."""
     
-    def __init__(self):
+    def __init__(self, settings: RuntimeSettings | None = None):
         """Initialize the NBA date parser with season-specific knowledge."""
         self.current_year = datetime.now().year
-        self.current_season = self._get_current_nba_season()
+        runtime_settings = settings or get_runtime_settings()
+        self.current_season = runtime_settings.nba.current_season
         
         self.nba_dates = {
             "all star break": "2025-02-14",         # All-Star Weekend Feb 14–16, break covers 14–19
@@ -36,11 +38,7 @@ class NBADateParser:
     
     def _get_current_nba_season(self) -> str:
         """Get current NBA season in YYYY-YY format."""
-        now = datetime.now()
-        if now.month >= 10:  # Season starts in October
-            return f"{now.year}-{str(now.year + 1)[-2:]}"
-        else:
-            return f"{now.year - 1}-{str(now.year)[-2:]}"
+        return current_nba_season()
     
     def parse_date_from_query(self, query: str) -> Optional[str]:
         """

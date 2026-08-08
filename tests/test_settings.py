@@ -1,0 +1,170 @@
+"""Tests for the validated runtime settings interface."""
+
+from datetime import date
+
+import pytest
+
+from app.config.settings import (
+    ConfigurationError,
+    NBASeasonSettings,
+    RuntimeSettings,
+    current_nba_season,
+    load_settings,
+)
+
+
+def test_current_nba_season_uses_october_boundary():
+    assert current_nba_season(date(2026, 9, 30)) == "2025-26"
+    assert current_nba_season(date(2026, 10, 1)) == "2026-27"
+
+
+def test_local_settings_have_typed_safe_defaults(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("FIREBASE_ADMIN_DISABLED", raising=False)
+
+    settings = load_settings()
+
+    assert isinstance(settings, RuntimeSettings)
+    assert settings.database.url == "sqlite:///nba_play_types.db"
+    assert settings.auth.firebase_admin_disabled is False
+    assert settings.cache.enabled is True
+    assert settings.llm.enable_fallback is False
+    assert settings.nba.current_season == current_nba_season()
+    assert isinstance(settings.providers.nba_stats_timeout_seconds, float)
+
+
+def test_testing_settings_allow_credential_free_bypass(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.environment == "testing"
+    assert settings.auth.firebase_admin_disabled is True
+
+
+def test_production_requires_database_and_firebase(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "production")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("FIREBASE_ADMIN_DISABLED", raising=False)
+    monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_PATH", raising=False)
+    monkeypatch.delenv("FIREBASE_PROJECT_ID", raising=False)
+    monkeypatch.delenv("FIREBASE_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("FIREBASE_CLIENT_EMAIL", raising=False)
+
+    with pytest.raises(ConfigurationError) as error:
+        load_settings()
+
+    message = str(error.value)
+    assert "DATABASE_URL" in message
+    assert "Firebase" in message
+
+
+def test_settings_parse_env_values(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    monkeypatch.setenv("ENABLE_CACHE", "off")
+    monkeypatch.setenv("NBA_STATS_TIMEOUT_SECONDS", "4.5")
+    monkeypatch.setenv("NBA_API_TIMEOUT_CONNECT", "2")
+    monkeypatch.setenv("NBA_API_TIMEOUT_READ", "6")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.25")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "256")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ENABLE_LLM_FALLBACK", "yes")
+
+    settings = load_settings()
+
+    assert settings.database.url == "postgresql://example/db"
+    assert settings.cache.enabled is False
+    assert settings.providers.nba_stats_timeout_seconds == 4.5
+    assert settings.providers.pbp_connect_timeout_seconds == 2.0
+    assert settings.providers.pbp_read_timeout_seconds == 6.0
+    assert settings.llm.temperature == 0.25
+    assert settings.llm.max_tokens == 256
+    assert settings.llm.enable_fallback is True
+
+
+def test_app_startup_exposes_one_settings_object(monkeypatch):
+    from app import create_app
+
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+
+    app = create_app({"SKIP_FIREBASE_INIT": True, "SKIP_TABLE_CREATE": True})
+
+    assert app.extensions["runtime_settings"] is app.config["RUNTIME_SETTINGS"]
+    assert "settings" not in app.extensions
+    assert isinstance(app.extensions["runtime_settings"], RuntimeSettings)
+
+
+def test_app_factory_isolates_request_settings_and_services(monkeypatch):
+    """Each app's request defaults and services use its injected settings."""
+    from app import create_app
+    from app.routes import game_routes
+    from app.routes import user_routes
+    from app.routes._service_proxy import CurrentAppService
+
+    monkeypatch.setattr(
+        "app.services.game_service.get_redis_client",
+        lambda settings: None,
+    )
+
+    first_settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        nba=NBASeasonSettings(current_season="2030-31"),
+    )
+    second_settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        nba=NBASeasonSettings(current_season="2040-41"),
+    )
+    first_app = create_app(
+        {
+            "RUNTIME_SETTINGS": first_settings,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    second_app = create_app(
+        {
+            "RUNTIME_SETTINGS": second_settings,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    assert first_app.extensions["runtime_settings"] is first_settings
+    assert second_app.extensions["runtime_settings"] is second_settings
+
+    with first_app.test_request_context(
+        "/api/games/game_logs?player_name=LeBron%20James"
+    ):
+        _, first_filters = game_routes._parse_game_log_filters()
+        assert first_filters["season_filter"] == "2030-31"
+        assert game_routes.game_service.settings is first_settings
+
+        assert isinstance(user_routes.user_service, CurrentAppService)
+        first_user_service = user_routes.user_service._resolve()
+        assert first_user_service.settings is first_settings
+
+    with second_app.test_request_context(
+        "/api/games/game_logs?player_name=LeBron%20James"
+    ):
+        _, second_filters = game_routes._parse_game_log_filters()
+        assert second_filters["season_filter"] == "2040-41"
+        assert game_routes.game_service.settings is second_settings
+
+        second_user_service = user_routes.user_service._resolve()
+        assert second_user_service.settings is second_settings
+
+    assert (
+        first_app.extensions["request_services"]["game"]
+        is not second_app.extensions["request_services"]["game"]
+    )
+    assert (
+        first_app.extensions["request_services"]["user"]
+        is not second_app.extensions["request_services"]["user"]
+    )

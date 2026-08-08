@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from rapidfuzz import process, fuzz
 from sqlalchemy import text
 from ...utils.date_parser import NBADateParser
+from ...config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -771,7 +772,7 @@ class BaseQueryParser:
     with the existing API. Enhanced with spaCy for better accuracy.
     """
     
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         """
         Initialize the parser with database connection
         
@@ -779,6 +780,7 @@ class BaseQueryParser:
             db_engine: SQLAlchemy database engine for data access
         """
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
         self.nlp = self._load_spacy_model()
         
         # Load reference data from existing database
@@ -794,7 +796,7 @@ class BaseQueryParser:
         )
         
         # Initialize date parser
-        self.date_parser = NBADateParser()
+        self.date_parser = NBADateParser(settings=self.settings)
         
         logger.debug("Loaded %s players", len(self.players))
         logger.debug("Loaded %s player aliases", len(self.player_aliases))

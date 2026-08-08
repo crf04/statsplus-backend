@@ -36,6 +36,18 @@ This is the same Ruff and pytest gate used by CI. To run only the tests:
 
 If a test requires network access or a real provider credential, mock that integration unless the test is explicitly marked as an integration check.
 
+## Database changes
+
+Use `python scripts/migrate.py --database-url <database-url>` (or set
+`DATABASE_URL`) to create or upgrade an application database. The command
+requires one of those explicit targets, is repeatable, and records applied
+versions in `schema_migrations`; use a disposable SQLite database for
+migration tests. It rejects the tracked `nba_play_types.db` file as a
+read-only fixture, and masks database passwords in status output.
+
+Run `python scripts/validate_demo_db.py` to validate that fixture. This command
+opens the file read-only and rejects missing schema elements or user records.
+
 ## Secrets and data
 
 Do not commit:

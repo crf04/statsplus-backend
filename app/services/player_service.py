@@ -1,16 +1,25 @@
 import pandas as pd
 import logging
+import requests
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
+from ..errors import (
+    AppError,
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+)
 from ..utils.nba_api_config import get_nba_stats_timeout
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
 class PlayerService:
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -27,8 +36,14 @@ class PlayerService:
         Categories: Playtypes, assists, Archetype
         """
         
-        #fuzzy match player name
+        if not player_name or not category:
+            raise InvalidInputError("player_name and category are required.")
+
+        # Fuzzy match player name.
         player_name = self._fuzzy_match_player_name(player_name)
+        if player_name is None:
+            raise ResourceNotFoundError("The requested player was not found.")
+
         try:
             if category == 'Playtypes':
                 return self._get_player_playtypes(player_name)
@@ -41,10 +56,18 @@ class PlayerService:
             elif category == 'Zone Shooting':
                 return self._get_player_zone_shooting(player_name)
             else:
-                raise ValueError(f"Unknown category: {category}")
-        except Exception as e:
-            logger.error("Error getting player profile: %s", e)
-            return None
+                raise InvalidInputError("The requested profile category is invalid.")
+        except AppError:
+            raise
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError(detail=error) from error
+        except (IndexError, KeyError) as error:
+            raise ResourceNotFoundError(
+                "The requested player profile was not found.", detail=error
+            ) from error
+        except Exception:
+            logger.exception("Error getting player profile")
+            raise
         
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
         """
@@ -84,9 +107,9 @@ class PlayerService:
                 
             return None
             
-        except Exception as e:
-            logger.error("Error fuzzy matching player name %r: %s", player_name, e)
-            return None
+        except Exception:
+            logger.exception("Error fuzzy matching player name %r", player_name)
+            raise
 
     def _get_player_playtypes(self, player_name):
         """Get player playtypes data"""
@@ -108,7 +131,7 @@ class PlayerService:
         """Get player shooting type data"""
         player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame', timeout=get_nba_stats_timeout()).get_data_frames()[1]
+        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame', timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[1]
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
@@ -128,9 +151,9 @@ class PlayerService:
             
             # Get game logs
             gl = playergamelogs.PlayerGameLogs(
-                season_nullable='2025-26',
+                season_nullable=self.settings.nba.current_season,
                 opp_team_id_nullable=team_id,
-                timeout=get_nba_stats_timeout(),
+                timeout=get_nba_stats_timeout(self.settings),
             ).get_data_frames()[0]
             
             # Filter and process game logs

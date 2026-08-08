@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask
 from flask_cors import CORS
+
+from app.config.settings import (
+    RuntimeSettings,
+    load_settings,
+    set_runtime_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +21,26 @@ logger = logging.getLogger(__name__)
 def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     """Create and configure the Flask application."""
     load_dotenv()
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+    config_overrides = config_overrides or {}
+    supplied_settings = config_overrides.get("RUNTIME_SETTINGS")
+    if isinstance(supplied_settings, RuntimeSettings):
+        settings = supplied_settings
+    else:
+        settings = load_settings(overrides=config_overrides)
+    set_runtime_settings(settings)
+    logging.basicConfig(level=settings.log_level)
 
     app = Flask(__name__)
     app.config.update(
         JSON_SORT_KEYS=False,
-        TESTING=os.getenv("FLASK_ENV") == "testing",
+        TESTING=settings.environment == "testing",
+        FLASK_ENV=settings.environment,
+        LOG_LEVEL=settings.log_level,
+        PORT=settings.port,
+        RUNTIME_SETTINGS=settings,
     )
+    app.extensions["runtime_settings"] = settings
     if config_overrides:
         app.config.update(config_overrides)
 
@@ -49,7 +67,7 @@ def _initialize_dependencies(app: Flask) -> None:
         try:
             from app.utils.firebase_admin import initialize_firebase_admin
 
-            initialize_firebase_admin()
+            initialize_firebase_admin(app.extensions["runtime_settings"])
         except Exception as error:
             logger.warning("Firebase Admin initialization skipped: %s", error)
 
@@ -75,17 +93,6 @@ def _register_blueprints(app: Flask) -> None:
 
 def _register_error_handlers(app: Flask) -> None:
     """Register consistent JSON error responses."""
+    from app.errors import register_error_handlers
 
-    @app.errorhandler(401)
-    def handle_unauthorized(error):  # type: ignore[no-untyped-def]
-        return jsonify({
-            "error": "Unauthorized",
-            "message": "Please sign in to access this resource",
-        }), 401
-
-    @app.errorhandler(403)
-    def handle_forbidden(error):  # type: ignore[no-untyped-def]
-        return jsonify({
-            "error": "Forbidden",
-            "message": "You do not have permission to access this resource",
-        }), 403
+    register_error_handlers(app)

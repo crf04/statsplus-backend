@@ -20,6 +20,34 @@ deployment provider's secret store.
 Use `.env.example` for variable names and safe defaults only. Keep real local
 values in `.env` or another gitignored file.
 
+Every pull request and push to `main` or `master` runs Gitleaks against the full
+repository history. A finding fails the `Security / Scan repository history for
+secrets` check; inspect the workflow log for the file and rule. Treat a matched
+credential as compromised even if it was removed in a later commit: revoke or
+rotate it first, then remove it from history when appropriate. Use a narrowly
+scoped `.gitleaks.toml` allowlist only for a confirmed false positive, and note
+the reason in the pull request.
+
+## Dependency maintenance
+
+Dependabot checks the root Python dependency inputs and GitHub Actions weekly.
+Its grouped pull requests must update both the direct requirement pins and the
+generated `requirements-lock.txt`; regenerate the lock with the command in
+`CONTRIBUTING.md`, review release notes for breaking changes, and run
+`./scripts/check.sh` before merging.
+
+The `Security` workflow audits the hashed lock file with `pip-audit` on every
+pull request, push to the default branches, and weekly schedule. A known
+vulnerability fails the `Security / Audit locked Python dependencies` check and
+lists its advisory and fixed versions in the log. Prefer upgrading to a fixed
+version. If no fix exists and the vulnerable code is demonstrably unreachable,
+document the risk and mitigation before adding a specific advisory ignore; do
+not disable the audit or use a blanket ignore.
+
+GitHub Actions are pinned to immutable commit SHAs with release comments.
+Dependabot keeps those pins current. When updating an action manually, verify
+the commit against the upstream release tag and preserve the version comment.
+
 ## Authentication and authorization
 
 Firebase Admin is the trust boundary for protected routes. If Firebase Admin
