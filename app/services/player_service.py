@@ -37,9 +37,11 @@ class PlayerService:
         try:
             df = self._fetch_data_from_table('player_play_types')
             return df['PLAYER_NAME'].values.tolist()
-        except Exception as e:
-            logger.error("Error fetching players: %s", e)
-            return []
+        except Exception:
+            # Surface the failure to the route so a broken database returns 500
+            # instead of an empty list that is indistinguishable from no players.
+            logger.exception("Error fetching players")
+            raise
 
     def get_player_profile(self, player_name, category, opp_team=None):
         """

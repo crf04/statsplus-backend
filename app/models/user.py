@@ -7,7 +7,7 @@ authentication to enable local user management and future features.
 
 from sqlalchemy import Column, String, DateTime, Boolean, Index
 from sqlalchemy.sql import func
-from datetime import datetime
+from datetime import datetime, timezone
 from . import Base
 
 class User(Base):
@@ -93,5 +93,7 @@ class User(Base):
             email=firebase_user_data.get('email'),
             display_name=firebase_user_data.get('name') or firebase_user_data.get('display_name'),
             photo_url=firebase_user_data.get('picture') or firebase_user_data.get('photo_url'),
-            last_login=datetime.utcnow()
+            # Timezone-aware: the column is timestamptz, and Postgres would read
+            # a naive value as server-local time and store it skewed by the offset.
+            last_login=datetime.now(timezone.utc)
         )
