@@ -7,12 +7,13 @@ without code changes elsewhere.
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from typing import Final
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
@@ -44,13 +45,19 @@ def _normalize_database_url(database_url: str) -> str:
     return database_url
 
 
-@lru_cache(maxsize=1)
-def get_engine() -> Engine:
+@lru_cache(maxsize=8)
+def _create_engine(database_url: str) -> Engine:
+    """Create and cache an engine for one normalized database URL."""
+
+    return create_engine(database_url)
+
+
+def get_engine(settings: RuntimeSettings | None = None) -> Engine:
     """Create and cache the global SQLAlchemy engine.
 
-    The engine is created from the `DATABASE_URL` environment variable if set,
-    otherwise falls back to the project-local SQLite database file. The engine
-    is memoized so imports across modules share the same connection pool.
+    The engine is created from the validated runtime settings object. The
+    bundled SQLite database remains the safe local default, and engines are
+    memoized by normalized URL so imports across modules share a pool.
 
     Returns
     -------
@@ -58,7 +65,11 @@ def get_engine() -> Engine:
         A configured SQLAlchemy engine.
     """
 
-    raw_url = os.getenv("DATABASE_URL", DEFAULT_SQLITE_PATH)
-    normalized_url = _normalize_database_url(raw_url)
-    return create_engine(normalized_url)
+    runtime_settings = settings or get_runtime_settings()
+    normalized_url = _normalize_database_url(runtime_settings.database.url)
+    return _create_engine(normalized_url)
 
+
+# Preserve the small cache-control surface callers historically got from the
+# lru_cache-decorated function.
+get_engine.cache_clear = _create_engine.cache_clear  # type: ignore[attr-defined]

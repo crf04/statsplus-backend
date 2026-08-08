@@ -52,7 +52,11 @@ cp .env.example .env
 
 ## Configuration
 
-The app loads `.env` automatically through `python-dotenv`. These are the most important variables:
+The app loads `.env` automatically through `python-dotenv`. The authoritative
+interface is the typed `RuntimeSettings` object; see
+[docs/SETTINGS.md](docs/SETTINGS.md) for the complete model, environment
+mapping, defaults, production validation, and current-season rule. These are
+the most important variables:
 
 | Variable | Required | Default or behavior |
 | --- | --- | --- |
@@ -62,7 +66,7 @@ The app loads `.env` automatically through `python-dotenv`. These are the most i
 | `LOG_LEVEL` | No | `INFO` |
 | `OPENAI_API_KEY` | No | If absent, NL queries stay in NLP-only mode |
 | `LLM_MODEL` | No | `gpt-4o-mini` |
-| `ENABLE_LLM_FALLBACK` | No | `True` |
+| `ENABLE_LLM_FALLBACK` | No | Enabled only when `OPENAI_API_KEY` is present |
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
@@ -78,6 +82,29 @@ Never commit `.env`, Firebase service-account JSON, OpenAI keys, database dumps 
 `nba_play_types.db` is intentionally tracked for public demos and local onboarding. It should contain public NBA-derived data only. The local `users` table is created by the app and should not be populated with real user data in public snapshots.
 
 The default SQLite URL is relative to the repository root, so run commands from the project directory unless you set an absolute `DATABASE_URL`.
+
+## Database schema and migrations
+
+Application-owned tables are managed by repeatable migrations. Create a fresh
+schema or upgrade an existing application database with an explicit database
+URL:
+
+```bash
+python scripts/migrate.py --database-url sqlite:////tmp/statsplus.sqlite3
+```
+
+Running the command again is safe; applied versions are recorded in the
+`schema_migrations` table. Keep migration databases disposable in tests and
+do not point this command at the tracked `nba_play_types.db` fixture.
+
+Validate the bundled fixture without changing it:
+
+```bash
+python scripts/validate_demo_db.py
+```
+
+The validator checks the required public tables and columns and fails if the
+`users` table contains records.
 
 ## Run locally
 
@@ -102,6 +129,12 @@ Live requests to `stats.nba.com` use a 10-second timeout by default. If that
 provider times out, game-log requests return `503 Service Unavailable` instead
 of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
+
+Application failures use a documented structured JSON error response with
+stable `invalid_input`, `resource_not_found`, `provider_unavailable`, and
+`invalid_configuration` codes. See the [API error contract](docs/API_DOCUMENTATION.md#error-responses)
+for statuses and examples; internal exception details are logged but not
+returned to clients.
 
 ## Authentication behavior
 
@@ -219,6 +252,8 @@ tests/
 scripts/
   bootstrap.sh             Create the Python 3.11 development environment
   check.sh                 Run the authoritative Ruff and pytest gate
+  migrate.py               Create or upgrade the application schema
+  validate_demo_db.py      Validate the public demo database read-only
 ```
 
 ## Deployment notes

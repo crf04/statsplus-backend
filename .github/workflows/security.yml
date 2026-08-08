@@ -1,4 +1,4 @@
-name: Tests
+name: Security
 
 on:
   pull_request:
@@ -6,9 +6,16 @@ on:
     branches:
       - master
       - main
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  checks:
+  dependency-audit:
+    name: Audit locked Python dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -31,18 +38,25 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-lock.txt
 
-      - name: Bootstrap development environment
+      - name: Bootstrap locked environment
         run: ./scripts/bootstrap.sh
 
-      - name: Verify database schema workflow
-        shell: bash
-        run: |
-          migration_database="$(mktemp)"
-          trap 'rm -f "$migration_database"' EXIT
-          migration_database_url="sqlite:///${migration_database}"
-          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
-          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
-          .venv/bin/python scripts/validate_demo_db.py
+      - name: Scan locked dependencies
+        run: .venv/bin/python -m pip_audit --require-hashes -r requirements-lock.txt
 
-      - name: Run checks
-        run: ./scripts/check.sh
+  secret-scan:
+    name: Scan repository history for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"

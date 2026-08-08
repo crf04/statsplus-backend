@@ -28,12 +28,20 @@ def get_session():
 
 def create_all_tables():
     """
-    Create all tables defined by models that inherit from Base.
-    This will only create tables that don't already exist.
+    Apply the current application schema migrations.
+
+    The function name is retained for the app-factory compatibility seam;
+    callers that need a repeatable workflow should use ``scripts/migrate.py``.
     """
     engine = get_engine()
-    Base.metadata.create_all(engine)
-    logger.info("Database tables are ready")
+    from app.migrations import run_migrations
+
+    result = run_migrations(engine)
+    logger.info(
+        "Database tables are ready at schema version %s (applied: %s)",
+        result.current_version,
+        ", ".join(result.applied) or "none",
+    )
 
 # Import all models here to ensure they're registered with Base.metadata
 from .user import User  # noqa: E402

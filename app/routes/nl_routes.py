@@ -1,6 +1,8 @@
 from flask import Blueprint, request, jsonify
 import logging
 
+from app.config.settings import get_runtime_settings
+
 from ..utils.db import get_engine
 from ..services.nl_service import NLService
 from ..utils.auth import require_auth, get_current_user
@@ -9,8 +11,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
-engine = get_engine()
-nl_service = NLService(engine)
+runtime_settings = get_runtime_settings()
+engine = get_engine(runtime_settings)
+nl_service = NLService(engine, settings=runtime_settings)
 
 @nl_bp.route('/nl-query', methods=['POST'])
 @require_auth

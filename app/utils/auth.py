@@ -10,6 +10,7 @@ from typing import Any, Callable
 from flask import current_app, g, jsonify, request
 
 from app.services.user_service import UserService
+from app.config.settings import RuntimeSettings
 
 from .firebase_admin import get_firebase_app, verify_firebase_token
 
@@ -39,6 +40,9 @@ def _is_production_environment() -> bool:
         environments.extend(
             [current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")]
         )
+        runtime_settings = current_app.extensions.get("runtime_settings")
+        if isinstance(runtime_settings, RuntimeSettings):
+            environments.append(runtime_settings.environment)
     except RuntimeError:
         pass
 
@@ -56,6 +60,9 @@ def _is_local_environment() -> bool:
         environments.extend(
             [current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")]
         )
+        runtime_settings = current_app.extensions.get("runtime_settings")
+        if isinstance(runtime_settings, RuntimeSettings):
+            environments.append(runtime_settings.environment)
         if current_app.testing:
             return True
     except RuntimeError:
@@ -78,6 +85,13 @@ def _auth_bypass_enabled() -> bool:
     if _is_production_environment() or not _is_local_environment():
         return False
 
+    try:
+        runtime_settings = current_app.extensions.get("runtime_settings")
+    except RuntimeError:
+        runtime_settings = None
+
+    if isinstance(runtime_settings, RuntimeSettings):
+        return runtime_settings.auth.firebase_admin_disabled
     return _is_truthy(os.getenv("FIREBASE_ADMIN_DISABLED"))
 
 

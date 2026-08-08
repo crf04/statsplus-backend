@@ -28,6 +28,32 @@ Authentication levels:
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
 
+## Error responses
+
+Expected application failures use one stable JSON shape:
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "The request contains invalid input."
+  }
+}
+```
+
+The public error categories and HTTP statuses are:
+
+| Category | Code | Status | Use |
+| --- | --- | ---: | --- |
+| Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
+| Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
+| Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
+| Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
+
+Unexpected failures return `internal_error` with status `500`. Internal
+exception details are logged for operators and are never included in the
+response. Successful response shapes are unchanged.
+
 For local, credential-free development only, set
 `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
 for local requests. The bypass is rejected when `FLASK_ENV=production`; never

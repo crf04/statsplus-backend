@@ -14,6 +14,7 @@ from openai import OpenAI, AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from dotenv import load_dotenv
 
+from app.config.settings import LLMSettings, RuntimeSettings, load_settings
 from ..services.nl_query.parser import QueryComponents
 
 
@@ -28,15 +29,18 @@ logger = logging.getLogger(__name__)
 class LLMConfig:
     """Configuration class for LLM service settings"""
     
-    def __init__(self):
-        self.api_key: str = os.getenv('OPENAI_API_KEY', '')
-        self.model: str = os.getenv('LLM_MODEL', 'gpt-4o-mini')
-        self.temperature: float = float(os.getenv('LLM_TEMPERATURE', '0'))
-        self.max_tokens: int = int(os.getenv('LLM_MAX_TOKENS', '512'))
-        self.timeout: float = float(os.getenv('LLM_TIMEOUT', '10.0'))
-        self.max_retries: int = int(os.getenv('LLM_MAX_RETRIES', '3'))
-        self.enable_fallback: bool = os.getenv('ENABLE_LLM_FALLBACK', 'True').lower() == 'true'
-        self.confidence_threshold: float = float(os.getenv('LLM_CONFIDENCE_THRESHOLD', '0.7'))
+    def __init__(self, settings: RuntimeSettings | None = None):
+        llm_settings: LLMSettings = (
+            settings.llm if settings is not None else load_settings().llm
+        )
+        self.api_key: str = llm_settings.api_key or ''
+        self.model: str = llm_settings.model
+        self.temperature: float = llm_settings.temperature
+        self.max_tokens: int = llm_settings.max_tokens
+        self.timeout: float = llm_settings.timeout_seconds
+        self.max_retries: int = llm_settings.max_retries
+        self.enable_fallback: bool = llm_settings.enable_fallback
+        self.confidence_threshold: float = llm_settings.confidence_threshold
     
     def validate(self) -> bool:
         """Validate configuration settings"""

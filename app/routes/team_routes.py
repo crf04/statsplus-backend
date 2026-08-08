@@ -1,12 +1,14 @@
 from flask import Blueprint, request, jsonify
+from app.config.settings import get_runtime_settings
 from ..utils.db import get_engine
 from ..services.team_service import TeamService
 from ..utils.auth import require_auth_optional
 
 # Initialize blueprint and services
 team_bp = Blueprint('teams', __name__)
-engine = get_engine()
-team_service = TeamService(engine)
+runtime_settings = get_runtime_settings()
+engine = get_engine(runtime_settings)
+team_service = TeamService(engine, settings=runtime_settings)
 
 @team_bp.route('/stats', methods=['GET'])
 @require_auth_optional

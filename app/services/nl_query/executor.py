@@ -8,10 +8,12 @@ and returns real data from the services.
 import json
 from typing import Dict, Any
 
+from app.config.settings import RuntimeSettings, get_runtime_settings
+
 class QueryExecutor:
     """Executes natural language queries against real NBA services"""
     
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         """
         Initialize the executor with database engine
         
@@ -19,13 +21,14 @@ class QueryExecutor:
             db_engine: SQLAlchemy database engine
         """
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
         
         # Import services dynamically to avoid circular imports
         from ..game_service import GameService
         from ..player_service import PlayerService
         
-        self.game_service = GameService(db_engine)
-        self.player_service = PlayerService(db_engine)
+        self.game_service = GameService(db_engine, settings=self.settings)
+        self.player_service = PlayerService(db_engine, settings=self.settings)
     
     def execute_query(self, api_info: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -143,7 +146,7 @@ class QueryExecutor:
             'rank_filter': [],
             'location_filter': 'Both',
             'game_filter': None,
-            'season_filter': '2025-26',
+            'season_filter': self.settings.nba.current_season,
             'playstyle_range': [0, 200],
             'self_filters': {}
         }

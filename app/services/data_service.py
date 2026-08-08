@@ -12,12 +12,14 @@ from nba_api.stats.endpoints import (
 from nba_api.stats.static import teams, players
 from app.utils.nba_api_config import get_nba_stats_timeout, get_shared_nba_session
 from app.utils.performance_monitor import monitor_nba_api_calls, PerformanceTimer
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
 class DataService:
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
         self.engine = db_engine
+        self.settings = settings or get_runtime_settings()
 
     def update_all_data(self):
         """Update all database tables with fresh data"""
@@ -266,15 +268,22 @@ class DataService:
         """Fetch play-by-play data from external API using optimized session"""
         base_url = 'https://api.pbpstats.com/get-totals/nba'
         params = {
-            'Season': '2025-26',
+            'Season': self.settings.nba.current_season,
             'SeasonType': 'Regular+Season',
             'Type': 'Player' if data_type == 'player' else 'Opponent'
         }
         
         try:
             # Use optimized session with connection pooling
-            session = get_shared_nba_session()
-            response = session.get(base_url, params=params, timeout=(10, 30))
+            session = get_shared_nba_session(self.settings)
+            response = session.get(
+                base_url,
+                params=params,
+                timeout=(
+                    self.settings.providers.pbp_connect_timeout_seconds,
+                    self.settings.providers.pbp_read_timeout_seconds,
+                ),
+            )
             response.raise_for_status()
             
             data = response.json()
@@ -324,7 +333,7 @@ class DataService:
             per_mode_detailed='Per48',
             date_from_nullable=date_filter,
             league_id_nullable='00',  # Filter for NBA teams only (excludes WNBA/G-League)
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_data(self, type, date_filter=None):
@@ -333,7 +342,7 @@ class DataService:
             date_from_nullable=date_filter,
             per_mode_simple='PerGame',
             league_id_nullable='00',  # Filter for NBA teams only (excludes WNBA/G-League)
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
@@ -343,7 +352,7 @@ class DataService:
             per_mode_detailed='PerGame',
             date_from_nullable=date_filter,
             league_id_nullable='00',  # Filter for NBA teams only (excludes WNBA/G-League)
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_player_zone_data(self, date_filter=None):
@@ -351,7 +360,7 @@ class DataService:
             distance_range='By Zone',
             per_mode_detailed='PerGame',
             date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_team_play_type_data(self, play_type):
@@ -359,7 +368,7 @@ class DataService:
             play_type_nullable=play_type,
             player_or_team_abbreviation='T',
             type_grouping_nullable='Defensive',
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_play_type_data(self, play_type):
@@ -367,14 +376,14 @@ class DataService:
             play_type_nullable=play_type,
             player_or_team_abbreviation='P',
             type_grouping_nullable='Offensive',
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
     
     def _fetch_player_per36_stats(self):
         return LeagueDashPlayerStats(
             measure_type_detailed_defense='Base',
             per_mode_detailed='Per36',
-            timeout=get_nba_stats_timeout(),
+            timeout=get_nba_stats_timeout(self.settings),
         ).get_data_frames()[0]
 
     def _fetch_data_from_table(self, table_name):
@@ -500,7 +509,7 @@ class DataService:
                 player_or_team_abbreviation='T',
                 type_grouping_nullable='Defensive',
                 league_id_nullable='00',  # Filter for NBA teams only (excludes WNBA/G-League)
-                timeout=get_nba_stats_timeout(),
+                timeout=get_nba_stats_timeout(self.settings),
             ).get_data_frames()[0]
             df['PLAY_TYPE'] = play_type
             df['PTS/G'] = df['PTS'] / df['GP']

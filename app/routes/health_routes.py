@@ -5,7 +5,6 @@ Provides endpoints to verify service dependencies such as the database and NBA A
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
@@ -16,6 +15,7 @@ from sqlalchemy import text
 
 from ..utils.db import get_engine
 from ..utils.nba_api_config import get_shared_nba_session
+from app.config.settings import get_runtime_settings
 
 
 health_bp = Blueprint("health", __name__, url_prefix="/api/health")
@@ -73,7 +73,7 @@ def detailed_health() -> Tuple[Any, int]:
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'database': _check_database_connection(),
         'nba_api': _check_nba_api_connectivity(),
-        'environment': os.getenv('FLASK_ENV', 'unknown'),
+        'environment': get_runtime_settings().environment,
         'version': '1.0.0'
     }
     
@@ -148,17 +148,21 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
     """
     try:
         start_time = time.time()
-        session = get_shared_nba_session()
+        settings = get_runtime_settings()
+        session = get_shared_nba_session(settings)
         
         # Test with the game logs API endpoint (what you actually use)
         response = session.get(
             'https://api.pbpstats.com/get-totals/nba',
             params={
-                'Season': '2025-26',
+                'Season': settings.nba.current_season,
                 'SeasonType': 'Regular+Season',
                 'Type': 'Player'
             },
-            timeout=(5, 15)
+            timeout=(
+                settings.providers.pbp_connect_timeout_seconds,
+                settings.providers.pbp_read_timeout_seconds,
+            )
         )
         
         duration = time.time() - start_time
@@ -193,4 +197,3 @@ def _check_nba_api_connectivity() -> Dict[str, Any]:
             'response_time_ms': None,
             'endpoint': 'api.pbpstats.com/get-totals/nba'
         }
-

@@ -1,12 +1,14 @@
 from flask import Blueprint, jsonify
+from app.config.settings import get_runtime_settings
 from ..utils.db import get_engine
 from ..services.data_service import DataService
 from ..utils.auth import require_admin
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
-engine = get_engine()
-data_service = DataService(engine)
+runtime_settings = get_runtime_settings()
+engine = get_engine(runtime_settings)
+data_service = DataService(engine, settings=runtime_settings)
 
 @data_bp.route('/update_database', methods=['POST'])
 @require_admin
