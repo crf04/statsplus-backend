@@ -5,26 +5,33 @@ Thanks for helping improve StatsPlus NBA Backend. Keep changes small, documented
 ## Local setup
 
 ```bash
-python3.11 -m venv .venv
+./scripts/bootstrap.sh
 source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env
 ```
 
-The dev requirements include runtime dependencies plus pytest and lint tooling.
+The script creates a Python 3.11.9 virtual environment, installs the hashed, fully resolved `requirements-lock.txt`, and creates a local `.env` from the example when needed.
+
+`requirements-lock.txt` is generated from `requirements-dev.txt` for the exact version in `runtime.txt`. After changing either requirements input, regenerate it with:
+
+```bash
+uv pip compile requirements-dev.txt \
+  --python-version "$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')" \
+  --generate-hashes \
+  --output-file requirements-lock.txt
+```
 
 ## Before opening a change
 
 Run:
 
 ```bash
-python -m pytest
+./scripts/check.sh
 ```
 
-For more detail:
+This is the same Ruff and pytest gate used by CI. To run only the tests:
 
 ```bash
-python -m pytest -v --tb=short
+./run_tests.sh
 ```
 
 If a test requires network access or a real provider credential, mock that integration unless the test is explicitly marked as an integration check.

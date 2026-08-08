@@ -138,8 +138,6 @@ yarn-error.log*
 *.db
 !nba_play_types.db
 *.sqlite
-AGENTS.md
-
 # Local credentials
 *serviceAccount*.json
 *service-account*.json
