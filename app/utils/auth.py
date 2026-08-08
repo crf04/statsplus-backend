@@ -7,8 +7,15 @@ import os
 from functools import wraps
 from typing import Any, Callable
 
-from flask import current_app, g, jsonify, request
+from flask import current_app, g, request
 
+from app.errors import (
+    AppError,
+    AuthenticationRequiredError,
+    AuthorizationError,
+    InvalidTokenError,
+    ProviderUnavailableError,
+)
 from app.services.user_service import UserService
 from app.config.settings import RuntimeSettings
 
@@ -117,18 +124,16 @@ def _set_local_bypass_user() -> None:
     }
 
 
-def _firebase_unavailable_response() -> tuple[Any, int]:
-    """Return the stable response for an unavailable auth provider."""
+def _firebase_unavailable_error(detail: Any = None) -> ProviderUnavailableError:
+    """Build the safe application error for an unavailable auth provider."""
 
-    return jsonify(
-        {
-            "error": "Authentication service unavailable",
-            "message": (
-                "Firebase authentication is unavailable. Configure Firebase "
-                "Admin credentials or enable the local development bypass."
-            ),
-        }
-    ), 503
+    return ProviderUnavailableError(
+        (
+            "Firebase authentication is unavailable. Configure Firebase Admin "
+            "credentials or enable the local development bypass."
+        ),
+        detail=detail,
+    )
 
 
 def _is_firebase_unavailable_error(error: Exception) -> bool:
@@ -176,8 +181,8 @@ def _sync_firebase_user(
     return current_user
 
 
-def _authenticate_request() -> tuple[Any, int] | None:
-    """Authenticate the current request, returning an HTTP error if needed."""
+def _authenticate_request() -> None:
+    """Authenticate the current request or raise a safe application error."""
 
     try:
         firebase_app = get_firebase_app()
@@ -189,41 +194,34 @@ def _authenticate_request() -> tuple[Any, int] | None:
         if _auth_bypass_enabled():
             logger.warning("Firebase unavailable; using explicitly enabled local auth bypass")
             _set_local_bypass_user()
-            return None
+            return
 
         logger.error("Firebase unavailable and no local auth bypass is enabled")
-        return _firebase_unavailable_response()
+        raise _firebase_unavailable_error()
 
     auth_header = request.headers.get("Authorization")
     if not auth_header:
-        return jsonify(
-            {
-                "error": "Missing Authorization header",
-                "message": "Please provide a valid Firebase token",
-            }
-        ), 401
+        raise AuthenticationRequiredError(
+            "Please provide a valid Firebase token.",
+            detail="Authorization header was not provided",
+        )
 
     # Split once so token strings containing spaces are passed unchanged to
     # Firebase, while still rejecting malformed or empty bearer credentials.
     try:
         scheme, token = auth_header.split(" ", 1)
         if scheme.lower() != "bearer":
-            return jsonify(
-                {
-                    "error": "Invalid authorization scheme",
-                    "message": "Authorization header must use Bearer scheme",
-                }
-            ), 401
+            raise AuthenticationRequiredError(
+                "Authorization header must use Bearer scheme.",
+                detail="Authorization header used an unsupported scheme",
+            )
         if not token.strip():
             raise ValueError("Authorization header must include a token")
     except ValueError as error:
-        return jsonify(
-            {
-                "error": "Invalid Authorization header format",
-                "message": str(error)
-                or "Authorization header must be: Bearer <token>",
-            }
-        ), 401
+        raise AuthenticationRequiredError(
+            "Authorization header must be: Bearer <token>.",
+            detail=error,
+        ) from error
 
     try:
         decoded_token = verify_firebase_token(token)
@@ -235,22 +233,19 @@ def _authenticate_request() -> tuple[Any, int] | None:
             current_user["email"],
             current_user["uid"],
         )
-        return None
+        return
     except ValueError as error:
         logger.warning("Invalid token: %s", error)
-        return jsonify({"error": "Invalid token", "message": str(error)}), 401
+        raise InvalidTokenError(detail=error) from error
+    except AppError:
+        raise
     except Exception as error:
         if _is_firebase_unavailable_error(error):
             logger.error("Firebase became unavailable while verifying token: %s", error)
-            return _firebase_unavailable_response()
+            raise _firebase_unavailable_error(error) from error
 
         logger.error("Authentication error: %s", error)
-        return jsonify(
-            {
-                "error": "Authentication failed",
-                "message": "Unable to verify token",
-            }
-        ), 500
+        raise AppError("Authentication failed while verifying the token.", detail=error) from error
 
 
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
@@ -266,9 +261,7 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
         # Reuse a user authenticated by an outer auth/authorization decorator
         # so either decorator ordering remains safe and single-pass.
         if get_current_user() is None:
-            authentication_error = _authenticate_request()
-            if authentication_error is not None:
-                return authentication_error
+            _authenticate_request()
         return f(*args, **kwargs)
 
     return decorated_function
@@ -321,17 +314,13 @@ def require_admin(f: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
         if get_current_user() is None:
-            authentication_error = _authenticate_request()
-            if authentication_error is not None:
-                return authentication_error
+            _authenticate_request()
 
         if not _user_is_admin(get_current_user()):
-            return jsonify(
-                {
-                    "error": "Forbidden",
-                    "message": "Administrator privileges are required",
-                }
-            ), 403
+            raise AuthorizationError(
+                "Administrator privileges are required.",
+                detail="Authenticated user did not satisfy an admin claim",
+            )
 
         return f(*args, **kwargs)
 
@@ -353,7 +342,13 @@ def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:
         # Firebase-unavailable response. If a token is supplied, preserve the
         # historical behavior of ignoring invalid optional credentials.
         auth_header = request.headers.get("Authorization")
-        if auth_header and get_firebase_app() is not None:
+        try:
+            firebase_app = get_firebase_app() if auth_header else None
+        except Exception as error:
+            logger.warning("Optional Firebase authentication is unavailable: %s", error)
+            firebase_app = None
+
+        if auth_header and firebase_app is not None:
             try:
                 scheme, token = auth_header.split(" ", 1)
                 if scheme.lower() != "bearer" or not token.strip():

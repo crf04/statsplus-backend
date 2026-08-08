@@ -23,7 +23,13 @@ registers handlers that return the documented `{ "error": { "code", "message"
 } }` shape. Optional `detail` values are logged for operators and never sent
 to clients.
 
-Most route modules currently construct service instances at import time. Tests should patch the instance exposed by the route module—for example, `app.routes.game_routes.game_service`—or instantiate a service directly with a temporary or mocked engine.
+Route modules expose lazy service handles rather than constructing services at
+import time. A handle resolves its service from the active app's
+`app.extensions["request_services"]` registry, passing that app's canonical
+`RuntimeSettings` object into the constructor. Tests can patch the handle
+exposed by the route module—for example,
+`app.routes.game_routes.game_service`—or instantiate a service directly with a
+temporary or mocked engine.
 
 ## Data-source seams
 
@@ -82,8 +88,10 @@ Data refreshes are mutations, not health checks. Use a disposable database and m
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and
 the `scripts/migrate.py` command. A fresh or existing application database can
-be created or upgraded with an explicit `DATABASE_URL`; rerunning the command
-is idempotent because applied versions are recorded in `schema_migrations`.
+be created or upgraded with an explicit `--database-url` argument or
+`DATABASE_URL`; the CLI has no database-file fallback and fails if neither is
+provided. Rerunning the command is idempotent because applied versions are
+recorded in `schema_migrations`. Status output masks database passwords.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
@@ -102,7 +110,8 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 
 ## Known seams to improve incrementally
 
-- Service construction at module import time couples imports to database, Redis, and parser initialization.
+- The lazy request-service registry keeps app-factory isolation explicit while
+  avoiding database, Redis, and parser initialization during route imports.
 - The request layer mixes synchronous Flask handlers with `asyncio.run` for game-log work.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
 - The bundled provider-generated tables are validated as a public fixture; they

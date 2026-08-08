@@ -12,12 +12,14 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from app.migrations import MigrationResult, run_migrations  # noqa: E402
-from app.utils.db import (  # noqa: E402
-    DEFAULT_SQLITE_PATH,
-    _normalize_database_url,
-)
+from app.utils.db import _normalize_database_url  # noqa: E402
+
+
+DEMO_DATABASE_PATH = Path(__file__).resolve().parents[1] / "nba_play_types.db"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -26,10 +28,46 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--database-url",
-        default=os.getenv("DATABASE_URL", DEFAULT_SQLITE_PATH),
-        help="SQLAlchemy database URL (default: DATABASE_URL or the bundled SQLite URL)",
+        help="SQLAlchemy database URL (or set DATABASE_URL)",
     )
     return parser
+
+
+def _database_url_for_migration(
+    parser: argparse.ArgumentParser, requested_url: str | None
+) -> str:
+    """Resolve the explicit migration target without falling back to the fixture."""
+    database_url = requested_url if requested_url is not None else os.getenv("DATABASE_URL")
+    if not database_url:
+        parser.error("a migration target is required: pass --database-url or set DATABASE_URL")
+    return database_url
+
+
+def _is_demo_database(database_url: str) -> bool:
+    """Return whether a SQLite URL resolves to the tracked demo fixture."""
+    try:
+        parsed_url = make_url(database_url)
+    except ArgumentError:
+        return False
+
+    if parsed_url.get_backend_name() != "sqlite" or not parsed_url.database:
+        return False
+
+    database_path = parsed_url.database
+    if database_path.startswith("file:"):
+        database_path = database_path.removeprefix("file:")
+    if database_path == ":memory:":
+        return False
+
+    return Path(database_path).expanduser().resolve() == DEMO_DATABASE_PATH.resolve()
+
+
+def _redacted_database_url(database_url: str) -> str:
+    """Render a database URL without exposing its password."""
+    try:
+        return make_url(database_url).render_as_string(hide_password=True)
+    except ArgumentError:
+        return "<invalid database URL>"
 
 
 def _run(database_url: str) -> MigrationResult:
@@ -42,17 +80,25 @@ def _run(database_url: str) -> MigrationResult:
 
 def main(argv: list[str] | None = None) -> int:
     """Run migrations and return a process exit status."""
-    args = _build_parser().parse_args(argv)
-    result = _run(args.database_url)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    database_url = _database_url_for_migration(parser, args.database_url)
+    if _is_demo_database(database_url):
+        parser.error(
+            "the tracked nba_play_types.db is a read-only demo database and "
+            "cannot be a migration target"
+        )
+
+    result = _run(database_url)
+    redacted_url = _redacted_database_url(database_url)
     if result.applied:
         print(
-            f"Applied {len(result.applied)} migration(s) to {args.database_url}: "
+            f"Applied {len(result.applied)} migration(s) to {redacted_url}: "
             f"{', '.join(result.applied)}"
         )
     else:
         print(
-            f"Database is already up to date at version {result.current_version}: "
-            f"{args.database_url}"
+            f"Database is already up to date at version {result.current_version}: {redacted_url}"
         )
     return 0
 

@@ -42,7 +42,7 @@ jobs:
         run: ./scripts/bootstrap.sh
 
       - name: Scan locked dependencies
-        run: .venv/bin/python -m pip_audit --require-hashes -r requirements-lock.txt
+        run: .venv/bin/python -m pip_audit --local
 
   secret-scan:
     name: Scan repository history for secrets

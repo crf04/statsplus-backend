@@ -2,23 +2,25 @@ import asyncio
 import requests
 from flask import Blueprint, request
 
-from app.config.settings import get_runtime_settings
-
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..utils.db import get_engine
 from ..services.game_service import GameService
 from ..utils.auth import require_auth
+from ._service_proxy import CurrentAppService
 
 
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
-runtime_settings = get_runtime_settings()
-engine = get_engine(runtime_settings)
-game_service = GameService(engine, settings=runtime_settings)
+
+
+def _build_game_service(engine, settings):
+    return GameService(engine, settings=settings)
+
+
+game_service = CurrentAppService("game", _build_game_service)
 
 
 def _parse_game_log_filters() -> tuple[str, dict]:
@@ -43,7 +45,7 @@ def _parse_game_log_filters() -> tuple[str, dict]:
             "location_filter": request.args.get("location_filter", "Both"),
             "game_filter": request.args.get("game_filter"),
             "season_filter": request.args.get(
-                "season_filter", runtime_settings.nba.current_season
+                "season_filter", game_service.settings.nba.current_season
             ),
             "playstyle_range": [
                 float(request.args.get("playstyle_RTG_min", "0")),

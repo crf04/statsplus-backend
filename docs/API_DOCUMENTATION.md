@@ -49,6 +49,10 @@ The public error categories and HTTP statuses are:
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
 | Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
+| Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
+| Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
+| Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
+| Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 
 Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the

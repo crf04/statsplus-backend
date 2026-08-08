@@ -14,7 +14,7 @@ from openai import OpenAI, AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from dotenv import load_dotenv
 
-from app.config.settings import LLMSettings, RuntimeSettings, load_settings
+from app.config.settings import LLMSettings, RuntimeSettings, get_runtime_settings
 from ..services.nl_query.parser import QueryComponents
 
 
@@ -31,7 +31,7 @@ class LLMConfig:
     
     def __init__(self, settings: RuntimeSettings | None = None):
         llm_settings: LLMSettings = (
-            settings.llm if settings is not None else load_settings().llm
+            settings.llm if settings is not None else get_runtime_settings().llm
         )
         self.api_key: str = llm_settings.api_key or ''
         self.model: str = llm_settings.model
@@ -70,14 +70,14 @@ class LLMService:
     Handles prompt management, error handling, retry logic, and response parsing.
     """
     
-    def __init__(self, engine=None):
+    def __init__(self, engine=None, settings: RuntimeSettings | None = None):
         """
         Initialize the LLM service.
         
         Args:
             engine: Database engine for loading player/team aliases (optional)
         """
-        self.config = LLMConfig()
+        self.config = LLMConfig(settings=settings)
         if not self.config.validate():
             raise LLMError("Invalid LLM configuration")
         

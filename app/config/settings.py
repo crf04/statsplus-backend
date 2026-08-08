@@ -53,12 +53,6 @@ class DatabaseSettings(BaseModel):
 
     url: str = DEFAULT_SQLITE_URL
 
-    @property
-    def database_url(self) -> str:
-        """Backward-compatible descriptive name for the URL field."""
-
-        return self.url
-
 
 class AuthenticationSettings(BaseModel):
     """Firebase Admin settings and the explicit local bypass."""
@@ -87,12 +81,6 @@ class AuthenticationSettings(BaseModel):
         )
         return has_file or has_json or has_parts
 
-    @property
-    def credentials_configured(self) -> bool:
-        """Alias used by callers that do not need to know Firebase details."""
-
-        return self.has_credentials
-
 
 class CacheSettings(BaseModel):
     """Optional Redis cache settings."""
@@ -107,12 +95,6 @@ class CacheSettings(BaseModel):
     password: str | None = None
     tls: bool = False
 
-    @property
-    def redis_url(self) -> str | None:
-        """Backward-compatible descriptive name for the URL field."""
-
-        return self.url
-
 
 class ProviderSettings(BaseModel):
     """Timeout, retry, and pooling settings for external NBA providers."""
@@ -125,24 +107,6 @@ class ProviderSettings(BaseModel):
     pbp_max_retries: int = Field(default=3, ge=0)
     pbp_pool_connections: int = Field(default=10, ge=1)
     pbp_pool_maxsize: int = Field(default=20, ge=1)
-
-    @property
-    def stats_timeout_seconds(self) -> float:
-        """Alias for the timeout used by ``stats.nba.com``."""
-
-        return self.nba_stats_timeout_seconds
-
-    @property
-    def nba_api_timeout_connect(self) -> float:
-        """Alias for the PBP provider connect timeout."""
-
-        return self.pbp_connect_timeout_seconds
-
-    @property
-    def nba_api_timeout_read(self) -> float:
-        """Alias for the PBP provider read timeout."""
-
-        return self.pbp_read_timeout_seconds
 
 
 class LLMSettings(BaseModel):
@@ -159,12 +123,6 @@ class LLMSettings(BaseModel):
     enable_fallback: bool = False
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
-    @property
-    def timeout(self) -> float:
-        """Alias matching the OpenAI client argument name."""
-
-        return self.timeout_seconds
-
 
 class NBASeasonSettings(BaseModel):
     """NBA season defaults shared by game-log and NL request paths."""
@@ -172,12 +130,6 @@ class NBASeasonSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     current_season: str = Field(default_factory=current_nba_season)
-
-    @property
-    def season(self) -> str:
-        """Short alias for the current season."""
-
-        return self.current_season
 
 
 class RuntimeSettings(BaseModel):
@@ -195,30 +147,6 @@ class RuntimeSettings(BaseModel):
     port: int = Field(default=5000, ge=1, le=65535)
     debug: bool = True
     log_level: str = "INFO"
-
-    @property
-    def current_season(self) -> str:
-        """Expose the centralized current season at the top level."""
-
-        return self.nba.current_season
-
-    @property
-    def season(self) -> str:
-        """Short top-level alias for the centralized current season."""
-
-        return self.nba.current_season
-
-    @property
-    def database_url(self) -> str:
-        """Expose the database URL at the top level for adapters."""
-
-        return self.database.url
-
-    @property
-    def provider(self) -> ProviderSettings:
-        """Singular alias for integrations that call this a provider config."""
-
-        return self.providers
 
     @field_validator("environment", mode="before")
     @classmethod
@@ -461,8 +389,6 @@ def get_runtime_settings() -> RuntimeSettings:
         from flask import current_app
 
         app_settings = current_app.extensions.get("runtime_settings")
-        if app_settings is None:
-            app_settings = current_app.extensions.get("settings")
         if isinstance(app_settings, RuntimeSettings):
             return app_settings
     except (ImportError, RuntimeError):
@@ -473,32 +399,17 @@ def get_runtime_settings() -> RuntimeSettings:
     return load_settings()
 
 
-# Public aliases retained for adapters and callers that prefer shorter names.
-AuthSettings = AuthenticationSettings
-NBASettings = NBASeasonSettings
-AppSettings = RuntimeSettings
-Settings = RuntimeSettings
-SettingsError = ConfigurationError
-load_runtime_settings = load_settings
-
-
 __all__ = [
-    "AuthSettings",
-    "AppSettings",
     "AuthenticationSettings",
     "CacheSettings",
     "ConfigurationError",
     "DatabaseSettings",
     "LLMSettings",
     "NBASeasonSettings",
-    "NBASettings",
     "ProviderSettings",
     "RuntimeSettings",
-    "Settings",
-    "SettingsError",
     "current_nba_season",
     "get_runtime_settings",
     "load_settings",
-    "load_runtime_settings",
     "set_runtime_settings",
 ]

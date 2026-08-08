@@ -86,16 +86,21 @@ The default SQLite URL is relative to the repository root, so run commands from 
 ## Database schema and migrations
 
 Application-owned tables are managed by repeatable migrations. Create a fresh
-schema or upgrade an existing application database with an explicit database
-URL:
+schema or upgrade an existing application database by passing an explicit
+database URL or setting `DATABASE_URL`:
 
 ```bash
 python scripts/migrate.py --database-url sqlite:////tmp/statsplus.sqlite3
+# Or: DATABASE_URL=sqlite:////tmp/statsplus.sqlite3 python scripts/migrate.py
 ```
 
+The migration command has no database-file fallback: it fails when neither
+target is provided. It also rejects the tracked `nba_play_types.db` fixture as
+a read-only demo database. Status output preserves the non-secret parts of a
+URL while masking its password.
+
 Running the command again is safe; applied versions are recorded in the
-`schema_migrations` table. Keep migration databases disposable in tests and
-do not point this command at the tracked `nba_play_types.db` fixture.
+`schema_migrations` table. Keep migration databases disposable in tests.
 
 Validate the bundled fixture without changing it:
 
@@ -131,8 +136,9 @@ of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
 
 Application failures use a documented structured JSON error response with
-stable `invalid_input`, `resource_not_found`, `provider_unavailable`, and
-`invalid_configuration` codes. See the [API error contract](docs/API_DOCUMENTATION.md#error-responses)
+stable category codes, including `invalid_input`, `resource_not_found`,
+`provider_unavailable`, `authentication_required`, `invalid_token`, and
+`forbidden`. See the [API error contract](docs/API_DOCUMENTATION.md#error-responses)
 for statuses and examples; internal exception details are logged but not
 returned to clients.
 

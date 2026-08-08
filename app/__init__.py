@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask
 from flask_cors import CORS
 
 from app.config.settings import (
@@ -41,7 +41,6 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
         RUNTIME_SETTINGS=settings,
     )
     app.extensions["runtime_settings"] = settings
-    app.extensions["settings"] = settings
     if config_overrides:
         app.config.update(config_overrides)
 
@@ -97,17 +96,3 @@ def _register_error_handlers(app: Flask) -> None:
     from app.errors import register_error_handlers
 
     register_error_handlers(app)
-
-    @app.errorhandler(401)
-    def handle_unauthorized(error):  # type: ignore[no-untyped-def]
-        return jsonify({
-            "error": "Unauthorized",
-            "message": "Please sign in to access this resource",
-        }), 401
-
-    @app.errorhandler(403)
-    def handle_forbidden(error):  # type: ignore[no-untyped-def]
-        return jsonify({
-            "error": "Forbidden",
-            "message": "You do not have permission to access this resource",
-        }), 403

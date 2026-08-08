@@ -70,6 +70,44 @@ class InvalidConfigurationError(AppError):
     default_message = "The server configuration is invalid."
 
 
+class AuthenticationError(AppError):
+    """The request could not be authenticated."""
+
+    status_code = 401
+    code = "authentication_failed"
+    default_message = "The request could not be authenticated."
+
+
+class AuthenticationRequiredError(AuthenticationError):
+    """The request did not provide usable authentication credentials."""
+
+    code = "authentication_required"
+    default_message = "Authentication is required to access this resource."
+
+
+class InvalidTokenError(AuthenticationError):
+    """The supplied authentication token is invalid or expired."""
+
+    code = "invalid_token"
+    default_message = "The provided Firebase token is invalid."
+
+
+class AuthorizationError(AppError):
+    """An authenticated user is not allowed to perform the operation."""
+
+    status_code = 403
+    code = "forbidden"
+    default_message = "You do not have permission to access this resource."
+
+
+class OperationFailedError(AppError):
+    """A requested application operation could not be completed safely."""
+
+    status_code = 500
+    code = "operation_failed"
+    default_message = "The requested operation could not be completed."
+
+
 def _error_response(code: str, message: str, status_code: int):
     """Build the one public JSON shape used for application errors."""
 
@@ -98,6 +136,10 @@ def register_error_handlers(app: Flask) -> None:
 
         if error.code == 400:
             app_error = InvalidInputError(detail=error.description)
+        elif error.code == 401:
+            app_error = AuthenticationRequiredError(detail=error.description)
+        elif error.code == 403:
+            app_error = AuthorizationError(detail=error.description)
         elif error.code == 404:
             app_error = ResourceNotFoundError(detail=error.description)
         else:

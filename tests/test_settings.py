@@ -6,6 +6,7 @@ import pytest
 
 from app.config.settings import (
     ConfigurationError,
+    NBASeasonSettings,
     RuntimeSettings,
     current_nba_season,
     load_settings,
@@ -94,4 +95,63 @@ def test_app_startup_exposes_one_settings_object(monkeypatch):
     app = create_app({"SKIP_FIREBASE_INIT": True, "SKIP_TABLE_CREATE": True})
 
     assert app.extensions["runtime_settings"] is app.config["RUNTIME_SETTINGS"]
+    assert "settings" not in app.extensions
     assert isinstance(app.extensions["runtime_settings"], RuntimeSettings)
+
+
+def test_app_factory_isolates_request_settings_and_services(monkeypatch):
+    """Each app's request defaults and services use its injected settings."""
+    from app import create_app
+    from app.routes import game_routes
+
+    monkeypatch.setattr(
+        "app.services.game_service.get_redis_client",
+        lambda settings: None,
+    )
+
+    first_settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        nba=NBASeasonSettings(current_season="2030-31"),
+    )
+    second_settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        nba=NBASeasonSettings(current_season="2040-41"),
+    )
+    first_app = create_app(
+        {
+            "RUNTIME_SETTINGS": first_settings,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    second_app = create_app(
+        {
+            "RUNTIME_SETTINGS": second_settings,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    assert first_app.extensions["runtime_settings"] is first_settings
+    assert second_app.extensions["runtime_settings"] is second_settings
+
+    with first_app.test_request_context(
+        "/api/games/game_logs?player_name=LeBron%20James"
+    ):
+        _, first_filters = game_routes._parse_game_log_filters()
+        assert first_filters["season_filter"] == "2030-31"
+        assert game_routes.game_service.settings is first_settings
+
+    with second_app.test_request_context(
+        "/api/games/game_logs?player_name=LeBron%20James"
+    ):
+        _, second_filters = game_routes._parse_game_log_filters()
+        assert second_filters["season_filter"] == "2040-41"
+        assert game_routes.game_service.settings is second_settings
+
+    assert (
+        first_app.extensions["request_services"]["game"]
+        is not second_app.extensions["request_services"]["game"]
+    )

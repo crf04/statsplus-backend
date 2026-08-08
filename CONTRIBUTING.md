@@ -38,11 +38,12 @@ If a test requires network access or a real provider credential, mock that integ
 
 ## Database changes
 
-Use `python scripts/migrate.py --database-url <database-url>` to create or
-upgrade an application database. The command is repeatable and records
-applied versions in `schema_migrations`; use a disposable SQLite database for
-migration tests. The tracked `nba_play_types.db` file is a public fixture and
-must not be used as a migration target.
+Use `python scripts/migrate.py --database-url <database-url>` (or set
+`DATABASE_URL`) to create or upgrade an application database. The command
+requires one of those explicit targets, is repeatable, and records applied
+versions in `schema_migrations`; use a disposable SQLite database for
+migration tests. It rejects the tracked `nba_play_types.db` file as a
+read-only fixture, and masks database passwords in status output.
 
 Run `python scripts/validate_demo_db.py` to validate that fixture. This command
 opens the file read-only and rejects missing schema elements or user records.

@@ -6,6 +6,13 @@ and basic user statistics.
 """
 
 from flask import Blueprint, request, jsonify
+from app.errors import (
+    AppError,
+    AuthenticationRequiredError,
+    InvalidInputError,
+    OperationFailedError,
+    ResourceNotFoundError,
+)
 from app.utils.auth import (
     get_current_user,
     require_admin,
@@ -33,7 +40,7 @@ def get_user_profile():
     try:
         current_user = get_current_user()
         if not current_user:
-            return jsonify({'error': 'User not authenticated'}), 401
+            raise AuthenticationRequiredError()
         
         # Get user from database
         db_user = current_user.get('db_user')
@@ -42,7 +49,7 @@ def get_user_profile():
             db_user = user_service.get_user_by_firebase_uid(current_user['uid'])
         
         if not db_user:
-            return jsonify({'error': 'User not found in database'}), 404
+            raise ResourceNotFoundError("User not found in database.")
         
         # Return user profile data
         return jsonify({
@@ -50,9 +57,13 @@ def get_user_profile():
             'user': db_user.to_dict()
         })
         
-    except Exception as e:
-        logger.error(f"Error in get_user_profile: {e}")
-        return jsonify({'error': 'Failed to retrieve user profile'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in get_user_profile: %s", error)
+        raise OperationFailedError(
+            "Failed to retrieve user profile.", detail=error
+        ) from error
 
 @user_bp.route('/profile', methods=['PUT'])
 @require_auth
@@ -72,17 +83,17 @@ def update_user_profile():
     try:
         current_user = get_current_user()
         if not current_user:
-            return jsonify({'error': 'User not authenticated'}), 401
+            raise AuthenticationRequiredError()
         
         # Get request data
-        data = request.get_json()
+        data = request.get_json(silent=True)
         if not data:
-            return jsonify({'error': 'No data provided'}), 400
+            raise InvalidInputError("No profile data was provided.")
         
         # Get current user from database
         db_user = user_service.get_user_by_firebase_uid(current_user['uid'])
         if not db_user:
-            return jsonify({'error': 'User not found in database'}), 404
+            raise ResourceNotFoundError("User not found in database.")
         
         # Update user data with new information
         updated_firebase_data = {
@@ -95,7 +106,7 @@ def update_user_profile():
         # Update user in database
         updated_user = user_service.create_or_update_user(updated_firebase_data)
         if not updated_user:
-            return jsonify({'error': 'Failed to update user profile'}), 500
+            raise OperationFailedError("Failed to update user profile.")
         
         return jsonify({
             'success': True,
@@ -103,9 +114,13 @@ def update_user_profile():
             'user': updated_user.to_dict()
         })
         
-    except Exception as e:
-        logger.error(f"Error in update_user_profile: {e}")
-        return jsonify({'error': 'Failed to update user profile'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in update_user_profile: %s", error)
+        raise OperationFailedError(
+            "Failed to update user profile.", detail=error
+        ) from error
 
 @user_bp.route('/stats', methods=['GET'])
 @require_auth
@@ -119,21 +134,25 @@ def get_user_stats():
     try:
         current_user = get_current_user()
         if not current_user:
-            return jsonify({'error': 'User not authenticated'}), 401
+            raise AuthenticationRequiredError()
         
         # Get user statistics
         stats = user_service.get_user_stats(current_user['uid'])
         if stats is None:
-            return jsonify({'error': 'User not found'}), 404
+            raise ResourceNotFoundError("User not found.")
         
         return jsonify({
             'success': True,
             'stats': stats
         })
         
-    except Exception as e:
-        logger.error(f"Error in get_user_stats: {e}")
-        return jsonify({'error': 'Failed to retrieve user statistics'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in get_user_stats: %s", error)
+        raise OperationFailedError(
+            "Failed to retrieve user statistics.", detail=error
+        ) from error
 
 @user_bp.route('/activity/ping', methods=['POST'])
 @require_auth_optional
@@ -156,15 +175,22 @@ def ping_user_activity():
         
         # Update last login timestamp
         success = user_service.update_last_login(current_user['uid'])
+
+        if not success:
+            raise OperationFailedError("Failed to update user activity.")
         
         return jsonify({
-            'success': success,
-            'message': 'Activity updated' if success else 'Failed to update activity'
+            'success': True,
+            'message': 'Activity updated'
         })
         
-    except Exception as e:
-        logger.error(f"Error in ping_user_activity: {e}")
-        return jsonify({'error': 'Failed to update user activity'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in ping_user_activity: %s", error)
+        raise OperationFailedError(
+            "Failed to update user activity.", detail=error
+        ) from error
 
 @user_bp.route('/deactivate', methods=['POST'])
 @require_auth
@@ -178,7 +204,7 @@ def deactivate_account():
     try:
         current_user = get_current_user()
         if not current_user:
-            return jsonify({'error': 'User not authenticated'}), 401
+            raise AuthenticationRequiredError()
         
         # Deactivate user account
         success = user_service.deactivate_user(current_user['uid'])
@@ -188,12 +214,15 @@ def deactivate_account():
                 'success': True,
                 'message': 'Account deactivated successfully'
             })
-        else:
-            return jsonify({'error': 'Failed to deactivate account'}), 500
+        raise OperationFailedError("Failed to deactivate account.")
         
-    except Exception as e:
-        logger.error(f"Error in deactivate_account: {e}")
-        return jsonify({'error': 'Failed to deactivate account'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in deactivate_account: %s", error)
+        raise OperationFailedError(
+            "Failed to deactivate account.", detail=error
+        ) from error
 
 @user_bp.route('/admin/stats', methods=['GET'])
 @require_admin
@@ -215,9 +244,13 @@ def get_admin_stats():
             }
         })
         
-    except Exception as e:
-        logger.error(f"Error in get_admin_stats: {e}")
-        return jsonify({'error': 'Failed to retrieve admin statistics'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in get_admin_stats: %s", error)
+        raise OperationFailedError(
+            "Failed to retrieve admin statistics.", detail=error
+        ) from error
 
 @user_bp.route('/sync', methods=['POST'])
 @require_auth
@@ -229,7 +262,7 @@ def sync_user():
     try:
         current_user = get_current_user()
         if not current_user:
-            return jsonify({'error': 'User not authenticated'}), 401
+            raise AuthenticationRequiredError()
         
         # The user should already be synced by the auth middleware,
         # but let's return the user info to confirm
@@ -241,16 +274,10 @@ def sync_user():
                 'user': db_user.to_dict()
             })
         else:
-            return jsonify({
-                'success': False,
-                'message': 'User sync failed',
-                'firebase_user': {
-                    'uid': current_user.get('uid'),
-                    'email': current_user.get('email'),
-                    'name': current_user.get('name')
-                }
-            })
+            raise OperationFailedError("User synchronization failed.")
         
-    except Exception as e:
-        logger.error(f"Error in sync_user: {e}")
-        return jsonify({'error': f'Sync failed: {str(e)}'}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        logger.error("Error in sync_user: %s", error)
+        raise OperationFailedError("User synchronization failed.", detail=error) from error

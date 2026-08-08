@@ -1,22 +1,26 @@
 import requests
 from flask import Blueprint, request, jsonify
 
-from app.config.settings import get_runtime_settings
-
 from ..errors import (
+    AppError,
     InvalidInputError,
+    OperationFailedError,
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..utils.db import get_engine
 from ..services.player_service import PlayerService
 from ..utils.auth import require_admin, require_auth_optional
+from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 player_bp = Blueprint('players', __name__)
-runtime_settings = get_runtime_settings()
-engine = get_engine(runtime_settings)
-player_service = PlayerService(engine, settings=runtime_settings)
+
+
+def _build_player_service(engine, settings):
+    return PlayerService(engine, settings=settings)
+
+
+player_service = CurrentAppService("player", _build_player_service)
 
 @player_bp.route('', methods=['GET'])
 @require_auth_optional
@@ -24,8 +28,10 @@ def get_players():
     try:
         players = player_service.get_all_players()
         return jsonify(players)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except AppError:
+        raise
+    except Exception as error:
+        raise OperationFailedError("Failed to retrieve players.", detail=error) from error
 
 @player_bp.route('/profile', methods=['GET'])
 @require_auth_optional
@@ -45,10 +51,14 @@ def get_player_profile():
                 detail=f"player_name={player!r}, category={category!r}",
             )
         return jsonify(profile_data)
-    except (InvalidInputError, ResourceNotFoundError):
+    except AppError:
         raise
     except requests.exceptions.RequestException as error:
         raise ProviderUnavailableError(detail=error) from error
+    except Exception as error:
+        raise OperationFailedError(
+            "Failed to retrieve the player profile.", detail=error
+        ) from error
 
 @player_bp.route('/fetch', methods=['PUT'])
 @require_admin
@@ -57,7 +67,8 @@ def fetch_players():
         success = player_service.store_player_information()
         if success:
             return jsonify({'message': 'Player data processed and stored successfully'})
-        else:
-            return jsonify({'error': 'Failed to store player data'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        raise OperationFailedError("Failed to store player data.")
+    except AppError:
+        raise
+    except Exception as error:
+        raise OperationFailedError("Failed to store player data.", detail=error) from error

@@ -186,3 +186,200 @@ def test_player_profile_provider_failure_uses_central_handler(client, monkeypatc
             "message": "An upstream provider is currently unavailable. Please try again later.",
         }
     }
+
+
+def test_missing_auth_header_uses_nested_error_contract(client, monkeypatch) -> None:
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+
+    response = client.get("/api/games/game_logs")
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error": {
+            "code": "authentication_required",
+            "message": "Please provide a valid Firebase token.",
+        }
+    }
+
+
+def test_non_admin_auth_uses_nested_error_contract(client, monkeypatch) -> None:
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    monkeypatch.setattr(
+        auth,
+        "verify_firebase_token",
+        lambda token: {
+            "uid": "viewer",
+            "email": "viewer@example.com",
+            "role": "viewer",
+        },
+    )
+    monkeypatch.setattr(auth.UserService, "create_or_update_user", lambda *args: None)
+
+    response = client.get(
+        "/api/data/fetch_playtypes",
+        headers={"Authorization": "Bearer viewer-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": {
+            "code": "forbidden",
+            "message": "Administrator privileges are required.",
+        }
+    }
+
+
+def test_invalid_token_details_are_not_exposed(client, monkeypatch) -> None:
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+
+    def reject_token(token):
+        raise ValueError("firebase-token-secret")
+
+    monkeypatch.setattr(auth, "verify_firebase_token", reject_token)
+
+    response = client.get(
+        "/api/games/game_logs",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_token",
+            "message": "The provided Firebase token is invalid.",
+        }
+    }
+    assert "firebase-token-secret" not in response.get_data(as_text=True)
+
+
+def test_route_exception_details_are_not_exposed(client, monkeypatch) -> None:
+    from app.routes import player_routes
+
+    def fail_to_load_players():
+        raise RuntimeError("player-provider-secret")
+
+    monkeypatch.setattr(
+        player_routes.player_service,
+        "get_all_players",
+        fail_to_load_players,
+    )
+
+    response = client.get("/api/players")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": {
+            "code": "operation_failed",
+            "message": "Failed to retrieve players.",
+        }
+    }
+    assert "player-provider-secret" not in response.get_data(as_text=True)
+
+
+def test_nl_query_missing_query_uses_nested_error_contract(client) -> None:
+    response = client.post("/api/nl-query", json={})
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "A query is required.",
+        }
+    }
+
+
+def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
+    from app.routes import health_routes
+
+    class FailingEngine:
+        dialect = type("Dialect", (), {"name": "sqlite", "driver": "pysqlite"})()
+
+        def connect(self):
+            raise RuntimeError("database-password-secret")
+
+    monkeypatch.setattr(health_routes, "get_engine", lambda: FailingEngine())
+
+    response = client.get("/api/health/db")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": {
+            "code": "internal_error",
+            "message": "The database health check failed.",
+        }
+    }
+    assert "database-password-secret" not in response.get_data(as_text=True)
+
+
+def test_data_route_failure_uses_nested_error_contract(client, monkeypatch) -> None:
+    from app.routes import data_update_routes
+
+    def fail_to_fetch_playtypes():
+        raise RuntimeError("playtypes-provider-secret")
+
+    monkeypatch.setattr(
+        data_update_routes.data_service,
+        "get_playtypes",
+        fail_to_fetch_playtypes,
+    )
+
+    response = client.get("/api/data/fetch_playtypes")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": {
+            "code": "operation_failed",
+            "message": "Failed to fetch play types.",
+        }
+    }
+    assert "playtypes-provider-secret" not in response.get_data(as_text=True)
+
+
+def test_team_missing_data_uses_nested_error_contract(client, monkeypatch) -> None:
+    from app.routes import team_routes
+
+    monkeypatch.setattr(
+        team_routes.team_service,
+        "get_team_stats",
+        lambda *args, **kwargs: None,
+    )
+
+    response = client.get("/api/teams/stats?team=Example&category=Traditional")
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": {
+            "code": "resource_not_found",
+            "message": "No data found for the specified team and category.",
+        }
+    }
+
+
+def test_user_route_exception_details_are_not_exposed(client, monkeypatch) -> None:
+    from app.routes import user_routes
+
+    def fail_to_load_user(*args, **kwargs):
+        raise RuntimeError("user-database-secret")
+
+    monkeypatch.setattr(
+        user_routes.user_service,
+        "get_user_by_firebase_uid",
+        fail_to_load_user,
+    )
+
+    response = client.get("/api/user/profile")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": {
+            "code": "operation_failed",
+            "message": "Failed to retrieve user profile.",
+        }
+    }
+    assert "user-database-secret" not in response.get_data(as_text=True)

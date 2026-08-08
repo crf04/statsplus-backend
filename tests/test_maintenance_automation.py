@@ -35,5 +35,6 @@ def test_security_workflow_audits_lock_and_scans_secrets():
 
     assert "pull_request:" in workflow
     assert "pip_audit" in workflow
+    assert "--local" in workflow
     assert "requirements-lock.txt" in workflow
     assert "gitleaks/gitleaks-action@" in workflow and "# v3." in workflow

@@ -8,6 +8,7 @@ import pytest
 from flask import Flask, jsonify
 
 import app.utils.auth as auth
+from app.errors import register_error_handlers
 
 
 class _FakeUserService:
@@ -21,6 +22,7 @@ def _make_app(decorator, **config: Any) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.config.update(config)
+    register_error_handlers(app)
 
     @app.get("/protected")
     @decorator
@@ -41,11 +43,13 @@ def test_require_auth_fails_closed_when_firebase_is_unavailable(monkeypatch):
 
     assert response.status_code == 503
     assert response.get_json() == {
-        "error": "Authentication service unavailable",
-        "message": (
-            "Firebase authentication is unavailable. Configure Firebase Admin "
-            "credentials or enable the local development bypass."
-        ),
+        "error": {
+            "code": "provider_unavailable",
+            "message": (
+                "Firebase authentication is unavailable. Configure Firebase Admin "
+                "credentials or enable the local development bypass."
+            ),
+        }
     }
 
 
@@ -82,7 +86,7 @@ def test_require_auth_rejects_legacy_config_bypass_without_environment_flag(monk
     response = app.test_client().get("/protected")
 
     assert response.status_code == 503
-    assert response.get_json()["error"] == "Authentication service unavailable"
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_require_auth_rejects_debug_only_bypass(monkeypatch):
@@ -94,7 +98,7 @@ def test_require_auth_rejects_debug_only_bypass(monkeypatch):
     response = app.test_client().get("/protected")
 
     assert response.status_code == 503
-    assert response.get_json()["error"] == "Authentication service unavailable"
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_require_auth_rejects_nonlocal_environment(monkeypatch):
@@ -106,7 +110,7 @@ def test_require_auth_rejects_nonlocal_environment(monkeypatch):
     response = app.test_client().get("/protected")
 
     assert response.status_code == 503
-    assert response.get_json()["error"] == "Authentication service unavailable"
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_local_bypass_is_rejected_in_production(monkeypatch):
@@ -118,7 +122,7 @@ def test_local_bypass_is_rejected_in_production(monkeypatch):
     response = app.test_client().get("/protected")
 
     assert response.status_code == 503
-    assert response.get_json()["error"] == "Authentication service unavailable"
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_local_bypass_is_rejected_without_an_explicit_local_environment(monkeypatch):
@@ -129,6 +133,7 @@ def test_local_bypass_is_rejected_without_an_explicit_local_environment(monkeypa
         ENV=None,
         FLASK_ENV=None,
     )
+    register_error_handlers(app)
 
     @app.get("/protected")
     @auth.require_auth
@@ -142,7 +147,7 @@ def test_local_bypass_is_rejected_without_an_explicit_local_environment(monkeypa
     response = app.test_client().get("/protected")
 
     assert response.status_code == 503
-    assert response.get_json()["error"] == "Authentication service unavailable"
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_optional_auth_uses_shared_user_sync_mapping(monkeypatch):
@@ -236,8 +241,10 @@ def test_require_admin_rejects_authenticated_non_admin(monkeypatch):
 
     assert response.status_code == 403
     assert response.get_json() == {
-        "error": "Forbidden",
-        "message": "Administrator privileges are required",
+        "error": {
+            "code": "forbidden",
+            "message": "Administrator privileges are required.",
+        }
     }
 
 

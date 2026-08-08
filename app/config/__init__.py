@@ -11,7 +11,6 @@ from .filter_mappings import (
     RANKING_TERMS
 )
 from .settings import (
-    AuthSettings,
     AuthenticationSettings,
     CacheSettings,
     ConfigurationError,
@@ -33,7 +32,6 @@ __all__ = [
     'TIME_PERIOD_SYNONYMS',
     'NUMBER_WORDS',
     'RANKING_TERMS',
-    'AuthSettings',
     'AuthenticationSettings',
     'CacheSettings',
     'ConfigurationError',

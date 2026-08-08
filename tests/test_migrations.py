@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
+import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from app.migrations import run_migrations
+from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
 
 
@@ -77,3 +79,64 @@ def test_demo_database_validation_reports_missing_tables(tmp_path):
 
     assert not result.valid
     assert any("missing required table" in issue for issue in result.issues)
+
+
+def test_migration_cli_requires_database_target(monkeypatch, capsys):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(SystemExit) as error:
+        migrate.main([])
+
+    assert error.value.code == 2
+    error_output = capsys.readouterr().err
+    assert "--database-url" in error_output
+    assert "DATABASE_URL" in error_output
+
+
+def test_migration_cli_rejects_demo_database(monkeypatch, capsys):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        migrate,
+        "_run",
+        lambda _: pytest.fail("the demo fixture must be rejected before migration"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        migrate.main(["--database-url", "sqlite:///nba_play_types.db"])
+
+    assert error.value.code == 2
+    assert "read-only demo database" in capsys.readouterr().err
+
+
+def test_migration_cli_accepts_database_url_environment_variable(monkeypatch):
+    database_url = "sqlite:////tmp/statsplus-migrations.sqlite3"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    observed_urls = []
+    monkeypatch.setattr(
+        migrate,
+        "_run",
+        lambda url: (
+            observed_urls.append(url),
+            migrate.MigrationResult(applied=(), current_version=1),
+        )[1],
+    )
+
+    assert migrate.main([]) == 0
+    assert observed_urls == [database_url]
+
+
+def test_migration_cli_redacts_database_password(monkeypatch, capsys):
+    database_url = "postgresql://migration_user:super-secret@example.invalid/stats"
+    monkeypatch.setattr(
+        migrate,
+        "_run",
+        lambda _: migrate.MigrationResult(
+            applied=("001_create_users",), current_version=1
+        ),
+    )
+
+    assert migrate.main(["--database-url", database_url]) == 0
+
+    output = capsys.readouterr().out
+    assert "super-secret" not in output
+    assert "postgresql://migration_user:***@example.invalid/stats" in output
