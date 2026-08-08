@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -24,6 +26,18 @@ from app.utils.db import get_engine
 from app.utils.nba_api_config import get_shared_nba_session
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class HealthProbe:
+    """Typed description of one external dependency health probe."""
+
+    label: str
+    endpoint: str
+    provider: str
+    test_type: str
+    probe: Callable[[], Any]
+    status_getter: Callable[[Any], int | None]
 
 
 class ProviderHealthService:
@@ -80,84 +94,68 @@ class ProviderHealthService:
 
     def check_nba_api(self) -> dict[str, Any]:
         """Probe NBA Stats through its typed adapter."""
-
-        started = time.monotonic()
-        try:
-            self.nba_stats.health_probe()
-            return {
-                "status": "healthy",
-                "response_time_ms": self._duration_ms(started),
-                "status_code": self.nba_stats.last_status_code,
-                "endpoint": self.NBA_ENDPOINT,
-                "provider": "nba_stats",
-                "test_type": "team_stats_api",
-            }
-        except requests.exceptions.Timeout:
-            logger.error("NBA API health check timed out")
-            return self._unhealthy_provider(
-                "NBA API health check timed out.",
-                self.NBA_ENDPOINT,
-                "nba_stats",
-                started,
-                status_code=self.nba_stats.last_status_code,
-            )
-        except requests.exceptions.RequestException:
-            logger.error("NBA API health check request failed")
-            return self._unhealthy_provider(
-                "NBA API health check request failed.",
-                self.NBA_ENDPOINT,
-                "nba_stats",
-                started,
-                status_code=self.nba_stats.last_status_code,
-            )
-        except Exception:
-            logger.error("NBA API health check failed")
-            return self._unhealthy_provider(
-                "NBA API health check failed.",
-                self.NBA_ENDPOINT,
-                "nba_stats",
-                started,
-                status_code=self.nba_stats.last_status_code,
-            )
+        return self._check_provider(self._nba_health_probe())
 
     def check_pbp_api(self) -> dict[str, Any]:
         """Probe PBP Stats through its separate adapter and timeout signal."""
+        return self._check_provider(self._pbp_health_probe())
+
+    def _nba_health_probe(self) -> HealthProbe:
+        """Describe the NBA probe without embedding its lifecycle policy."""
+
+        return HealthProbe(
+            label="NBA API",
+            endpoint=self.NBA_ENDPOINT,
+            provider="nba_stats",
+            test_type="team_stats_api",
+            probe=self.nba_stats.health_probe,
+            status_getter=lambda _result: getattr(
+                self.nba_stats, "last_status_code", None
+            ),
+        )
+
+    def _pbp_health_probe(self) -> HealthProbe:
+        """Describe the PBP probe and keep its status signal distinct."""
+
+        return HealthProbe(
+            label="PBP Stats",
+            endpoint=self.PBP_ENDPOINT,
+            provider="pbp_stats",
+            test_type="totals_api",
+            probe=self.pbp_stats.health_probe,
+            status_getter=lambda result: result if isinstance(result, int) else None,
+        )
+
+    def _check_provider(self, probe: HealthProbe) -> dict[str, Any]:
+        """Run one provider probe with shared timing and failure policy."""
 
         started = time.monotonic()
+        result: Any = None
         try:
-            status_code = self.pbp_stats.health_probe()
+            result = probe.probe()
             return {
                 "status": "healthy",
                 "response_time_ms": self._duration_ms(started),
-                "status_code": status_code,
-                "endpoint": self.PBP_ENDPOINT,
-                "provider": "pbp_stats",
-                "test_type": "totals_api",
+                "status_code": self._status_code(probe, result),
+                "endpoint": probe.endpoint,
+                "provider": probe.provider,
+                "test_type": probe.test_type,
             }
         except requests.exceptions.Timeout:
-            logger.error("PBP Stats health check timed out")
-            return self._unhealthy_provider(
-                "PBP Stats health check timed out.",
-                self.PBP_ENDPOINT,
-                "pbp_stats",
-                started,
-            )
+            message = f"{probe.label} health check timed out."
+            logger.error(message)
         except requests.exceptions.RequestException:
-            logger.error("PBP Stats health check request failed")
-            return self._unhealthy_provider(
-                "PBP Stats health check request failed.",
-                self.PBP_ENDPOINT,
-                "pbp_stats",
-                started,
-            )
+            message = f"{probe.label} health check request failed."
+            logger.error(message)
         except Exception:
-            logger.error("PBP Stats health check failed")
-            return self._unhealthy_provider(
-                "PBP Stats health check failed.",
-                self.PBP_ENDPOINT,
-                "pbp_stats",
-                started,
-            )
+            message = f"{probe.label} health check failed."
+            logger.error(message)
+        return self._unhealthy_provider(
+            message,
+            probe,
+            started,
+            status_code=self._status_code(probe, result),
+        )
 
     def detailed(self) -> dict[str, Any]:
         """Return the complete detailed-health payload before HTTP translation."""
@@ -182,10 +180,17 @@ class ProviderHealthService:
         return round((time.monotonic() - started) * 1000, 2)
 
     @staticmethod
+    def _status_code(probe: HealthProbe, result: Any) -> int | None:
+        try:
+            status_code = probe.status_getter(result)
+        except Exception:
+            return None
+        return status_code if isinstance(status_code, int) else None
+
+    @staticmethod
     def _unhealthy_provider(
         message: str,
-        endpoint: str,
-        provider: str,
+        probe: HealthProbe,
         started: float,
         *,
         status_code: int | None = None,
@@ -195,9 +200,9 @@ class ProviderHealthService:
             "error": message,
             "response_time_ms": ProviderHealthService._duration_ms(started),
             "status_code": status_code,
-            "endpoint": endpoint,
-            "provider": provider,
+            "endpoint": probe.endpoint,
+            "provider": probe.provider,
         }
 
 
-__all__ = ["ProviderHealthService"]
+__all__ = ["HealthProbe", "ProviderHealthService"]

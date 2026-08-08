@@ -45,7 +45,6 @@ from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
     CACHE_DISABLED,
     CACHE_HIT,
-    CACHE_MISS,
     NBA_STATS_OPERATIONS,
     PROVIDER_NBA_STATS,
     ProviderResponseError,
@@ -241,7 +240,7 @@ class NBAStatsAdapter:
         build: Callable[[float], object],
         *,
         frame_index: int = 0,
-        cache_status: str = CACHE_MISS,
+        cache_status: str = CACHE_DISABLED,
         required_columns: Iterable[str] = (),
         validator: Callable[[pd.DataFrame], Any] | None = None,
     ) -> pd.DataFrame | None:
@@ -264,6 +263,9 @@ class NBAStatsAdapter:
                 f"expected one of {sorted(NBA_STATS_OPERATIONS)}."
             )
 
+        # Avoid exposing a previous call's status when a new request times
+        # out before ``nba_api`` creates its response object.
+        self._last_status_code = None
         with self._bound:
             with provider_call(
                 PROVIDER_NBA_STATS,
@@ -332,7 +334,7 @@ class NBAStatsAdapter:
         player_id: int,
         season: str,
         *,
-        cache_status: str = CACHE_MISS,
+        cache_status: str = CACHE_DISABLED,
     ) -> pd.DataFrame:
         """Fetch one player's regular-season game logs for ``season``."""
 
@@ -355,7 +357,7 @@ class NBAStatsAdapter:
         self,
         date_from: str | None,
         *,
-        cache_status: str = CACHE_MISS,
+        cache_status: str = CACHE_DISABLED,
         per_mode_detailed: str = "Per48",
         league_id: str = "00",
     ) -> pd.DataFrame | None:
@@ -382,7 +384,7 @@ class NBAStatsAdapter:
         general_range: str,
         date_from: str | None,
         *,
-        cache_status: str = CACHE_MISS,
+        cache_status: str = CACHE_DISABLED,
         per_mode_simple: str = "PerGame",
         league_id: str = "00",
     ) -> pd.DataFrame:
@@ -408,7 +410,7 @@ class NBAStatsAdapter:
         self,
         date_from: str | None,
         *,
-        cache_status: str = CACHE_MISS,
+        cache_status: str = CACHE_DISABLED,
         per_mode_detailed: str = "PerGame",
         league_id: str = "00",
     ) -> pd.DataFrame:

@@ -24,6 +24,7 @@ from app.models.catalogs import (
 )
 from app.services.nba_stats_adapter import NBAStatsAdapter
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
+from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher
 from app.utils.performance_monitor import monitor_nba_api_calls
 
@@ -44,12 +45,13 @@ class DataService:
         Provider and transformation failures happen before any table is
         touched, so an interrupted refresh leaves the previous tables intact.
         """
-        self._report_progress(progress_callback, 0.05, "Fetching provider data")
+        progress = RefreshProgress(progress_callback)
+        progress.fetch("Fetching provider data")
         frames = self._collect_all_frames()
-        self._report_progress(progress_callback, 0.75, "Transforming provider data")
-        self._report_progress(progress_callback, 0.9, "Publishing refreshed tables")
+        progress.transform("Transforming provider data")
+        progress.publish("Publishing refreshed tables")
         self.publisher.publish(frames)
-        self._report_progress(progress_callback, 1.0, "Completed")
+        progress.complete()
         return True
 
     @monitor_nba_api_calls
@@ -61,33 +63,26 @@ class DataService:
         """Fetch one PBP totals set and publish it under its live table name."""
         self._validate_pbp_data_type(data_type)
         table_name = f"pbp_{data_type}_stats"
-        self._report_progress(progress_callback, 0.1, "Fetching PBP totals")
+        progress = RefreshProgress(progress_callback)
+        progress.fetch("Fetching PBP totals")
         frame = self._collect_pbp_frame(data_type)
-        self._report_progress(progress_callback, 0.75, "Transforming PBP totals")
-        self._report_progress(progress_callback, 0.9, "Publishing PBP totals")
+        progress.transform("Transforming PBP totals")
+        progress.publish("Publishing PBP totals")
         self.publisher.publish({table_name: frame})
-        self._report_progress(progress_callback, 1.0, "Completed")
+        progress.complete()
         return True
 
     def fetch_players_with_teams(self, progress_callback: Callable | None = None):
         """Fetch teams, map players to them, and publish both tables at once."""
-        self._report_progress(progress_callback, 0.1, "Fetching players and teams")
+        progress = RefreshProgress(progress_callback)
+        progress.fetch("Fetching players and teams")
         frames = self._collect_players_with_teams()
-        self._report_progress(progress_callback, 0.75, "Transforming player-team mapping")
+        progress.transform("Transforming player-team mapping")
         records = frames["player_team_table"].to_dict(orient="records")
-        self._report_progress(progress_callback, 0.9, "Publishing player-team mapping")
+        progress.publish("Publishing player-team mapping")
         self.publisher.publish(frames)
-        self._report_progress(progress_callback, 1.0, "Completed")
+        progress.complete()
         return records
-
-    @staticmethod
-    def _report_progress(
-        progress_callback: Callable | None,
-        progress: float,
-        note: str,
-    ) -> None:
-        if progress_callback is not None:
-            progress_callback(progress, note)
 
     def get_playtypes(self):
         combined_df = pd.DataFrame()

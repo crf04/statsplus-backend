@@ -12,6 +12,8 @@ shape raise :class:`ProviderResponseError`, which is recorded as a
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pandas as pd
@@ -81,6 +83,24 @@ class PBPTotalsAdapter:
     def read_timeout(self) -> float:
         return self.settings.providers.pbp_read_timeout_seconds
 
+    @contextmanager
+    def _request(self, operation: str, params: dict[str, str]) -> Iterator[Any]:
+        """Execute one instrumented PBP request and yield its response."""
+
+        with provider_call(
+            PROVIDER_PBP_STATS,
+            operation,
+            cache_status=CACHE_DISABLED,
+        ) as tracker:
+            response = self.session.get(
+                self.base_url,
+                params=params,
+                timeout=(self.connect_timeout, self.read_timeout),
+            )
+            tracker.status_code = response.status_code
+            response.raise_for_status()
+            yield response
+
     def fetch_totals_frame(self, data_type: PBPDataKind = "player") -> pd.DataFrame:
         """Fetch one PBP totals frame (``player`` or ``opponent``).
 
@@ -101,18 +121,7 @@ class PBPTotalsAdapter:
         }
         operation = "get_totals_player" if data_type == "player" else "get_totals_opponent"
 
-        with provider_call(
-            PROVIDER_PBP_STATS,
-            operation,
-            cache_status=CACHE_DISABLED,
-        ) as tracker:
-            response = self.session.get(
-                self.base_url,
-                params=params,
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
-            tracker.status_code = response.status_code
-            response.raise_for_status()
+        with self._request(operation, params) as response:
             try:
                 payload = response.json()
             except ValueError as error:
@@ -123,22 +132,14 @@ class PBPTotalsAdapter:
 
     def health_probe(self) -> int:
         """Check ``api.pbpstats.com`` using its own timeout and telemetry seam."""
-        with provider_call(
-            PROVIDER_PBP_STATS,
+        with self._request(
             "health_probe",
-            cache_status=CACHE_DISABLED,
-        ) as tracker:
-            response = self.session.get(
-                self.base_url,
-                params={
-                    "Season": self.settings.nba.current_season,
-                    "SeasonType": "Regular+Season",
-                    "Type": "Player",
-                },
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
-            tracker.status_code = response.status_code
-            response.raise_for_status()
+            {
+                "Season": self.settings.nba.current_season,
+                "SeasonType": "Regular+Season",
+                "Type": "Player",
+            },
+        ) as response:
             return response.status_code
 
     @staticmethod

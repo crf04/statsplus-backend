@@ -9,6 +9,7 @@ import sys
 import os
 from unittest.mock import patch, MagicMock
 import pandas as pd
+from app.models.game_logs import SelfFilter
 
 # Add the app directory to the path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -199,6 +200,36 @@ class TestSelfFilters(unittest.TestCase):
                     filter_obj = components.self_filters[0]
                     self.assertEqual(filter_obj.operator, expected_op)
                     self.assertEqual(filter_obj.value, expected_val)
+
+    def test_typed_operator_domain_applies_all_comparisons(self):
+        values = pd.Series([1, 2, 3, 4])
+        expected = {
+            "gte": [False, True, True, True],
+            "gt": [False, False, True, True],
+            "lt": [True, False, False, False],
+            "lte": [True, True, False, False],
+            "eq": [False, False, True, False],
+            "between": [False, True, True, False],
+        }
+
+        for operator, mask in expected.items():
+            with self.subTest(operator=operator):
+                value2 = 3 if operator == "between" else None
+                typed_filter = SelfFilter(
+                    stat="PTS",
+                    operator=operator,
+                    value=2 if operator != "eq" else 3,
+                    value2=value2,
+                )
+                self.assertEqual(typed_filter.apply(values).tolist(), mask)
+
+    def test_typed_operator_domain_rejects_invalid_second_values(self):
+        with self.assertRaises(ValueError):
+            SelfFilter(stat="PTS", operator="between", value=3)
+        with self.assertRaises(ValueError):
+            SelfFilter(stat="PTS", operator="gte", value=3, value2=4)
+        with self.assertRaises(ValueError):
+            SelfFilter(stat="PTS", operator="between", value=4, value2=3)
     
     def test_edge_cases(self):
         """Test edge cases and potential failure scenarios"""

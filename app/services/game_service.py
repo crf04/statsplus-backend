@@ -247,7 +247,7 @@ class GameService:
             )
 
     def _fetch_game_logs_from_api(
-        self, player_name, season=None, *, cache_status=CACHE_MISS
+        self, player_name, season=None, *, cache_status=CACHE_DISABLED
     ):
         season = season or self.settings.nba.current_season
         player_id = self.get_player_id(player_name)
@@ -381,22 +381,7 @@ class GameService:
             stat = self_filter.stat
             if stat not in df.columns:
                 continue
-            values = df[stat]
-            if self_filter.operator == "gte":
-                df = df[values >= self_filter.value]
-            elif self_filter.operator == "gt":
-                df = df[values > self_filter.value]
-            elif self_filter.operator == "lt":
-                df = df[values < self_filter.value]
-            elif self_filter.operator == "lte":
-                df = df[values <= self_filter.value]
-            elif self_filter.operator == "eq":
-                df = df[values == self_filter.value]
-            elif self_filter.operator == "between":
-                df = df[
-                    (values >= self_filter.value)
-                    & (values <= self_filter.value2)
-                ]
+            df = df[self_filter.apply(df[stat])]
 
         # Apply last games filter
         if query.game_filter:
@@ -554,7 +539,7 @@ class GameService:
         rank_filter,
         date_filter=None,
         *,
-        cache_status=CACHE_MISS,
+        cache_status=CACHE_DISABLED,
     ):
         strategy = TEAM_FILTER_STRATEGIES.get(team_filter)
         if strategy is None:
@@ -602,7 +587,7 @@ class GameService:
 
     # Function that returns general opponent stats sorted by the filter
     def general_opp_filtering(
-        self, team_filter, date_filter, *, cache_status=CACHE_MISS
+        self, team_filter, date_filter, *, cache_status=CACHE_DISABLED
     ):
         if date_filter is not None:
             date_filter = pd.to_datetime(date_filter)
@@ -625,7 +610,7 @@ class GameService:
         team_filter,
         date_filter,
         *,
-        cache_status=CACHE_MISS,
+        cache_status=CACHE_DISABLED,
     ):
         """Apply one parameterized opponent shooting-type pipeline."""
         strategy = TEAM_FILTER_STRATEGIES[team_filter]

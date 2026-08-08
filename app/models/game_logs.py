@@ -22,8 +22,11 @@ from __future__ import annotations
 
 from datetime import date
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
 from math import isfinite
-from typing import Any, Literal
+from operator import eq, ge, gt, le, lt
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -34,7 +37,96 @@ from app.models.catalogs import (
 )
 
 Location = Literal["Home", "Away", "Both"]
-SelfFilterOperator = Literal["gte", "gt", "lt", "lte", "eq", "between"]
+
+
+@dataclass(frozen=True, slots=True)
+class _SelfFilterOperatorDescriptor:
+    """Comparison behavior owned by one member of the closed operator set."""
+
+    validate: Callable[["SelfFilterOperator", float, float | None], None]
+    apply: Callable[[Any, float, float | None], Any]
+
+
+class SelfFilterOperator(str, Enum):
+    """The comparison operators accepted by HTTP, NLP, and game filters."""
+
+    GTE = "gte"
+    GT = "gt"
+    LT = "lt"
+    LTE = "lte"
+    EQ = "eq"
+    BETWEEN = "between"
+
+    @property
+    def descriptor(self) -> _SelfFilterOperatorDescriptor:
+        return _SELF_FILTER_OPERATOR_DESCRIPTORS[self]
+
+    def validate_values(self, value: float, value2: float | None) -> None:
+        """Validate the operands for this operator."""
+
+        self.descriptor.validate(self, value, value2)
+
+    def apply(self, values: Any, value: float, value2: float | None = None) -> Any:
+        """Return a pandas-like boolean mask for the comparison."""
+
+        self.validate_values(value, value2)
+        return self.descriptor.apply(values, value, value2)
+
+
+def _validate_single(
+    operator: SelfFilterOperator, value: float, value2: float | None
+) -> None:
+    del value
+    if value2 is not None:
+        raise ValueError(
+            f"{operator.value} self_filters accept one value, not value2"
+        )
+
+
+def _validate_between(
+    operator: SelfFilterOperator, value: float, value2: float | None
+) -> None:
+    del operator
+    if value2 is None:
+        raise ValueError("between self_filters require value2")
+    if value > value2:
+        raise ValueError("between self_filter value must not exceed value2")
+
+
+def _single_apply(comparison: Callable[[Any, float], Any]) -> Callable[
+    [Any, float, float | None], Any
+]:
+    def apply(values: Any, value: float, value2: float | None) -> Any:
+        del value2
+        return comparison(values, value)
+
+    return apply
+
+
+def _between_apply(values: Any, value: float, value2: float | None) -> Any:
+    return (values >= value) & (values <= value2)
+
+
+_SELF_FILTER_OPERATOR_DESCRIPTORS: dict[SelfFilterOperator, _SelfFilterOperatorDescriptor] = {
+    SelfFilterOperator.GTE: _SelfFilterOperatorDescriptor(
+        validate=_validate_single, apply=_single_apply(ge)
+    ),
+    SelfFilterOperator.GT: _SelfFilterOperatorDescriptor(
+        validate=_validate_single, apply=_single_apply(gt)
+    ),
+    SelfFilterOperator.LT: _SelfFilterOperatorDescriptor(
+        validate=_validate_single, apply=_single_apply(lt)
+    ),
+    SelfFilterOperator.LTE: _SelfFilterOperatorDescriptor(
+        validate=_validate_single, apply=_single_apply(le)
+    ),
+    SelfFilterOperator.EQ: _SelfFilterOperatorDescriptor(
+        validate=_validate_single, apply=_single_apply(eq)
+    ),
+    SelfFilterOperator.BETWEEN: _SelfFilterOperatorDescriptor(
+        validate=_validate_between, apply=_between_apply
+    ),
+}
 
 
 class SelfFilter(BaseModel):
@@ -87,16 +179,13 @@ class SelfFilter(BaseModel):
 
     @model_validator(mode="after")
     def validate_operator_values(self) -> "SelfFilter":
-        if self.operator == "between":
-            if self.value2 is None:
-                raise ValueError("between self_filters require value2")
-            if self.value > self.value2:
-                raise ValueError("between self_filter value must not exceed value2")
-        elif self.value2 is not None:
-            raise ValueError(
-                f"{self.operator} self_filters accept one value, not value2"
-            )
+        self.operator.validate_values(self.value, self.value2)
         return self
+
+    def apply(self, values: Any) -> Any:
+        """Apply this filter to a pandas-like series."""
+
+        return self.operator.apply(values, self.value, self.value2)
 
 def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
     """Convert one HTTP, NLP, or typed self-filter entry."""

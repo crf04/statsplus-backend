@@ -276,6 +276,47 @@ def test_adapter_records_upstream_status_on_provider_event(monkeypatch):
     assert events[-1]["outcome"] == telemetry.OUTCOME_SUCCESS
 
 
+def test_non_cache_operation_defaults_to_disabled(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: _StatusResponse(200),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs("123", "2024-25")
+
+    assert telemetry.get_recorded_provider_events()[-1]["cache_status"] == (
+        telemetry.CACHE_DISABLED
+    )
+
+
+def test_cache_aware_calls_record_explicit_miss_and_hit(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: _StatusResponse(200),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs(
+        "123", "2024-25", cache_status=telemetry.CACHE_MISS
+    )
+    adapter.record_cache_hit("player_game_logs")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[-2]["cache_status"] == telemetry.CACHE_MISS
+    assert events[-1]["cache_status"] == telemetry.CACHE_HIT
+
+
 def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
     import requests
 

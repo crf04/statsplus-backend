@@ -13,6 +13,7 @@ from ..errors import (
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.services.progress import RefreshProgress
 
 logger = logging.getLogger(__name__)
 
@@ -204,19 +205,16 @@ class PlayerService:
         Fetching completes before the table is replaced, so a provider failure
         leaves the existing player list untouched.
         """
-        if progress_callback is not None:
-            progress_callback(0.1, "Fetching player information")
+        progress = RefreshProgress(progress_callback)
+        progress.fetch("Fetching player information")
         player_dict = players.get_players()
         player_df = pd.DataFrame.from_dict(player_dict)
-        if progress_callback is not None:
-            progress_callback(0.75, "Transforming player information")
+        progress.transform("Transforming player information")
         from app.services.table_publisher import AtomicTablePublisher
 
-        if progress_callback is not None:
-            progress_callback(0.9, "Publishing player information")
+        progress.publish("Publishing player information")
         AtomicTablePublisher(self.engine).publish({"player_information": player_df})
-        if progress_callback is not None:
-            progress_callback(1.0, "Completed")
+        progress.complete()
         return True
 
     def get_player_id(self, player_name):
