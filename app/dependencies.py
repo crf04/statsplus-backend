@@ -59,7 +59,11 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
             settings=settings,
             nba_stats_adapter=nba_stats_provider,
         ),
-        player_service=PlayerService(engine, settings=settings),
+        player_service=PlayerService(
+            engine,
+            settings=settings,
+            nba_stats_provider=nba_stats_provider,
+        ),
         team_service=TeamService(engine, settings=settings),
         data_service=DataService(
             engine,

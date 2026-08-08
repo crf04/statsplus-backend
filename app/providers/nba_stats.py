@@ -32,11 +32,11 @@ DEFAULT_SEASON_TYPE = "Regular Season"
 
 
 class NBAStatsProvider(Protocol):
-    """Interface consumed by :class:`app.services.game_service.GameService`.
+    """Interface consumed by NBA-backed application services.
 
     Implementations return normalized game logs and translate upstream
     failures into :class:`~app.errors.ProviderUnavailableError`.  A fake can
-    implement this one method for offline service tests without importing or
+    implement these methods for offline service tests without importing or
     patching ``nba_api``.
     """
 
@@ -48,6 +48,16 @@ class NBAStatsProvider(Protocol):
         season_type: str = DEFAULT_SEASON_TYPE,
     ) -> pd.DataFrame:
         """Return canonical game logs for one player and season."""
+
+    def get_archetype_game_logs(
+        self,
+        *,
+        player_ids: Sequence[int],
+        opponent_team_id: int,
+        season: str,
+        season_type: str = DEFAULT_SEASON_TYPE,
+    ) -> pd.DataFrame:
+        """Return normalized logs for cluster members against one opponent."""
 
 
 # These fields are required by GameService's filters, summaries, and output.
@@ -207,8 +217,12 @@ def _provider_response_error(message: str, *, detail: Any = None) -> ProviderUna
     return ProviderUnavailableError(message, detail=detail)
 
 
-def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
-    """Normalize one ``nba_api`` game-log response to the service schema.
+def _normalize_game_logs(
+    raw_frame: pd.DataFrame,
+    *,
+    preserve_player_id: bool,
+) -> pd.DataFrame:
+    """Normalize one ``nba_api`` game-log response to an app-facing schema.
 
     The provider occasionally adds columns and has historically varied the
     names of a few date/matchup fields.  Extra columns are ignored, supported
@@ -223,8 +237,11 @@ def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
         )
 
     frame = _canonicalize_column_names(raw_frame.copy())
+    required_columns = (
+        ("PLAYER_ID",) if preserve_player_id else ()
+    ) + REQUIRED_GAME_LOG_COLUMNS
     missing_columns = [
-        column for column in REQUIRED_GAME_LOG_COLUMNS if column not in frame.columns
+        column for column in required_columns if column not in frame.columns
     ]
     if missing_columns:
         raise _provider_response_error(
@@ -235,11 +252,15 @@ def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
     # Remove endpoint rank/metadata columns and any unknown additions.  A
     # stable projection is important: filters should not accidentally start
     # depending on a provider-only column after a schema update.
-    allowed_columns = set(REQUIRED_GAME_LOG_COLUMNS) | set(OPTIONAL_GAME_LOG_COLUMNS)
-    frame = frame.drop(columns=list(_DROP_PROVIDER_COLUMNS), errors="ignore")
+    allowed_columns = set(required_columns) | set(OPTIONAL_GAME_LOG_COLUMNS)
+    drop_columns = _DROP_PROVIDER_COLUMNS - ({"PLAYER_ID"} if preserve_player_id else set())
+    frame = frame.drop(columns=list(drop_columns), errors="ignore")
     frame = frame.loc[:, [column for column in frame.columns if column in allowed_columns]]
 
-    for column in _NUMERIC_GAME_LOG_COLUMNS:
+    numeric_columns = (
+        ("PLAYER_ID",) if preserve_player_id else ()
+    ) + _NUMERIC_GAME_LOG_COLUMNS
+    for column in numeric_columns:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         if frame[column].isna().any():
             raise _provider_response_error(
@@ -251,6 +272,8 @@ def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
     # contract at the provider boundary and avoid a pandas dtype surprise for
     # callers using an empty response.
     frame["MIN"] = frame["MIN"].round().astype(int)
+    if preserve_player_id:
+        frame["PLAYER_ID"] = frame["PLAYER_ID"].round().astype(int)
     frame["GAME_DATE"] = frame["GAME_DATE"].astype(str)
 
     frame["PRA"] = frame["PTS"] + frame["REB"] + frame["AST"]
@@ -264,11 +287,23 @@ def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
     frame["FG2A"] = frame["FGA"] - frame["FG3A"]
 
     ordered_columns = [
-        *REQUIRED_GAME_LOG_COLUMNS,
+        *(required_columns if preserve_player_id else REQUIRED_GAME_LOG_COLUMNS),
         *[column for column in OPTIONAL_GAME_LOG_COLUMNS if column in frame.columns],
         *DERIVED_GAME_LOG_COLUMNS,
     ]
     return frame.loc[:, ordered_columns]
+
+
+def normalize_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize one player game-log response for :class:`GameService`."""
+
+    return _normalize_game_logs(raw_frame, preserve_player_id=False)
+
+
+def normalize_archetype_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize game logs while retaining ``PLAYER_ID`` for cluster filters."""
+
+    return _normalize_game_logs(raw_frame, preserve_player_id=True)
 
 
 class NBAStatsAdapter:
@@ -303,26 +338,52 @@ class NBAStatsAdapter:
     ) -> pd.DataFrame:
         """Fetch and normalize one player's regular-season game logs."""
 
+        return self._fetch_game_logs(
+            normalize=normalize_player_game_logs,
+            player_id_nullable=player_id,
+            season_nullable=season,
+            season_type_nullable=season_type,
+        )
+
+    def get_archetype_game_logs(
+        self,
+        *,
+        player_ids: Sequence[int],
+        opponent_team_id: int,
+        season: str,
+        season_type: str = DEFAULT_SEASON_TYPE,
+    ) -> pd.DataFrame:
+        """Fetch normalized logs for archetype members against one opponent."""
+
+        frame = self._fetch_game_logs(
+            normalize=normalize_archetype_game_logs,
+            season_nullable=season,
+            season_type_nullable=season_type,
+            opp_team_id_nullable=opponent_team_id,
+        )
+        return frame[frame["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
+
+    def _fetch_game_logs(
+        self,
+        *,
+        normalize: Callable[[pd.DataFrame], pd.DataFrame],
+        **endpoint_kwargs: Any,
+    ) -> pd.DataFrame:
+        """Call ``PlayerGameLogs`` and apply one centralized error contract."""
+
         timeout = get_nba_stats_timeout(self.settings)
         try:
-            endpoint = self._endpoint_factory(
-                player_id_nullable=player_id,
-                season_nullable=season,
-                season_type_nullable=season_type,
-                timeout=timeout,
-            )
+            endpoint = self._endpoint_factory(timeout=timeout, **endpoint_kwargs)
             data_frames = endpoint.get_data_frames()
             if not isinstance(data_frames, Sequence) or not data_frames:
                 raise _provider_response_error(
                     "The NBA Stats provider returned no game-log data.",
                     detail="get_data_frames() returned no frames",
                 )
-            return normalize_player_game_logs(data_frames[0])
+            return normalize(data_frames[0])
         except ProviderUnavailableError:
             raise
-        except (
-            requests_exceptions.Timeout,
-        ) as error:
+        except requests_exceptions.Timeout as error:
             logger.warning("NBA Stats provider request timed out: %s", error)
             raise _provider_response_error(
                 "The upstream stats provider timed out. Please try again shortly.",
@@ -355,5 +416,6 @@ __all__ = [
     "NBAStatsProvider",
     "OPTIONAL_GAME_LOG_COLUMNS",
     "REQUIRED_GAME_LOG_COLUMNS",
+    "normalize_archetype_game_logs",
     "normalize_player_game_logs",
 ]

@@ -95,17 +95,12 @@ class PBPStatsAdapter:
         """
 
         canonical_type = self._canonical_data_type(data_type)
-        payload, _response, _duration = self._request_payload(
+        payload, _response = self._request_payload(
             canonical_type,
             season=season,
             season_type=season_type,
         )
         return self._normalize_payload(payload)
-
-    # ``fetch_totals`` is a descriptive compatibility alias for callers that
-    # use "fetch" for external provider operations.  Both names cross the
-    # same adapter interface and therefore share all error handling.
-    fetch_totals = get_totals
 
     def health_check(self) -> dict[str, Any]:
         """Check PBP Stats using the same request and response validation.
@@ -117,7 +112,7 @@ class PBPStatsAdapter:
         """
 
         started = time.monotonic()
-        payload, response, _duration = self._request_payload("player")
+        payload, response = self._request_payload("player")
         self._normalize_payload(payload)
         duration_ms = round((time.monotonic() - started) * 1000, 2)
 
@@ -131,17 +126,13 @@ class PBPStatsAdapter:
             "using_session_pool": True,
         }
 
-    # Some infrastructure callers use the noun form.  Keep this alias on the
-    # concrete adapter while the documented protocol uses ``health_check``.
-    healthcheck = health_check
-
     def _request_payload(
         self,
         data_type: str,
         *,
         season: str | None = None,
         season_type: str = "Regular Season",
-    ) -> tuple[Any, Any, float]:
+    ) -> tuple[Any, Any]:
         """Request one totals payload and translate all provider failures."""
 
         settings = self.settings
@@ -195,7 +186,7 @@ class PBPStatsAdapter:
                 "PBP Stats could not be reached.", detail=error
             ) from error
 
-        return payload, response, time.monotonic() - started
+        return payload, response
 
     @staticmethod
     def _canonical_data_type(data_type: str) -> str:

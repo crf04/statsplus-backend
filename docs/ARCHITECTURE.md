@@ -79,6 +79,11 @@ class NBAStatsProvider(Protocol):
         self, *, player_id: int, season: str,
         season_type: str = "Regular Season",
     ) -> pandas.DataFrame: ...
+
+    def get_archetype_game_logs(
+        self, *, player_ids: Sequence[int], opponent_team_id: int,
+        season: str, season_type: str = "Regular Season",
+    ) -> pandas.DataFrame: ...
 ```
 
 `NBAStatsAdapter` is the production implementation. It is the only game-log
@@ -88,7 +93,9 @@ returns the canonical columns used by `GameService` (including derived PRA,
 PA, PR, RA, STKS, and shooting totals) before business filters run. Timeout,
 transport, endpoint, and schema-drift failures become the centralized
 `ProviderUnavailableError` contract. Tests can inject a one-method fake into
-`GameService`; they should not patch the `nba_api` package.
+`GameService` or a two-method fake into `PlayerService`; they should not patch
+the `nba_api` package. Archetype reads retain `PLAYER_ID` while filtering the
+same normalized `PlayerGameLogs` response for cluster members.
 
 Natural-language query:
 
@@ -123,9 +130,10 @@ GET /api/health/pbp-stats or PUT /api/data/*_PBP
 
 `PBPStatsProvider` is the injectable interface at
 `app.providers.pbp_stats`. `DataService` accepts an implementation through
-its `pbp_provider` constructor argument, while the health route builds the
-default adapter behind a small request-time seam. This keeps provider details
-out of route and refresh logic and allows offline tests to use a fake adapter.
+its `pbp_provider` constructor argument, while the health route resolves the
+same app-owned adapter from `app.extensions["dependencies"]`. This keeps
+provider details out of route and refresh logic and allows offline tests to
+replace either dependency with a fake adapter.
 
 Data refreshes are mutations, not health checks. Use a disposable database and mocked providers when testing them.
 
