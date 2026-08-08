@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
 from operator import eq, ge, gt, le, lt
+import re
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -252,6 +253,26 @@ class GameLogQuery(BaseModel):
     # can contain more than one constraint for the same stat.
     self_filters: list[SelfFilter] = Field(default_factory=list)
 
+    @field_validator("season_filter", mode="before")
+    @classmethod
+    def normalize_season_filter(cls, value: Any) -> str:
+        """Require one canonical NBA season label (for example, ``2024-25``)."""
+
+        if not isinstance(value, str):
+            raise ValueError("season_filter must be a string in YYYY-YY format")
+        season = value.strip()
+        match = re.fullmatch(r"([0-9]{4})-([0-9]{2})", season)
+        if match is None:
+            raise ValueError("season_filter must use YYYY-YY format")
+        start_year = int(match.group(1))
+        expected_suffix = f"{(start_year + 1) % 100:02d}"
+        if match.group(2) != expected_suffix:
+            raise ValueError(
+                "season_filter must end with the following calendar year's "
+                "final two digits"
+            )
+        return season
+
     @field_validator("minutes_filter", mode="before")
     @classmethod
     def normalize_minutes(cls, value: Any) -> tuple[int, int]:
@@ -293,14 +314,15 @@ class GameLogQuery(BaseModel):
     def normalize_playstyle_range(cls, value: Any) -> tuple[float, float]:
         if value is None:
             return (0.0, 200.0)
-        if isinstance(value, tuple):
-            return value
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             raise ValueError("playstyle_range must contain min,max ratings")
         try:
-            return (float(value[0]), float(value[1]))
+            normalized = (float(value[0]), float(value[1]))
         except (TypeError, ValueError) as error:
             raise ValueError("playstyle_range values must be numbers") from error
+        if not all(isfinite(number) for number in normalized):
+            raise ValueError("playstyle_range values must be finite numbers")
+        return normalized
 
     @field_validator("self_filters", mode="before")
     @classmethod

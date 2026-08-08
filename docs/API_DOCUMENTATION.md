@@ -213,9 +213,9 @@ Query parameters:
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Season. Default is the current season |
-| `playstyle_RTG_min` | No | Default `0` |
-| `playstyle_RTG_max` | No | Default `200` |
+| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
+| `playstyle_RTG_min` | No | Finite numeric lower bound. Default `0` |
+| `playstyle_RTG_max` | No | Finite numeric upper bound. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
 
 Example:

@@ -46,6 +46,24 @@ def test_game_log_query_accepts_typed_and_raw_filters():
     assert self_filter.value2 == 60.0
 
 
+def test_game_log_query_trims_and_validates_canonical_season():
+    query = GameLogQuery(season_filter=" 2024-25 ")
+
+    assert query.season_filter == "2024-25"
+
+
+@pytest.mark.parametrize("season", ["", "potato", "2024-27"])
+def test_game_log_query_rejects_invalid_season(season):
+    with pytest.raises(Exception):
+        GameLogQuery(season_filter=season)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_game_log_query_rejects_nonfinite_playstyle_range(value):
+    with pytest.raises(Exception):
+        GameLogQuery(season_filter="2024-25", playstyle_range=(value, 200))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -568,6 +586,47 @@ def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_stri
             "message": "One or more game log filters are invalid.",
         }
     }
+
+
+@pytest.mark.parametrize(
+    "query_string",
+    [
+        "season_filter=",
+        "season_filter=potato",
+        "season_filter=2024-27",
+        "playstyle_RTG_min=nan",
+        "playstyle_RTG_max=inf",
+        "playstyle_RTG_min=-inf",
+    ],
+)
+def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
+    client, monkeypatch, query_string
+):
+    from app.routes import game_routes
+
+    _stub_route_settings(monkeypatch)
+    calls = []
+
+    def service_must_not_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("invalid game-log filters reached the service")
+
+    monkeypatch.setattr(
+        game_routes.game_service, "get_filtered_logs", service_must_not_run
+    )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&" + query_string
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "One or more game log filters are invalid.",
+        }
+    }
+    assert calls == []
 
 
 def test_route_returns_400_when_player_name_missing(client, monkeypatch):

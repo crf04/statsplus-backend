@@ -20,7 +20,7 @@ from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Final
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import sessionmaker
@@ -553,13 +553,7 @@ class DataRefreshJobService:
             with self._session_factory() as session:
                 result = session.execute(
                     update(DataRefreshJob)
-                    .where(
-                        DataRefreshJob.job_id == claimed_job.job_id,
-                        DataRefreshJob.status == JOB_STATUS_RUNNING,
-                        DataRefreshJob.lease_owner == claimed_job.owner,
-                        DataRefreshJob.attempt_count == claimed_job.attempt_count,
-                        DataRefreshJob.lease_expires_at > now,
-                    )
+                    .where(self._owned_lease_condition(claimed_job, now))
                     .values(
                         lease_expires_at=now + timedelta(seconds=self._lease_seconds),
                         heartbeat_at=now,
@@ -576,14 +570,11 @@ class DataRefreshJobService:
             return False
 
     def _owned_job(self, claimed_job: ClaimedJob):
+        now = self._clock()
         with self._session_factory() as session:
             return session.execute(
                 select(DataRefreshJob).where(
-                    DataRefreshJob.job_id == claimed_job.job_id,
-                    DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == claimed_job.owner,
-                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
-                    DataRefreshJob.lease_expires_at > self._clock(),
+                    self._owned_lease_condition(claimed_job, now)
                 )
             ).scalars().first()
 
@@ -635,13 +626,9 @@ class DataRefreshJobService:
         now = self._clock()
         with self._session_factory() as session:
             result = session.execute(
-                update(DataRefreshJob).where(
-                    DataRefreshJob.job_id == claimed_job.job_id,
-                    DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == claimed_job.owner,
-                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
-                    DataRefreshJob.lease_expires_at > now,
-                ).values(**fields)
+                update(DataRefreshJob)
+                .where(self._owned_lease_condition(claimed_job, now))
+                .values(**fields)
             )
             if result.rowcount != 1:
                 session.rollback()
@@ -659,13 +646,7 @@ class DataRefreshJobService:
         with self._session_factory() as session:
             result = session.execute(
                 update(DataRefreshJob)
-                .where(
-                    DataRefreshJob.job_id == claimed_job.job_id,
-                    DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == claimed_job.owner,
-                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
-                    DataRefreshJob.lease_expires_at > now,
-                )
+                .where(self._owned_lease_condition(claimed_job, now))
                 .values(
                     progress=case(
                         (DataRefreshJob.progress < bounded, bounded),
@@ -688,13 +669,7 @@ class DataRefreshJobService:
             now = self._clock()
             result = connection.execute(
                 update(DataRefreshJob)
-                .where(
-                    DataRefreshJob.job_id == claimed_job.job_id,
-                    DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == claimed_job.owner,
-                    DataRefreshJob.attempt_count == claimed_job.attempt_count,
-                    DataRefreshJob.lease_expires_at > now,
-                )
+                .where(self._owned_lease_condition(claimed_job, now))
                 .values(
                     lease_expires_at=now + timedelta(seconds=self._lease_seconds),
                     heartbeat_at=now,
@@ -704,6 +679,24 @@ class DataRefreshJobService:
                 raise StaleLeaseError()
 
         return fence
+
+    @staticmethod
+    def _owned_lease_condition(claimed_job: ClaimedJob, now: Any):
+        """Build the common owner/fencing predicate for a claimed attempt.
+
+        Claim candidates intentionally use different semantics: queued rows
+        and expired running rows are eligible for a new attempt.  Every
+        operation after a claim, however, must use this exact predicate so an
+        expired or reclaimed worker cannot renew, update, or publish.
+        """
+
+        return and_(
+            DataRefreshJob.job_id == claimed_job.job_id,
+            DataRefreshJob.status == JOB_STATUS_RUNNING,
+            DataRefreshJob.lease_owner == claimed_job.owner,
+            DataRefreshJob.attempt_count == claimed_job.attempt_count,
+            DataRefreshJob.lease_expires_at > now,
+        )
 
     def _handler_for(self, operation: str) -> RefreshCallable | None:
         return self._handlers.get(operation)
