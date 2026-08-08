@@ -32,12 +32,12 @@ def test_players_endpoint_smoke(client):
     assert isinstance(response.get_json(), list)
 
 
-def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):
+def test_game_logs_endpoint_can_be_exercised_with_mocked_service(
+    client, monkeypatch, dependencies
+):
     from flask import jsonify
 
     import app.utils.auth as auth
-    from app.routes import game_routes
-
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
 
     async def fake_get_filtered_logs(player_name, filter_params):
@@ -46,7 +46,9 @@ def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeyp
             "season_filter": filter_params["season_filter"],
         })
 
-    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
+    monkeypatch.setattr(
+        dependencies.game_service, "get_filtered_logs", fake_get_filtered_logs
+    )
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
@@ -58,17 +60,15 @@ def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeyp
 
 
 def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
-    client, monkeypatch
+    client, monkeypatch, dependencies
 ):
     import app.utils.auth as auth
-    from app.routes import game_routes
-
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
 
     async def timed_out(*args, **kwargs):
         raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
 
-    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", timed_out)
+    monkeypatch.setattr(dependencies.game_service, "get_filtered_logs", timed_out)
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
@@ -81,13 +81,13 @@ def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
     }
 
 
-def test_nl_query_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):
+def test_nl_query_endpoint_can_be_exercised_with_mocked_service(
+    client, monkeypatch, dependencies
+):
     import app.utils.auth as auth
-    from app.routes import nl_routes
-
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
     monkeypatch.setattr(
-        nl_routes.nl_service,
+        dependencies.nl_service,
         "process_query",
         lambda query: {"query": query, "parsed_by": "test"},
     )

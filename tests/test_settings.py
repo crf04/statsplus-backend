@@ -1,6 +1,8 @@
 """Tests for the validated runtime settings interface."""
 
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,6 +32,7 @@ def test_local_settings_have_typed_safe_defaults(monkeypatch):
     assert settings.auth.firebase_admin_disabled is False
     assert settings.cache.enabled is True
     assert settings.llm.enable_fallback is False
+    assert settings.cors.allowed_origins == ("http://localhost:3000",)
     assert settings.nba.current_season == current_nba_season()
     assert isinstance(settings.providers.nba_stats_timeout_seconds, float)
 
@@ -106,11 +109,6 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     from app.routes import user_routes
     from app.routes._service_proxy import CurrentAppService
 
-    monkeypatch.setattr(
-        "app.services.game_service.get_redis_client",
-        lambda settings: None,
-    )
-
     first_settings = RuntimeSettings(
         environment="testing",
         auth={"firebase_admin_disabled": True},
@@ -121,9 +119,36 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         auth={"firebase_admin_disabled": True},
         nba=NBASeasonSettings(current_season="2040-41"),
     )
+    first_dependencies = SimpleNamespace(
+        settings=first_settings,
+        game_service=SimpleNamespace(settings=first_settings),
+        user_service=SimpleNamespace(settings=first_settings),
+        player_service=Mock(),
+        team_service=Mock(),
+        data_service=Mock(),
+        nl_service=Mock(),
+        engine=Mock(),
+        redis_client=None,
+        nba_stats_provider=Mock(),
+        pbp_stats_provider=Mock(),
+    )
+    second_dependencies = SimpleNamespace(
+        settings=second_settings,
+        game_service=SimpleNamespace(settings=second_settings),
+        user_service=SimpleNamespace(settings=second_settings),
+        player_service=Mock(),
+        team_service=Mock(),
+        data_service=Mock(),
+        nl_service=Mock(),
+        engine=Mock(),
+        redis_client=None,
+        nba_stats_provider=Mock(),
+        pbp_stats_provider=Mock(),
+    )
     first_app = create_app(
         {
             "RUNTIME_SETTINGS": first_settings,
+            "DEPENDENCIES": first_dependencies,
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
         }
@@ -131,6 +156,7 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     second_app = create_app(
         {
             "RUNTIME_SETTINGS": second_settings,
+            "DEPENDENCIES": second_dependencies,
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
         }
@@ -161,10 +187,10 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         assert second_user_service.settings is second_settings
 
     assert (
-        first_app.extensions["request_services"]["game"]
-        is not second_app.extensions["request_services"]["game"]
+        first_app.extensions["dependencies"].game_service
+        is not second_app.extensions["dependencies"].game_service
     )
     assert (
-        first_app.extensions["request_services"]["user"]
-        is not second_app.extensions["request_services"]["user"]
+        first_app.extensions["dependencies"].user_service
+        is not second_app.extensions["dependencies"].user_service
     )

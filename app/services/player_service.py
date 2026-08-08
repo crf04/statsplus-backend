@@ -2,7 +2,7 @@ import pandas as pd
 import logging
 import requests
 from nba_api.stats.static import players
-from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
+from nba_api.stats.endpoints import PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
 from ..errors import (
@@ -13,13 +13,24 @@ from ..errors import (
 )
 from ..utils.nba_api_config import get_nba_stats_timeout
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 
 logger = logging.getLogger(__name__)
 
 class PlayerService:
-    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        settings: RuntimeSettings | None = None,
+        nba_stats_provider: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
+        self.nba_stats_provider = (
+            nba_stats_provider
+            if nba_stats_provider is not None
+            else NBAStatsAdapter(settings=self.settings)
+        )
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -149,15 +160,16 @@ class PlayerService:
             team_dict = pd.DataFrame(self._get_teams())
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
             
-            # Get game logs
-            gl = playergamelogs.PlayerGameLogs(
-                season_nullable=self.settings.nba.current_season,
-                opp_team_id_nullable=team_id,
-                timeout=get_nba_stats_timeout(self.settings),
-            ).get_data_frames()[0]
+            # Get game logs through the app-owned NBA Stats adapter.  The
+            # adapter owns endpoint construction, timeout, normalization, and
+            # provider error translation.
+            gl = self.nba_stats_provider.get_archetype_game_logs(
+                player_ids=player_ids,
+                opponent_team_id=int(team_id),
+                season=self.settings.nba.current_season,
+            )
             
-            # Filter and process game logs
-            gl = gl[gl["PLAYER_ID"].isin(player_ids)]
+            # Process the normalized cluster logs returned by the adapter.
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             
@@ -180,6 +192,8 @@ class PlayerService:
                                'FTM/36MIN_DIFF', 'FTA/36MIN_DIFF', 'PTS/36MIN_DIFF', 'TOV/36MIN_DIFF']]
 
             return merged_df.to_dict(orient='records')
+        except AppError:
+            raise
         except Exception as e:
             logger.error("Error getting archetype gamelogs: %s", e)
             return []

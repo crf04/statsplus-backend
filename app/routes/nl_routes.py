@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 import logging
 
 from ..errors import InvalidInputError, OperationFailedError, route_error_boundary
-from ..services.nl_service import NLService
 from ..utils.auth import require_auth, get_current_user
 from ._service_proxy import CurrentAppService
 
@@ -11,12 +10,7 @@ logger = logging.getLogger(__name__)
 # Initialize blueprint and services
 nl_bp = Blueprint('nl', __name__)
 
-
-def _build_nl_service(engine, settings):
-    return NLService(engine, settings=settings)
-
-
-nl_service = CurrentAppService("nl", _build_nl_service)
+nl_service = CurrentAppService("nl")
 
 @nl_bp.route('/nl-query', methods=['POST'])
 @require_auth

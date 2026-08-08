@@ -15,6 +15,7 @@ The model is intentionally grouped by responsibility:
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `ProviderSettings` | NBA Stats timeout, PBP timeouts, retries, and pool sizes | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE` |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
+| `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
@@ -33,12 +34,21 @@ Local and test startup is credential-free by default:
 - Firebase is optional until a protected request is made. The explicit
   `FIREBASE_ADMIN_DISABLED=true` bypass is accepted only in development,
   testing, or local environments.
+- CORS defaults explicitly to `http://localhost:3000` for local development.
+  `CORS_ALLOWED_ORIGINS` is a comma-separated list of exact `http://` or
+  `https://` origins; wildcard `*` values are rejected.
 
 Production startup raises `ConfigurationError` with the invalid field names
 when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
-credentials are absent/invalid, or the local bypass is enabled. This prevents
-the process from starting with a configuration that cannot enforce its
-security contract.
+credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
+or the local bypass is enabled. This prevents the process from starting with a
+configuration that cannot enforce its security contract.
+
+For example, a deployment should set:
+
+```bash
+CORS_ALLOWED_ORIGINS=https://stats.example.com,https://admin.example.com
+```
 
 ## Current season rule
 
@@ -51,3 +61,8 @@ parser/mapper, cache freshness checks, and provider requests.
 
 Tests can pass an explicit date to `current_nba_season` or a mapping to
 `load_settings(environ=...)` without changing process environment state.
+
+`NBA_STATS_TIMEOUT_SECONDS` is reserved for `stats.nba.com` calls made through
+`nba_api`. `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, and
+`NBA_API_MAX_RETRIES` configure the PBP Stats adapter's shared HTTP session;
+the two providers therefore keep distinct timeout and health signals.

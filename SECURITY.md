@@ -84,6 +84,8 @@ credentials and claim-based authorization.
 ## Deployment checklist
 
 - Set `FLASK_ENV=production` in deployed environments.
+- Set `CORS_ALLOWED_ORIGINS` to the exact deployed frontend origin allowlist;
+  production rejects the local default and wildcard origins.
 - Provide Firebase Admin credentials through the deployment secret manager.
 - Leave `FIREBASE_ADMIN_DISABLED=false` or unset.
 - Verify that a non-admin token receives `403` from admin-only routes and that

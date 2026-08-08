@@ -4,19 +4,13 @@ from ..errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..services.team_service import TeamService
 from ..utils.auth import require_auth_optional
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 team_bp = Blueprint('teams', __name__)
 
-
-def _build_team_service(engine, settings):
-    return TeamService(engine, settings=settings)
-
-
-team_service = CurrentAppService("team", _build_team_service)
+team_service = CurrentAppService("team")
 
 @team_bp.route('/stats', methods=['GET'])
 @require_auth_optional
