@@ -6,7 +6,8 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 
 - Flask app factory with blueprints for players, teams, games, data refreshes, health checks, users, and natural-language queries.
 - Bundled SQLite demo database, `nba_play_types.db`, so the project can run immediately after install.
-- NBA data integrations through `nba_api` and pbpstats endpoints.
+- NBA data integrations through the injectable NBA Stats game-log adapter
+  (`nba_api` → `stats.nba.com`) and pbpstats endpoints.
 - Deterministic NLP parsing with spaCy, aliases, fuzzy matching, date parsing, and optional OpenAI fallback.
 - Firebase Admin authentication for protected routes, with an explicit local-only bypass for credential-free development.
 - Optional Redis-backed caching for NBA API responses.

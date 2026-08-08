@@ -39,7 +39,7 @@ The app reads from three distinct sources:
 | Source | Access path | Expected behavior |
 | --- | --- | --- |
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
-| NBA Stats | `nba_api` → `stats.nba.com` | Live game logs and selected team/player data; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
+| NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | Live game logs use the adapter; selected team/player calls remain direct `nba_api` seams; game-log requests are normalized and bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | shared `requests.Session` → `api.pbpstats.com` | Play-by-play aggregates and the existing external health probe |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
@@ -67,6 +67,28 @@ GET /api/games/game_logs
   → local/database and request filters
   → serialized logs and averages
 ```
+
+### NBA Stats game-log adapter
+
+`app.providers.nba_stats.NBAStatsProvider` is the injectable interface for
+live game logs:
+
+```python
+class NBAStatsProvider(Protocol):
+    def get_player_game_logs(
+        self, *, player_id: int, season: str,
+        season_type: str = "Regular Season",
+    ) -> pandas.DataFrame: ...
+```
+
+`NBAStatsAdapter` is the production implementation. It is the only game-log
+seam that knows the `nba_api` endpoint constructor, the
+`NBA_STATS_TIMEOUT_SECONDS` timeout, and the provider response schema. It
+returns the canonical columns used by `GameService` (including derived PRA,
+PA, PR, RA, STKS, and shooting totals) before business filters run. Timeout,
+transport, endpoint, and schema-drift failures become the centralized
+`ProviderUnavailableError` contract. Tests can inject a one-method fake into
+`GameService`; they should not patch the `nba_api` package.
 
 Natural-language query:
 
@@ -109,6 +131,10 @@ validator must not be used to repair the fixture.
 - Route/service interaction: replace methods on the dependency graph supplied
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
+- NBA Stats game-log behavior: inject a fake `NBAStatsProvider` into
+  `GameService`; use the recorded provider fixture and
+  `normalize_player_game_logs` for schema-drift tests. Keep `stats.nba.com`
+  (`nba_api`) tests separate from the PBP Stats shared-session seam.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.
 
