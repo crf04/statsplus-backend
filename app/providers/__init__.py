@@ -5,9 +5,12 @@ from .nba_stats import (
     NBAStatsProvider,
     normalize_player_game_logs,
 )
+from .pbp_stats import PBPStatsAdapter, PBPStatsProvider
 
 __all__ = [
     "NBAStatsAdapter",
     "NBAStatsProvider",
+    "PBPStatsAdapter",
+    "PBPStatsProvider",
     "normalize_player_game_logs",
 ]

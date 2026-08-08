@@ -9,6 +9,8 @@ def _fake_dependencies(settings: RuntimeSettings):
         settings=settings,
         engine=Mock(name="engine"),
         redis_client=None,
+        nba_stats_provider=Mock(name="nba_stats_provider"),
+        pbp_stats_provider=Mock(name="pbp_stats_provider"),
         game_service=Mock(name="game_service"),
         player_service=Mock(name="player_service"),
         team_service=Mock(name="team_service"),

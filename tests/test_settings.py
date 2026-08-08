@@ -129,6 +129,8 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         nl_service=Mock(),
         engine=Mock(),
         redis_client=None,
+        nba_stats_provider=Mock(),
+        pbp_stats_provider=Mock(),
     )
     second_dependencies = SimpleNamespace(
         settings=second_settings,
@@ -140,6 +142,8 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         nl_service=Mock(),
         engine=Mock(),
         redis_client=None,
+        nba_stats_provider=Mock(),
+        pbp_stats_provider=Mock(),
     )
     first_app = create_app(
         {

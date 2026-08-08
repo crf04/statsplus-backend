@@ -61,3 +61,8 @@ parser/mapper, cache freshness checks, and provider requests.
 
 Tests can pass an explicit date to `current_nba_season` or a mapping to
 `load_settings(environ=...)` without changing process environment state.
+
+`NBA_STATS_TIMEOUT_SECONDS` is reserved for `stats.nba.com` calls made through
+`nba_api`. `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, and
+`NBA_API_MAX_RETRIES` configure the PBP Stats adapter's shared HTTP session;
+the two providers therefore keep distinct timeout and health signals.

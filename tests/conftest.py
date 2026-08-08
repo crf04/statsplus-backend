@@ -103,6 +103,8 @@ def dependencies(runtime_settings, mock_db_engine):
         settings=runtime_settings,
         engine=mock_db_engine,
         redis_client=None,
+        nba_stats_provider=Mock(name="nba_stats_provider"),
+        pbp_stats_provider=Mock(name="pbp_stats_provider"),
         **{f"{name}_service": service for name, service in services.items()},
     )
 

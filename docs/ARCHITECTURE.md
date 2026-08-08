@@ -40,7 +40,7 @@ The app reads from three distinct sources:
 | --- | --- | --- |
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | Live game logs use the adapter; selected team/player calls remain direct `nba_api` seams; game-log requests are normalized and bounded by `NBA_STATS_TIMEOUT_SECONDS` |
-| PBP Stats | shared `requests.Session` → `api.pbpstats.com` | Play-by-play aggregates and the existing external health probe |
+| PBP Stats | `PBPStatsProvider` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, and the PBP Stats health probe |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
@@ -104,10 +104,28 @@ Data refresh:
 
 ```text
 /api/data route
-  → DataService provider calls
+  → PBPStatsProvider / NBA Stats provider calls
+  → provider response normalization and centralized provider errors
+  → DataService persistence
   → dataframe transformations
   → replace one or more database tables
 ```
+
+PBP Stats:
+
+```text
+GET /api/health/pbp-stats or PUT /api/data/*_PBP
+  → PBPStatsAdapter.get_totals / health_check
+  → shared requests.Session with PBP-specific connect/read timeouts and retries
+  → validate multi_row_table_data and normalize to a dataframe
+  → ProviderUnavailableError on timeout, unavailable, or malformed responses
+```
+
+`PBPStatsProvider` is the injectable interface at
+`app.providers.pbp_stats`. `DataService` accepts an implementation through
+its `pbp_provider` constructor argument, while the health route builds the
+default adapter behind a small request-time seam. This keeps provider details
+out of route and refresh logic and allows offline tests to use a fake adapter.
 
 Data refreshes are mutations, not health checks. Use a disposable database and mocked providers when testing them.
 
