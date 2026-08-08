@@ -1,6 +1,6 @@
 import pandas as pd
-from nba_api.stats.endpoints import playergamelogs
 from app.config.settings import get_runtime_settings
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.utils.db import get_engine
 
 # Function to get player ID from database
@@ -12,7 +12,17 @@ def get_player_id(player_name):
     player = player_dict[player_dict['full_name'] == player_name]
     return player['id'].values[0]
 
-def apply_filters(df, filter_params):
+def _resolve_nba_stats_provider(
+    nba_stats_provider: NBAStatsProvider | None,
+) -> NBAStatsProvider:
+    """Use an injected provider or create one for this standalone helper call."""
+
+    if nba_stats_provider is not None:
+        return nba_stats_provider
+    return NBAStatsAdapter(settings=get_runtime_settings())
+
+
+def apply_filters(df, filter_params, nba_stats_provider=None):
     """Apply all filters to the DataFrame"""
     minutes_filter = filter_params.get('minutes_filter', (0, 48))
     players_on = filter_params.get('players_on', [])
@@ -60,32 +70,61 @@ def apply_filters(df, filter_params):
         players_on,
         players_off,
         get_runtime_settings().nba.current_season,
+        nba_stats_provider=nba_stats_provider,
     )
     
     return df
 
-def filter_players_on_off(df, players_on, players_off, season):
+def filter_players_on_off(
+    df,
+    players_on,
+    players_off,
+    season,
+    nba_stats_provider=None,
+):
+    provider = nba_stats_provider
+    if provider is None and (players_on or players_off):
+        provider = _resolve_nba_stats_provider(None)
+
     if players_on:
-        common_games = get_common_games(df, players_on, season)
+        common_games = get_common_games(
+            df,
+            players_on,
+            season,
+            nba_stats_provider=provider,
+        )
         df = df[df['GAME_ID'].isin(common_games)]
     
     if players_off:
-        exclude_games = get_games_to_exclude(df, players_off, season)
+        exclude_games = get_games_to_exclude(
+            df,
+            players_off,
+            season,
+            nba_stats_provider=provider,
+        )
         df = df[~df['GAME_ID'].isin(exclude_games)]
     
     return df
 
-def get_games_to_exclude(player_logs, players_off_names, season=None):
+def get_games_to_exclude(
+    player_logs,
+    players_off_names,
+    season=None,
+    nba_stats_provider=None,
+):
     season = season or get_runtime_settings().nba.current_season
     exclude_game_ids = set()
+    provider = nba_stats_provider
     
     # Loop through players_off and union game IDs
     for player_name in players_off_names:
+        if provider is None:
+            provider = _resolve_nba_stats_provider(None)
         player_id = get_player_id(player_name)
-        player_gamelogs = playergamelogs.PlayerGameLogs(
-            player_id_nullable=player_id, 
-            season_nullable=season
-        ).get_data_frames()[0]
+        player_gamelogs = provider.get_player_game_logs(
+            player_id=player_id,
+            season=season,
+        )
         player_game_ids = set(player_gamelogs['GAME_ID'])
         
         # Union with exclude_game_ids to accumulate games where any player_off played
@@ -93,20 +132,28 @@ def get_games_to_exclude(player_logs, players_off_names, season=None):
 
     return exclude_game_ids
 
-def get_common_games(primary_player_logs, other_players_names, season=None):
+def get_common_games(
+    primary_player_logs,
+    other_players_names,
+    season=None,
+    nba_stats_provider=None,
+):
     season = season or get_runtime_settings().nba.current_season
     primary_game_team_pairs = set(zip(
         primary_player_logs['GAME_ID'], 
         primary_player_logs['TEAM_ABBREVIATION']
     ))
+    provider = nba_stats_provider
     
     # Loop through other players and find intersections
     for player_name in other_players_names:
+        if provider is None:
+            provider = _resolve_nba_stats_provider(None)
         player_id = get_player_id(player_name)
-        player_gamelogs = playergamelogs.PlayerGameLogs(
-            player_id_nullable=player_id, 
-            season_nullable=season
-        ).get_data_frames()[0]
+        player_gamelogs = provider.get_player_game_logs(
+            player_id=player_id,
+            season=season,
+        )
         player_game_team_pairs = set(zip(
             player_gamelogs['GAME_ID'], 
             player_gamelogs['TEAM_ABBREVIATION']

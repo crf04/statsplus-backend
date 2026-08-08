@@ -169,8 +169,7 @@ class PlayerService:
                 season=self.settings.nba.current_season,
             )
             
-            # Filter and process game logs
-            gl = gl[gl["PLAYER_ID"].isin(player_ids)]
+            # Process the normalized cluster logs returned by the adapter.
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             

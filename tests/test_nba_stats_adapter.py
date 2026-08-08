@@ -52,22 +52,35 @@ def test_recorded_provider_fixture_is_normalized_across_schema_drift():
 
     normalized = normalize_player_game_logs(raw_frame)
 
-    assert list(normalized["GAME_DATE"]) == ["2025-10-22", "2025-10-24"]
+    assert list(normalized["GAME_DATE"]) == [
+        "2018-03-20T00:00:00",
+        "2018-03-18T00:00:00",
+        "2018-03-17T00:00:00",
+        "2018-03-15T00:00:00",
+        "2018-03-13T00:00:00",
+        "2018-03-11T00:00:00",
+    ]
     assert "SEASON_YEAR" not in normalized.columns
     assert "TEAM_NAME" not in normalized.columns
     assert set(REQUIRED_GAME_LOG_COLUMNS).issubset(normalized.columns)
     assert set(DERIVED_GAME_LOG_COLUMNS).issubset(normalized.columns)
     assert normalized.loc[0, "MIN"] == 35
-    assert normalized.loc[0, "PRA"] == 40
-    assert normalized.loc[0, "FG2M"] == 6
-    assert normalized.loc[1, "FG2A"] == 14
+    assert normalized.loc[0, "PRA"] == 47
+    assert normalized.loc[0, "FG2M"] == 13
+    assert normalized.loc[1, "FG2A"] == 21
     assert list(raw_frame.columns) == _recorded_provider_result_set()["headers"]
 
 
 def test_fixture_matches_current_player_game_logs_result_set_schema():
     result_set = _recorded_provider_result_set()
 
-    assert json.loads(FIXTURE_PATH.read_text())["resource"] == "playergamelogs"
+    payload = json.loads(FIXTURE_PATH.read_text())
+
+    assert payload["resource"] == "gamelogs"
+    assert payload["provenance"]["commit"] == (
+        "03f6a064982edfc8c5d5905a6633a3af17569d54"
+    )
+    assert payload["provenance"]["repository"] == "eddiemay/NBAStats"
     assert result_set["name"] == "PlayerGameLogs"
     assert result_set["headers"] == PlayerGameLogs.expected_data["PlayerGameLogs"]
 
@@ -76,8 +89,8 @@ def test_archetype_normalization_preserves_player_ids_for_cluster_filtering():
     normalized = normalize_archetype_game_logs(_recorded_provider_frame())
 
     assert "PLAYER_ID" in normalized.columns
-    assert list(normalized["PLAYER_ID"]) == [2544, 201939]
-    assert normalized.loc[0, "PRA"] == 40
+    assert list(normalized["PLAYER_ID"]) == [203076] * 6
+    assert normalized.loc[0, "PRA"] == 47
 
 
 def test_missing_required_provider_column_is_centralized_provider_error():
@@ -132,7 +145,7 @@ def test_adapter_normalizes_recorded_response_from_endpoint_factory():
 
     normalized = adapter.get_player_game_logs(player_id=2544, season="2025-26")
 
-    assert normalized.loc[0, "PRA"] == 40
+    assert normalized.loc[0, "PRA"] == 47
     assert "TEAM_NAME" not in normalized.columns
 
 
@@ -151,13 +164,13 @@ def test_adapter_fetches_and_filters_archetype_logs_through_provider_seam():
     )
 
     normalized = adapter.get_archetype_game_logs(
-        player_ids=[2544],
+        player_ids=[203076],
         opponent_team_id=1610612744,
         season="2025-26",
     )
 
-    assert list(normalized["PLAYER_ID"]) == [2544]
-    assert normalized.loc[0, "PLAYER_NAME"] == "LeBron James"
+    assert list(normalized["PLAYER_ID"]) == [203076] * 6
+    assert normalized.loc[0, "PLAYER_NAME"] == "Anthony Davis"
     assert calls == [
         {
             "season_nullable": "2025-26",
@@ -204,7 +217,7 @@ def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):
     logs, next_team = asyncio.run(service._get_game_logs("LeBron James", "2025-26"))
 
     assert next_team is None
-    assert list(logs["PRA"]) == [40, 45]
+    assert list(logs["PRA"]) == [47, 48, 40, 37, 48, 39]
     assert fake.calls == [
         {"player_id": 2544, "season": "2025-26", "season_type": "Regular Season"}
     ]
