@@ -32,6 +32,7 @@ def test_local_settings_have_typed_safe_defaults(monkeypatch):
     assert settings.auth.firebase_admin_disabled is False
     assert settings.cache.enabled is True
     assert settings.llm.enable_fallback is False
+    assert settings.cors.allowed_origins == ("http://localhost:3000",)
     assert settings.nba.current_season == current_nba_season()
     assert isinstance(settings.providers.nba_stats_timeout_seconds, float)
 

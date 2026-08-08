@@ -44,7 +44,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     if config_overrides:
         app.config.update(config_overrides)
 
-    CORS(app)
+    CORS(app, origins=settings.cors.allowed_origins, always_send=False)
 
     _initialize_dependencies(app)
     _assemble_dependencies(app)

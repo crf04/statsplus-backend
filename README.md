@@ -70,6 +70,7 @@ the most important variables:
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
+| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
@@ -274,6 +275,7 @@ gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 100
 For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
+- Set `CORS_ALLOWED_ORIGINS` to every deployed frontend origin as a comma-separated exact allowlist (for example, `https://stats.example.com`). Do not use `*`; production startup rejects the local default when this setting is omitted.
 - Set Firebase credentials so protected and admin routes enforce real tokens and claims.
 - Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.

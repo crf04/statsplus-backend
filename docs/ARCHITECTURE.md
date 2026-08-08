@@ -50,6 +50,10 @@ Runtime configuration is loaded and validated once by
 `app.config.settings.load_settings()`. The resulting typed `RuntimeSettings`
 object is attached to the app and passed into request services; see
 [SETTINGS.md](SETTINGS.md) for the field and environment-variable contract.
+The app factory configures Flask-CORS from `RuntimeSettings.cors`; it never
+falls back to a wildcard origin. Local development uses the explicit
+`http://localhost:3000` default, while production requires
+`CORS_ALLOWED_ORIGINS`.
 
 ## Request flows
 

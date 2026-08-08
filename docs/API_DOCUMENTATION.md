@@ -313,7 +313,10 @@ Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`,
 ## Development Notes
 
 - The app uses `DATABASE_URL` and defaults to `sqlite:///nba_play_types.db`.
-- CORS is enabled globally.
+- CORS uses the exact origins in `CORS_ALLOWED_ORIGINS` (the local default is
+  `http://localhost:3000`; production requires an explicit deployment
+  allowlist). Requests without an `Origin` header are unaffected, and origins
+  outside the allowlist receive no CORS permission headers.
 - `OPENAI_API_KEY` is optional; without it the NL endpoint uses deterministic parsing only.
 - Redis is optional; cache initialization should not be required for local development.
 - Legacy routes from earlier versions are not currently registered in `app/__init__.py`; use the blueprint paths documented here.
