@@ -46,6 +46,7 @@ from app.utils.telemetry import (
     CACHE_DISABLED,
     CACHE_HIT,
     CACHE_MISS,
+    NBA_STATS_OPERATIONS,
     PROVIDER_NBA_STATS,
     ProviderResponseError,
     provider_call,
@@ -120,12 +121,23 @@ def _validate_frame(
     required_columns: Iterable[str] = (),
     validator: Callable[[pd.DataFrame], Any] | None = None,
 ) -> pd.DataFrame:
-    """Validate one NBA frame without retaining provider data in errors."""
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
+    """Validate one NBA frame without retaining provider data in errors.
+
+    An empty frame is a valid provider result when it still carries the
+    endpoint's declared schema.  ``nba_api`` uses that shape for perfectly
+    normal no-result queries (for example, a player with no games in a
+    requested season).  Only a missing/non-DataFrame frame or a frame missing
+    required columns is malformed.
+    """
+    if not isinstance(frame, pd.DataFrame):
         raise ProviderResponseError(
-            "NBA Stats returned an empty or invalid data frame."
+            "NBA Stats returned an invalid data frame."
         )
     required = tuple(required_columns)
+    if frame.empty and not required:
+        raise ProviderResponseError(
+            "NBA Stats returned an empty data frame without a declared schema."
+        )
     missing = [column for column in required if column not in frame.columns]
     if missing:
         raise ProviderResponseError(
@@ -237,13 +249,21 @@ class NBAStatsAdapter:
 
         ``build`` receives the shared provider timeout and must return the
         endpoint instance (constructed so the blocking request has been made).
-        Every response must contain a non-empty :class:`~pandas.DataFrame`;
+        Every response must contain a :class:`~pandas.DataFrame` with the
+        required schema; an empty frame with that schema is a valid no-result
+        response.
         callers may additionally provide required columns or a validator for
         endpoint-specific schemas.  Invalid provider frames are classified as
         ``malformed`` by the telemetry context rather than as application
         failures.  The upstream HTTP status is recorded on the provider event;
         a non-2xx response is classified as an ``http_error``.
         """
+        if operation not in NBA_STATS_OPERATIONS:
+            raise ValueError(
+                f"Unsupported NBA Stats operation {operation!r}; "
+                f"expected one of {sorted(NBA_STATS_OPERATIONS)}."
+            )
+
         with self._bound:
             with provider_call(
                 PROVIDER_NBA_STATS,
@@ -331,14 +351,17 @@ class NBAStatsAdapter:
         date_from: str | None,
         *,
         cache_status: str = CACHE_MISS,
+        per_mode_detailed: str = "Per48",
+        league_id: str = "00",
     ) -> pd.DataFrame | None:
         """Fetch league opponent team stats from the cutoff ``date_from``."""
 
         def build(timeout: float) -> object:
             return endpoints.LeagueDashTeamStats(
                 measure_type_detailed_defense="Opponent",
-                per_mode_detailed="Per48",
+                per_mode_detailed=per_mode_detailed,
                 date_from_nullable=date_from,
+                league_id_nullable=league_id,
                 timeout=timeout,
             )
 
@@ -355,6 +378,8 @@ class NBAStatsAdapter:
         date_from: str | None,
         *,
         cache_status: str = CACHE_MISS,
+        per_mode_simple: str = "PerGame",
+        league_id: str = "00",
     ) -> pd.DataFrame:
         """Fetch league opponent shot data (catch-and-shoot / pull-ups)."""
 
@@ -362,6 +387,8 @@ class NBAStatsAdapter:
             return endpoints.LeagueDashOppPtShot(
                 general_range_nullable=general_range,
                 date_from_nullable=date_from,
+                per_mode_simple=per_mode_simple,
+                league_id_nullable=league_id,
                 timeout=timeout,
             )
 
@@ -370,6 +397,162 @@ class NBAStatsAdapter:
             build,
             cache_status=cache_status,
             required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
+        )
+
+    def fetch_opponent_shooting_zone(
+        self,
+        date_from: str | None,
+        *,
+        cache_status: str = CACHE_MISS,
+        per_mode_detailed: str = "PerGame",
+        league_id: str = "00",
+    ) -> pd.DataFrame:
+        """Fetch opponent shot-location data through the shared NBA seam."""
+
+        def build(timeout: float) -> object:
+            return endpoints.LeagueDashTeamShotLocations(
+                distance_range="By Zone",
+                measure_type_simple="Opponent",
+                per_mode_detailed=per_mode_detailed,
+                date_from_nullable=date_from,
+                league_id_nullable=league_id,
+                timeout=timeout,
+            )
+
+        return self.run_endpoint(
+            "league_opponent_shooting_zone",
+            build,
+            cache_status=cache_status,
+            required_columns=("TEAM_ID", "TEAM_NAME"),
+        )
+
+    def fetch_synergy_play_types(
+        self,
+        play_type: str,
+        *,
+        player_or_team_abbreviation: str,
+        type_grouping: str,
+        league_id: str = "00",
+    ) -> pd.DataFrame:
+        """Fetch one typed Synergy play-type frame."""
+
+        if player_or_team_abbreviation not in {"T", "P"}:
+            raise ValueError("player_or_team_abbreviation must be 'T' or 'P'.")
+        operation = (
+            "synergy_team_play_types"
+            if player_or_team_abbreviation == "T"
+            else "synergy_player_play_types"
+        )
+
+        def build(timeout: float) -> object:
+            return endpoints.SynergyPlayTypes(
+                play_type_nullable=play_type,
+                player_or_team_abbreviation=player_or_team_abbreviation,
+                type_grouping_nullable=type_grouping,
+                league_id_nullable=league_id,
+                timeout=timeout,
+            )
+
+        required_columns = (
+            ("TEAM_NAME", "GP", "PTS")
+            if player_or_team_abbreviation == "T"
+            else ("PLAYER_NAME", "TEAM_ABBREVIATION", "PTS")
+        )
+        return self.run_endpoint(
+            operation,
+            build,
+            required_columns=required_columns,
+        )
+
+    def fetch_player_per36_stats(self) -> pd.DataFrame:
+        """Fetch the player per-36 baseline used by archetype calculations."""
+
+        return self.run_endpoint(
+            "player_per36_stats",
+            lambda timeout: endpoints.LeagueDashPlayerStats(
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="Per36",
+                timeout=timeout,
+            ),
+            required_columns=("PLAYER_ID",),
+        )
+
+    def fetch_player_shooting_zone(
+        self,
+        date_from: str | None = None,
+        *,
+        per_mode_detailed: str = "PerGame",
+    ) -> pd.DataFrame:
+        """Fetch player shooting-zone data for the refresh/profile tables."""
+
+        return self.run_endpoint(
+            "player_shooting_zone",
+            lambda timeout: endpoints.LeagueDashPlayerShotLocations(
+                distance_range="By Zone",
+                per_mode_detailed=per_mode_detailed,
+                date_from_nullable=date_from,
+                timeout=timeout,
+            ),
+            required_columns=("PLAYER_ID", "PLAYER_NAME", "TEAM_ID"),
+        )
+
+    def fetch_player_shot_chart(self, player_id: int, team_id: int) -> pd.DataFrame:
+        """Fetch one player's shot-chart profile."""
+
+        return self.run_endpoint(
+            "player_shot_chart",
+            lambda timeout: endpoints.PlayerDashPtShots(
+                player_id=player_id,
+                team_id=team_id,
+                per_mode_simple="PerGame",
+                timeout=timeout,
+            ),
+            frame_index=1,
+            required_columns=("SHOT_TYPE",),
+        )
+
+    def fetch_player_gamelogs_against(
+        self,
+        team_id: int,
+        season: str,
+    ) -> pd.DataFrame:
+        """Fetch game logs for the current season against one opponent."""
+
+        return self.run_endpoint(
+            "player_gamelogs_against",
+            lambda timeout: endpoints.playergamelogs.PlayerGameLogs(
+                season_nullable=season,
+                opp_team_id_nullable=team_id,
+                timeout=timeout,
+            ),
+            required_columns=(
+                "PLAYER_ID",
+                "PLAYER_NAME",
+                "GAME_DATE",
+                "MIN",
+                "FGM",
+                "FGA",
+                "FG3M",
+                "FG3A",
+                "FTM",
+                "FTA",
+                "PTS",
+                "TOV",
+            ),
+        )
+
+    def health_probe(self) -> pd.DataFrame:
+        """Probe ``stats.nba.com`` and retain the upstream status."""
+
+        return self.run_endpoint(
+            "health_probe",
+            lambda timeout: endpoints.LeagueDashTeamStats(
+                measure_type_detailed_defense="Opponent",
+                per_mode_detailed="Per48",
+                league_id_nullable="00",
+                timeout=timeout,
+            ),
+            required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
 

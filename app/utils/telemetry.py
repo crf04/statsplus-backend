@@ -34,6 +34,35 @@ logger = logging.getLogger(__name__)
 PROVIDER_NBA_STATS = "nba_stats"
 PROVIDER_PBP_STATS = "pbp_stats"
 
+# Keep provider operation names in one place.  These names are part of the
+# telemetry contract: adapter methods, provider health checks, and the admin
+# metrics surface must not quietly grow parallel spellings for the same
+# upstream endpoint.  The recorded-fixture operation is included because it
+# deliberately uses the production parser and emits the same event shape.
+NBA_STATS_OPERATIONS = frozenset(
+    {
+        "health_probe",
+        "player_game_logs",
+        "player_game_logs_recorded",
+        "league_opponent_team_stats",
+        "league_opponent_shot_chart",
+        "league_opponent_shooting_zone",
+        "synergy_team_play_types",
+        "synergy_player_play_types",
+        "player_per36_stats",
+        "player_shooting_zone",
+        "player_shot_chart",
+        "player_gamelogs_against",
+    }
+)
+PBP_STATS_OPERATIONS = frozenset(
+    {"get_totals_player", "get_totals_opponent", "health_probe"}
+)
+PROVIDER_OPERATION_CATALOG = {
+    PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
+    PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
+}
+
 OUTCOME_SUCCESS = "success"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_HTTP_ERROR = "http_error"
@@ -354,6 +383,9 @@ __all__ = [
     "OUTCOME_TIMEOUT",
     "PROVIDER_NBA_STATS",
     "PROVIDER_PBP_STATS",
+    "NBA_STATS_OPERATIONS",
+    "PBP_STATS_OPERATIONS",
+    "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "ProviderResponseError",
     "ProviderTracker",

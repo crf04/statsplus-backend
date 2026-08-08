@@ -64,8 +64,8 @@ Provider calls at the two external seams are wrapped in one structured event
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | `player_game_logs`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `health_probe` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | `get_totals_player`, `get_totals_opponent`, `health_probe` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (thread-safe counter incremented by

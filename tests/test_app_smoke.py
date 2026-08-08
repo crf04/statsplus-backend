@@ -30,7 +30,7 @@ def test_database_healthcheck(client):
 def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
     client, monkeypatch
 ):
-    from app.routes import health_routes
+    from app.services import nba_stats_adapter
     from app.utils import telemetry
 
     class FailingResponse:
@@ -40,7 +40,7 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
             raise requests.exceptions.HTTPError("503 Service Unavailable")
 
     monkeypatch.setattr(
-        health_routes.endpoints,
+        nba_stats_adapter.endpoints,
         "LeagueDashTeamStats",
         lambda *args, **kwargs: FailingEndpoint(),
     )
@@ -67,7 +67,7 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
 
 
 def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
-    from app.routes import health_routes
+    from app.services import provider_health_service
     from app.utils import telemetry
 
     class FailingResponse:
@@ -81,7 +81,7 @@ def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
             return FailingResponse()
 
     monkeypatch.setattr(
-        health_routes,
+        provider_health_service,
         "get_shared_nba_session",
         lambda settings: FailingSession(),
     )
@@ -102,19 +102,16 @@ def test_detailed_health_reports_both_providers(client, monkeypatch):
     from app.routes import health_routes
 
     monkeypatch.setattr(
-        health_routes,
-        "_check_database_connection",
-        lambda: {"status": "healthy"},
-    )
-    monkeypatch.setattr(
-        health_routes,
-        "_check_nba_api_connectivity",
-        lambda: {"status": "healthy", "provider": "nba_stats"},
-    )
-    monkeypatch.setattr(
-        health_routes,
-        "_check_pbp_stats_connectivity",
-        lambda: {"status": "healthy", "provider": "pbp_stats"},
+        health_routes.health_service,
+        "detailed",
+        lambda: {
+            "status": "healthy",
+            "checks": {
+                "database": {"status": "healthy"},
+                "nba_api": {"status": "healthy", "provider": "nba_stats"},
+                "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
+            },
+        },
     )
 
     response = client.get("/api/health/detailed")

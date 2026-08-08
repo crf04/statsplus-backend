@@ -1,5 +1,3 @@
-from functools import partial
-
 from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
@@ -26,34 +24,28 @@ data_jobs_service = CurrentAppService(
 @require_admin
 @route_error_boundary("Failed to schedule the database update.")
 def update_database():
-    job_state = data_jobs_service.start("update_database", data_service.update_all_data)
+    job_state = data_jobs_service.start("update_database")
     return jsonify(job_state), 202
 
 @data_bp.route('/player_PBP', methods=['PUT'])
 @require_admin
 @route_error_boundary("Failed to schedule the player PBP data refresh.")
 def store_player_PBP():
-    job_state = data_jobs_service.start(
-        "player_pbp", partial(data_service.fetch_PBP_data, "player")
-    )
+    job_state = data_jobs_service.start("player_pbp")
     return jsonify(job_state), 202
 
 @data_bp.route('/opponent_PBP', methods=['PUT'])
 @require_admin
 @route_error_boundary("Failed to schedule the opponent PBP data refresh.")
 def store_opponent_PBP():
-    job_state = data_jobs_service.start(
-        "opponent_pbp", partial(data_service.fetch_PBP_data, "opponent")
-    )
+    job_state = data_jobs_service.start("opponent_pbp")
     return jsonify(job_state), 202
 
 @data_bp.route('/fetch_players_with_teams', methods=['POST'])
 @require_admin
 @route_error_boundary("Failed to schedule the player team refresh.")
 def fetch_players_with_teams():
-    job_state = data_jobs_service.start(
-        "fetch_players_with_teams", data_service.fetch_players_with_teams
-    )
+    job_state = data_jobs_service.start("fetch_players_with_teams")
     return jsonify(job_state), 202
 
 @data_bp.route('/jobs/<job_id>', methods=['GET'])

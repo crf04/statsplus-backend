@@ -57,7 +57,5 @@ def get_player_profile():
 @require_admin
 @route_error_boundary("Failed to schedule the player data refresh.")
 def fetch_players():
-    job_state = player_jobs_service.start(
-        "fetch_players", player_service.store_player_information
-    )
+    job_state = player_jobs_service.start("fetch_players")
     return jsonify(job_state), 202

@@ -18,7 +18,7 @@ from typing import Any, ClassVar, ParamSpec, TypeVar
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
-from app.utils.telemetry import record_application_failure
+from app.utils.telemetry import ProviderResponseError, record_application_failure
 
 
 logger = logging.getLogger(__name__)
@@ -258,6 +258,12 @@ def route_error_boundary(
         def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
             try:
                 return handler(*args, **kwargs)
+            except ProviderResponseError as error:
+                # A provider seam has already recorded the malformed event.
+                # Translate it at the HTTP boundary so the public contract is
+                # the same safe 503 used for provider timeouts and HTTP
+                # failures, without incrementing application-failure metrics.
+                raise ProviderUnavailableError(detail=error) from error
             except AppError:
                 raise
             except Exception as error:
@@ -318,6 +324,8 @@ def register_error_handlers(app: Flask) -> None:
 
         if isinstance(error, HTTPException):
             return handle_http_error(error)
+        if isinstance(error, ProviderResponseError):
+            return handle_app_error(ProviderUnavailableError(detail=error))
 
         app_error = AppError(detail=error)
         return handle_app_error(app_error)

@@ -250,6 +250,78 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
     assert result["averages"] == []
 
 
+def test_route_accepts_schema_valid_empty_provider_frame(client, monkeypatch):
+    """A real provider-shaped empty frame is a successful no-result query."""
+
+    from app.routes import game_routes
+    from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS
+
+    class EmptyNBAAdapter:
+        def fetch_player_game_logs(self, player_id, season, **kwargs):
+            return pd.DataFrame(columns=GAME_LOG_REQUIRED_COLUMNS)
+
+        def record_cache_hit(self, operation):
+            return None
+
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        service = game_routes.game_service._resolve()
+        monkeypatch.setattr(service, "get_player_id", lambda name: 1)
+        monkeypatch.setattr(service, "nba_stats", EmptyNBAAdapter())
+    monkeypatch.setattr(
+        game_routes.game_service,
+        "get_filtered_logs",
+        lambda player_name, query: GameService.get_filtered_logs(
+            service, player_name, query
+        ),
+    )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["game_logs"] == []
+    assert body["averages"] == []
+    assert body["season_averages"] == []
+
+
+def test_malformed_provider_response_is_safe_503_without_app_failure(
+    client, monkeypatch
+):
+    from app.routes import game_routes
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+
+    def malformed(*args, **kwargs):
+        with telemetry.provider_call(
+            telemetry.PROVIDER_NBA_STATS, "player_game_logs"
+        ):
+            raise telemetry.ProviderResponseError(
+                "malformed provider secret=do-not-return"
+            )
+
+    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", malformed)
+
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": {
+            "code": "provider_unavailable",
+            "message": "An upstream provider is currently unavailable. Please try again later.",
+        }
+    }
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["provider_failures"][telemetry.PROVIDER_NBA_STATS][
+        telemetry.OUTCOME_MALFORMED
+    ] == 1
+    assert metrics["application_failures"] == {}
+    assert "do-not-return" not in response.get_data(as_text=True)
+
+
 def test_service_surfaces_provider_timeout(
     monkeypatch, mock_db_engine, mock_redis_client
 ):

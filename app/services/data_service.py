@@ -12,14 +12,6 @@ import logging
 from collections.abc import Callable
 
 import pandas as pd
-from nba_api.stats.endpoints import (
-    LeagueDashOppPtShot,
-    LeagueDashPlayerShotLocations,
-    LeagueDashPlayerStats,
-    LeagueDashTeamShotLocations,
-    LeagueDashTeamStats,
-    SynergyPlayTypes,
-)
 from nba_api.stats.static import players, teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
@@ -101,16 +93,10 @@ class DataService:
         combined_df = pd.DataFrame()
 
         for play_type in PLAY_TYPES:
-            df = self.nba_stats.run_endpoint(
-                "synergy_team_play_types",
-                lambda timeout, play_type=play_type: SynergyPlayTypes(
-                    play_type_nullable=play_type,
-                    player_or_team_abbreviation="T",
-                    type_grouping_nullable="Defensive",
-                    league_id_nullable="00",
-                    timeout=timeout,
-                ),
-                required_columns=("TEAM_NAME", "GP", "PTS"),
+            df = self.nba_stats.fetch_synergy_play_types(
+                play_type,
+                player_or_team_abbreviation="T",
+                type_grouping="Defensive",
             )
             df["PLAY_TYPE"] = play_type
             df["PTS/G"] = df["PTS"] / df["GP"]
@@ -457,91 +443,49 @@ class DataService:
             )
 
     def _fetch_opponent_data(self, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            "opponent_team_stats",
-            lambda timeout: LeagueDashTeamStats(
-                measure_type_detailed_defense="Opponent",
-                per_mode_detailed="Per48",
-                date_from_nullable=date_filter,
-                league_id_nullable="00",
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME"),
+        return self.nba_stats.fetch_opponent_team_stats(
+            date_filter,
+            per_mode_detailed="Per48",
+            league_id="00",
         )
 
     def _fetch_opp_shooting_data(self, play_type, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            "opp_shooting",
-            lambda timeout: LeagueDashOppPtShot(
-                general_range_nullable=play_type,
-                date_from_nullable=date_filter,
-                per_mode_simple="PerGame",
-                league_id_nullable="00",
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
+        return self.nba_stats.fetch_opponent_shot_chart(
+            play_type,
+            date_filter,
+            per_mode_simple="PerGame",
+            league_id="00",
         )
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            "opp_shooting_zone",
-            lambda timeout: LeagueDashTeamShotLocations(
-                distance_range="By Zone",
-                measure_type_simple="Opponent",
-                per_mode_detailed="PerGame",
-                date_from_nullable=date_filter,
-                league_id_nullable="00",
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME"),
+        return self.nba_stats.fetch_opponent_shooting_zone(
+            date_filter,
+            per_mode_detailed="PerGame",
+            league_id="00",
         )
 
     def _fetch_player_zone_data(self, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            "player_shooting_zone",
-            lambda timeout: LeagueDashPlayerShotLocations(
-                distance_range="By Zone",
-                per_mode_detailed="PerGame",
-                date_from_nullable=date_filter,
-                timeout=timeout,
-            ),
-            required_columns=("PLAYER_ID", "PLAYER_NAME", "TEAM_ID"),
+        return self.nba_stats.fetch_player_shooting_zone(
+            date_filter,
+            per_mode_detailed="PerGame",
         )
 
     def _fetch_team_play_type_data(self, play_type):
-        return self.nba_stats.run_endpoint(
-            "team_play_types",
-            lambda timeout, play_type=play_type: SynergyPlayTypes(
-                play_type_nullable=play_type,
-                player_or_team_abbreviation="T",
-                type_grouping_nullable="Defensive",
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_NAME", "GP", "PTS"),
+        return self.nba_stats.fetch_synergy_play_types(
+            play_type,
+            player_or_team_abbreviation="T",
+            type_grouping="Defensive",
         )
 
     def _fetch_play_type_data(self, play_type):
-        return self.nba_stats.run_endpoint(
-            "player_play_types",
-            lambda timeout, play_type=play_type: SynergyPlayTypes(
-                play_type_nullable=play_type,
-                player_or_team_abbreviation="P",
-                type_grouping_nullable="Offensive",
-                timeout=timeout,
-            ),
-            required_columns=("PLAYER_NAME", "TEAM_ABBREVIATION", "PTS"),
+        return self.nba_stats.fetch_synergy_play_types(
+            play_type,
+            player_or_team_abbreviation="P",
+            type_grouping="Offensive",
         )
 
     def _fetch_player_per36_stats(self):
-        return self.nba_stats.run_endpoint(
-            "player_per36_stats",
-            lambda timeout: LeagueDashPlayerStats(
-                measure_type_detailed_defense="Base",
-                per_mode_detailed="Per36",
-                timeout=timeout,
-            ),
-            required_columns=("PLAYER_ID",),
-        )
+        return self.nba_stats.fetch_player_per36_stats()
 
     def _fetch_data_from_table(self, table_name):
         from ..utils.tables import normalize_table_name

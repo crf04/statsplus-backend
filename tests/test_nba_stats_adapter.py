@@ -302,14 +302,14 @@ def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "frame, required_columns",
+    "frame, required_columns, malformed",
     [
-        (pd.DataFrame(), ()),
-        (pd.DataFrame({"GAME_ID": ["1"]}), ("GAME_ID", "PTS")),
+        (pd.DataFrame({"GAME_ID": [], "PTS": []}), ("GAME_ID", "PTS"), False),
+        (pd.DataFrame({"GAME_ID": ["1"]}), ("GAME_ID", "PTS"), True),
     ],
 )
 def test_adapter_classifies_empty_or_invalid_schema_as_malformed(
-    monkeypatch, frame, required_columns
+    monkeypatch, frame, required_columns, malformed
 ):
     from app.utils import telemetry
 
@@ -320,12 +320,22 @@ def test_adapter_classifies_empty_or_invalid_schema_as_malformed(
     adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
     telemetry.clear_recorded_provider_events()
 
-    with pytest.raises(telemetry.ProviderResponseError):
-        adapter.run_endpoint(
-            "schema_probe",
+    if malformed:
+        with pytest.raises(telemetry.ProviderResponseError):
+            adapter.run_endpoint(
+                "health_probe",
+                lambda timeout: Endpoint(),
+                required_columns=required_columns,
+            )
+    else:
+        result = adapter.run_endpoint(
+            "health_probe",
             lambda timeout: Endpoint(),
             required_columns=required_columns,
         )
+        assert result.empty
 
     event = telemetry.get_recorded_provider_events()[-1]
-    assert event["outcome"] == telemetry.OUTCOME_MALFORMED
+    assert event["outcome"] == (
+        telemetry.OUTCOME_MALFORMED if malformed else telemetry.OUTCOME_SUCCESS
+    )

@@ -1,119 +1,63 @@
-"""Health check routes.
+"""HTTP adapters for dependency health checks.
 
-Provides endpoints to verify service dependencies such as the database and NBA API connectivity.
+Provider I/O, timing, probe construction, and failure classification live in
+``ProviderHealthService``.  These routes only invoke the app-scoped service,
+translate its result into the existing public status contract, and jsonify it.
 """
 
 from __future__ import annotations
 
-import time
-import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Tuple
+from typing import Any
 
 from flask import Blueprint, jsonify
-import requests
-from nba_api.stats import endpoints
-from sqlalchemy import text
 
-from ..errors import AppError, ProviderUnavailableError
-from ..services.nba_stats_adapter import NBAStatsAdapter
-from ..services.pbp_stats_adapter import PBPTotalsAdapter, PBP_TOTALS_URL
-from ..utils.db import get_engine
-from ..utils.nba_api_config import get_shared_nba_session
-from app.config.settings import get_runtime_settings
+from app.errors import AppError, ProviderUnavailableError
+from ._service_proxy import (
+    CurrentAppService,
+    build_provider_health_service,
+)
 
 
 health_bp = Blueprint("health", __name__, url_prefix="/api/health")
-logger = logging.getLogger(__name__)
+health_service = CurrentAppService(
+    "provider_health", build_provider_health_service
+)
 
 
 @health_bp.route("/db", methods=["GET"])
-def database_healthcheck() -> Tuple[Any, int]:
-    """Check database connectivity.
+def database_healthcheck():
+    """Return the small database health payload used by readiness checks."""
 
-    Attempts to connect to the configured database and run a trivial query.
-
-    Returns
-    -------
-    Tuple[Any, int]
-        A JSON response with status information and an HTTP status code.
-    """
-
-    try:
-        engine = get_engine()
-        with engine.connect() as connection:
-            result = connection.execute(text("SELECT 1"))
-            ok = result.scalar() == 1
-
-        payload: Dict[str, Any] = {
-            "status": "ok" if ok else "error",
-            "dialect": engine.dialect.name,
-            "driver": getattr(engine.dialect, "driver", None),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        if not ok:
-            raise AppError(
-                "The database health check failed.",
-                detail="Database health query returned an unexpected result",
-            )
-        return jsonify(payload), 200
-
-    except Exception as error:
-        if isinstance(error, AppError):
-            raise
-        raise AppError("The database health check failed.", detail=error) from error
+    result = _check_database_connection()
+    if result.get("status") != "healthy":
+        raise AppError(
+            "The database health check failed.",
+            detail=result.get("error") or result,
+        )
+    payload = dict(result)
+    payload["status"] = "ok"
+    return jsonify(payload), 200
 
 
 @health_bp.route("/detailed", methods=["GET"])
-def detailed_health() -> Tuple[Any, int]:
-    """Comprehensive health check including NBA API connectivity.
+def detailed_health():
+    """Return all dependency checks or the safe provider-unavailable error."""
 
-    Checks database, NBA API connectivity, and environment configuration.
-
-    Returns
-    -------
-    Tuple[Any, int]
-        A JSON response with detailed status information and HTTP status code.
-    """
-    checks = {
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'database': _check_database_connection(),
-        'nba_api': _check_nba_api_connectivity(),
-        'pbp_stats': _check_pbp_stats_connectivity(),
-        'environment': get_runtime_settings().environment,
-        'version': '1.0.0'
-    }
-    
-    all_healthy = all(
-        checks[key].get('status') == 'healthy' if isinstance(checks[key], dict) else True
-        for key in ['database', 'nba_api', 'pbp_stats']
-    )
-    
-    overall_status = 'healthy' if all_healthy else 'degraded'
-
-    if not all_healthy:
+    payload = health_service.detailed()
+    if payload.get("status") != "healthy":
         raise ProviderUnavailableError(
             "One or more health-check dependencies are unavailable.",
-            detail=checks,
+            detail=payload.get("checks"),
         )
-    
-    return jsonify({
-        'status': overall_status,
-        'checks': checks
-    }), 200
+    return jsonify(payload), 200
 
 
 @health_bp.route("/nba-api", methods=["GET"])
-def nba_api_health() -> Tuple[Any, int]:
-    """Test ``stats.nba.com`` connectivity through the NBA adapter seam.
+def nba_api_health():
+    """Return the NBA Stats provider health signal."""
 
-    Returns
-    -------
-    Tuple[Any, int]
-        A JSON response with NBA API status and HTTP status code.
-    """
     result = _check_nba_api_connectivity()
-    if result['status'] != 'healthy':
+    if result.get("status") != "healthy":
         raise ProviderUnavailableError(
             "The NBA API health check failed.",
             detail=result.get("error") or result,
@@ -123,10 +67,11 @@ def nba_api_health() -> Tuple[Any, int]:
 
 @health_bp.route("/pbp-api", methods=["GET"])
 @health_bp.route("/pbp-stats", methods=["GET"])
-def pbp_stats_health() -> Tuple[Any, int]:
-    """Test ``api.pbpstats.com`` connectivity with its own signal."""
+def pbp_stats_health():
+    """Return the PBP Stats provider health signal."""
+
     result = _check_pbp_stats_connectivity()
-    if result["status"] != "healthy":
+    if result.get("status") != "healthy":
         raise ProviderUnavailableError(
             "The PBP Stats health check failed.",
             detail=result.get("error") or result,
@@ -134,147 +79,25 @@ def pbp_stats_health() -> Tuple[Any, int]:
     return jsonify(result), 200
 
 
-def _check_database_connection() -> Dict[str, Any]:
-    """Check database connectivity.
-    
-    Returns
-    -------
-    Dict[str, Any]
-        Database connection status information.
-    """
-    engine = get_engine()
-    try:
-        start_time = time.time()
-        with engine.connect() as connection:
-            result = connection.execute(text("SELECT 1"))
-            ok = result.scalar() == 1
-        
-        duration = time.time() - start_time
-        
-        return {
-            'status': 'healthy' if ok else 'unhealthy',
-            'response_time_ms': round(duration * 1000, 2),
-            'dialect': engine.dialect.name,
-            'driver': getattr(engine.dialect, 'driver', None)
-        }
-        
-    except Exception as error:
-        logger.error("Database health check failed: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'Database health check failed.',
-            'dialect': engine.dialect.name,
-            'driver': getattr(engine.dialect, 'driver', None)
-        }
+# Kept as tiny route-level seams for callers that patch individual checks.
+# They perform no I/O; all work remains in the app-scoped service.
+def _check_database_connection() -> dict[str, Any]:
+    return health_service.check_database()
 
 
-def _check_nba_api_connectivity() -> Dict[str, Any]:
-    """Test ``stats.nba.com`` via :class:`NBAStatsAdapter`.
-    
-    Returns
-    -------
-    Dict[str, Any]
-        NBA API connectivity status information.
-    """
-    try:
-        start_time = time.time()
-        settings = get_runtime_settings()
-        adapter = NBAStatsAdapter(settings=settings)
-        adapter.run_endpoint(
-            "health_probe",
-            lambda timeout: endpoints.LeagueDashTeamStats(
-                measure_type_detailed_defense="Opponent",
-                per_mode_detailed="Per48",
-                league_id_nullable="00",
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME"),
-        )
-
-        duration = time.time() - start_time
-
-        return {
-            'status': 'healthy',
-            'response_time_ms': round(duration * 1000, 2),
-            'status_code': adapter.last_status_code,
-            'endpoint': 'stats.nba.com/stats/leaguedashteamstats',
-            'provider': 'nba_stats',
-            'test_type': 'team_stats_api',
-        }
-        
-    except requests.exceptions.Timeout as error:
-        logger.error("NBA API health check timed out: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check timed out.',
-            'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguedashteamstats',
-            'provider': 'nba_stats',
-        }
-    except requests.exceptions.RequestException as error:
-        logger.error("NBA API health check request failed: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check request failed.',
-            'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguedashteamstats',
-            'provider': 'nba_stats',
-        }
-    except Exception as error:
-        logger.error("NBA API health check failed: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check failed.',
-            'response_time_ms': None,
-            'endpoint': 'stats.nba.com/stats/leaguedashteamstats',
-            'provider': 'nba_stats',
-        }
+def _check_nba_api_connectivity() -> dict[str, Any]:
+    return health_service.check_nba_api()
 
 
-def _check_pbp_stats_connectivity() -> Dict[str, Any]:
-    """Test ``api.pbpstats.com`` through its separate PBP adapter seam."""
-    endpoint = PBP_TOTALS_URL.replace("https://", "")
-    try:
-        start_time = time.time()
-        settings = get_runtime_settings()
-        adapter = PBPTotalsAdapter(
-            settings=settings,
-            session=get_shared_nba_session(settings),
-        )
-        status_code = adapter.health_probe()
-        duration = time.time() - start_time
-        return {
-            "status": "healthy",
-            "response_time_ms": round(duration * 1000, 2),
-            "status_code": status_code,
-            "endpoint": endpoint,
-            "provider": "pbp_stats",
-            "test_type": "totals_api",
-        }
-    except requests.exceptions.Timeout:
-        logger.error("PBP Stats health check timed out")
-        return {
-            "status": "unhealthy",
-            "error": "PBP Stats health check timed out.",
-            "response_time_ms": None,
-            "endpoint": endpoint,
-            "provider": "pbp_stats",
-        }
-    except requests.exceptions.RequestException:
-        logger.error("PBP Stats health check request failed")
-        return {
-            "status": "unhealthy",
-            "error": "PBP Stats health check request failed.",
-            "response_time_ms": None,
-            "endpoint": endpoint,
-            "provider": "pbp_stats",
-        }
-    except Exception:
-        logger.exception("PBP Stats health check failed")
-        return {
-            "status": "unhealthy",
-            "error": "PBP Stats health check failed.",
-            "response_time_ms": None,
-            "endpoint": endpoint,
-            "provider": "pbp_stats",
-        }
+def _check_pbp_stats_connectivity() -> dict[str, Any]:
+    return health_service.check_pbp_api()
+
+
+__all__ = [
+    "database_healthcheck",
+    "detailed_health",
+    "health_bp",
+    "health_service",
+    "nba_api_health",
+    "pbp_stats_health",
+]

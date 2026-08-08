@@ -3,7 +3,6 @@ import logging
 import requests
 from collections.abc import Callable
 from nba_api.stats.static import players
-from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
 from ..errors import (
@@ -133,16 +132,9 @@ class PlayerService:
         """Get player shooting type data"""
         player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = self.nba_stats.run_endpoint(
-            'player_shot_chart',
-            lambda timeout: PlayerDashPtShots(
-                player_id=self.get_player_id(player_name),
-                team_id=int(team_id),
-                per_mode_simple='PerGame',
-                timeout=timeout,
-            ),
-            frame_index=1,
-            required_columns=("SHOT_TYPE",),
+        df = self.nba_stats.fetch_player_shot_chart(
+            self.get_player_id(player_name),
+            int(team_id),
         )
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
@@ -162,27 +154,9 @@ class PlayerService:
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
             
             # Get game logs
-            gl = self.nba_stats.run_endpoint(
-                "player_gamelogs_against",
-                lambda timeout: playergamelogs.PlayerGameLogs(
-                    season_nullable=self.settings.nba.current_season,
-                    opp_team_id_nullable=team_id,
-                    timeout=timeout,
-                ),
-                required_columns=(
-                    "PLAYER_ID",
-                    "PLAYER_NAME",
-                    "GAME_DATE",
-                    "MIN",
-                    "FGM",
-                    "FGA",
-                    "FG3M",
-                    "FG3A",
-                    "FTM",
-                    "FTA",
-                    "PTS",
-                    "TOV",
-                ),
+            gl = self.nba_stats.fetch_player_gamelogs_against(
+                int(team_id),
+                self.settings.nba.current_season,
             )
             
             # Filter and process game logs

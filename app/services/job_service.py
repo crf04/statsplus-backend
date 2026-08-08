@@ -10,7 +10,6 @@ or abandoned work deterministically.
 from __future__ import annotations
 
 import atexit
-import inspect
 import logging
 import threading
 import uuid
@@ -76,6 +75,8 @@ __all__ = [
     "DEFAULT_FAILURE_SUMMARY",
     "KNOWN_REFRESH_OPERATIONS",
     "build_default_refresh_handlers",
+    "build_data_refresh_job_service",
+    "adapt_zero_arg_handler",
 ]
 
 
@@ -94,6 +95,22 @@ class SynchronousExecutor:
         return fn(*args, **kwargs)
 
 
+def adapt_zero_arg_handler(handler: Callable[[], Any]) -> RefreshCallable:
+    """Adapt a deliberately tiny test fake to the one worker protocol.
+
+    Production handlers are registered with the explicit keyword-only
+    ``progress_callback`` signature.  A unit test that does not need progress
+    can opt into this adapter when constructing its complete registry; the
+    worker itself never inspects or branches on handler signatures.
+    """
+
+    def wrapped(*, progress_callback: ProgressCallback) -> Any:
+        del progress_callback
+        return handler()
+
+    return wrapped
+
+
 def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCallable]:
     """Build the complete operation registry for one application instance.
 
@@ -103,20 +120,39 @@ def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCall
     later process.
     """
 
-    from functools import partial
-
     from app.services.data_service import DataService
     from app.services.player_service import PlayerService
 
     data_service = DataService(engine, settings=settings)
     player_service = PlayerService(engine, settings=settings)
+
+    def player_pbp(*, progress_callback: ProgressCallback) -> Any:
+        return data_service.fetch_PBP_data(
+            "player", progress_callback=progress_callback
+        )
+
+    def opponent_pbp(*, progress_callback: ProgressCallback) -> Any:
+        return data_service.fetch_PBP_data(
+            "opponent", progress_callback=progress_callback
+        )
+
     return {
         "update_database": data_service.update_all_data,
-        "player_pbp": partial(data_service.fetch_PBP_data, "player"),
-        "opponent_pbp": partial(data_service.fetch_PBP_data, "opponent"),
+        "player_pbp": player_pbp,
+        "opponent_pbp": opponent_pbp,
         "fetch_players_with_teams": data_service.fetch_players_with_teams,
         "fetch_players": player_service.store_player_information,
     }
+
+
+def build_data_refresh_job_service(engine, settings) -> "DataRefreshJobService":
+    """Build the canonical app-scoped durable refresh coordinator."""
+
+    return DataRefreshJobService(
+        engine,
+        settings=settings,
+        handlers=build_default_refresh_handlers(engine, settings),
+    )
 
 
 class DataRefreshJobService:
@@ -140,7 +176,6 @@ class DataRefreshJobService:
         self._clock = clock or utcnow
         self._session_factory = sessionmaker(bind=engine)
         self._handlers = MappingProxyType(dict(handlers or {}))
-        self._runtime_handlers: dict[str, RefreshCallable] = {}
         self._lease_seconds = max(float(lease_seconds), 0.1)
         self._poll_interval = max(float(poll_interval), 0.05)
         self._owner = f"{uuid.uuid4().hex}:{threading.get_ident()}"
@@ -181,23 +216,18 @@ class DataRefreshJobService:
     def start(
         self,
         operation: str,
-        refresh: RefreshCallable | None = None,
         *,
         request_id: str | None = None,
     ) -> dict:
         """Persist and dispatch one operation, returning its queued state.
 
-        ``refresh`` is retained as a compatibility/test seam for callers that
-        inject a fake service method.  It is kept only in this process and is
-        never written to SQL; production recovery always uses the registered
-        operation handler.  Routes pass their bound service method so existing
-        tests can still patch the narrow route seam.
+        The operation name is the only executable identity persisted in SQL.
+        Every process resolves it from the immutable startup registry, so a
+        queued row can be recovered after a restart without request closures.
         """
 
         if operation not in KNOWN_REFRESH_OPERATIONS:
             raise InvalidInputError("Unsupported data refresh operation.")
-        if refresh is not None:
-            self._runtime_handlers[operation] = refresh
         if self._handler_for(operation) is None:
             raise InvalidInputError("The data refresh operation is unavailable.")
 
@@ -428,14 +458,10 @@ class DataRefreshJobService:
             handler = self._handler_for(job.operation)
             if handler is None:
                 raise RuntimeError("No registered handler for refresh operation")
-            result = self._invoke_handler(
-                handler,
-                lambda progress, note=None: self.update_progress(
-                    job_id,
-                    progress,
-                    note,
-                    lease_owner=owner,
-                ),
+            result = handler(
+                progress_callback=lambda progress, note=None: self.update_progress(
+                    job_id, progress, note, lease_owner=owner
+                )
             )
             if result is False:
                 self._fail(job_id, owner, OperationFailedError())
@@ -448,25 +474,6 @@ class DataRefreshJobService:
             heartbeat.join(timeout=max(self._poll_interval, 0.1))
             clear_request_id()
 
-    @staticmethod
-    def _invoke_handler(handler: RefreshCallable, progress: ProgressCallback) -> Any:
-        """Call a modern progress-aware handler or an older zero-arg seam."""
-
-        try:
-            signature = inspect.signature(handler)
-        except (TypeError, ValueError):
-            return handler()
-        if "progress_callback" in signature.parameters:
-            return handler(progress_callback=progress)
-        positional = [
-            parameter
-            for parameter in signature.parameters.values()
-            if parameter.kind
-            in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        if positional:
-            return handler(progress)
-        return handler()
 
     def _heartbeat_loop(
         self,
@@ -590,7 +597,7 @@ class DataRefreshJobService:
             session.commit()
 
     def _handler_for(self, operation: str) -> RefreshCallable | None:
-        return self._runtime_handlers.get(operation) or self._handlers.get(operation)
+        return self._handlers.get(operation)
 
     def _active_job(self, operation: str):
         with self._session_factory() as session:

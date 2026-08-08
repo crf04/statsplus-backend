@@ -95,10 +95,7 @@ def _initialize_dependencies(app: Flask) -> None:
     # bootable.
     if not app.config.get("SKIP_TABLE_CREATE", False):
         try:
-            from app.services.job_service import (
-                DataRefreshJobService,
-                build_default_refresh_handlers,
-            )
+            from app.services.job_service import build_data_refresh_job_service
             from app.utils.db import get_engine, is_demo_database_url
 
             settings = app.extensions["runtime_settings"]
@@ -106,11 +103,7 @@ def _initialize_dependencies(app: Flask) -> None:
                 engine = get_engine(settings)
                 app.extensions.setdefault("request_services", {})[
                     "data_refresh_jobs"
-                ] = DataRefreshJobService(
-                    engine,
-                    settings=settings,
-                    handlers=build_default_refresh_handlers(engine, settings),
-                )
+                ] = build_data_refresh_job_service(engine, settings)
         except Exception as error:
             logger.warning("Data refresh queue initialization skipped: %s", error)
 

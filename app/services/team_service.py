@@ -1,10 +1,5 @@
 import pandas as pd
 from nba_api.stats.static import teams
-from nba_api.stats.endpoints import (
-    LeagueDashOppPtShot,
-    LeagueDashTeamShotLocations,
-    LeagueDashTeamStats,
-)
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.models.catalogs import SHOOTING_TYPES
 from app.services.nba_stats_adapter import NBAStatsAdapter
@@ -83,15 +78,11 @@ class TeamService:
         return team_stats
 
     def _fetch_opp_shooting_data(self, type, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            'team_opp_shooting',
-            lambda timeout: LeagueDashOppPtShot(
-                general_range_nullable=type,
-                date_from_nullable=date_filter,
-                per_mode_simple='PerGame',
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME", "FG2M", "FG3M"),
+        return self.nba_stats.fetch_opponent_shot_chart(
+            type,
+            date_filter,
+            per_mode_simple='PerGame',
+            league_id='00',
         )
     
 
@@ -103,28 +94,17 @@ class TeamService:
             return pd.read_sql(query, conn)
 
     def _fetch_opponent_data(self, date_filter=None):
-        return self.nba_stats.run_endpoint(
-            'team_opponent_stats',
-            lambda timeout: LeagueDashTeamStats(
-                measure_type_detailed_defense='Opponent',
-                per_mode_detailed='Per48',
-                date_from_nullable=date_filter,
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME"),
+        return self.nba_stats.fetch_opponent_team_stats(
+            date_filter,
+            per_mode_detailed='Per48',
+            league_id='00',
         )
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
-        opp_zone_df = self.nba_stats.run_endpoint(
-            'team_opp_shooting_zone',
-            lambda timeout: LeagueDashTeamShotLocations(
-                distance_range='By Zone',
-                measure_type_simple='Opponent',
-                per_mode_detailed='PerGame',
-                date_from_nullable=date_filter,
-                timeout=timeout,
-            ),
-            required_columns=("TEAM_ID", "TEAM_NAME"),
+        opp_zone_df = self.nba_stats.fetch_opponent_shooting_zone(
+            date_filter,
+            per_mode_detailed='PerGame',
+            league_id='00',
         )
         opp_zone_df.columns = ['_'.join(filter(None, col)).strip() for col in opp_zone_df.columns]
         

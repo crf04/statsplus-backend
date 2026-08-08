@@ -21,8 +21,8 @@ class FakeJobService:
     def __init__(self):
         self.started = []
 
-    def start(self, operation, refresh):
-        self.started.append((operation, refresh))
+    def start(self, operation):
+        self.started.append(operation)
         return {
             "job_id": "job-under-test",
             "operation": operation,

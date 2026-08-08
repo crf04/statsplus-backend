@@ -16,16 +16,16 @@ ServiceFactory = Callable[[Any, RuntimeSettings], Any]
 
 def build_data_refresh_job_service(engine: Any, settings: RuntimeSettings) -> Any:
     """Build the app-scoped durable refresh coordinator used by admin routes."""
-    from app.services.job_service import (
-        DataRefreshJobService,
-        build_default_refresh_handlers,
-    )
+    from app.services.job_service import build_data_refresh_job_service
 
-    return DataRefreshJobService(
-        engine,
-        settings=settings,
-        handlers=build_default_refresh_handlers(engine, settings),
-    )
+    return build_data_refresh_job_service(engine, settings)
+
+
+def build_provider_health_service(engine: Any, settings: RuntimeSettings) -> Any:
+    """Build the app-scoped dependency health-check service."""
+    from app.services.provider_health_service import ProviderHealthService
+
+    return ProviderHealthService(engine, settings=settings)
 
 
 class CurrentAppService:

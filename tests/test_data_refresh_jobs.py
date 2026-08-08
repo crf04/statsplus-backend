@@ -21,6 +21,7 @@ from app.services.job_service import (
     DEFAULT_FAILURE_SUMMARY,
     DataRefreshJobService,
     SynchronousExecutor,
+    adapt_zero_arg_handler,
 )
 from app.services.table_publisher import AtomicTablePublisher, TablePublicationError
 from app.utils import telemetry
@@ -43,6 +44,9 @@ def job_service(job_engine):
         job_engine,
         executor=SynchronousExecutor(),
         clock=_fixed_clock,
+        handlers={
+            "update_database": adapt_zero_arg_handler(lambda: True),
+        },
     )
 
 
@@ -61,7 +65,7 @@ def publisher_engine(tmp_path):
 
 
 def test_start_records_queued_then_completes(job_service):
-    queued = job_service.start("update_database", lambda: True)
+    queued = job_service.start("update_database")
 
     assert queued["status"] == JOB_STATUS_QUEUED
     assert queued["operation"] == "update_database"
@@ -92,7 +96,7 @@ def test_duplicate_active_operation_is_rejected(job_service, job_engine):
         session.commit()
 
     with pytest.raises(DuplicateOperationError) as raised:
-        job_service.start("update_database", lambda: True)
+        job_service.start("update_database")
 
     assert raised.value.status_code == 409
     assert raised.value.code == "duplicate_active_operation"
@@ -102,7 +106,13 @@ def test_provider_failure_records_safe_public_summary(job_service):
     def fail_refresh():
         raise ProviderUnavailableError(detail="stats.nba.com token=super-secret")
 
-    queued = job_service.start("update_database", fail_refresh)
+    failing_service = DataRefreshJobService(
+        engine=job_service._engine,
+        executor=SynchronousExecutor(),
+        clock=_fixed_clock,
+        handlers={"update_database": adapt_zero_arg_handler(fail_refresh)},
+    )
+    queued = failing_service.start("update_database")
 
     final = job_service.get(queued["job_id"])
     assert final["status"] == JOB_STATUS_FAILED
@@ -118,7 +128,13 @@ def test_unexpected_failure_collapses_to_stable_summary(job_service):
     def fail_refresh():
         raise RuntimeError("provider-secret-traceback")
 
-    queued = job_service.start("update_database", fail_refresh)
+    failing_service = DataRefreshJobService(
+        engine=job_service._engine,
+        executor=SynchronousExecutor(),
+        clock=_fixed_clock,
+        handlers={"update_database": adapt_zero_arg_handler(fail_refresh)},
+    )
+    queued = failing_service.start("update_database")
 
     final = job_service.get(queued["job_id"])
     assert final["status"] == JOB_STATUS_FAILED
@@ -150,7 +166,7 @@ def test_restart_recovers_expired_lease_but_not_healthy_running_job(job_engine):
     first = DataRefreshJobService(
         job_engine,
         executor=first_executor,
-        handlers={"update_database": lambda: True},
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
         clock=lambda: now[0],
         dispatch_on_startup=False,
         start_poller=False,
@@ -162,7 +178,7 @@ def test_restart_recovers_expired_lease_but_not_healthy_running_job(job_engine):
     second = DataRefreshJobService(
         job_engine,
         executor=SynchronousExecutor(),
-        handlers={"update_database": lambda: True},
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
         clock=lambda: now[0],
         dispatch_on_startup=False,
         start_poller=False,
@@ -181,7 +197,7 @@ def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
     seed = DataRefreshJobService(
         job_engine,
         executor=executor,
-        handlers={"update_database": lambda: True},
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
         dispatch_on_startup=False,
         start_poller=False,
     )
@@ -204,7 +220,7 @@ def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
         DataRefreshJobService(
             job_engine,
             executor=_ManualExecutor(),
-            handlers={"update_database": lambda: True},
+            handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
             dispatch_on_startup=False,
             start_poller=False,
         )
@@ -399,7 +415,10 @@ def test_data_service_publishes_related_frames_together(job_engine, monkeypatch)
 def job_app(tmp_path, monkeypatch):
     from app import create_app
     from app.routes import data_update_routes, player_routes
-    from app.services.job_service import DataRefreshJobService, SynchronousExecutor
+    from app.services.job_service import (
+        DataRefreshJobService,
+        SynchronousExecutor,
+    )
     from app.utils.db import get_engine
 
     database_url = f"sqlite:///{tmp_path / 'application.sqlite3'}"
@@ -420,6 +439,23 @@ def job_app(tmp_path, monkeypatch):
         engine,
         executor=SynchronousExecutor(),
         clock=_fixed_clock,
+        handlers={
+            "update_database": lambda *, progress_callback: data_update_routes.data_service.update_all_data(
+                progress_callback=progress_callback
+            ),
+            "player_pbp": lambda *, progress_callback: data_update_routes.data_service.fetch_PBP_data(
+                "player", progress_callback=progress_callback
+            ),
+            "opponent_pbp": lambda *, progress_callback: data_update_routes.data_service.fetch_PBP_data(
+                "opponent", progress_callback=progress_callback
+            ),
+            "fetch_players_with_teams": lambda *, progress_callback: data_update_routes.data_service.fetch_players_with_teams(
+                progress_callback=progress_callback
+            ),
+            "fetch_players": lambda *, progress_callback: player_routes.player_service.store_player_information(
+                progress_callback=progress_callback
+            ),
+        },
     )
     monkeypatch.setattr(
         data_update_routes, "data_jobs_service", sync_job_service
@@ -478,7 +514,9 @@ def test_start_returns_202_and_status_is_visible(job_app, monkeypatch):
     client = job_app.test_client()
     headers = _admin_headers(monkeypatch)
     monkeypatch.setattr(
-        data_update_routes.data_service, "update_all_data", lambda: True
+        data_update_routes.data_service,
+        "update_all_data",
+        lambda **kwargs: True,
     )
 
     response = client.post("/api/data/update_database", headers=headers)

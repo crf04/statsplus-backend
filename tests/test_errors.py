@@ -377,13 +377,14 @@ def test_nl_query_missing_query_uses_nested_error_contract(client) -> None:
 def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
     from app.routes import health_routes
 
-    class FailingEngine:
-        dialect = type("Dialect", (), {"name": "sqlite", "driver": "pysqlite"})()
-
-        def connect(self):
-            raise RuntimeError("database-password-secret")
-
-    monkeypatch.setattr(health_routes, "get_engine", lambda: FailingEngine())
+    monkeypatch.setattr(
+        health_routes.health_service,
+        "check_database",
+        lambda: {
+            "status": "unhealthy",
+            "error": "Database health check failed.",
+        },
+    )
 
     response = client.get("/api/health/db")
 
