@@ -17,8 +17,30 @@ from app.utils import telemetry
 
 VALID_PAYLOAD = {
     "multi_row_table_data": [
-        {"Name": "LeBron James", "Team": "LAL", "Season": "2024-25"},
-        {"Name": "Stephen Curry", "Team": "GSW", "Season": "2024-25"},
+        {
+            "Name": "LeBron James",
+            "Assists": 20,
+            "AssistPoints": 40,
+            "TwoPtAssists": 10,
+            "ThreePtAssists": 10,
+            "Arc3Assists": 4,
+            "Corner3Assists": 3,
+            "AtRimAssists": 8,
+            "ShortMidRangeAssists": 3,
+            "LongMidRangeAssists": 2,
+        },
+        {
+            "Name": "Stephen Curry",
+            "Assists": 18,
+            "AssistPoints": 36,
+            "TwoPtAssists": 6,
+            "ThreePtAssists": 12,
+            "Arc3Assists": 6,
+            "Corner3Assists": 2,
+            "AtRimAssists": 5,
+            "ShortMidRangeAssists": 3,
+            "LongMidRangeAssists": 2,
+        },
     ]
 }
 
@@ -69,7 +91,18 @@ def test_fetch_totals_records_full_event_and_valid_frame(monkeypatch):
     frame = adapter.fetch_totals_frame("player")
 
     assert isinstance(frame, pd.DataFrame)
-    assert list(frame.columns) == ["Name", "Team", "Season"]
+    assert list(frame.columns) == [
+        "Name",
+        "Assists",
+        "AssistPoints",
+        "TwoPtAssists",
+        "ThreePtAssists",
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    ]
     assert len(frame) == 2
 
     assert len(telemetry.get_recorded_provider_events()) == 1

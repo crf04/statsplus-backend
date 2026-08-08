@@ -130,3 +130,11 @@ python -m pytest
 - No OpenAI key: LLM fallback is unavailable, but deterministic NLP can still run.
 - Unexpected player resolution: check `player_aliases.yaml`, fuzzy-match thresholds, and whether the bundled database contains the player.
 - External NBA data failures: queries that depend on live rankings or data refreshes can fail when upstream APIs are unavailable.
+
+### Self-filter migration
+
+The parser may emit its legacy `SelfFilter(stat_column, operator, value,
+value2)` objects, and the HTTP route still accepts `self_filters[STAT]=min,max`.
+`GameLogQuery` normalizes both forms to the typed `app.models.game_logs.SelfFilter`
+model. The range form means inclusive `between`; typed inputs preserve the
+exact `gte`, `gt`, `lt`, `lte`, `eq`, or `between` operator.

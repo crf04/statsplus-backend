@@ -6,6 +6,10 @@ inside the response JSON.  These models replace that implicit contract:
 
 * :class:`GameLogQuery` is the single typed filter interface accepted by
   :meth:`GameService.get_filtered_logs` and the filtering pipeline.
+* :class:`SelfFilter` is the canonical comparison model.  Query-string
+  ``STAT=min,max`` input is normalized to ``between``; natural-language
+  ``gte``, ``gt``, ``lt``, ``lte``, and ``eq`` comparisons retain their exact
+  operator semantics.
 * :class:`GameLogResponse` describes the top-level response contract, where
   the logs and averages fields are ordinary JSON arrays (fresh records) rather
   than strings produced by ``DataFrame.to_json``.
@@ -17,6 +21,8 @@ which routes translate into a clear ``invalid_input`` client error.
 from __future__ import annotations
 
 from datetime import date
+from collections.abc import Mapping, Sequence
+from math import isfinite
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -28,6 +34,127 @@ from app.models.catalogs import (
 )
 
 Location = Literal["Home", "Away", "Both"]
+SelfFilterOperator = Literal["gte", "gt", "lt", "lte", "eq", "between"]
+
+
+class SelfFilter(BaseModel):
+    """One validated comparison against a player game-log column.
+
+    The natural-language parser historically emitted a ``SelfFilter``
+    dataclass with a ``stat_column`` field, while HTTP callers supplied a
+    ``stat -> min,max`` dictionary.  This model is the canonical boundary
+    representation for both inputs.  ``stat_column`` remains a read-only
+    compatibility property for parser/executor callers during migration.
+    """
+
+    stat: str
+    operator: SelfFilterOperator
+    value: float
+    value2: float | None = None
+    original_text: str = ""
+
+    @property
+    def stat_column(self) -> str:
+        """Return the parser-era name for the canonical stat field."""
+
+        return self.stat
+
+    @field_validator("stat", mode="before")
+    @classmethod
+    def normalize_stat(cls, value: Any) -> str:
+        stat = str(value).strip().upper()
+        if not stat:
+            raise ValueError("self_filter stat must not be empty")
+        if stat not in SUPPORTED_SELF_FILTER_STATS:
+            raise ValueError(
+                f"self_filter contains unsupported stat {stat!r}. Supported stats are: "
+                + ", ".join(SUPPORTED_SELF_FILTER_STATS)
+            )
+        return stat
+
+    @field_validator("value", "value2", mode="before")
+    @classmethod
+    def normalize_numeric_value(cls, value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("self_filter values must be numbers") from error
+        if not isfinite(number):
+            raise ValueError("self_filter values must be finite numbers")
+        return number
+
+    @model_validator(mode="after")
+    def validate_operator_values(self) -> "SelfFilter":
+        if self.operator == "between":
+            if self.value2 is None:
+                raise ValueError("between self_filters require value2")
+            if self.value > self.value2:
+                raise ValueError("between self_filter value must not exceed value2")
+        elif self.value2 is not None:
+            raise ValueError(
+                f"{self.operator} self_filters accept one value, not value2"
+            )
+        return self
+
+    def __eq__(self, other: object) -> bool:
+        """Keep equality with the legacy ``(min,max)`` value shape temporary.
+
+        This only supports callers comparing a model snapshot to the old
+        public value in tests or logs; filtering itself never consumes a
+        tuple/dict and always uses this typed object.
+        """
+
+        if isinstance(other, tuple) and len(other) == 2:
+            return self.operator == "between" and (
+                self.value,
+                self.value2,
+            ) == (float(other[0]), float(other[1]))
+        if isinstance(other, SelfFilter):
+            return self.model_dump() == other.model_dump()
+        return super().__eq__(other)
+
+
+def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
+    """Convert one HTTP, NLP, or typed self-filter entry."""
+
+    if isinstance(raw, SelfFilter):
+        if stat is None or raw.stat == str(stat).strip().upper():
+            return raw
+        return raw.model_copy(update={"stat": stat})
+
+    if isinstance(raw, Mapping):
+        payload = dict(raw)
+        payload.setdefault("stat", payload.pop("stat_column", stat))
+        if payload.get("stat") is None:
+            raise ValueError("self_filter entries require a stat")
+        return SelfFilter(**payload)
+
+    # NLP's legacy dataclass uses attributes rather than a mapping.
+    if hasattr(raw, "stat_column") or hasattr(raw, "stat"):
+        payload = {
+            "stat": getattr(raw, "stat_column", None) or getattr(raw, "stat", stat),
+            "operator": getattr(raw, "operator", None),
+            "value": getattr(raw, "value", None),
+            "value2": getattr(raw, "value2", None),
+            "original_text": getattr(raw, "original_text", ""),
+        }
+        return SelfFilter(**payload)
+
+    # The query-string contract remains ``STAT=min,max`` and is interpreted
+    # as an inclusive between comparison.
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+        parts = list(raw)
+    else:
+        raise ValueError(
+            f"self_filter for {stat!r} must be a range or typed comparison"
+        )
+    if len(parts) != 2:
+        raise ValueError(f"self_filter for {stat!r} must contain min,max values")
+    return SelfFilter(stat=stat, operator="between", value=parts[0], value2=parts[1])
 
 
 class GameLogQuery(BaseModel):
@@ -49,7 +176,7 @@ class GameLogQuery(BaseModel):
     location_filter: Location = "Both"
     game_filter: int | None = Field(default=None, ge=1)
     playstyle_range: tuple[float, float] = (0.0, 200.0)
-    self_filters: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    self_filters: dict[str, SelfFilter] = Field(default_factory=dict)
 
     @field_validator("minutes_filter", mode="before")
     @classmethod
@@ -103,36 +230,22 @@ class GameLogQuery(BaseModel):
 
     @field_validator("self_filters", mode="before")
     @classmethod
-    def normalize_self_filters(cls, value: Any) -> dict[str, tuple[float, float]]:
+    def normalize_self_filters(cls, value: Any) -> dict[str, SelfFilter]:
         if value is None:
             return {}
-        if not isinstance(value, dict):
-            raise ValueError("self_filters must be a stat -> min,max mapping")
-        normalized: dict[str, tuple[float, float]] = {}
-        for stat, bounds in value.items():
-            if isinstance(bounds, str):
-                bounds = bounds.split(",")
-            if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
-                raise ValueError(
-                    f"self_filter for {stat!r} must contain min,max values"
-                )
-            normalized[str(stat)] = (float(bounds[0]), float(bounds[1]))
-        return normalized
-
-    @field_validator("self_filters")
-    @classmethod
-    def reject_unsupported_self_filter_stats(
-        cls, value: dict[str, tuple[float, float]]
-    ) -> dict[str, tuple[float, float]]:
-        unsupported = [
-            stat for stat in value if stat not in SUPPORTED_SELF_FILTER_STATS
-        ]
-        if unsupported:
+        normalized: dict[str, SelfFilter] = {}
+        if isinstance(value, Mapping):
+            entries = value.items()
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            entries = ((None, entry) for entry in value)
+        else:
             raise ValueError(
-                f"self_filters contains unsupported stats: {unsupported}. "
-                f"Supported stats are: {', '.join(SUPPORTED_SELF_FILTER_STATS)}"
+                "self_filters must be a stat range mapping or a list of typed filters"
             )
-        return value
+        for stat, raw in entries:
+            entry = _normalize_self_filter_entry(stat, raw)
+            normalized[entry.stat] = entry
+        return normalized
 
     @field_validator("teams_against")
     @classmethod
@@ -185,5 +298,7 @@ __all__ = [
     "GameLogQuery",
     "GameLogResponse",
     "Location",
+    "SelfFilter",
+    "SelfFilterOperator",
     "SUPPORTED_TEAM_FILTERS",
 ]

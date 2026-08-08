@@ -190,6 +190,9 @@ COMPARISON_PATTERNS = [
     (r'(\d+)\+\s*(\w+(?:\s+\w+)*)', 'gte'),
     # More than: "more than 30 points"
     (r'more\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'gt'),
+    # Inclusive upper bounds must precede the plain "less than" pattern.
+    (r'less\s+than\s+or\s+equal\s+to\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lte'),
+    (r'(?:at\s+most|no\s+more\s+than|no\s+greater\s+than|up\s+to)\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lte'),
     # Less than: "less than 30 points"
     (r'less\s+than\s+(\d+)\s+(\w+(?:\s+\w+)*)', 'lt'),
     # At least: "at least 30 points"

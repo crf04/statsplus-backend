@@ -388,6 +388,81 @@ def test_data_service_failure_before_publication_preserves_tables(
         )
 
 
+def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(
+    job_engine, monkeypatch
+):
+    from app.services.data_service import DataService
+    from app.services.pbp_stats_adapter import PBPTotalsAdapter
+
+    columns = [
+        "Name",
+        "TwoPtAssists",
+        "ThreePtAssists",
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    ]
+    with job_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE pbp_player_stats ("
+                + ", ".join(f'"{column}" INTEGER' for column in columns)
+                + ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO pbp_player_stats VALUES "
+                "('old-player', 1, 2, 3, 4, 5, 6, 7)"
+            )
+        )
+
+    service = DataService(job_engine)
+
+    class MalformedResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"multi_row_table_data": [{"Name": "bad"}]}
+
+    service.pbp = PBPTotalsAdapter(
+        settings=service.settings,
+        session=type(
+            "MalformedSession",
+            (),
+            {"get": lambda self, *args, **kwargs: MalformedResponse()},
+        )(),
+    )
+    telemetry.clear_recorded_provider_events()
+    jobs = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        handlers={
+            "player_pbp": lambda *, progress_callback: service.fetch_PBP_data(
+                "player", progress_callback=progress_callback
+            )
+        },
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+
+    queued = jobs.start("player_pbp")
+    final = jobs.get(queued["job_id"])
+
+    assert final["status"] == JOB_STATUS_FAILED
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == telemetry.OUTCOME_MALFORMED
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["application_failures"] == {}
+    with job_engine.connect() as connection:
+        assert connection.execute(text("SELECT Name FROM pbp_player_stats")).scalar() == "old-player"
+    jobs.shutdown()
+
+
 def test_data_service_publishes_related_frames_together(job_engine, monkeypatch):
     from app.services.data_service import DataService
 

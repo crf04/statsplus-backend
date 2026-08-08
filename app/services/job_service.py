@@ -15,6 +15,7 @@ import threading
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Final
@@ -69,11 +70,25 @@ DEFAULT_FAILURE_SUMMARY: Final[str] = (
 RefreshCallable = Callable[..., Any]
 ProgressCallback = Callable[[float, str | None], None]
 
+
+@dataclass(frozen=True, slots=True)
+class ClaimedJob:
+    """Immutable identity of a job together with the lease that owns it."""
+
+    job_id: str
+    owner: str
+
+
+# Explicit alias for callers that prefer to name the value by its lease role.
+ClaimedJobLease = ClaimedJob
+
 __all__ = [
     "DataRefreshJobService",
     "SynchronousExecutor",
     "DEFAULT_FAILURE_SUMMARY",
     "KNOWN_REFRESH_OPERATIONS",
+    "ClaimedJob",
+    "ClaimedJobLease",
     "build_default_refresh_handlers",
     "build_data_refresh_job_service",
     "adapt_zero_arg_handler",
@@ -297,7 +312,9 @@ class DataRefreshJobService:
         """Record monotonic coarse progress and renew the worker lease."""
 
         if lease_owner:
-            self._update_owned_progress(job_id, lease_owner, progress, note)
+            self._update_owned_progress(
+                ClaimedJob(job_id, lease_owner), progress, note
+            )
         else:
             # Retain the small public test seam used by older callers.  Worker
             # callbacks always use the owner-checked path above.
@@ -347,10 +364,11 @@ class DataRefreshJobService:
 
         claimed = 0
         for job_id in candidates:
-            if not self._claim(job_id, now):
+            claimed_job = self._claim(job_id, now)
+            if claimed_job is None:
                 continue
             claimed += 1
-            self._submit_claimed(job_id)
+            self._submit_claimed(claimed_job)
         return claimed
 
     def shutdown(self, wait: bool = False) -> None:
@@ -382,11 +400,11 @@ class DataRefreshJobService:
         with self._submitted_lock:
             self._submitted = max(self._submitted - 1, 0)
 
-    def _submit_claimed(self, job_id: str) -> None:
+    def _submit_claimed(self, claimed_job: ClaimedJob) -> None:
         with self._submitted_lock:
             self._submitted += 1
         try:
-            result = self._executor.submit(self._run_claimed, job_id, self._owner)
+            result = self._executor.submit(self._run_claimed, claimed_job)
         except BaseException:
             self._release_slot()
             raise
@@ -396,7 +414,7 @@ class DataRefreshJobService:
             # SynchronousExecutor has no Future and has already completed.
             self._release_slot()
 
-    def _claim(self, job_id: str, now: Any) -> bool:
+    def _claim(self, job_id: str, now: Any) -> ClaimedJob | None:
         lease_expires = now + timedelta(seconds=self._lease_seconds)
         stale_filter = (
             (DataRefreshJob.status == JOB_STATUS_RUNNING)
@@ -432,15 +450,15 @@ class DataRefreshJobService:
                 )
                 if result.rowcount != 1:
                     session.rollback()
-                    return False
+                    return None
                 session.commit()
-                return True
+                return ClaimedJob(job_id=job_id, owner=self._owner)
         except OperationalError:
             logger.debug("Could not claim refresh job %s", job_id, exc_info=True)
-            return False
+            return None
 
-    def _run_claimed(self, job_id: str, owner: str) -> None:
-        job = self._owned_job(job_id, owner)
+    def _run_claimed(self, claimed_job: ClaimedJob) -> None:
+        job = self._owned_job(claimed_job)
         if job is None:
             return
 
@@ -449,8 +467,8 @@ class DataRefreshJobService:
         stop_heartbeat = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
-            args=(job_id, owner, stop_heartbeat),
-            name=f"data-refresh-heartbeat-{job_id[:8]}",
+            args=(claimed_job, stop_heartbeat),
+            name=f"data-refresh-heartbeat-{claimed_job.job_id[:8]}",
             daemon=True,
         )
         heartbeat.start()
@@ -459,43 +477,41 @@ class DataRefreshJobService:
             if handler is None:
                 raise RuntimeError("No registered handler for refresh operation")
             result = handler(
-                progress_callback=lambda progress, note=None: self.update_progress(
-                    job_id, progress, note, lease_owner=owner
+                progress_callback=lambda progress, note=None: self._update_owned_progress(
+                    claimed_job, progress, note
                 )
             )
             if result is False:
-                self._fail(job_id, owner, OperationFailedError())
+                self._fail(claimed_job, OperationFailedError())
             else:
-                self._finish(job_id, owner)
+                self._finish(claimed_job)
         except BaseException as error:
-            self._fail(job_id, owner, error)
+            self._fail(claimed_job, error)
         finally:
             stop_heartbeat.set()
             heartbeat.join(timeout=max(self._poll_interval, 0.1))
             clear_request_id()
 
-
     def _heartbeat_loop(
         self,
-        job_id: str,
-        owner: str,
+        claimed_job: ClaimedJob,
         stop_event: threading.Event,
     ) -> None:
         interval = min(max(self._lease_seconds / 3.0, 0.05), 5.0)
         while not stop_event.wait(interval):
-            if not self._renew_lease(job_id, owner):
+            if not self._renew_lease(claimed_job):
                 return
 
-    def _renew_lease(self, job_id: str, owner: str) -> bool:
+    def _renew_lease(self, claimed_job: ClaimedJob) -> bool:
         now = self._clock()
         try:
             with self._session_factory() as session:
                 result = session.execute(
                     update(DataRefreshJob)
                     .where(
-                        DataRefreshJob.job_id == job_id,
+                        DataRefreshJob.job_id == claimed_job.job_id,
                         DataRefreshJob.status == JOB_STATUS_RUNNING,
-                        DataRefreshJob.lease_owner == owner,
+                        DataRefreshJob.lease_owner == claimed_job.owner,
                     )
                     .values(
                         lease_expires_at=now + timedelta(seconds=self._lease_seconds),
@@ -505,23 +521,26 @@ class DataRefreshJobService:
                 session.commit()
                 return result.rowcount == 1
         except OperationalError:
-            logger.debug("Could not renew refresh job %s", job_id, exc_info=True)
+            logger.debug(
+                "Could not renew refresh job %s",
+                claimed_job.job_id,
+                exc_info=True,
+            )
             return False
 
-    def _owned_job(self, job_id: str, owner: str):
+    def _owned_job(self, claimed_job: ClaimedJob):
         with self._session_factory() as session:
             return session.execute(
                 select(DataRefreshJob).where(
-                    DataRefreshJob.job_id == job_id,
+                    DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == owner,
+                    DataRefreshJob.lease_owner == claimed_job.owner,
                 )
             ).scalars().first()
 
-    def _finish(self, job_id: str, owner: str) -> None:
+    def _finish(self, claimed_job: ClaimedJob) -> None:
         self._update_owned(
-            job_id,
-            owner,
+            claimed_job,
             status=JOB_STATUS_SUCCEEDED,
             finished_at=self._clock(),
             progress=1.0,
@@ -532,14 +551,13 @@ class DataRefreshJobService:
             error_summary=None,
         )
 
-    def _fail(self, job_id: str, owner: str, error: BaseException) -> None:
+    def _fail(self, claimed_job: ClaimedJob, error: BaseException) -> None:
         """Record failure, clear the lease, and keep retry possible."""
 
         summary = _failure_summary(error)
         try:
             self._update_owned(
-                job_id,
-                owner,
+                claimed_job,
                 status=JOB_STATUS_FAILED,
                 finished_at=self._clock(),
                 error_summary=summary,
@@ -548,29 +566,30 @@ class DataRefreshJobService:
                 heartbeat_at=None,
             )
         except Exception:
-            logger.exception("Could not record failure for job %s", job_id)
+            logger.exception(
+                "Could not record failure for job %s", claimed_job.job_id
+            )
             return
         logger.error(
             "Data refresh job %s failed: %s",
-            job_id,
+            claimed_job.job_id,
             _sanitize_diagnostic_detail(str(error)) or summary,
         )
 
-    def _update_owned(self, job_id: str, owner: str, **fields: Any) -> None:
+    def _update_owned(self, claimed_job: ClaimedJob, **fields: Any) -> None:
         with self._session_factory() as session:
             session.execute(
                 update(DataRefreshJob).where(
-                    DataRefreshJob.job_id == job_id,
+                    DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == owner,
+                    DataRefreshJob.lease_owner == claimed_job.owner,
                 ).values(**fields)
             )
             session.commit()
 
     def _update_owned_progress(
         self,
-        job_id: str,
-        owner: str,
+        claimed_job: ClaimedJob,
         progress: float,
         note: str | None,
     ) -> None:
@@ -580,9 +599,9 @@ class DataRefreshJobService:
             session.execute(
                 update(DataRefreshJob)
                 .where(
-                    DataRefreshJob.job_id == job_id,
+                    DataRefreshJob.job_id == claimed_job.job_id,
                     DataRefreshJob.status == JOB_STATUS_RUNNING,
-                    DataRefreshJob.lease_owner == owner,
+                    DataRefreshJob.lease_owner == claimed_job.owner,
                 )
                 .values(
                     progress=case(

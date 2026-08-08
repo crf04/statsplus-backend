@@ -320,6 +320,11 @@ class NBAStatsAdapter:
 
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a game served without a provider call."""
+        if operation not in NBA_STATS_OPERATIONS:
+            raise ValueError(
+                f"Unsupported NBA Stats operation {operation!r}; "
+                f"expected one of {sorted(NBA_STATS_OPERATIONS)}."
+            )
         record_cached_provider_event(PROVIDER_NBA_STATS, operation, CACHE_HIT)
 
     def fetch_player_game_logs(

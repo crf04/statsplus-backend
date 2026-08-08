@@ -98,6 +98,61 @@ def test_documented_self_filter_stats_are_accepted(stat):
     assert stat in query.self_filters
 
 
+@pytest.mark.parametrize(
+    ("operator", "value", "value2", "expected_points"),
+    [
+        ("gte", 25, None, {25, 30}),
+        ("gt", 25, None, {30}),
+        ("lt", 25, None, {15}),
+        ("lte", 25, None, {15, 25}),
+        ("eq", 25, None, {25}),
+        ("between", 20, 30, {25, 30}),
+    ],
+)
+def test_typed_self_filter_operators_are_applied_exactly(
+    monkeypatch,
+    mock_db_engine,
+    mock_redis_client,
+    operator,
+    value,
+    value2,
+    expected_points,
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    payload = {
+        "stat_column": "PTS",
+        "operator": operator,
+        "value": value,
+    }
+    if value2 is not None:
+        payload["value2"] = value2
+    query = GameLogQuery(season_filter="2024-25", self_filters=[payload])
+
+    filtered = service.apply_filters(_game_logs_frame(), query)
+
+    assert set(filtered["PTS"]) == expected_points
+
+
+def test_game_query_normalizes_legacy_nlp_self_filter_object():
+    from app.services.nl_query.parser import SelfFilter as ParsedSelfFilter
+
+    query = GameLogQuery(
+        season_filter="2024-25",
+        self_filters=[
+            ParsedSelfFilter(
+                stat_column="PTS",
+                operator="lte",
+                value=25,
+            )
+        ],
+    )
+
+    self_filter = query.self_filters["PTS"]
+    assert self_filter.stat == "PTS"
+    assert self_filter.operator == "lte"
+    assert self_filter.value == 25
+
+
 @pytest.mark.parametrize("legacy", ["<10 Ft", "<10 ft", "Less Than 10 Ft"])
 def test_less_than_ten_feet_filter_aliases_are_normalized(legacy):
     query = GameLogQuery(

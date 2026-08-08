@@ -29,6 +29,36 @@ from app.utils.telemetry import (
 
 PBP_TOTALS_URL = "https://api.pbpstats.com/get-totals/nba"
 
+# These are the columns consumed by the publication and assist-table
+# transforms in ``DataService``.  Keep the provider contract at this seam so
+# a malformed response cannot replace a valid table with a schema-less frame.
+PBP_PLAYER_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "Name",
+    "TwoPtAssists",
+    "ThreePtAssists",
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+PBP_OPPONENT_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "Name",
+    "Assists",
+    "AssistPoints",
+    "TwoPtAssists",
+    "ThreePtAssists",
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+PBP_REQUIRED_COLUMNS: dict[PBPDataKind, tuple[str, ...]] = {
+    "player": PBP_PLAYER_REQUIRED_COLUMNS,
+    "opponent": PBP_OPPONENT_REQUIRED_COLUMNS,
+}
+
 
 class PBPTotalsAdapter:
     """Fetch and normalize PBP totals through the shared, retrying session."""
@@ -89,7 +119,7 @@ class PBPTotalsAdapter:
                 raise ProviderResponseError(
                     "PBP Stats returned a response that was not valid JSON."
                 ) from error
-            return type(self).parse_totals(payload)
+            return type(self).parse_totals(payload, data_type=data_type)
 
     def health_probe(self) -> int:
         """Check ``api.pbpstats.com`` using its own timeout and telemetry seam."""
@@ -112,13 +142,22 @@ class PBPTotalsAdapter:
             return response.status_code
 
     @staticmethod
-    def parse_totals(payload: Any) -> pd.DataFrame:
+    def parse_totals(
+        payload: Any,
+        *,
+        data_type: PBPDataKind = "player",
+    ) -> pd.DataFrame:
         """Validate and normalize a recorded PBP totals payload.
 
         This is the production normalization seam: recorded fixtures and live
         calls both flow through it, so offline contract tests run the exact
         code a live response uses.
         """
+        if data_type not in PBP_DATA_KINDS:
+            raise InvalidInputError(
+                f"Unsupported PBP data type {data_type!r}. "
+                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+            )
         rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             raise ProviderResponseError(
@@ -128,7 +167,28 @@ class PBPTotalsAdapter:
             raise ProviderResponseError(
                 "PBP Stats totals payload contains malformed rows."
             )
+        required_columns = PBP_REQUIRED_COLUMNS[data_type]
+        if not rows:
+            # An empty provider result carries no column names.  Materialize
+            # the declared schema explicitly so a valid table is never
+            # replaced by a schema-less DataFrame.
+            return pd.DataFrame(columns=required_columns)
+        missing = [column for column in required_columns if column not in rows[0]]
+        if missing:
+            raise ProviderResponseError(
+                "PBP Stats totals payload has an invalid schema."
+            )
+        if any(set(row) != set(rows[0]) for row in rows[1:]):
+            raise ProviderResponseError(
+                "PBP Stats totals payload has inconsistent row schemas."
+            )
         return pd.DataFrame(rows)
 
 
-__all__ = ["PBP_TOTALS_URL", "PBPTotalsAdapter"]
+__all__ = [
+    "PBP_TOTALS_URL",
+    "PBP_PLAYER_REQUIRED_COLUMNS",
+    "PBP_OPPONENT_REQUIRED_COLUMNS",
+    "PBP_REQUIRED_COLUMNS",
+    "PBPTotalsAdapter",
+]

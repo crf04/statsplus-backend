@@ -156,6 +156,7 @@ validator must not be used to repair the fixture.
 - Route/service interaction: patch the module-level service on the route module.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `PBPTotalsAdapter.parse_totals`) with no network.
+- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.
