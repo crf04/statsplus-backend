@@ -53,6 +53,7 @@ The app loads `.env` automatically through `python-dotenv`. These are the most i
 | `ENABLE_LLM_FALLBACK` | No | `True` |
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
+| `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
 | `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL` | No | Alternative Firebase credential form |
@@ -83,6 +84,11 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 ```
 
 `GET /api/health/nba-api` and `/api/health/detailed` call an external NBA data endpoint, so they can fail if the network or upstream API is unavailable.
+
+Live requests to `stats.nba.com` use a 10-second timeout by default. If that
+provider times out, game-log requests return `503 Service Unavailable` instead
+of exposing a generic internal-server error. Override the timeout with
+`NBA_STATS_TIMEOUT_SECONDS` when needed.
 
 ## Authentication behavior
 

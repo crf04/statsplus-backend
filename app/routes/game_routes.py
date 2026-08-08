@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 import asyncio
+import requests
 from ..utils.db import get_engine
 from ..services.game_service import GameService
 from ..utils.auth import require_auth
@@ -37,5 +38,10 @@ def get_game_logs():
         }
 
         return asyncio.run(game_service.get_filtered_logs(player_name, filter_params))
+    except requests.exceptions.Timeout:
+        return jsonify({
+            'error': 'NBA Stats API unavailable',
+            'message': 'The upstream stats provider timed out. Please try again shortly.',
+        }), 503
     except Exception as e:
         return jsonify({'error': str(e)}), 500

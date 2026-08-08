@@ -5,6 +5,7 @@ from nba_api.stats.endpoints import (
     LeagueDashOppPtShot,
     LeagueDashTeamShotLocations
 )
+from ..utils.nba_api_config import get_nba_stats_timeout
 
 class TeamService:
     def __init__(self, db_engine):
@@ -87,7 +88,8 @@ class TeamService:
         return LeagueDashOppPtShot(
             general_range_nullable=type,
             date_from_nullable=date_filter,
-            per_mode_simple='PerGame'
+            per_mode_simple='PerGame',
+            timeout=get_nba_stats_timeout(),
         ).get_data_frames()[0]
     
 
@@ -102,7 +104,8 @@ class TeamService:
         response = LeagueDashTeamStats(
             measure_type_detailed_defense='Opponent',
             per_mode_detailed='Per48',
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            timeout=get_nba_stats_timeout(),
         )
         return response.get_data_frames()[0]
 
@@ -111,7 +114,8 @@ class TeamService:
             distance_range='By Zone',
             measure_type_simple='Opponent',
             per_mode_detailed='PerGame',
-            date_from_nullable=date_filter
+            date_from_nullable=date_filter,
+            timeout=get_nba_stats_timeout(),
         )
         opp_zone_df = response.get_data_frames()[0]
         opp_zone_df.columns = ['_'.join(filter(None, col)).strip() for col in opp_zone_df.columns]

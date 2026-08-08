@@ -1,5 +1,7 @@
 """Application and route smoke tests."""
 
+import requests
+
 
 def test_app_factory_registers_expected_routes(app):
     routes = {str(rule) for rule in app.url_map.iter_rules()}
@@ -52,6 +54,28 @@ def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeyp
     assert response.get_json() == {
         "player_name": "LeBron James",
         "season_filter": "2025-26",
+    }
+
+
+def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
+    client, monkeypatch
+):
+    import app.utils.auth as auth
+    from app.routes import game_routes
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+
+    async def timed_out(*args, **kwargs):
+        raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
+
+    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", timed_out)
+
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": "NBA Stats API unavailable",
+        "message": "The upstream stats provider timed out. Please try again shortly.",
     }
 
 

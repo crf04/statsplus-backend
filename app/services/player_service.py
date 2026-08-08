@@ -4,6 +4,7 @@ from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelogs, PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
+from ..utils.nba_api_config import get_nba_stats_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class PlayerService:
         """Get player shooting type data"""
         player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame' ).get_data_frames()[1]
+        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame', timeout=get_nba_stats_timeout()).get_data_frames()[1]
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
@@ -128,7 +129,8 @@ class PlayerService:
             # Get game logs
             gl = playergamelogs.PlayerGameLogs(
                 season_nullable='2025-26',
-                opp_team_id_nullable=team_id
+                opp_team_id_nullable=team_id,
+                timeout=get_nba_stats_timeout(),
             ).get_data_frames()[0]
             
             # Filter and process game logs

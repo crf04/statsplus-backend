@@ -3,6 +3,7 @@ import asyncio
 from nba_api.stats import endpoints
 from nba_api.stats.static import teams
 from ..utils.database_utils import nba_team_to_abbreviation
+from ..utils.nba_api_config import get_nba_stats_timeout
 from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
@@ -132,7 +133,8 @@ class GameService:
                     lambda: endpoints.playergamelogs.PlayerGameLogs(
                         player_id_nullable=player_id, 
                         season_nullable=season,
-                        season_type_nullable='Regular Season'
+                        season_type_nullable='Regular Season',
+                        timeout=get_nba_stats_timeout(),
                     ).get_data_frames()[0]
                 )
         
@@ -487,7 +489,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             async with self.nba_api_semaphore:
                 df = await asyncio.to_thread(
-                    lambda: endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter).get_data_frames()[0]
+                    lambda: endpoints.LeagueDashTeamStats(measure_type_detailed_defense = 'Opponent',per_mode_detailed = 'Per48',date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
                 )
         else:
             df = self._fetch_data_from_table('general_opponent_stats')
@@ -507,7 +509,7 @@ class GameService:
                 date_filter = pd.to_datetime(date_filter)
                 async with self.nba_api_semaphore:
                     df = await asyncio.to_thread(
-                        lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter).get_data_frames()[0]
+                        lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Catch and Shoot', date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
                     )
         else:
                 df = self._fetch_data_from_table('catch_and_shoot')
@@ -522,7 +524,7 @@ class GameService:
             date_filter = pd.to_datetime(date_filter)
             async with self.nba_api_semaphore:
                 df = await asyncio.to_thread(
-                    lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter).get_data_frames()[0]
+                    lambda: endpoints.LeagueDashOppPtShot(general_range_nullable = 'Pullups', date_from_nullable = date_filter, timeout=get_nba_stats_timeout()).get_data_frames()[0]
                 )
         else:
             df = self._fetch_data_from_table('pullups')

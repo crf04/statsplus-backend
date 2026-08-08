@@ -7,6 +7,27 @@ import os
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NBA_STATS_TIMEOUT_SECONDS = 10.0
+
+
+def get_nba_stats_timeout() -> float:
+    """Return the timeout used by calls made through the ``nba_api`` package."""
+    raw_timeout = os.getenv(
+        'NBA_STATS_TIMEOUT_SECONDS', str(DEFAULT_NBA_STATS_TIMEOUT_SECONDS)
+    )
+    try:
+        timeout = float(raw_timeout)
+        if timeout <= 0:
+            raise ValueError
+        return timeout
+    except ValueError:
+        logger.warning(
+            "Invalid NBA_STATS_TIMEOUT_SECONDS=%r; using %.1f seconds",
+            raw_timeout,
+            DEFAULT_NBA_STATS_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_NBA_STATS_TIMEOUT_SECONDS
+
 
 class LoggingHTTPAdapter(HTTPAdapter):
     """Custom HTTP adapter that logs retry attempts."""
