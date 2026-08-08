@@ -90,9 +90,10 @@ def filter_players_on_off(
     season,
     nba_stats_provider=None,
 ):
-    provider = nba_stats_provider
-    if provider is None and (players_on or players_off):
-        provider = _resolve_nba_stats_provider(None)
+    provider = _resolve_provider_for_names(
+        [*(players_on or []), *(players_off or [])],
+        nba_stats_provider,
+    )
 
     if players_on:
         common_games = get_common_games(
