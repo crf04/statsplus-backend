@@ -22,6 +22,14 @@ def _resolve_nba_stats_provider(
     return NBAStatsAdapter(settings=get_runtime_settings())
 
 
+def _resolve_provider_for_names(names, nba_stats_provider):
+    """Resolve one provider for a non-empty player-name collection."""
+
+    if not names:
+        return nba_stats_provider
+    return _resolve_nba_stats_provider(nba_stats_provider)
+
+
 def apply_filters(df, filter_params, nba_stats_provider=None):
     """Apply all filters to the DataFrame"""
     minutes_filter = filter_params.get('minutes_filter', (0, 48))
@@ -114,12 +122,10 @@ def get_games_to_exclude(
 ):
     season = season or get_runtime_settings().nba.current_season
     exclude_game_ids = set()
-    provider = nba_stats_provider
+    provider = _resolve_provider_for_names(players_off_names, nba_stats_provider)
     
     # Loop through players_off and union game IDs
     for player_name in players_off_names:
-        if provider is None:
-            provider = _resolve_nba_stats_provider(None)
         player_id = get_player_id(player_name)
         player_gamelogs = provider.get_player_game_logs(
             player_id=player_id,
@@ -143,12 +149,10 @@ def get_common_games(
         primary_player_logs['GAME_ID'], 
         primary_player_logs['TEAM_ABBREVIATION']
     ))
-    provider = nba_stats_provider
+    provider = _resolve_provider_for_names(other_players_names, nba_stats_provider)
     
     # Loop through other players and find intersections
     for player_name in other_players_names:
-        if provider is None:
-            provider = _resolve_nba_stats_provider(None)
         player_id = get_player_id(player_name)
         player_gamelogs = provider.get_player_game_logs(
             player_id=player_id,
