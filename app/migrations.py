@@ -111,4 +111,3 @@ def _validate_migration_order() -> None:
     versions = [migration.version for migration in MIGRATIONS]
     if versions != sorted(set(versions)):
         raise ValueError("Migrations must have unique, increasing versions")
-
