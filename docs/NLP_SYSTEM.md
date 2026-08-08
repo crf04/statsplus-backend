@@ -107,13 +107,14 @@ With the app running:
 ```bash
 curl -X POST http://localhost:5000/api/nl-query \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
   -d '{"query": "Show me LeBron James last 10 games at home"}'
 ```
 
-If Firebase Admin is configured, include:
+For credential-free local development, enable the explicit local-only bypass:
 
-```bash
--H "Authorization: Bearer <firebase-id-token>"
+```text
+FIREBASE_ADMIN_DISABLED=true
 ```
 
 Unit and integration coverage lives in the pytest suite:

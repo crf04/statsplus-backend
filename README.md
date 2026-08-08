@@ -8,15 +8,15 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 - Bundled SQLite demo database, `nba_play_types.db`, so the project can run immediately after install.
 - NBA data integrations through `nba_api` and pbpstats endpoints.
 - Deterministic NLP parsing with spaCy, aliases, fuzzy matching, date parsing, and optional OpenAI fallback.
-- Firebase Admin authentication support for protected routes, with local development fallback when Firebase is not configured.
+- Firebase Admin authentication for protected routes, with an explicit local-only bypass for credential-free development.
 - Optional Redis-backed caching for NBA API responses.
 
 ## Prerequisites
 
-- Python 3.11. The deployed runtime is pinned in `runtime.txt` as `python-3.11.9`.
+- Python 3.11.9. The exact supported runtime is pinned in `runtime.txt` as `python-3.11.9`.
 - A shell with virtualenv support.
 - Optional: Redis if you want shared caching through `REDIS_URL`.
-- Optional: Firebase Admin credentials if you want real auth locally.
+- Optional for read-only local exploration: Firebase Admin credentials. Protected and admin routes require Firebase unless the explicit local-only bypass is enabled.
 - Optional: OpenAI API key if you want LLM fallback for harder NL queries.
 
 ## Setup
@@ -24,18 +24,30 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 ```bash
 git clone https://github.com/crf04/statsplus-backend.git
 cd statsplus-backend
-python3.11 -m venv .venv
+./scripts/bootstrap.sh
 source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
 ```
+
+The bootstrap script creates `.venv`, installs the hashed, fully resolved `requirements-lock.txt`, and copies `.env.example` to `.env` when needed. It uses `uv` when available and falls back to Python's standard virtual-environment tooling.
 
 `requirements.txt` includes the spaCy English model wheel used by the parser. If your environment blocks wheel installation from GitHub, install dependencies after allowing that download or install `en_core_web_sm` manually with `python -m spacy download en_core_web_sm`.
 
-For contributor tooling:
+`requirements-lock.txt` is generated from `requirements-dev.txt` for Python 3.11.9. After changing either requirements input, regenerate it with `uv`:
 
 ```bash
-pip install -r requirements-dev.txt
+uv pip compile requirements-dev.txt \
+  --python-version "$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')" \
+  --generate-hashes \
+  --output-file requirements-lock.txt
+```
+
+For a manual installation without the bootstrap script:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --require-hashes -r requirements-lock.txt
+cp .env.example .env
 ```
 
 ## Configuration
@@ -54,6 +66,7 @@ The app loads `.env` automatically through `python-dotenv`. These are the most i
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
+| `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
 | `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL` | No | Alternative Firebase credential form |
@@ -94,10 +107,11 @@ of exposing a generic internal-server error. Override the timeout with
 
 The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
-- Protected routes: `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
-- Optional-auth routes: player, team, and data-management routes, plus `POST /api/user/activity/ping`.
-- Local development fallback: if Firebase Admin cannot initialize because no credentials are configured, `@require_auth` logs a warning and allows protected requests through as a synthetic `dev-user`.
-- Real Firebase mode: once Firebase Admin initializes, protected routes require a valid Firebase ID token and return `401` for missing or invalid tokens.
+- Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
+- Protected routes include `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
+- For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment.
+- Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.
 
 ## API examples
 
@@ -124,32 +138,39 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 Game logs:
 
 ```bash
-curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60"
+curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60" \
+  -H "Authorization: Bearer <firebase-id-token>"
 ```
 
-With Firebase initialized, add:
-
-```bash
--H "Authorization: Bearer <firebase-id-token>"
-```
+When using the local-only bypass, set `FIREBASE_ADMIN_DISABLED=true` in `.env` instead of sending a token. Do not use that bypass outside local development.
 
 Natural-language parsing:
 
 ```bash
 curl -X POST http://localhost:5000/api/nl-query \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
   -d '{"query": "Stephen Curry last 10 home games with 25+ points"}'
 ```
 
-Data refresh endpoints:
+Admin data refresh endpoints:
 
 ```bash
-curl http://localhost:5000/api/data/fetch_playtypes
-curl -X PUT http://localhost:5000/api/data/player_PBP
-curl http://localhost:5000/api/data/update_database
+curl -X POST http://localhost:5000/api/data/update_database \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl -X POST http://localhost:5000/api/data/fetch_players_with_teams \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl -X PUT http://localhost:5000/api/data/player_PBP \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl -X PUT http://localhost:5000/api/data/opponent_PBP \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl http://localhost:5000/api/data/fetch_playtypes \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl -X PUT http://localhost:5000/api/players/fetch \
+  -H "Authorization: Bearer <firebase-admin-token>"
 ```
 
-Refresh endpoints call external NBA/PBP APIs and may replace local tables. The bundled database is enough for exploring read-only routes.
+Refresh endpoints call external NBA/PBP APIs and may replace local tables. They require an admin claim. The bundled database is enough for exploring read-only routes.
 
 See [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) for endpoint details and [docs/NLP_SYSTEM.md](docs/NLP_SYSTEM.md) for the natural-language pipeline.
 
@@ -167,11 +188,13 @@ More verbose output:
 python -m pytest -v --tb=short
 ```
 
-The wrapper script runs the same test command:
+Run the same lint and test gate used by CI:
 
 ```bash
-./run_tests.sh
+./scripts/check.sh
 ```
+
+`./run_tests.sh` remains available when only pytest is needed.
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
 
@@ -185,6 +208,7 @@ app/
   services/nl_query/       Parser, mapper, executor, validators
   utils/                   Auth, database, cache, date, and helper utilities
 docs/
+  ARCHITECTURE.md          Runtime interfaces, data sources, and test seams
   API_DOCUMENTATION.md     Endpoint reference
   NLP_SYSTEM.md            Natural-language query architecture
 prompts/
@@ -192,6 +216,9 @@ prompts/
   system_prompt.txt            Reference prompt used by the LLM smoke script
 tests/
   pytest suite
+scripts/
+  bootstrap.sh             Create the Python 3.11 development environment
+  check.sh                 Run the authoritative Ruff and pytest gate
 ```
 
 ## Deployment notes
@@ -205,7 +232,8 @@ gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 100
 For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
-- Set Firebase credentials so protected routes enforce real tokens.
+- Set Firebase credentials so protected and admin routes enforce real tokens and claims.
+- Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.
 - Configure `REDIS_URL` if you want cache sharing across processes or instances.
 - Rotate any credentials that were ever committed or shared outside your secret manager.

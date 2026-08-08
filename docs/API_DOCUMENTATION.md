@@ -14,12 +14,25 @@ All POST and PUT examples use `Content-Type: application/json`.
 
 ## Authentication
 
-Firebase Admin authentication is route-specific:
+Firebase Admin verifies `Authorization: Bearer <firebase-id-token>` on protected
+routes. Protected routes fail closed when Firebase Admin cannot initialize:
+the service returns `503 Service Unavailable`. Missing or invalid tokens return
+`401 Unauthorized`.
+
+Authentication levels:
 
 - Required: `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
-- Optional: `/api/players/*`, `/api/teams/*`, `/api/data/*`, and `POST /api/user/activity/ping`.
-- Development fallback: if Firebase Admin is not configured, required-auth routes are allowed through as a synthetic `dev-user`.
-- Firebase mode: once Firebase Admin initializes, required-auth routes need `Authorization: Bearer <firebase-id-token>`.
+- Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint, and `PUT /api/players/fetch`.
+- Optional: player and team read routes, plus `POST /api/user/activity/ping`.
+- Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
+  or `roles` containing `admin` for admin-only routes. Missing claims return
+  `403 Forbidden`.
+
+For local, credential-free development only, set
+`FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
+for local requests. The bypass is rejected when `FLASK_ENV=production`; never
+enable it in a deployed environment. It is accepted only in an explicit
+development or test environment.
 
 ## Health Endpoints
 
@@ -135,7 +148,8 @@ Query parameters:
 Example:
 
 ```bash
-curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60"
+curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60" \
+  -H "Authorization: Bearer <firebase-id-token>"
 ```
 
 ## Player Endpoints
@@ -169,11 +183,11 @@ curl "http://localhost:5000/api/players/profile?player_name=LeBron%20James&categ
 ### Fetch or Update Player Data
 
 ```http
-GET /api/players/fetch
 PUT /api/players/fetch
 ```
 
-Fetches current NBA player metadata through `nba_api` and replaces the local `player_information` table.
+Requires an admin claim. Fetches current NBA player metadata through
+`nba_api` and replaces the local `player_information` table.
 
 ## Team Endpoints
 
@@ -205,13 +219,14 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 
 ## Data Management Endpoints
 
-These endpoints are optional-auth and can call external NBA/PBP APIs or replace local tables.
+These endpoints require an authenticated Firebase token with an admin claim.
+They can call external NBA/PBP APIs or replace local tables.
 
 ```http
-GET /api/data/update_database
+POST /api/data/update_database
 PUT /api/data/player_PBP
 PUT /api/data/opponent_PBP
-GET /api/data/fetch_players_with_teams
+POST /api/data/fetch_players_with_teams
 GET /api/data/fetch_playtypes
 ```
 
@@ -219,7 +234,7 @@ Use the bundled database for read-only demo exploration before running refresh e
 
 ## User Endpoints
 
-Most user endpoints require Firebase auth in real Firebase mode:
+Most user endpoints require Firebase auth:
 
 ```http
 GET /api/user/profile
@@ -230,13 +245,15 @@ GET /api/user/admin/stats
 POST /api/user/sync
 ```
 
+`GET /api/user/admin/stats` additionally requires an admin claim (`admin=true`,
+`role=admin`, or `roles` containing `admin`).
+
 Optional-auth endpoint:
 
 ```http
 POST /api/user/activity/ping
 ```
 
-The admin stats route currently lacks role enforcement in code; any authenticated Firebase user can call it.
 
 ## Filtering Reference
 
