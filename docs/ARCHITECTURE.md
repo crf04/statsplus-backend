@@ -23,13 +23,14 @@ registers handlers that return the documented `{ "error": { "code", "message"
 } }` shape. Optional `detail` values are logged for operators and never sent
 to clients.
 
-Route modules expose lazy service handles rather than constructing services at
-import time. A handle resolves its service from the active app's
-`app.extensions["request_services"]` registry, passing that app's canonical
-`RuntimeSettings` object into the constructor. Tests can patch the handle
-exposed by the route module—for example,
-`app.routes.game_routes.game_service`—or instantiate a service directly with a
-temporary or mocked engine.
+`app.dependencies.build_dependencies()` is the single production assembly
+point for the database engine, cache client, and request services. The app
+factory constructs that graph once and stores it in
+`app.extensions["dependencies"]`. Route modules contain read-only handles that
+resolve objects from the active app; importing a route never selects a
+database, connects to Redis, initializes Firebase, or loads a parser. Tests can
+provide a complete replacement graph through the `DEPENDENCIES` app-factory
+override without patching module globals.
 
 ## Data-source seams
 
@@ -101,7 +102,8 @@ validator must not be used to repair the fixture.
 ## Test seams
 
 - App and route behavior: use the `app` and `client` fixtures in `tests/conftest.py`.
-- Route/service interaction: patch the module-level service on the route module.
+- Route/service interaction: replace methods on the dependency graph supplied
+  through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.
@@ -110,8 +112,9 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 
 ## Known seams to improve incrementally
 
-- The lazy request-service registry keeps app-factory isolation explicit while
-  avoiding database, Redis, and parser initialization during route imports.
+- The app-owned dependency graph keeps app-factory isolation explicit while
+  avoiding database, Redis, Firebase, and parser initialization during route
+  imports.
 - The request layer mixes synchronous Flask handlers with `asyncio.run` for game-log work.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
 - The bundled provider-generated tables are validated as a public fixture; they

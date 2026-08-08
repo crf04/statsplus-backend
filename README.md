@@ -242,6 +242,7 @@ Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unle
 ```text
 app/
   __init__.py              Flask app factory and blueprint registration
+  dependencies.py         Application dependency assembly and test injection
   routes/                  HTTP route handlers
   services/                Business logic, NBA data calls, NL/LLM services
   services/nl_query/       Parser, mapper, executor, validators

@@ -19,11 +19,6 @@ def _set_token_verifier(monkeypatch, claims: dict) -> None:
         "verify_firebase_token",
         lambda token: {"uid": token, "email": f"{token}@example.com", **claims},
     )
-    monkeypatch.setattr(
-        auth.UserService,
-        "create_or_update_user",
-        lambda self, user_data: None,
-    )
 
 
 def _admin_auth(monkeypatch) -> dict[str, str]:
@@ -154,15 +149,14 @@ def test_data_routes_allow_admin_without_provider_or_database_calls(
     service_method,
     service_args,
     result,
+    dependencies,
 ):
-    from app.routes import data_update_routes
-
     headers = _admin_auth(monkeypatch)
 
     if service_method == "map_id_to_team":
-        monkeypatch.setattr(data_update_routes.data_service, "save_team", lambda: None)
+        monkeypatch.setattr(dependencies.data_service, "save_team", lambda: None)
     monkeypatch.setattr(
-        data_update_routes.data_service,
+        dependencies.data_service,
         service_method,
         lambda *args: result,
     )
@@ -178,13 +172,11 @@ def test_data_routes_allow_admin_without_provider_or_database_calls(
 
 
 def test_player_fetch_allows_admin_without_provider_or_database_calls(
-    client, monkeypatch
+    client, monkeypatch, dependencies
 ):
-    from app.routes import player_routes
-
     headers = _admin_auth(monkeypatch)
     monkeypatch.setattr(
-        player_routes.player_service,
+        dependencies.player_service,
         "store_player_information",
         lambda: True,
     )
@@ -205,12 +197,12 @@ def test_admin_stats_rejects_non_admin(client, monkeypatch):
     assert response.status_code == 403
 
 
-def test_admin_stats_allows_admin_without_database_call(client, monkeypatch):
-    from app.routes import user_routes
-
+def test_admin_stats_allows_admin_without_database_call(
+    client, monkeypatch, dependencies
+):
     headers = _admin_auth(monkeypatch)
     monkeypatch.setattr(
-        user_routes.user_service,
+        dependencies.user_service,
         "get_all_active_users_count",
         lambda: 7,
     )

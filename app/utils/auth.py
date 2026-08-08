@@ -16,8 +16,8 @@ from app.errors import (
     InvalidTokenError,
     ProviderUnavailableError,
 )
-from app.services.user_service import UserService
 from app.config.settings import RuntimeSettings
+from app.dependencies import get_dependencies
 
 from .firebase_admin import get_firebase_app, verify_firebase_token
 
@@ -166,7 +166,9 @@ def _sync_firebase_user(
 
     db_user = None
     try:
-        db_user = UserService().create_or_update_user(firebase_user_data)
+        db_user = get_dependencies().user_service.create_or_update_user(
+            firebase_user_data
+        )
     except Exception as error:
         if not tolerate_sync_errors:
             raise

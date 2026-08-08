@@ -12,6 +12,7 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
 
 logger = logging.getLogger(__name__)
+_REDIS_CLIENT_UNSET = object()
 
 
 class GameService:
@@ -22,13 +23,18 @@ class GameService:
         'pullups', 'less_than_10_ft'
     }
     
-    def __init__(self, db_engine, redis_client=None, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        redis_client=_REDIS_CLIENT_UNSET,
+        settings: RuntimeSettings | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
         
         # Initialize cache
-        if redis_client is None:
+        if redis_client is _REDIS_CLIENT_UNSET:
             redis_client = get_redis_client(self.settings)
         self.cache = NBAGameCache(redis_client, settings=self.settings)
         

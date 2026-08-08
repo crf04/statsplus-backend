@@ -1,18 +1,12 @@
 from flask import Blueprint, jsonify
 from ..errors import OperationFailedError, route_error_boundary
-from ..services.data_service import DataService
 from ..utils.auth import require_admin
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
 
-
-def _build_data_service(engine, settings):
-    return DataService(engine, settings=settings)
-
-
-data_service = CurrentAppService("data", _build_data_service)
+data_service = CurrentAppService("data")
 
 @data_bp.route('/update_database', methods=['POST'])
 @require_admin

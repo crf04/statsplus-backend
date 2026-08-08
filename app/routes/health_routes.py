@@ -14,8 +14,8 @@ from flask import Blueprint, jsonify
 import requests
 from sqlalchemy import text
 
+from ..dependencies import get_dependencies
 from ..errors import AppError, ProviderUnavailableError
-from ..utils.db import get_engine
 from ..utils.nba_api_config import get_shared_nba_session
 from app.config.settings import get_runtime_settings
 
@@ -37,7 +37,7 @@ def database_healthcheck() -> Tuple[Any, int]:
     """
 
     try:
-        engine = get_engine()
+        engine = get_dependencies().engine
         with engine.connect() as connection:
             result = connection.execute(text("SELECT 1"))
             ok = result.scalar() == 1
@@ -125,7 +125,7 @@ def _check_database_connection() -> Dict[str, Any]:
     Dict[str, Any]
         Database connection status information.
     """
-    engine = get_engine()
+    engine = get_dependencies().engine
     try:
         start_time = time.time()
         with engine.connect() as connection:

@@ -219,11 +219,11 @@ def test_game_logs_invalid_input_uses_central_handler(client) -> None:
     }
 
 
-def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:
-    from app.routes import player_routes
-
+def test_player_profile_missing_resource_uses_central_handler(
+    client, monkeypatch, dependencies
+) -> None:
     monkeypatch.setattr(
-        player_routes.player_service,
+        dependencies.player_service,
         "get_player_profile",
         lambda *args, **kwargs: None,
     )
@@ -241,16 +241,16 @@ def test_player_profile_missing_resource_uses_central_handler(client, monkeypatc
     }
 
 
-def test_player_profile_provider_failure_uses_central_handler(client, monkeypatch) -> None:
+def test_player_profile_provider_failure_uses_central_handler(
+    client, monkeypatch, dependencies
+) -> None:
     import requests
-
-    from app.routes import player_routes
 
     def unavailable(*args, **kwargs):
         raise requests.exceptions.ReadTimeout("profile-provider-secret")
 
     monkeypatch.setattr(
-        player_routes.player_service,
+        dependencies.player_service,
         "get_player_profile",
         unavailable,
     )
@@ -297,8 +297,6 @@ def test_non_admin_auth_uses_nested_error_contract(client, monkeypatch) -> None:
             "role": "viewer",
         },
     )
-    monkeypatch.setattr(auth.UserService, "create_or_update_user", lambda *args: None)
-
     response = client.get(
         "/api/data/fetch_playtypes",
         headers={"Authorization": "Bearer viewer-token"},
@@ -338,14 +336,14 @@ def test_invalid_token_details_are_not_exposed(client, monkeypatch) -> None:
     assert "firebase-token-secret" not in response.get_data(as_text=True)
 
 
-def test_route_exception_details_are_not_exposed(client, monkeypatch) -> None:
-    from app.routes import player_routes
-
+def test_route_exception_details_are_not_exposed(
+    client, monkeypatch, dependencies
+) -> None:
     def fail_to_load_players():
         raise RuntimeError("player-provider-secret")
 
     monkeypatch.setattr(
-        player_routes.player_service,
+        dependencies.player_service,
         "get_all_players",
         fail_to_load_players,
     )
@@ -374,16 +372,16 @@ def test_nl_query_missing_query_uses_nested_error_contract(client) -> None:
     }
 
 
-def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
-    from app.routes import health_routes
-
+def test_health_failure_uses_nested_error_contract(
+    client, monkeypatch, dependencies
+) -> None:
     class FailingEngine:
         dialect = type("Dialect", (), {"name": "sqlite", "driver": "pysqlite"})()
 
         def connect(self):
             raise RuntimeError("database-password-secret")
 
-    monkeypatch.setattr(health_routes, "get_engine", lambda: FailingEngine())
+    monkeypatch.setattr(dependencies, "engine", FailingEngine())
 
     response = client.get("/api/health/db")
 
@@ -397,14 +395,14 @@ def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
     assert "database-password-secret" not in response.get_data(as_text=True)
 
 
-def test_data_route_failure_uses_nested_error_contract(client, monkeypatch) -> None:
-    from app.routes import data_update_routes
-
+def test_data_route_failure_uses_nested_error_contract(
+    client, monkeypatch, dependencies
+) -> None:
     def fail_to_fetch_playtypes():
         raise RuntimeError("playtypes-provider-secret")
 
     monkeypatch.setattr(
-        data_update_routes.data_service,
+        dependencies.data_service,
         "get_playtypes",
         fail_to_fetch_playtypes,
     )
@@ -421,11 +419,11 @@ def test_data_route_failure_uses_nested_error_contract(client, monkeypatch) -> N
     assert "playtypes-provider-secret" not in response.get_data(as_text=True)
 
 
-def test_team_missing_data_uses_nested_error_contract(client, monkeypatch) -> None:
-    from app.routes import team_routes
-
+def test_team_missing_data_uses_nested_error_contract(
+    client, monkeypatch, dependencies
+) -> None:
     monkeypatch.setattr(
-        team_routes.team_service,
+        dependencies.team_service,
         "get_team_stats",
         lambda *args, **kwargs: None,
     )
@@ -441,14 +439,14 @@ def test_team_missing_data_uses_nested_error_contract(client, monkeypatch) -> No
     }
 
 
-def test_user_route_exception_details_are_not_exposed(client, monkeypatch) -> None:
-    from app.routes import user_routes
-
+def test_user_route_exception_details_are_not_exposed(
+    client, monkeypatch, dependencies
+) -> None:
     def fail_to_load_user(*args, **kwargs):
         raise RuntimeError("user-database-secret")
 
     monkeypatch.setattr(
-        user_routes.user_service,
+        dependencies.user_service,
         "get_user_by_firebase_uid",
         fail_to_load_user,
     )
