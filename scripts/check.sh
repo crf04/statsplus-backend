@@ -10,5 +10,11 @@ else
     PYTHON_BIN="${PYTHON:-python3}"
 fi
 
+# Coverage floor. Raise this as tests are added; never lower it to make CI pass.
+COVERAGE_MIN=46
+
 "$PYTHON_BIN" -m ruff check app tests scripts
-"$PYTHON_BIN" -m pytest
+"$PYTHON_BIN" -m pytest \
+    --cov=app \
+    --cov-report=term-missing \
+    --cov-fail-under="$COVERAGE_MIN"

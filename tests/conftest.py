@@ -121,3 +121,54 @@ def empty_engine(tmp_path):
     from sqlalchemy import create_engine
 
     return create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+
+
+@pytest.fixture
+def make_db_user():
+    """Build an unpersisted User row for routes that serialize the DB user."""
+
+    def _make_db_user(**overrides):
+        from app.models.user import User
+
+        fields = {
+            "firebase_uid": "test-uid",
+            "email": "user@example.com",
+            "display_name": "Test User",
+            "photo_url": None,
+            "is_active": True,
+        }
+        fields.update(overrides)
+        return User(**fields)
+
+    return _make_db_user
+
+
+@pytest.fixture
+def authenticate(monkeypatch):
+    """Return a callable that installs a verified Firebase identity.
+
+    Avoids Firebase credentials entirely: the token verifier and the user-sync
+    call are both replaced, so routes see a fully authenticated request.
+    """
+
+    def _authenticate(claims=None, db_user=None):
+        import app.utils.auth as auth
+
+        token_claims = {
+            "uid": "test-uid",
+            "email": "user@example.com",
+            "name": "Test User",
+            "picture": None,
+        }
+        token_claims.update(claims or {})
+
+        monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+        monkeypatch.setattr(auth, "verify_firebase_token", lambda token: token_claims)
+        monkeypatch.setattr(
+            auth.UserService,
+            "create_or_update_user",
+            lambda self, user_data: db_user,
+        )
+        return {"Authorization": "Bearer test-token"}
+
+    return _authenticate

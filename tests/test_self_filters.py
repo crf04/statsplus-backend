@@ -85,15 +85,15 @@ class TestSelfFilters(unittest.TestCase):
         for query, expected_filter in traditional_cases:
             with self.subTest(query=query):
                 components = self.parser.parse(query)
-                
-                if components.self_filters:
-                    filter_obj = components.self_filters[0]
-                    expected_stat, expected_op, expected_val = expected_filter
-                    
-                    self.assertEqual(filter_obj.stat_column, expected_stat)
-                    self.assertEqual(filter_obj.operator, expected_op)
-                    self.assertEqual(filter_obj.value, expected_val)
-    
+                self.assertGreater(len(components.self_filters), 0, f"No self filters found for: {query}")
+
+                filter_obj = components.self_filters[0]
+                expected_stat, expected_op, expected_val = expected_filter
+
+                self.assertEqual(filter_obj.stat_column, expected_stat)
+                self.assertEqual(filter_obj.operator, expected_op)
+                self.assertEqual(filter_obj.value, expected_val)
+
     def test_rebound_filters(self):
         """Test rebounding pattern filters"""
         test_cases = [
@@ -195,10 +195,11 @@ class TestSelfFilters(unittest.TestCase):
         for query, expected_op, expected_val in test_cases:
             with self.subTest(query=query):
                 components = self.parser.parse(query)
-                if components.self_filters:
-                    filter_obj = components.self_filters[0]
-                    self.assertEqual(filter_obj.operator, expected_op)
-                    self.assertEqual(filter_obj.value, expected_val)
+                self.assertGreater(len(components.self_filters), 0, f"No self filters found for: {query}")
+
+                filter_obj = components.self_filters[0]
+                self.assertEqual(filter_obj.operator, expected_op)
+                self.assertEqual(filter_obj.value, expected_val)
     
     def test_edge_cases(self):
         """Test edge cases and potential failure scenarios"""
@@ -242,73 +243,3 @@ class TestSelfFilters(unittest.TestCase):
                 components = self.parser.parse(query)
                 self.assertTrue(components.confidence_breakdown.should_use_llm,
                               f"Should trigger LLM: {query}")
-
-
-def run_self_filter_integration_test():
-    """Run integration test to show current self-filter parsing status"""
-    print("\n" + "="*60)
-    print("SELF-FILTER INTEGRATION TEST")
-    print("="*60)
-    
-    # Mock engine
-    mock_engine = MagicMock()
-    
-    # Create mock player data
-    player_data = {
-        'PLAYER_NAME': [
-            "LeBron James", "Stephen Curry", "Giannis Antetokounmpo", 
-            "Kevin Durant", "Jayson Tatum", "Kobe Bryant"
-        ]
-    }
-    mock_player_df = pd.DataFrame(player_data)
-    
-    test_queries = [
-        # Traditional patterns (should work well)
-        "LeBron games with 25+ points",
-        "Curry games with 10+ rebounds", 
-        "Giannis 15+ assist games",
-        
-        # Shooting patterns (should trigger LLM)
-        "LeBron games shooting 15+ times",
-        "Curry games attempting 10+ threes",
-        "Kobe games taking 20+ shots",
-        
-        # Complex patterns
-        "Durant games with 25+ points and 8+ assists",
-        "Tatum triple-double games",
-    ]
-    
-    try:
-        with patch('pandas.read_sql', return_value=mock_player_df):
-            with patch('nba_api.stats.static.teams.get_teams', return_value=[]):
-                parser = BaseQueryParser(mock_engine)
-                
-                for query in test_queries:
-                    print(f"\nQuery: '{query}'")
-                    try:
-                        components = parser.parse(query)
-                        print(f"  Player: {components.player_name}")
-                        print(f"  Confidence: {components.confidence:.3f}")
-                        print(f"  Should use LLM: {components.confidence_breakdown.should_use_llm}")
-                        
-                        if components.self_filters:
-                            print(f"  Self filters ({len(components.self_filters)}):")
-                            for i, filter_obj in enumerate(components.self_filters):
-                                print(f"    {i+1}. {filter_obj.stat_column} {filter_obj.operator} {filter_obj.value}")
-                        else:
-                            print("  Self filters: None detected")
-                            
-                    except Exception as e:
-                        print(f"  ERROR: {e}")
-                        
-    except Exception as e:
-        print(f"Integration test setup failed: {e}")
-
-
-if __name__ == '__main__':
-    # Run unit tests
-    print("Running self-filter unit tests...")
-    unittest.main(verbosity=2, exit=False)
-    
-    # Run integration test
-    run_self_filter_integration_test()
