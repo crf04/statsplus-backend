@@ -6,7 +6,12 @@ and basic user statistics.
 """
 
 from flask import Blueprint, request, jsonify
-from app.utils.auth import require_auth, require_auth_optional, get_current_user
+from app.utils.auth import (
+    get_current_user,
+    require_admin,
+    require_auth,
+    require_auth_optional,
+)
 from app.services.user_service import UserService
 import logging
 
@@ -191,14 +196,11 @@ def deactivate_account():
         return jsonify({'error': 'Failed to deactivate account'}), 500
 
 @user_bp.route('/admin/stats', methods=['GET'])
-@require_auth
+@require_admin
 def get_admin_stats():
     """
     Get administrative statistics (total users, etc.).
-    
-    Note: In a real application, this would require admin role checking.
-    For now, any authenticated user can access this.
-    
+
     Returns:
         JSON response with admin statistics
     """

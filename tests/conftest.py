@@ -2,12 +2,7 @@
 Pytest configuration and fixtures for NBA backend tests
 """
 import pytest
-import sys
-import os
 from unittest.mock import Mock
-
-# Add the app directory to the Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 
 @pytest.fixture
 def mock_redis_client():
@@ -77,9 +72,12 @@ def setup_logging():
     logging.basicConfig(level=logging.DEBUG)
     
 @pytest.fixture
-def app():
+def app(monkeypatch):
     """Create a Flask app instance for route tests."""
     from app import create_app
+
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    monkeypatch.setenv("FLASK_ENV", "testing")
 
     return create_app({
         "TESTING": True,

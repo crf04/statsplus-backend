@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from ..utils.db import get_engine
 from ..services.player_service import PlayerService
-from ..utils.auth import require_auth_optional
+from ..utils.auth import require_admin, require_auth_optional
 
 # Initialize blueprint and services
 player_bp = Blueprint('players', __name__)
@@ -30,8 +30,8 @@ def get_player_profile():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@player_bp.route('/fetch', methods=['PUT','GET'])
-@require_auth_optional
+@player_bp.route('/fetch', methods=['PUT'])
+@require_admin
 def fetch_players():
     try:
         success = player_service.store_player_information()
