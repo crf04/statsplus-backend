@@ -6,6 +6,7 @@ the foundation for ORM models.
 """
 
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 from app.utils.db import get_engine
 import logging
@@ -15,15 +16,15 @@ logger = logging.getLogger(__name__)
 # Create the declarative base for all models
 Base = declarative_base()
 
-def get_session():
+def get_session(engine: Engine | None = None):
     """
     Create a new SQLAlchemy session.
     
     Returns:
         Session: A new SQLAlchemy session bound to the application engine
     """
-    engine = get_engine()
-    Session = sessionmaker(bind=engine)
+    session_engine = engine or get_engine()
+    Session = sessionmaker(bind=session_engine)
     return Session()
 
 def create_all_tables():

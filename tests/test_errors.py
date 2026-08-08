@@ -11,9 +11,11 @@ from app.errors import (
     AppError,
     InvalidConfigurationError,
     InvalidInputError,
+    OperationFailedError,
     ProviderUnavailableError,
     ResourceNotFoundError,
     register_error_handlers,
+    route_error_boundary,
 )
 
 
@@ -123,6 +125,32 @@ def test_app_error_defaults_to_safe_public_message() -> None:
 
     assert error.public_message == "An unexpected server error occurred."
     assert error.detail == "private implementation detail"
+
+
+def test_route_error_boundary_preserves_expected_application_errors() -> None:
+    expected = InvalidInputError("The request is invalid.")
+
+    @route_error_boundary("The operation failed.")
+    def handler() -> None:
+        raise expected
+
+    with pytest.raises(InvalidInputError) as raised:
+        handler()
+
+    assert raised.value is expected
+
+
+def test_route_error_boundary_translates_unexpected_errors(caplog) -> None:
+    @route_error_boundary("The operation failed.")
+    def handler() -> None:
+        raise RuntimeError("private provider detail")
+
+    with pytest.raises(OperationFailedError) as raised:
+        handler()
+
+    assert raised.value.public_message == "The operation failed."
+    assert raised.value.detail == "private provider detail"
+    assert "private provider detail" in caplog.text
 
 
 def test_game_logs_invalid_input_uses_central_handler(client) -> None:

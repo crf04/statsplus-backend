@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 import logging
 
-from ..errors import AppError, InvalidInputError, OperationFailedError
+from ..errors import InvalidInputError, OperationFailedError, route_error_boundary
 from ..services.nl_service import NLService
 from ..utils.auth import require_auth, get_current_user
 from ._service_proxy import CurrentAppService
@@ -20,28 +20,26 @@ nl_service = CurrentAppService("nl", _build_nl_service)
 
 @nl_bp.route('/nl-query', methods=['POST'])
 @require_auth
+@route_error_boundary("Failed to process the natural-language query.")
 def process_natural_language_query():
     """Process natural language queries and return structured results"""
-    try:
-        # Get authenticated user
-        user = get_current_user()
-        
-        # Get query from request
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict) or 'query' not in data:
-            raise InvalidInputError("A query is required.")
+    # Get authenticated user
+    user = get_current_user()
 
-        query = data['query']
-        if not isinstance(query, str) or not query.strip():
-            raise InvalidInputError("A non-empty query is required.")
-        
-        logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
-        
+    # Get query from request
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'query' not in data:
+        raise InvalidInputError("A query is required.")
+
+    query = data['query']
+    if not isinstance(query, str) or not query.strip():
+        raise InvalidInputError("A non-empty query is required.")
+
+    logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
+
+    try:
         result = nl_service.process_query(query)
         return jsonify(result)
-        
-    except AppError:
-        raise
     except ValueError as error:
         raise InvalidInputError(
             "The natural-language query is invalid.", detail=error
@@ -49,9 +47,4 @@ def process_natural_language_query():
     except RuntimeError as error:
         raise OperationFailedError(
             "The natural-language query service is unavailable.", detail=error
-        ) from error
-    except Exception as error:
-        logger.exception("NL query failed")
-        raise OperationFailedError(
-            "Failed to process the natural-language query.", detail=error
         ) from error

@@ -103,6 +103,8 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     """Each app's request defaults and services use its injected settings."""
     from app import create_app
     from app.routes import game_routes
+    from app.routes import user_routes
+    from app.routes._service_proxy import CurrentAppService
 
     monkeypatch.setattr(
         "app.services.game_service.get_redis_client",
@@ -144,6 +146,10 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         assert first_filters["season_filter"] == "2030-31"
         assert game_routes.game_service.settings is first_settings
 
+        assert isinstance(user_routes.user_service, CurrentAppService)
+        first_user_service = user_routes.user_service._resolve()
+        assert first_user_service.settings is first_settings
+
     with second_app.test_request_context(
         "/api/games/game_logs?player_name=LeBron%20James"
     ):
@@ -151,7 +157,14 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         assert second_filters["season_filter"] == "2040-41"
         assert game_routes.game_service.settings is second_settings
 
+        second_user_service = user_routes.user_service._resolve()
+        assert second_user_service.settings is second_settings
+
     assert (
         first_app.extensions["request_services"]["game"]
         is not second_app.extensions["request_services"]["game"]
+    )
+    assert (
+        first_app.extensions["request_services"]["user"]
+        is not second_app.extensions["request_services"]["user"]
     )

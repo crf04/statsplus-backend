@@ -10,13 +10,18 @@ details can be logged without being returned to a caller.
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar
+from collections.abc import Callable
+from functools import wraps
+from typing import Any, ClassVar, ParamSpec, TypeVar
 
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
 
 logger = logging.getLogger(__name__)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class AppError(Exception):
@@ -106,6 +111,36 @@ class OperationFailedError(AppError):
     status_code = 500
     code = "operation_failed"
     default_message = "The requested operation could not be completed."
+
+
+def route_error_boundary(
+    safe_message: str,
+    *,
+    error_type: type[AppError] = OperationFailedError,
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Translate unexpected failures from one route into a safe app error.
+
+    Routes should raise the most specific :class:`AppError` they can describe.
+    This boundary preserves those expected failures and only translates
+    otherwise-unhandled exceptions.  ``error_type`` supplies the public error
+    category and status code; ``safe_message`` is the client-facing message.
+    The original exception is retained as ``detail`` for the central logger.
+    """
+
+    def decorator(handler: Callable[P, R]) -> Callable[P, R]:
+        @wraps(handler)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                return handler(*args, **kwargs)
+            except AppError:
+                raise
+            except Exception as error:
+                logger.exception("Route operation failed: %s", safe_message)
+                raise error_type(safe_message, detail=error) from error
+
+        return wrapped
+
+    return decorator
 
 
 def _error_response(code: str, message: str, status_code: int):
