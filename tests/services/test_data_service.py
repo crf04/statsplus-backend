@@ -7,7 +7,6 @@ writes to a temporary SQLite database.
 
 import pandas as pd
 import pytest
-import requests
 
 PLAY_TYPES = [
     "Transition", "Isolation", "PRBallHandler", "PRRollMan", "OffRebound",
@@ -173,71 +172,56 @@ def test_player_playstyles_become_percentages(service, engine, monkeypatch):
 # --- play-by-play ----------------------------------------------------------
 
 
-class _FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
+class _FakeProvider:
+    """Stand-in for the PBP Stats adapter."""
 
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
-
-
-class _FakeSession:
     def __init__(self, result):
         self._result = result
         self.calls = []
 
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
+    def get_totals(self, data_type):
+        self.calls.append(data_type)
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
 
 
-def _install_session(monkeypatch, session):
-    from app.services import data_service as data_service_module
-
-    monkeypatch.setattr(
-        data_service_module, "get_shared_nba_session", lambda *a, **k: session
+def test_pbp_data_is_stored_for_players(service, engine):
+    service.pbp_provider = _FakeProvider(
+        pd.DataFrame([{"Name": "LeBron James", "Points": 30}])
     )
-
-
-def test_pbp_data_is_stored_for_players(service, engine, monkeypatch):
-    session = _FakeSession(
-        _FakeResponse({"multi_row_table_data": [{"Name": "LeBron James", "Points": 30}]})
-    )
-    _install_session(monkeypatch, session)
 
     assert service.fetch_PBP_data() is True
     assert read_table(engine, "pbp_player_stats")["Name"].tolist() == ["LeBron James"]
-    assert session.calls[0]["params"]["Type"] == "Player"
+    assert service.pbp_provider.calls == ["player"]
 
 
-def test_pbp_data_requests_opponent_totals_for_the_opponent_type(
-    service, engine, monkeypatch
-):
-    session = _FakeSession(_FakeResponse({"multi_row_table_data": [{"Name": "LAL"}]}))
-    _install_session(monkeypatch, session)
+def test_pbp_data_requests_opponent_totals_for_the_opponent_type(service, engine):
+    service.pbp_provider = _FakeProvider(pd.DataFrame([{"Name": "LAL"}]))
 
     assert service.fetch_PBP_data(data_type="Opponent") is True
-    assert session.calls[0]["params"]["Type"] == "Opponent"
+    assert service.pbp_provider.calls == ["Opponent"]
     assert read_table(engine, "pbp_Opponent_stats")["Name"].tolist() == ["LAL"]
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        requests.exceptions.Timeout("pbpstats timed out"),
-        requests.exceptions.ConnectionError("pbpstats unreachable"),
-        ValueError("malformed payload"),
-    ],
-)
-def test_pbp_failures_are_reported_without_raising(service, monkeypatch, error):
-    _install_session(monkeypatch, _FakeSession(error))
+def test_pbp_storage_failures_are_reported_without_raising(service):
+    """A local failure keeps the boolean contract."""
+    service.pbp_provider = _FakeProvider(ValueError("malformed payload"))
 
     assert service.fetch_PBP_data() is False
+
+
+def test_pbp_provider_outages_propagate_to_the_error_handler(service):
+    """Provider unavailability is translated to HTTP by the route boundary,
+    so it must not be flattened into a False return."""
+    from app.errors import ProviderUnavailableError
+
+    service.pbp_provider = _FakeProvider(
+        ProviderUnavailableError("pbpstats is unavailable.")
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        service.fetch_PBP_data()
 
 
 # --- player information ----------------------------------------------------

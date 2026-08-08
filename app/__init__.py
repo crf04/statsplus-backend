@@ -44,13 +44,29 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     if config_overrides:
         app.config.update(config_overrides)
 
-    CORS(app)
+    CORS(app, origins=settings.cors.allowed_origins, always_send=False)
 
     _initialize_dependencies(app)
+    _assemble_dependencies(app)
     _register_error_handlers(app)
     _register_blueprints(app)
 
     return app
+
+
+def _assemble_dependencies(app: Flask) -> None:
+    """Construct or accept the one dependency graph used by all routes."""
+
+    supplied_dependencies = app.config.get("DEPENDENCIES")
+    if supplied_dependencies is not None:
+        app.extensions["dependencies"] = supplied_dependencies
+        return
+
+    from app.dependencies import build_dependencies
+
+    app.extensions["dependencies"] = build_dependencies(
+        app.extensions["runtime_settings"]
+    )
 
 
 def _initialize_dependencies(app: Flask) -> None:

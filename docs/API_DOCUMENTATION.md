@@ -74,13 +74,20 @@ GET /api/health/db
 
 Runs `SELECT 1` against the configured SQLAlchemy engine and returns the dialect, driver, timestamp, and status.
 
-### NBA API Health
+### PBP Stats Health
 
 ```http
-GET /api/health/nba-api
+GET /api/health/pbp-stats
 ```
 
-Checks connectivity to the pbpstats NBA totals endpoint. This endpoint depends on external network access.
+Checks the PBP Stats totals endpoint used by PBP refreshes. The adapter
+validates the totals payload before reporting the provider as healthy, so this
+endpoint depends on external network access and a valid upstream response.
+Successful responses identify the provider as `PBP Stats`.
+
+`GET /api/health/nba-api` is preserved as a deprecated compatibility alias.
+It returns the same PBP Stats result and includes a `Deprecation: true` header;
+new clients should use `/api/health/pbp-stats`.
 
 ### Detailed Health
 
@@ -88,7 +95,7 @@ Checks connectivity to the pbpstats NBA totals endpoint. This endpoint depends o
 GET /api/health/detailed
 ```
 
-Combines database and NBA API checks. Returns `503` when a dependency is degraded.
+Combines database and PBP Stats checks. Returns `503` when a dependency is degraded.
 
 ## Natural Language Query
 
@@ -260,6 +267,13 @@ POST /api/data/fetch_players_with_teams
 GET /api/data/fetch_playtypes
 ```
 
+The two PBP refresh routes use the documented `PBPStatsProvider` interface
+(`app.providers.pbp_stats.PBPStatsProvider`). The concrete
+`PBPStatsAdapter` fetches and normalizes the PBP Stats totals response using
+the shared HTTP session, then `DataService` persists the normalized rows. A
+provider timeout, unavailable response, or malformed payload returns the
+standard `provider_unavailable` error with HTTP 503.
+
 Use the bundled database for read-only demo exploration before running refresh endpoints.
 
 ## User Endpoints
@@ -313,7 +327,10 @@ Common stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`,
 ## Development Notes
 
 - The app uses `DATABASE_URL` and defaults to `sqlite:///nba_play_types.db`.
-- CORS is enabled globally.
+- CORS uses the exact origins in `CORS_ALLOWED_ORIGINS` (the local default is
+  `http://localhost:3000`; production requires an explicit deployment
+  allowlist). Requests without an `Origin` header are unaffected, and origins
+  outside the allowlist receive no CORS permission headers.
 - `OPENAI_API_KEY` is optional; without it the NL endpoint uses deterministic parsing only.
 - Redis is optional; cache initialization should not be required for local development.
 - Legacy routes from earlier versions are not currently registered in `app/__init__.py`; use the blueprint paths documented here.

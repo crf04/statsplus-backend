@@ -7,7 +7,6 @@ from ..errors import (
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..services.game_service import GameService
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -15,12 +14,7 @@ from ._service_proxy import CurrentAppService
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
 
-
-def _build_game_service(engine, settings):
-    return GameService(engine, settings=settings)
-
-
-game_service = CurrentAppService("game", _build_game_service)
+game_service = CurrentAppService("game")
 
 
 def _parse_game_log_filters() -> tuple[str, dict]:

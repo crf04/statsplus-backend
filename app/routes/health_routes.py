@@ -1,7 +1,4 @@
-"""Health check routes.
-
-Provides endpoints to verify service dependencies such as the database and NBA API connectivity.
-"""
+"""Health check routes for the database and external providers."""
 
 from __future__ import annotations
 
@@ -11,12 +8,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
 
 from flask import Blueprint, jsonify
-import requests
 from sqlalchemy import text
 
+from ..dependencies import get_dependencies
 from ..errors import AppError, ProviderUnavailableError
-from ..utils.db import get_engine
-from ..utils.nba_api_config import get_shared_nba_session
+from ..providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.config.settings import get_runtime_settings
 
 
@@ -37,7 +33,7 @@ def database_healthcheck() -> Tuple[Any, int]:
     """
 
     try:
-        engine = get_engine()
+        engine = get_dependencies().engine
         with engine.connect() as connection:
             result = connection.execute(text("SELECT 1"))
             ok = result.scalar() == 1
@@ -63,9 +59,9 @@ def database_healthcheck() -> Tuple[Any, int]:
 
 @health_bp.route("/detailed", methods=["GET"])
 def detailed_health() -> Tuple[Any, int]:
-    """Comprehensive health check including NBA API connectivity.
+    """Comprehensive health check including PBP Stats connectivity.
 
-    Checks database, NBA API connectivity, and environment configuration.
+    Checks database, PBP Stats connectivity, and environment configuration.
 
     Returns
     -------
@@ -75,14 +71,14 @@ def detailed_health() -> Tuple[Any, int]:
     checks = {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'database': _check_database_connection(),
-        'nba_api': _check_nba_api_connectivity(),
+        'pbp_stats': _check_pbp_stats_connectivity(),
         'environment': get_runtime_settings().environment,
         'version': '1.0.0'
     }
     
     all_healthy = all(
         checks[key].get('status') == 'healthy' if isinstance(checks[key], dict) else True
-        for key in ['database', 'nba_api']
+        for key in ['database', 'pbp_stats']
     )
     
     overall_status = 'healthy' if all_healthy else 'degraded'
@@ -99,22 +95,83 @@ def detailed_health() -> Tuple[Any, int]:
     }), 200
 
 
+@health_bp.route("/pbp-stats", methods=["GET"])
+def pbp_stats_health() -> Tuple[Any, int]:
+    """Test PBP Stats totals connectivity and response validation."""
+
+    return _render_pbp_health()
+
+
 @health_bp.route("/nba-api", methods=["GET"])
 def nba_api_health() -> Tuple[Any, int]:
-    """Test NBA API connectivity and response time.
+    """Deprecated compatibility alias for :func:`pbp_stats_health`.
 
-    Returns
-    -------
-    Tuple[Any, int]
-        A JSON response with NBA API status and HTTP status code.
+    The old path said "NBA API" even though it has always called PBP Stats.
+    Keep it working for existing clients while making the migration explicit.
     """
-    result = _check_nba_api_connectivity()
+
+    return _render_pbp_health(deprecated=True)
+
+
+def _render_pbp_health(*, deprecated: bool = False) -> Tuple[Any, int]:
+    """Render the canonical PBP Stats health response or its old alias."""
+
+    result = _check_pbp_stats_connectivity()
     if result['status'] != 'healthy':
         raise ProviderUnavailableError(
-            "The NBA API health check failed.",
+            "The PBP Stats health check failed.",
             detail=result.get("error") or result,
         )
-    return jsonify(result), 200
+
+    response = jsonify(result)
+    if deprecated:
+        response.headers["Deprecation"] = "true"
+        response.headers[
+            "Warning"
+        ] = '299 - "Deprecated; use /api/health/pbp-stats"'
+    return response, 200
+
+
+def _build_pbp_stats_provider() -> PBPStatsProvider:
+    """Resolve the app-factory-injected PBP adapter."""
+
+    return get_dependencies().pbp_stats_provider
+
+
+def _check_pbp_stats_connectivity(
+    provider: PBPStatsProvider | None = None,
+) -> Dict[str, Any]:
+    """Check the PBP Stats totals endpoint through its adapter."""
+
+    try:
+        adapter = provider or _build_pbp_stats_provider()
+        return adapter.health_check()
+    except ProviderUnavailableError as error:
+        logger.error("PBP Stats health check failed: %s", error)
+        return {
+            'status': 'unhealthy',
+            'provider': 'PBP Stats',
+            'error': error.public_message,
+            'response_time_ms': None,
+            'endpoint': PBPStatsAdapter.BASE_URL,
+        }
+    except Exception as error:
+        logger.error("PBP Stats health check failed: %s", error)
+        return {
+            'status': 'unhealthy',
+            'provider': 'PBP Stats',
+            'error': 'PBP Stats health check failed.',
+            'response_time_ms': None,
+            'endpoint': PBPStatsAdapter.BASE_URL,
+        }
+
+
+def _check_nba_api_connectivity(
+    provider: PBPStatsProvider | None = None,
+) -> Dict[str, Any]:
+    """Deprecated helper alias retained for integrations importing it."""
+
+    return _check_pbp_stats_connectivity(provider)
 
 
 def _check_database_connection() -> Dict[str, Any]:
@@ -125,7 +182,7 @@ def _check_database_connection() -> Dict[str, Any]:
     Dict[str, Any]
         Database connection status information.
     """
-    engine = get_engine()
+    engine = get_dependencies().engine
     try:
         start_time = time.time()
         with engine.connect() as connection:
@@ -148,68 +205,4 @@ def _check_database_connection() -> Dict[str, Any]:
             'error': 'Database health check failed.',
             'dialect': engine.dialect.name,
             'driver': getattr(engine.dialect, 'driver', None)
-        }
-
-
-def _check_nba_api_connectivity() -> Dict[str, Any]:
-    """Test NBA API connectivity and response time using game logs endpoint.
-    
-    Returns
-    -------
-    Dict[str, Any]
-        NBA API connectivity status information.
-    """
-    try:
-        start_time = time.time()
-        settings = get_runtime_settings()
-        session = get_shared_nba_session(settings)
-        
-        # Test with the game logs API endpoint (what you actually use)
-        response = session.get(
-            'https://api.pbpstats.com/get-totals/nba',
-            params={
-                'Season': settings.nba.current_season,
-                'SeasonType': 'Regular+Season',
-                'Type': 'Player'
-            },
-            timeout=(
-                settings.providers.pbp_connect_timeout_seconds,
-                settings.providers.pbp_read_timeout_seconds,
-            )
-        )
-        
-        duration = time.time() - start_time
-        
-        return {
-            'status': 'healthy' if response.status_code == 200 else 'unhealthy',
-            'response_time_ms': round(duration * 1000, 2),
-            'status_code': response.status_code,
-            'endpoint': 'api.pbpstats.com/get-totals/nba',
-            'test_type': 'game_logs_api',
-            'using_session_pool': True
-        }
-        
-    except requests.exceptions.Timeout as error:
-        logger.error("NBA API health check timed out: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check timed out.',
-            'response_time_ms': None,
-            'endpoint': 'api.pbpstats.com/get-totals/nba'
-        }
-    except requests.exceptions.RequestException as error:
-        logger.error("NBA API health check request failed: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check request failed.',
-            'response_time_ms': None,
-            'endpoint': 'api.pbpstats.com/get-totals/nba'
-        }
-    except Exception as error:
-        logger.error("NBA API health check failed: %s", error)
-        return {
-            'status': 'unhealthy',
-            'error': 'NBA API health check failed.',
-            'response_time_ms': None,
-            'endpoint': 'api.pbpstats.com/get-totals/nba'
         }

@@ -8,19 +8,13 @@ from ..errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..services.player_service import PlayerService
 from ..utils.auth import require_admin, require_auth_optional
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 player_bp = Blueprint('players', __name__)
 
-
-def _build_player_service(engine, settings):
-    return PlayerService(engine, settings=settings)
-
-
-player_service = CurrentAppService("player", _build_player_service)
+player_service = CurrentAppService("player")
 
 @player_bp.route('', methods=['GET'])
 @require_auth_optional

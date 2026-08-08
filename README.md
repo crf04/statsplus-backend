@@ -6,7 +6,8 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 
 - Flask app factory with blueprints for players, teams, games, data refreshes, health checks, users, and natural-language queries.
 - Bundled SQLite demo database, `nba_play_types.db`, so the project can run immediately after install.
-- NBA data integrations through `nba_api` and pbpstats endpoints.
+- NBA data integrations through the injectable NBA Stats game-log adapter
+  (`nba_api` → `stats.nba.com`) and pbpstats endpoints.
 - Deterministic NLP parsing with spaCy, aliases, fuzzy matching, date parsing, and optional OpenAI fallback.
 - Firebase Admin authentication for protected routes, with an explicit local-only bypass for credential-free development.
 - Optional Redis-backed caching for NBA API responses.
@@ -70,6 +71,10 @@ the most important variables:
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
+| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
+| `NBA_API_TIMEOUT_CONNECT` | No | `10`; PBP Stats connect timeout in seconds |
+| `NBA_API_TIMEOUT_READ` | No | `30`; PBP Stats response timeout in seconds |
+| `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
@@ -128,12 +133,21 @@ curl http://localhost:5000/api/players
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
 ```
 
-`GET /api/health/nba-api` and `/api/health/detailed` call an external NBA data endpoint, so they can fail if the network or upstream API is unavailable.
+`GET /api/health/pbp-stats` and `/api/health/detailed` call the external PBP
+Stats totals endpoint used by refreshes, so they can fail if the network or
+upstream API is unavailable. The existing `/api/health/nba-api` URL remains a
+deprecated alias and returns the same PBP Stats result.
 
 Live requests to `stats.nba.com` use a 10-second timeout by default. If that
 provider times out, game-log requests return `503 Service Unavailable` instead
 of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
+
+PBP Stats requests use separate connect/read timeouts and safe-request retries.
+Both `/api/health/pbp-stats` and the admin PBP refresh endpoints use the
+`PBPStatsProvider` adapter, which normalizes totals responses and translates
+timeouts, unavailable responses, and malformed payloads into
+`provider_unavailable` (`503`).
 
 Application failures use a documented structured JSON error response with
 stable category codes, including `invalid_input`, `resource_not_found`,
@@ -242,6 +256,7 @@ Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unle
 ```text
 app/
   __init__.py              Flask app factory and blueprint registration
+  dependencies.py         Application dependency assembly and test injection
   routes/                  HTTP route handlers
   services/                Business logic, NBA data calls, NL/LLM services
   services/nl_query/       Parser, mapper, executor, validators
@@ -273,6 +288,7 @@ gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 100
 For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
+- Set `CORS_ALLOWED_ORIGINS` to every deployed frontend origin as a comma-separated exact allowlist (for example, `https://stats.example.com`). Do not use `*`; production startup rejects the local default when this setting is omitted.
 - Set Firebase credentials so protected and admin routes enforce real tokens and claims.
 - Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.

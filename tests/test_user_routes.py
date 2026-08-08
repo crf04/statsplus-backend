@@ -5,6 +5,8 @@ the failure handling of every route under ``/api/user`` except the admin
 statistics endpoint, which is covered in ``test_admin_routes``.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -16,6 +18,20 @@ def assert_error(response, status, code, message):
     """Assert the sanitized error envelope returned by route_error_boundary."""
     assert response.status_code == status
     assert response.get_json()["error"] == {"code": code, "message": message}
+
+
+@pytest.fixture
+def user_service(monkeypatch):
+    """Swap the route module's service handle for a stub.
+
+    The real handle is a read-only proxy over the app dependency graph, so
+    tests replace the module-level name rather than patching the proxy.
+    """
+    from app.routes import user_routes
+
+    stub = SimpleNamespace()
+    monkeypatch.setattr(user_routes, "user_service", stub)
+    return stub
 
 
 # --- authentication --------------------------------------------------------
@@ -61,15 +77,11 @@ def test_profile_returns_the_user_synced_onto_the_request(
 
 
 def test_profile_falls_back_to_a_database_lookup(
-    client, monkeypatch, authenticate, make_db_user
+    client, authenticate, user_service, make_db_user
 ):
-    from app.routes import user_routes
-
     headers = authenticate(db_user=None)
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_user_by_firebase_uid",
-        lambda uid: make_db_user(display_name="Fetched User"),
+    user_service.get_user_by_firebase_uid = lambda uid: make_db_user(
+        display_name="Fetched User"
     )
 
     response = client.get("/api/user/profile", headers=headers)
@@ -79,14 +91,10 @@ def test_profile_falls_back_to_a_database_lookup(
 
 
 def test_profile_returns_not_found_when_the_user_is_absent(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate(db_user=None)
-    monkeypatch.setattr(
-        user_routes.user_service, "get_user_by_firebase_uid", lambda uid: None
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: None
 
     response = client.get("/api/user/profile", headers=headers)
 
@@ -94,12 +102,10 @@ def test_profile_returns_not_found_when_the_user_is_absent(
 
 
 def test_profile_returns_server_error_when_the_lookup_fails(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate(db_user=None)
-    monkeypatch.setattr(user_routes.user_service, "get_user_by_firebase_uid", _raise)
+    user_service.get_user_by_firebase_uid = _raise
 
     response = client.get("/api/user/profile", headers=headers)
 
@@ -118,14 +124,10 @@ def test_profile_update_rejects_an_empty_body(client, authenticate):
 
 
 def test_profile_update_returns_not_found_for_an_unknown_user(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service, "get_user_by_firebase_uid", lambda uid: None
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: None
 
     response = client.put(
         "/api/user/profile", headers=headers, json={"display_name": "New Name"}
@@ -135,16 +137,10 @@ def test_profile_update_returns_not_found_for_an_unknown_user(
 
 
 def test_profile_update_forwards_the_submitted_fields(
-    client, monkeypatch, authenticate, make_db_user
+    client, authenticate, user_service, make_db_user
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_user_by_firebase_uid",
-        lambda uid: make_db_user(),
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: make_db_user()
 
     submitted = {}
 
@@ -154,7 +150,7 @@ def test_profile_update_forwards_the_submitted_fields(
             display_name=firebase_data["name"], photo_url=firebase_data["picture"]
         )
 
-    monkeypatch.setattr(user_routes.user_service, "create_or_update_user", capture)
+    user_service.create_or_update_user = capture
 
     response = client.put(
         "/api/user/profile",
@@ -170,16 +166,10 @@ def test_profile_update_forwards_the_submitted_fields(
 
 
 def test_profile_update_keeps_existing_values_when_fields_are_omitted(
-    client, monkeypatch, authenticate, make_db_user
+    client, authenticate, user_service, make_db_user
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_user_by_firebase_uid",
-        lambda uid: make_db_user(),
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: make_db_user()
 
     submitted = {}
 
@@ -187,7 +177,7 @@ def test_profile_update_keeps_existing_values_when_fields_are_omitted(
         submitted.update(firebase_data)
         return make_db_user()
 
-    monkeypatch.setattr(user_routes.user_service, "create_or_update_user", capture)
+    user_service.create_or_update_user = capture
 
     response = client.put(
         "/api/user/profile", headers=headers, json={"unrelated": "value"}
@@ -199,19 +189,11 @@ def test_profile_update_keeps_existing_values_when_fields_are_omitted(
 
 
 def test_profile_update_reports_a_failed_save(
-    client, monkeypatch, authenticate, make_db_user
+    client, authenticate, user_service, make_db_user
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_user_by_firebase_uid",
-        lambda uid: make_db_user(),
-    )
-    monkeypatch.setattr(
-        user_routes.user_service, "create_or_update_user", lambda data: None
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: make_db_user()
+    user_service.create_or_update_user = lambda data: None
 
     response = client.put(
         "/api/user/profile", headers=headers, json={"display_name": "New Name"}
@@ -223,15 +205,9 @@ def test_profile_update_reports_a_failed_save(
 # --- GET /stats ------------------------------------------------------------
 
 
-def test_stats_returns_the_service_payload(client, monkeypatch, authenticate):
-    from app.routes import user_routes
-
+def test_stats_returns_the_service_payload(client, authenticate, user_service):
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_user_stats",
-        lambda uid: {"queries_run": 12},
-    )
+    user_service.get_user_stats = lambda uid: {"queries_run": 12}
 
     response = client.get("/api/user/stats", headers=headers)
 
@@ -240,12 +216,10 @@ def test_stats_returns_the_service_payload(client, monkeypatch, authenticate):
 
 
 def test_stats_returns_not_found_when_the_service_returns_none(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(user_routes.user_service, "get_user_stats", lambda uid: None)
+    user_service.get_user_stats = lambda uid: None
 
     response = client.get("/api/user/stats", headers=headers)
 
@@ -253,12 +227,10 @@ def test_stats_returns_not_found_when_the_service_returns_none(
 
 
 def test_stats_returns_server_error_when_the_service_raises(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(user_routes.user_service, "get_user_stats", _raise)
+    user_service.get_user_stats = _raise
 
     response = client.get("/api/user/stats", headers=headers)
 
@@ -279,17 +251,11 @@ def test_activity_ping_succeeds_without_authentication(client):
 
 
 def test_activity_ping_records_the_login_for_an_authenticated_user(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
     recorded = []
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "update_last_login",
-        lambda uid: recorded.append(uid) or True,
-    )
+    user_service.update_last_login = lambda uid: recorded.append(uid) or True
 
     response = client.post("/api/user/activity/ping", headers=headers)
 
@@ -299,14 +265,10 @@ def test_activity_ping_records_the_login_for_an_authenticated_user(
 
 
 def test_activity_ping_reports_an_unsuccessful_update(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(
-        user_routes.user_service, "update_last_login", lambda uid: False
-    )
+    user_service.update_last_login = lambda uid: False
 
     response = client.post("/api/user/activity/ping", headers=headers)
 
@@ -317,12 +279,10 @@ def test_activity_ping_reports_an_unsuccessful_update(
 
 
 def test_deactivate_confirms_a_successful_soft_delete(
-    client, monkeypatch, authenticate
+    client, authenticate, user_service
 ):
-    from app.routes import user_routes
-
     headers = authenticate()
-    monkeypatch.setattr(user_routes.user_service, "deactivate_user", lambda uid: True)
+    user_service.deactivate_user = lambda uid: True
 
     response = client.post("/api/user/deactivate", headers=headers)
 
@@ -333,11 +293,9 @@ def test_deactivate_confirms_a_successful_soft_delete(
     }
 
 
-def test_deactivate_reports_a_failed_soft_delete(client, monkeypatch, authenticate):
-    from app.routes import user_routes
-
+def test_deactivate_reports_a_failed_soft_delete(client, authenticate, user_service):
     headers = authenticate()
-    monkeypatch.setattr(user_routes.user_service, "deactivate_user", lambda uid: False)
+    user_service.deactivate_user = lambda uid: False
 
     response = client.post("/api/user/deactivate", headers=headers)
 

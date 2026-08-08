@@ -19,18 +19,12 @@ from app.utils.auth import (
     require_auth,
     require_auth_optional,
 )
-from app.services.user_service import UserService
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint
 user_bp = Blueprint('users', __name__)
 
-
-def _build_user_service(engine, settings):
-    return UserService(engine, settings=settings)
-
-
-user_service = CurrentAppService("user", _build_user_service)
+user_service = CurrentAppService("user")
 
 @user_bp.route('/profile', methods=['GET'])
 @require_auth

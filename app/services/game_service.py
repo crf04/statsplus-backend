@@ -7,34 +7,13 @@ from ..utils.nba_api_config import get_nba_stats_timeout
 from ..utils.tables import normalize_table_name
 from difflib import get_close_matches
 from .nba_cache import NBAGameCache
+from ..providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from ..utils.cache_config import get_redis_client, set_cache_with_1am_expiry
 from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-# Columns discarded from a PlayerGameLogs response before it reaches callers.
-# Module level so the provider contract test can check them against the
-# schema nba_api declares, rather than discovering drift in production.
-GAME_LOG_DROP_COLUMNS = [
-    'SEASON_YEAR', 'PLAYER_ID', 'GP_RANK', 'W_RANK', 'L_RANK',
-    'W_PCT_RANK', 'MIN_RANK', 'FGM_RANK', 'FGA_RANK', 'FG_PCT_RANK',
-    'FG3M_RANK', 'FG3A_RANK', 'FG3_PCT_RANK', 'FTM_RANK', 'FTA_RANK',
-    'FT_PCT_RANK', 'OREB_RANK', 'DREB_RANK', 'REB_RANK', 'AST_RANK',
-    'TOV_RANK', 'STL_RANK', 'BLK_RANK', 'BLKA_RANK', 'PF_RANK',
-    'PFD_RANK', 'PTS_RANK', 'PLUS_MINUS_RANK', 'NBA_FANTASY_PTS_RANK',
-    'DD2_RANK', 'TD3_RANK', 'WNBA_FANTASY_PTS_RANK', 'AVAILABLE_FLAG',
-    'NICKNAME', 'TEAM_NAME', 'DD2', 'TD3', 'WNBA_FANTASY_PTS',
-    'BLKA', 'PFD'
-]
-
-# Columns read directly when deriving combined stats such as PRA and STKS.
-GAME_LOG_REQUIRED_COLUMNS = [
-    'PTS', 'REB', 'AST', 'STL', 'BLK', 'NBA_FANTASY_PTS', 'PLUS_MINUS',
-    'MIN', 'FGM', 'FG3M', 'FGA', 'FG3A', 'GAME_DATE', 'GAME_ID', 'TEAM_ID',
-    'TEAM_ABBREVIATION',
-]
+_REDIS_CLIENT_UNSET = object()
 
 
 class GameService:
@@ -45,13 +24,24 @@ class GameService:
         'pullups', 'less_than_10_ft'
     }
     
-    def __init__(self, db_engine, redis_client=None, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        redis_client=_REDIS_CLIENT_UNSET,
+        settings: RuntimeSettings | None = None,
+        nba_stats_adapter: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
+        self.nba_stats_adapter = (
+            nba_stats_adapter
+            if nba_stats_adapter is not None
+            else NBAStatsAdapter(settings=self.settings)
+        )
         
         # Initialize cache
-        if redis_client is None:
+        if redis_client is _REDIS_CLIENT_UNSET:
             redis_client = get_redis_client(self.settings)
         self.cache = NBAGameCache(redis_client, settings=self.settings)
         
@@ -152,66 +142,18 @@ class GameService:
     async def _fetch_game_logs_from_api(self, player_name, season=None):
         season = season or self.settings.nba.current_season
         player_id = self.get_player_id(player_name)
-        
-        # Define async wrappers for NBA API calls
-        async def fetch_game_logs():
-            async with self.nba_api_semaphore:
-                return await asyncio.to_thread(
-                    lambda: endpoints.playergamelogs.PlayerGameLogs(
-                        player_id_nullable=player_id, 
-                        season_nullable=season,
-                        season_type_nullable='Regular Season',
-                        timeout=get_nba_stats_timeout(self.settings),
-                    ).get_data_frames()[0]
-                )
-        
-        async def fetch_next_game():
-            return None
-            async with self.nba_api_semaphore:
-                try:
-                    return await asyncio.to_thread(
-                        lambda: endpoints.PlayerNextNGames(number_of_games=1, player_id=player_id).get_data_frames()[0]
-                    )
-                except (Exception, IndexError, KeyError) as e:
-                    logger.warning(f"Failed to fetch next game for player {player_id}: {str(e)}")
-                    return None
-        
-        # Run both NBA API calls concurrently
-        gamelogs, next_game_df = await asyncio.gather(fetch_game_logs(), fetch_next_game())
-        
-        # Clean up columns. errors='ignore' because these are all columns we do
-        # not want: if the provider stops returning one, that is not a reason to
-        # fail the request.
-        gamelogs = gamelogs.drop(GAME_LOG_DROP_COLUMNS, axis=1, errors='ignore')
-        
-        # Process next game data
-        next_team = None
-        if next_game_df is not None:
-            try:
-                team1, team2 = next_game_df.loc[0,'VISITOR_TEAM_ID'], next_game_df.loc[0,'HOME_TEAM_ID']
-                if team1 != gamelogs.loc[0, 'TEAM_ID']:
-                    next_team = team1
-                else:
-                    next_team = team2
-            except (Exception, IndexError, KeyError) as e:
-                logger.warning(f"Failed to process next game data for player {player_id}: {str(e)}")
-                next_team = None
-        
-        # Calculate additional stats
-        gamelogs['PRA'] = gamelogs['PTS'] + gamelogs['REB'] + gamelogs['AST']
-        gamelogs['PA'] = gamelogs['PTS'] + gamelogs['AST']
-        gamelogs['PR'] = gamelogs['PTS'] + gamelogs['REB']
-        gamelogs['RA'] = gamelogs['REB'] + gamelogs['AST']
-        gamelogs['STKS'] = gamelogs['STL'] + gamelogs['BLK']
-        gamelogs['FD_PTS'] = gamelogs['NBA_FANTASY_PTS']
-        gamelogs['+/-'] = gamelogs['PLUS_MINUS']
-        gamelogs['MIN'] = gamelogs['MIN'].round().astype(int)
-        gamelogs['FG2M'] = gamelogs['FGM'] - gamelogs['FG3M']
-        gamelogs['FG2A'] = gamelogs['FGA'] - gamelogs['FG3A']
-        
-        gamelogs['GAME_DATE'] = gamelogs['GAME_DATE'].astype(str)
-        
-        return gamelogs, next_team
+
+        async with self.nba_api_semaphore:
+            gamelogs = await asyncio.to_thread(
+                self.nba_stats_adapter.get_player_game_logs,
+                player_id=player_id,
+                season=season,
+            )
+
+        # The NBA Stats adapter owns provider-specific response handling and
+        # normalization.  Keep the service contract's second tuple value for
+        # compatibility; the old next-game request was never active.
+        return gamelogs, None
 
 
     async def get_common_games(self, primary_player_logs, other_players_names, season=None):
@@ -359,7 +301,7 @@ class GameService:
         filtered_logs['GAME_DATE'] = pd.to_datetime(filtered_logs['GAME_DATE'], errors='coerce').dt.date
         filtered_averages = filtered_logs[average_columns].mean().round(2)
         season_averages = full_game_logs[average_columns].mean().round(2)
-        filtered_logs.drop(['PLAYER_NAME','GAME_ID','NBA_FANTASY_PTS','FT_PCT','PLUS_MINUS', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'],axis=1, inplace = True)
+        filtered_logs.drop(['PLAYER_NAME','GAME_ID','NBA_FANTASY_PTS','FT_PCT','PLUS_MINUS', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'],axis=1, inplace = True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
         
         return {

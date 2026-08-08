@@ -3,6 +3,9 @@ Pytest configuration and fixtures for NBA backend tests
 """
 import pytest
 from unittest.mock import Mock
+from types import SimpleNamespace
+
+from app.config.settings import AuthenticationSettings, CacheSettings, RuntimeSettings
 
 @pytest.fixture
 def mock_redis_client():
@@ -27,6 +30,9 @@ def mock_db_engine():
     """Mock database engine for testing"""
     mock_engine = Mock()
     mock_conn = Mock()
+    mock_conn.execute.return_value.scalar.return_value = 1
+    mock_engine.dialect.name = "sqlite"
+    mock_engine.dialect.driver = "pysqlite"
     mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
     mock_engine.connect.return_value.__exit__ = Mock(return_value=None)
     return mock_engine
@@ -72,7 +78,39 @@ def setup_logging():
     logging.basicConfig(level=logging.DEBUG)
     
 @pytest.fixture
-def app(monkeypatch):
+def runtime_settings():
+    """Credential-free settings shared by the app and its injected dependencies."""
+    return RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+    )
+
+
+@pytest.fixture
+def dependencies(runtime_settings, mock_db_engine):
+    """Replaceable application dependency graph for route tests."""
+    services = {
+        name: Mock(name=f"{name}_service")
+        for name in ("game", "player", "team", "data", "nl", "user")
+    }
+    for service in services.values():
+        service.settings = runtime_settings
+    services["player"].get_all_players.return_value = []
+    services["team"].get_all_teams.return_value = []
+    services["user"].create_or_update_user.return_value = None
+    return SimpleNamespace(
+        settings=runtime_settings,
+        engine=mock_db_engine,
+        redis_client=None,
+        nba_stats_provider=Mock(name="nba_stats_provider"),
+        pbp_stats_provider=Mock(name="pbp_stats_provider"),
+        **{f"{name}_service": service for name, service in services.items()},
+    )
+
+
+@pytest.fixture
+def app(monkeypatch, runtime_settings, dependencies):
     """Create a Flask app instance for route tests."""
     from app import create_app
 
@@ -81,6 +119,8 @@ def app(monkeypatch):
 
     return create_app({
         "TESTING": True,
+        "RUNTIME_SETTINGS": runtime_settings,
+        "DEPENDENCIES": dependencies,
         "SKIP_FIREBASE_INIT": True,
         "SKIP_TABLE_CREATE": True,
     })
@@ -189,10 +229,16 @@ def authenticate(monkeypatch):
 
         monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
         monkeypatch.setattr(auth, "verify_firebase_token", lambda token: token_claims)
+        # Auth resolves the user service through the app dependency registry,
+        # so replace the lookup rather than the service class.
         monkeypatch.setattr(
-            auth.UserService,
-            "create_or_update_user",
-            lambda self, user_data: db_user,
+            auth,
+            "get_dependencies",
+            lambda: SimpleNamespace(
+                user_service=SimpleNamespace(
+                    create_or_update_user=lambda user_data: db_user
+                )
+            ),
         )
         return {"Authorization": "Bearer test-token"}
 

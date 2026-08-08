@@ -22,46 +22,26 @@ def declared_columns(endpoint_class, data_set):
 # --- player game logs ------------------------------------------------------
 
 
-def test_the_drop_list_is_not_asserted_to_match_the_declared_schema():
-    """The drop list intentionally exceeds nba_api's declared columns.
-
-    nba_api's ``expected_data`` lags the live response: it omits columns the
-    API does return (AVAILABLE_FLAG, NICKNAME, the WNBA fantasy pair). Because
-    every name here is a column we want gone, the drop is applied with
-    ``errors='ignore'`` and a divergence is harmless in either direction.
-    """
-    from nba_api.stats.endpoints import playergamelogs
-
-    from app.services.game_service import GAME_LOG_DROP_COLUMNS
-
-    available = declared_columns(playergamelogs.PlayerGameLogs, "PlayerGameLogs")
-    undeclared = set(GAME_LOG_DROP_COLUMNS) - available
-
-    # Guard the assumption above rather than the exact contents: if the drop
-    # list ever diverges wildly, it is no longer just provider metadata lag.
-    assert len(undeclared) <= 6, f"Unexpectedly large divergence: {sorted(undeclared)}"
-
-
 def test_required_game_log_columns_all_exist_upstream():
     """These are read directly when deriving PRA, STKS, FG2M and friends."""
     from nba_api.stats.endpoints import playergamelogs
 
-    from app.services.game_service import GAME_LOG_REQUIRED_COLUMNS
+    from app.providers.nba_stats import REQUIRED_GAME_LOG_COLUMNS
 
     available = declared_columns(playergamelogs.PlayerGameLogs, "PlayerGameLogs")
-    missing = sorted(set(GAME_LOG_REQUIRED_COLUMNS) - available)
+    missing = sorted(set(REQUIRED_GAME_LOG_COLUMNS) - available)
 
-    assert not missing, f"Game log processing reads columns nba_api no longer returns: {missing}"
+    assert not missing, f"The adapter reads columns nba_api no longer returns: {missing}"
 
 
 def test_dropped_and_required_game_log_columns_do_not_overlap():
     """A column cannot be both discarded and depended on."""
-    from app.services.game_service import (
-        GAME_LOG_DROP_COLUMNS,
-        GAME_LOG_REQUIRED_COLUMNS,
+    from app.providers.nba_stats import (
+        _DROP_PROVIDER_COLUMNS,
+        REQUIRED_GAME_LOG_COLUMNS,
     )
 
-    overlap = sorted(set(GAME_LOG_DROP_COLUMNS) & set(GAME_LOG_REQUIRED_COLUMNS))
+    overlap = sorted(set(_DROP_PROVIDER_COLUMNS) & set(REQUIRED_GAME_LOG_COLUMNS))
 
     assert not overlap, f"Columns are dropped then read: {overlap}"
 
@@ -70,15 +50,27 @@ def test_the_columns_dropped_from_game_logs_leave_a_usable_frame():
     """Dropping the discard list must not remove everything callers need."""
     from nba_api.stats.endpoints import playergamelogs
 
-    from app.services.game_service import (
-        GAME_LOG_DROP_COLUMNS,
-        GAME_LOG_REQUIRED_COLUMNS,
+    from app.providers.nba_stats import (
+        _DROP_PROVIDER_COLUMNS,
+        REQUIRED_GAME_LOG_COLUMNS,
     )
 
     available = declared_columns(playergamelogs.PlayerGameLogs, "PlayerGameLogs")
-    remaining = available - set(GAME_LOG_DROP_COLUMNS)
+    remaining = available - set(_DROP_PROVIDER_COLUMNS)
 
-    assert set(GAME_LOG_REQUIRED_COLUMNS).issubset(remaining)
+    assert set(REQUIRED_GAME_LOG_COLUMNS).issubset(remaining)
+
+
+def test_derived_game_log_columns_are_not_provider_columns():
+    """The adapter computes these; a provider collision would be silently lost."""
+    from nba_api.stats.endpoints import playergamelogs
+
+    from app.providers.nba_stats import DERIVED_GAME_LOG_COLUMNS
+
+    available = declared_columns(playergamelogs.PlayerGameLogs, "PlayerGameLogs")
+    collisions = sorted(set(DERIVED_GAME_LOG_COLUMNS) & available)
+
+    assert not collisions, f"Derived columns now collide with provider columns: {collisions}"
 
 
 # --- data service provider endpoints --------------------------------------
