@@ -16,10 +16,15 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 from app.migrations import MigrationResult, run_migrations  # noqa: E402
-from app.utils.db import _normalize_database_url  # noqa: E402
+from app.utils.db import (  # noqa: E402
+    _normalize_database_url,
+    is_demo_database_url,
+)
 
 
-DEMO_DATABASE_PATH = Path(__file__).resolve().parents[1] / "nba_play_types.db"
+# Keep the private helper name for callers that used the original CLI seam;
+# target classification itself lives with the database URL utilities.
+_is_demo_database = is_demo_database_url
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,25 +46,6 @@ def _database_url_for_migration(
     if not database_url:
         parser.error("a migration target is required: pass --database-url or set DATABASE_URL")
     return database_url
-
-
-def _is_demo_database(database_url: str) -> bool:
-    """Return whether a SQLite URL resolves to the tracked demo fixture."""
-    try:
-        parsed_url = make_url(database_url)
-    except ArgumentError:
-        return False
-
-    if parsed_url.get_backend_name() != "sqlite" or not parsed_url.database:
-        return False
-
-    database_path = parsed_url.database
-    if database_path.startswith("file:"):
-        database_path = database_path.removeprefix("file:")
-    if database_path == ":memory:":
-        return False
-
-    return Path(database_path).expanduser().resolve() == DEMO_DATABASE_PATH.resolve()
 
 
 def _redacted_database_url(database_url: str) -> str:

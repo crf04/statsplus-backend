@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -11,6 +12,22 @@ from sqlalchemy import create_engine, inspect, text
 from app.migrations import run_migrations
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
+
+
+def _sqlite_schema_snapshot(database_path: str | Path) -> tuple[bytes, tuple[tuple[str, str | None], ...]]:
+    path = Path(database_path)
+    with path.open("rb") as database_file:
+        file_digest = hashlib.sha256(database_file.read()).digest()
+
+    uri = f"file:{path.resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        schema = tuple(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        )
+    return file_digest, schema
 
 
 def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
@@ -68,6 +85,39 @@ def test_demo_database_validation_is_read_only():
     assert result.valid
     assert result.user_count == 0
     assert before == after
+
+
+def test_app_factory_does_not_migrate_demo_database(monkeypatch):
+    from app import create_app
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    database_path = Path("nba_play_types.db")
+    before = _sqlite_schema_snapshot(database_path)
+
+    create_app({"TESTING": True, "SKIP_FIREBASE_INIT": True})
+
+    assert _sqlite_schema_snapshot(database_path) == before
+
+
+def test_app_factory_migrates_configured_application_database(tmp_path, monkeypatch):
+    from app import create_app
+
+    database_url = f"sqlite:///{tmp_path / 'application.sqlite3'}"
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+
+    create_app(
+        {
+            "DATABASE_URL": database_url,
+            "TESTING": True,
+            "SKIP_FIREBASE_INIT": True,
+        }
+    )
+
+    engine = create_engine(database_url)
+    assert inspect(engine).get_table_names() == ["schema_migrations", "users"]
 
 
 def test_demo_database_validation_reports_missing_tables(tmp_path):
