@@ -259,7 +259,7 @@ app/
   dependencies.py         Application dependency assembly and test injection
   routes/                  HTTP route handlers
   services/                Business logic, NBA data calls, NL/LLM services
-  services/nl_query/       Parser, mapper, executor, validators
+  services/nl_query/       Natural-language query parser
   utils/                   Auth, database, cache, date, and helper utilities
 docs/
   ARCHITECTURE.md          Runtime interfaces, data sources, and test seams

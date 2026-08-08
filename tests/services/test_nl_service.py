@@ -294,6 +294,78 @@ def test_very_high_confidence_llm_may_override_teammates():
     assert merged["players_on"] == ["Austin Reaves"]
 
 
+# --- real initialization ---------------------------------------------------
+
+
+def _real_service(seeded_db_url):
+    from sqlalchemy import create_engine
+
+    from app.config.settings import load_settings
+    from app.services.nl_service import NLService
+
+    return NLService(create_engine(seeded_db_url), settings=load_settings())
+
+
+def test_a_real_service_initializes_and_parses(seeded_db_url):
+    """Exercises initialize_nl_system, which the stubbed tests bypass."""
+    service = _real_service(seeded_db_url)
+
+    assert service.nl_parser is not None
+
+    result = service.process_query("LeBron last 10 games")
+
+    assert result["player_name"] == "LeBron James"
+    assert result["parsed_by"] in {"nlp", "llm", "hybrid"}
+
+
+def test_a_failed_parser_build_leaves_the_service_unavailable(
+    seeded_db_url, monkeypatch
+):
+    """Initialization swallows failures, so process_query owns the guard."""
+    from app.services import nl_service as nl_service_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("spaCy model missing")
+
+    monkeypatch.setattr(nl_service_module, "BaseQueryParser", boom)
+
+    service = _real_service(seeded_db_url)
+
+    assert service.nl_parser is None
+    with pytest.raises(RuntimeError, match="not initialized"):
+        service.process_query("LeBron last 10 games")
+
+
+def test_initialization_does_not_build_the_game_or_player_services(
+    seeded_db_url, monkeypatch
+):
+    """Parsing must not depend on provider, Redis, or cache construction.
+
+    The deleted QueryExecutor built GameService and PlayerService during
+    NLService init, so an unrelated provider outage could disable natural
+    language parsing entirely.
+    """
+    from app.services import game_service as game_service_module
+    from app.services import player_service as player_service_module
+
+    # Record rather than raise: initialize_nl_system swallows exceptions, so a
+    # raising stub would be absorbed and the assertion would never be reached.
+    constructed = []
+    monkeypatch.setattr(
+        game_service_module, "GameService", lambda *a, **k: constructed.append("game")
+    )
+    monkeypatch.setattr(
+        player_service_module,
+        "PlayerService",
+        lambda *a, **k: constructed.append("player"),
+    )
+
+    service = _real_service(seeded_db_url)
+
+    assert constructed == []
+    assert service.process_query("LeBron last 10 games")["player_name"] == "LeBron James"
+
+
 # --- end to end through the route -----------------------------------------
 
 
