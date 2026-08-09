@@ -72,6 +72,9 @@ def test_settings_parse_env_values(monkeypatch):
     monkeypatch.setenv("NBA_STATS_TIMEOUT_SECONDS", "4.5")
     monkeypatch.setenv("NBA_API_TIMEOUT_CONNECT", "2")
     monkeypatch.setenv("NBA_API_TIMEOUT_READ", "6")
+    monkeypatch.setenv("DABBLE_CONNECT_TIMEOUT_SECONDS", "1.25")
+    monkeypatch.setenv("DABBLE_READ_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("DABBLE_MAX_FIXTURES_PER_REQUEST", "4")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.25")
     monkeypatch.setenv("LLM_MAX_TOKENS", "256")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -84,6 +87,9 @@ def test_settings_parse_env_values(monkeypatch):
     assert settings.providers.nba_stats_timeout_seconds == 4.5
     assert settings.providers.pbp_connect_timeout_seconds == 2.0
     assert settings.providers.pbp_read_timeout_seconds == 6.0
+    assert settings.providers.dabble_connect_timeout_seconds == 1.25
+    assert settings.providers.dabble_read_timeout_seconds == 9.0
+    assert settings.providers.dabble_max_fixtures_per_request == 4
     assert settings.llm.temperature == 0.25
     assert settings.llm.max_tokens == 256
     assert settings.llm.enable_fallback is True

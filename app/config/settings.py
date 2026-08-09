@@ -101,7 +101,7 @@ class CacheSettings(BaseModel):
 
 
 class ProviderSettings(BaseModel):
-    """Timeout, retry, and pooling settings for external NBA providers."""
+    """Timeout, retry, pooling, and fan-out settings for external providers."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -112,6 +112,12 @@ class ProviderSettings(BaseModel):
     pbp_max_retries: int = Field(default=3, ge=0)
     pbp_pool_connections: int = Field(default=10, ge=1)
     pbp_pool_maxsize: int = Field(default=20, ge=1)
+    dabble_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    dabble_read_timeout_seconds: float = Field(default=30.0, gt=0)
+    dabble_max_retries: int = Field(default=2, ge=0)
+    dabble_pool_connections: int = Field(default=5, ge=1)
+    dabble_pool_maxsize: int = Field(default=10, ge=1)
+    dabble_max_fixtures_per_request: int = Field(default=5, ge=1, le=20)
 
 
 class LLMSettings(BaseModel):
@@ -348,6 +354,18 @@ def _build_settings(
         pbp_max_retries=reader.integer("NBA_API_MAX_RETRIES", 3),
         pbp_pool_connections=reader.integer("NBA_API_POOL_CONNECTIONS", 10),
         pbp_pool_maxsize=reader.integer("NBA_API_POOL_MAXSIZE", 20),
+        dabble_connect_timeout_seconds=reader.decimal(
+            "DABBLE_CONNECT_TIMEOUT_SECONDS", 5.0
+        ),
+        dabble_read_timeout_seconds=reader.decimal(
+            "DABBLE_READ_TIMEOUT_SECONDS", 30.0
+        ),
+        dabble_max_retries=reader.integer("DABBLE_MAX_RETRIES", 2),
+        dabble_pool_connections=reader.integer("DABBLE_POOL_CONNECTIONS", 5),
+        dabble_pool_maxsize=reader.integer("DABBLE_POOL_MAXSIZE", 10),
+        dabble_max_fixtures_per_request=reader.integer(
+            "DABBLE_MAX_FIXTURES_PER_REQUEST", 5
+        ),
     )
 
     api_key = reader.text("OPENAI_API_KEY")

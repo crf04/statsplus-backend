@@ -41,6 +41,7 @@ The app reads from three distinct sources:
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
+| DFS lines | `app.providers.dfs.DFSLineProvider` → `DabbleAdapter` → `api.dabble.com.au` | Provider-neutral competition discovery and normalized player lines; read-only, bounded by `DABBLE_MAX_FIXTURES_PER_REQUEST` |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
@@ -71,6 +72,7 @@ Provider calls at the two external seams are wrapped in one structured event
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
+| Dabble | `DabbleAdapter` (dedicated retrying session) | The closed `DABBLE_OPERATIONS` catalog in `app.utils.telemetry`: `sports`, `active_competitions`, `competition_lookup`, `competition_fixtures`, `fixture_details` |
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (thread-safe counter incremented by
@@ -130,6 +132,29 @@ POST /api/nl-query
   → optional OpenAI fallback
   → frontend-compatible structured filters
 ```
+
+DFS lines:
+
+```text
+GET /api/dfs/competitions?provider=dabble&sport=Basketball
+  → Firebase auth (or explicit local-only bypass)
+  → DFSLineService provider registry
+  → DabbleAdapter sport + active-competition discovery
+
+GET /api/dfs/lines?provider=dabble&competition=NBA&limit=3
+  → Firebase auth (or explicit local-only bypass)
+  → bounded competition fixture lookup
+  → one fixture-details request per selected fixture
+  → normalized player/stat/line/direction records with nullable multipliers
+```
+
+`DabbleAdapter` is intentionally read-only and implements no account, entry,
+or payment operations. Dabble does not publish a supported developer API; its
+mobile read feed can be geo/bot gated and can change without notice. The
+provider-neutral `DFSLineProvider` and recorded-payload parser keep that
+instability outside routes and services. A direct `fixture_id` request makes
+one upstream details call. Competition requests default to three fixtures and
+cannot exceed `DABBLE_MAX_FIXTURES_PER_REQUEST` (default five).
 
 Data refresh:
 

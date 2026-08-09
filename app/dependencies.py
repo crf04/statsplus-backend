@@ -20,10 +20,12 @@ class ApplicationDependencies:
     redis_client: Any
     nba_stats_provider: Any
     pbp_stats_provider: Any
+    dfs_line_providers: Any
     game_service: Any
     player_service: Any
     team_service: Any
     data_service: Any
+    dfs_line_service: Any
     data_refresh_jobs_service: Any
     provider_health_service: Any
     nl_service: Any
@@ -35,6 +37,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
 
     from app.services.data_service import DataService
     from app.services.game_service import GameService
+    from app.services.dfs_line_service import DFSLineService
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
     from app.services.team_service import TeamService
@@ -43,6 +46,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.provider_health_service import ProviderHealthService
     from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
+    from app.providers.dabble import DabbleAdapter
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
 
@@ -50,6 +54,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
+    dfs_line_providers = {"dabble": DabbleAdapter(settings=settings)}
 
     game_service = GameService(
         engine,
@@ -73,6 +78,12 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         pbp_provider=pbp_stats_provider,
         nba_stats_provider=nba_stats_provider,
     )
+    dfs_line_service = DFSLineService(
+        dfs_line_providers,
+        max_fixtures_per_request=(
+            settings.providers.dabble_max_fixtures_per_request
+        ),
+    )
     provider_health_service = ProviderHealthService(
         engine,
         settings=settings,
@@ -92,10 +103,12 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         redis_client=redis_client,
         nba_stats_provider=nba_stats_provider,
         pbp_stats_provider=pbp_stats_provider,
+        dfs_line_providers=dfs_line_providers,
         game_service=game_service,
         player_service=player_service,
         team_service=team_service,
         data_service=data_service,
+        dfs_line_service=dfs_line_service,
         data_refresh_jobs_service=data_refresh_jobs_service,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),

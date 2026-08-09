@@ -11,10 +11,12 @@ def _fake_dependencies(settings: RuntimeSettings):
         redis_client=None,
         nba_stats_provider=Mock(name="nba_stats_provider"),
         pbp_stats_provider=Mock(name="pbp_stats_provider"),
+        dfs_line_providers={"dabble": Mock(name="dabble_provider")},
         game_service=Mock(name="game_service"),
         player_service=Mock(name="player_service"),
         team_service=Mock(name="team_service"),
         data_service=Mock(name="data_service"),
+        dfs_line_service=Mock(name="dfs_line_service"),
         nl_service=Mock(name="nl_service"),
         user_service=Mock(name="user_service"),
     )
@@ -82,6 +84,7 @@ def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):
 
     for module_name in (
         "app.routes.data_update_routes",
+        "app.routes.dfs_routes",
         "app.routes.game_routes",
         "app.routes.health_routes",
         "app.routes.nl_routes",

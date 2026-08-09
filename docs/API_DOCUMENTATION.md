@@ -21,7 +21,8 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/game_logs`, both `/api/dfs/*` routes,
+  `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -170,6 +171,97 @@ Common query types:
 - Teammates: "LeBron with Anthony Davis on court"
 - Dates: "Curry games since January 1"
 - Stat thresholds: "25+ points and 10+ assists"
+
+## DFS Line Endpoints
+
+DFS data is normalized behind a provider-neutral contract. `dabble` is the
+first supported provider. Its read feed is unofficial and can be geo/bot
+gated, so upstream failures return the standard `503 provider_unavailable`
+response. These endpoints never place entries or access a Dabble account.
+
+### Discover Competitions
+
+```http
+GET /api/dfs/competitions?provider=dabble&sport=Basketball
+```
+
+`provider` defaults to `dabble`. Use either the case-insensitive `sport` name
+or a provider `sport_id`, but not both. Omitting both lists all active
+competitions.
+
+```json
+{
+  "provider": "dabble",
+  "count": 1,
+  "competitions": [
+    {
+      "id": "090c2877-4d13-4f6e-8faf-886092153c58",
+      "name": "NBA",
+      "sport_id": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+      "sport": "Basketball",
+      "country": "USA",
+      "featured": false
+    }
+  ]
+}
+```
+
+### Fetch Lines
+
+```http
+GET /api/dfs/lines?provider=dabble&competition=NBA&limit=3
+```
+
+Provide exactly one selector:
+
+- `competition`: friendly competition name such as `NBA` or `WNBA`.
+- `competition_id`: ID returned by competition discovery.
+- `fixture_id`: fetch one fixture directly, avoiding competition fan-out.
+
+Optional filters are `player` (case-insensitive substring), `stat`
+(case-insensitive normalized stat such as `points`; StatsPlus aliases such as
+`PTS`, `REB`, `AST`, `PRA`, `PA`, `PR`, and `RA` are accepted), `include_in_play`
+(`true`/`false`), and `limit`. `limit` defaults to `3` and is capped by
+`DABBLE_MAX_FIXTURES_PER_REQUEST` (default `5`). Each line is one provider
+selection, so the same market commonly appears twice with `direction` equal
+to `over` and `under`. Every selection also includes nullable `multiplier` and
+`multiplier_scope` fields. A provider-supplied line multiplier is represented
+as a positive number with `multiplier_scope: "selection"`; providers without
+one return `null` for both fields. Entry-level payout multipliers must not be
+attached to an individual line.
+
+```json
+{
+  "provider": "dabble",
+  "count": 1,
+  "lines": [
+    {
+      "provider": "dabble",
+      "fixture_id": "fixture-id",
+      "fixture": "Los Angeles Lakers @ Chicago Bulls",
+      "starts_at": "2026-08-09T16:30:00.000Z",
+      "competition_id": "competition-id",
+      "competition": "NBA",
+      "sport_id": "sport-id",
+      "sport": "Basketball",
+      "player_id": "player-id",
+      "player_name": "LeBron James",
+      "team_id": "team-id",
+      "team": "Los Angeles Lakers",
+      "team_abbreviation": "LAL",
+      "position": "F",
+      "market_id": "market-id",
+      "selection_id": "selection-id",
+      "stats": ["points", "rebounds", "assists"],
+      "stat": "points+rebounds+assists",
+      "line": 45.5,
+      "direction": "over",
+      "multiplier": 1.5,
+      "multiplier_scope": "selection"
+    }
+  ]
+}
+```
 
 ## Game Endpoints
 

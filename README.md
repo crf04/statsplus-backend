@@ -75,6 +75,9 @@ the most important variables:
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
+| `DABBLE_CONNECT_TIMEOUT_SECONDS` / `DABBLE_READ_TIMEOUT_SECONDS` | No | `5` / `30`; dedicated Dabble DFS feed timeouts |
+| `DABBLE_MAX_RETRIES` | No | `2`; retries for safe Dabble reads |
+| `DABBLE_MAX_FIXTURES_PER_REQUEST` | No | `5`; maximum fixture-details fan-out for one lines request |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
@@ -131,6 +134,8 @@ Useful smoke checks:
 curl http://localhost:5000/api/health/db
 curl http://localhost:5000/api/players
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
+curl "http://localhost:5000/api/dfs/lines?competition=NBA&player=LeBron" \
+  -H "Authorization: Bearer <firebase-id-token>"
 ```
 
 `GET /api/health/nba-api` checks `stats.nba.com`; `GET /api/health/pbp-api`
@@ -147,8 +152,8 @@ default); production requires an explicit allow-list.
 
 Every response carries an `X-Request-ID` used to correlate a request, its
 provider calls, and its logs; safe inbound values are echoed, otherwise one is
-generated. Every call to `stats.nba.com` (via `nba_api`) and
-`api.pbpstats.com` is recorded as one sanitized provider event with outcome,
+generated. Every call to `stats.nba.com` (via `nba_api`), `api.pbpstats.com`,
+and the Dabble DFS read feed is recorded as one sanitized provider event with outcome,
 duration, retry count, cache status, and HTTP status — operator counters and
 recent events are available on the admin-only `GET /api/data/telemetry`.
 
@@ -176,7 +181,7 @@ returned to clients.
 The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
-- Protected routes include `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Protected routes include `GET /api/games/game_logs`, both `/api/dfs/*` routes, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
 - For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.

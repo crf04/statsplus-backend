@@ -13,7 +13,7 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `ProviderSettings` | NBA Stats timeout, PBP timeouts, retries, and pool sizes | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE` |
+| `ProviderSettings` | NBA Stats timeout; PBP and Dabble timeouts, retries, pool sizes; Dabble fixture fan-out | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DABBLE_CONNECT_TIMEOUT_SECONDS`, `DABBLE_READ_TIMEOUT_SECONDS`, `DABBLE_MAX_RETRIES`, `DABBLE_POOL_CONNECTIONS`, `DABBLE_POOL_MAXSIZE`, `DABBLE_MAX_FIXTURES_PER_REQUEST` |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -73,3 +73,8 @@ Tests can pass an explicit date to `current_nba_season` or a mapping to
 `nba_api`. `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, and
 `NBA_API_MAX_RETRIES` configure the PBP Stats adapter's shared HTTP session;
 the two providers therefore keep distinct timeout and health signals.
+
+Dabble DFS requests use a third, dedicated session and the `DABBLE_*`
+settings. `DABBLE_MAX_FIXTURES_PER_REQUEST` defaults to `5` and may be set from
+`1` to `20`; it bounds how many large fixture-details payloads one competition
+line request can trigger. The public API defaults each request to only three.

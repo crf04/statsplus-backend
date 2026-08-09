@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_NBA_STATS = "nba_stats"
 PROVIDER_PBP_STATS = "pbp_stats"
+PROVIDER_DABBLE = "dabble"
 
 # Keep provider operation names in one place.  These names are part of the
 # telemetry contract: adapter methods, provider health checks, and the admin
@@ -58,9 +59,19 @@ NBA_STATS_OPERATIONS = frozenset(
 PBP_STATS_OPERATIONS = frozenset(
     {"get_totals_player", "get_totals_opponent", "health_probe"}
 )
+DABBLE_OPERATIONS = frozenset(
+    {
+        "sports",
+        "active_competitions",
+        "competition_lookup",
+        "competition_fixtures",
+        "fixture_details",
+    }
+)
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
     PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
+    PROVIDER_DABBLE: DABBLE_OPERATIONS,
 }
 
 OUTCOME_SUCCESS = "success"
@@ -383,8 +394,10 @@ __all__ = [
     "OUTCOME_TIMEOUT",
     "PROVIDER_NBA_STATS",
     "PROVIDER_PBP_STATS",
+    "PROVIDER_DABBLE",
     "NBA_STATS_OPERATIONS",
     "PBP_STATS_OPERATIONS",
+    "DABBLE_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "ProviderResponseError",

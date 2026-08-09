@@ -105,6 +105,7 @@ def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
             "player",
             "team",
             "data",
+            "dfs_line",
             "nl",
             "user",
             "data_refresh_jobs",
@@ -137,6 +138,7 @@ def _initialize_dependencies(app: Flask) -> None:
 def _register_blueprints(app: Flask) -> None:
     """Register the public API blueprints in one place."""
     from app.routes.data_update_routes import data_bp
+    from app.routes.dfs_routes import dfs_bp
     from app.routes.game_routes import game_bp
     from app.routes.health_routes import health_bp
     from app.routes.nl_routes import nl_bp
@@ -148,6 +150,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(game_bp, url_prefix="/api/games")
     app.register_blueprint(team_bp, url_prefix="/api/teams")
     app.register_blueprint(data_bp, url_prefix="/api/data")
+    app.register_blueprint(dfs_bp, url_prefix="/api/dfs")
     app.register_blueprint(nl_bp, url_prefix="/api")
     app.register_blueprint(health_bp)
     app.register_blueprint(user_bp, url_prefix="/api/user")
