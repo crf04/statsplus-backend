@@ -197,3 +197,39 @@ def test_migration_creates_event_tables_in_writable_database_only(tmp_path):
     columns = {column["name"] for column in inspect(engine).get_columns("event_catalog")}
     assert not {"mapping_needed", "audit_status", "audit_note"} & columns
     assert engine.url.database != "nba_play_types.db"
+
+
+def test_refresh_multiple_seasons_dedupes_calls_and_is_deterministic(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    provider = FakeScheduleProvider()
+    provider.frame = provider.frame.drop(columns=["season", "seasonYear"], errors="ignore")
+    service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now)
+    result = service.refresh(["2025-26", "2024-25", "2025-26"])
+    assert [item.season for item in result.results] == ["2024-25", "2025-26"]
+    assert result.failures == {}
+    assert provider.calls == ["2024-25", "2025-26"]
+    assert service.get_freshness("2024-25")["fresh"] is True
+    assert service.get_freshness("2025-26")["fresh"] is True
+
+
+def test_refresh_multiple_seasons_keeps_success_when_one_fails(tmp_path):
+    class MixedProvider(FakeScheduleProvider):
+        def fetch_whole_season_schedule(self, *, season):
+            self.calls.append(season)
+            if season == "2024-25":
+                raise ProviderUnavailableError("recorded outage")
+            return self.frame.copy()
+
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    service = EventCatalogService(_engine(tmp_path), MixedProvider(), clock=lambda: now)
+    result = service.refresh(["2025-26", "2024-25"])
+    assert [item.season for item in result.results] == ["2025-26"]
+    assert result.failures == {"2024-25": "recorded outage"}
+    assert service.get_freshness("2025-26")["fresh"] is True
+    assert service.get_freshness("2024-25")["last_success_at"] is None
+
+
+def test_refresh_rejects_empty_season_batch(tmp_path):
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
+    with pytest.raises(ValueError, match="at least one"):
+        service.refresh([])

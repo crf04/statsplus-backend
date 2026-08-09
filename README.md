@@ -111,15 +111,18 @@ URL while masking its password.
 Running the command again is safe; applied versions are recorded in the
 `schema_migrations` table. Keep migration databases disposable in tests.
 
-Refresh one explicit season into the writable canonical event catalog with:
+Refresh one or more explicit seasons into the writable canonical event catalog
+with (repeat `--season` as needed):
 
 ```bash
 python scripts/refresh_event_catalog.py \
   --database-url sqlite:////tmp/statsplus.sqlite3 \
-  --season 2025-26
+  --season 2025-26 \
+  --season 2024-25
 ```
 
-The command performs one atomic upsert and exits; it does not run a worker or
+Each season is fetched and published independently in one atomic upsert, and
+the command exits nonzero if any season fails; it does not run a worker or
 timer. Set `EVENT_CATALOG_MAX_AGE_HOURS` to change the default 72-hour
 freshness window. For offline verification, pass `--fixture` with a recorded
 `ScheduleLeagueV2` JSON payload.

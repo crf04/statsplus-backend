@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,6 +27,14 @@ class EventCatalogRefreshResult:
     season: str
     event_count: int
     refreshed_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventCatalogBatchResult:
+    """Independent outcomes for an explicit multi-season refresh."""
+
+    results: tuple[EventCatalogRefreshResult, ...]
+    failures: dict[str, str]
 
 
 def _utc(value: datetime) -> datetime:
@@ -57,8 +65,23 @@ class EventCatalogService:
         if self.max_age.total_seconds() <= 0:
             raise ValueError("event catalog max age must be greater than zero")
 
-    def refresh(self, season: str, *, now: datetime | None = None) -> EventCatalogRefreshResult:
-        canonical = validate_canonical_season(season)
+    def refresh(self, seasons: str | Iterable[str], *, now: datetime | None = None) -> EventCatalogRefreshResult | EventCatalogBatchResult:
+        requested = self._canonical_seasons(seasons)
+        if len(requested) == 1 and isinstance(seasons, str):
+            return self._refresh_one(requested[0], now=now)
+        results: list[EventCatalogRefreshResult] = []
+        failures: dict[str, str] = {}
+        for season in requested:
+            try:
+                results.append(self._refresh_one(season, now=now))
+            except Exception as error:
+                failures[season] = (
+                    error.public_message if isinstance(error, ProviderUnavailableError)
+                    else "The event catalog refresh could not complete."
+                )
+        return EventCatalogBatchResult(tuple(results), failures)
+
+    def _refresh_one(self, canonical: str, *, now: datetime | None) -> EventCatalogRefreshResult:
         refreshed_at = _utc(now or self._clock())
         try:
             raw = self.provider.fetch_whole_season_schedule(season=canonical)
@@ -75,6 +98,16 @@ class EventCatalogService:
         except Exception:
             self.repository.record_failure(canonical, refreshed_at)
             raise
+
+    @staticmethod
+    def _canonical_seasons(seasons: str | Iterable[str]) -> tuple[str, ...]:
+        if isinstance(seasons, str):
+            values = [seasons]
+        else:
+            values = list(seasons)
+        if not values:
+            raise ValueError("at least one explicit canonical NBA season is required")
+        return tuple(sorted({validate_canonical_season(value) for value in values}))
 
     def get_events(self, season: str) -> list[dict[str, Any]]:
         return self.repository.list_events(validate_canonical_season(season))
@@ -96,4 +129,4 @@ class EventCatalogService:
         raise ProviderUnavailableError("The NBA schedule provider returned invalid data.")
 
 
-__all__ = ["DEFAULT_EVENT_CATALOG_MAX_AGE", "EventCatalogRefreshResult", "EventCatalogService"]
+__all__ = ["DEFAULT_EVENT_CATALOG_MAX_AGE", "EventCatalogBatchResult", "EventCatalogRefreshResult", "EventCatalogService"]

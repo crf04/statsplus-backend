@@ -266,10 +266,11 @@ no heuristic transfer. `EventCatalogService.get_freshness` reads per-season
 attempt/success/failure state independently from Athlete Catalog. The
 `EVENT_CATALOG_MAX_AGE_HOURS` setting defaults to 72 hours.
 
-Operators/deployments run one explicit refresh with
+Operators/deployments run one or more explicit refreshes with repeated
 `python scripts/refresh_event_catalog.py --database-url <url> --season
-2025-26`; the command exits after one refresh and does not start a worker
-timer. `--fixture` accepts a recorded schedule payload for offline checks.
+2025-26`; each season is independent and the command exits after the batch
+without starting a worker timer. `--fixture` accepts a recorded schedule
+payload for offline checks.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

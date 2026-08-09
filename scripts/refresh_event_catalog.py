@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh one explicit NBA season into the canonical event catalog.
+"""Refresh one or more explicit NBA seasons into the canonical event catalog.
 
 This is an operator/deployment command, not a background scheduler.  It runs
 one whole-season retrieval, publishes the validated result atomically, and
@@ -43,7 +43,7 @@ class _RecordedScheduleProvider:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Refresh the canonical event catalog for one NBA season."
+        description="Refresh the canonical event catalog for explicit NBA seasons."
     )
     parser.add_argument(
         "--database-url",
@@ -52,7 +52,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--season",
         required=True,
-        help="Explicit canonical NBA season, for example 2025-26",
+        action="append",
+        help="Explicit canonical NBA season; repeat for multiple seasons, for example 2025-26",
     )
     parser.add_argument(
         "--fixture",
@@ -81,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        validate_canonical_season(args.season)
+        seasons = tuple(sorted({validate_canonical_season(season) for season in args.season}))
     except ValueError as error:
         parser.error(str(error))
     database_url = _database_url_for_command(parser, args.database_url)
@@ -94,18 +95,18 @@ def main(argv: list[str] | None = None) -> int:
         else:
             provider = NBAStatsAdapter(settings=settings)
         service = EventCatalogService(engine, provider, settings=settings)
-        result = service.refresh(args.season)
+        result = service.refresh(seasons)
+        payload = {
+            "results": [
+                {"season": item.season, "event_count": item.event_count, "refreshed_at": item.refreshed_at}
+                for item in result.results
+            ],
+            "failures": result.failures,
+        }
         print(
-            json.dumps(
-                {
-                    "season": result.season,
-                    "event_count": result.event_count,
-                    "refreshed_at": result.refreshed_at,
-                },
-                sort_keys=True,
-            )
+            json.dumps(payload, sort_keys=True)
         )
-        return 0
+        return 1 if result.failures else 0
     except ProviderUnavailableError as error:
         print(error.public_message, file=sys.stderr)
         return 1
