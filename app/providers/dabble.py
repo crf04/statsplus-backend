@@ -56,9 +56,11 @@ from app.providers.dfs import (
 from app.providers.dfs_normalization import optional_text
 from app.providers.dfs_transport import request_json, run_bounded
 from app.utils.telemetry import (
+    CACHE_DISABLED,
     PROVIDER_DABBLE,
     ProviderResponseError,
     increment_retry_count,
+    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -427,80 +429,96 @@ class DabbleAdapter:
         if context.is_expired(now=self._now_utc()):
             raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
         try:
-            normalization = run_bounded(
-                context=context,
-                now=self._now_utc,
-                call=lambda: self._normalize_detail_results(detail_results, query),
-            )
+            with provider_call(
+                PROVIDER_DABBLE,
+                "snapshot_normalization",
+                cache_status=CACHE_DISABLED,
+                request_id=context.request_id,
+            ):
+                normalization = run_bounded(
+                    context=context,
+                    now=self._now_utc,
+                    call=lambda: self._normalize_detail_results(detail_results, query),
+                )
+                if normalization.deadline_error or context.is_expired(
+                    now=self._now_utc()
+                ):
+                    raise DeadlineExceededError(
+                        "Dabble snapshot normalization deadline exceeded"
+                    )
+
+                batch = normalization.batch
+                warnings = (
+                    *discovery.warning_codes,
+                    *normalization.warning_codes,
+                    *batch.warning_codes,
+                )
+                skipped_reasons = (
+                    *discovery.skipped_reasons,
+                    *normalization.skipped_reasons,
+                    *batch.skipped_reasons,
+                )
+                diagnostic_details = (
+                    *discovery.diagnostic_details,
+                    *normalization.diagnostic_details,
+                    *batch.diagnostic_details,
+                )
+                skipped_count = (
+                    discovery.skipped_count
+                    + normalization.skipped_count
+                    + batch.skipped_count
+                )
+                malformed_seen = (
+                    discovery.malformed_seen
+                    or normalization.malformed_seen
+                    or batch.malformed_count > 0
+                )
+                fanout_complete = (
+                    discovery.fanout_complete
+                    and normalization.fanout_complete
+                    and not malformed_seen
+                )
+
+                if not batch.markets:
+                    if malformed_seen or not normalization.fanout_complete:
+                        raise ProviderResponseError(
+                            "Dabble produced no usable markets"
+                        )
+                    return _build_snapshot(
+                        provider=self.PROVIDER_ID,
+                        markets=(),
+                        retrieved_at=retrieved_at,
+                        fetched_count=batch.fetched_count,
+                        eligible_count=batch.eligible_count,
+                        normalized_count=batch.normalized_count,
+                        skipped_count=skipped_count,
+                        pagination_complete=True,
+                        fanout_complete=fanout_complete,
+                        warning_codes=warnings,
+                        skipped_reasons=skipped_reasons,
+                        diagnostic_details=diagnostic_details,
+                    )
+
+                return _build_snapshot(
+                    provider=self.PROVIDER_ID,
+                    markets=batch.markets,
+                    retrieved_at=retrieved_at,
+                    fetched_count=batch.fetched_count,
+                    eligible_count=batch.eligible_count,
+                    normalized_count=batch.normalized_count,
+                    skipped_count=skipped_count,
+                    pagination_complete=True,
+                    fanout_complete=fanout_complete,
+                    warning_codes=warnings,
+                    skipped_reasons=skipped_reasons,
+                    diagnostic_details=diagnostic_details,
+                )
         except DeadlineExceededError as error:
             raise self._unavailable(
                 _DabbleRequestFailure("deadline_exceeded", error)
             ) from error
-        if normalization.deadline_error or context.is_expired(now=self._now_utc()):
-            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
-
-        batch = normalization.batch
-        warnings = (*discovery.warning_codes, *normalization.warning_codes, *batch.warning_codes)
-        skipped_reasons = (
-            *discovery.skipped_reasons,
-            *normalization.skipped_reasons,
-            *batch.skipped_reasons,
-        )
-        diagnostic_details = (
-            *discovery.diagnostic_details,
-            *normalization.diagnostic_details,
-            *batch.diagnostic_details,
-        )
-        skipped_count = (
-            discovery.skipped_count
-            + normalization.skipped_count
-            + batch.skipped_count
-        )
-        malformed_seen = (
-            discovery.malformed_seen
-            or normalization.malformed_seen
-            or batch.malformed_count > 0
-        )
-        fanout_complete = (
-            discovery.fanout_complete
-            and normalization.fanout_complete
-            and not malformed_seen
-        )
-
-        if not batch.markets:
-            if malformed_seen or not normalization.fanout_complete:
-                raise self._unavailable(
-                    ProviderResponseError("Dabble produced no usable markets")
-                )
-            return _build_snapshot(
-                provider=self.PROVIDER_ID,
-                markets=(),
-                retrieved_at=retrieved_at,
-                fetched_count=batch.fetched_count,
-                eligible_count=batch.eligible_count,
-                normalized_count=batch.normalized_count,
-                skipped_count=skipped_count,
-                pagination_complete=True,
-                fanout_complete=fanout_complete,
-                warning_codes=warnings,
-                skipped_reasons=skipped_reasons,
-                diagnostic_details=diagnostic_details,
-            )
-
-        return _build_snapshot(
-            provider=self.PROVIDER_ID,
-            markets=batch.markets,
-            retrieved_at=retrieved_at,
-            fetched_count=batch.fetched_count,
-            eligible_count=batch.eligible_count,
-            normalized_count=batch.normalized_count,
-            skipped_count=skipped_count,
-            pagination_complete=True,
-            fanout_complete=fanout_complete,
-            warning_codes=warnings,
-            skipped_reasons=skipped_reasons,
-            diagnostic_details=diagnostic_details,
-        )
+        except ProviderResponseError as error:
+            raise self._unavailable(error) from error
 
     def _discover_fixtures(
         self,

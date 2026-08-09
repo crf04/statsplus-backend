@@ -64,7 +64,12 @@ PBP_STATS_OPERATIONS = frozenset(
     {"get_totals_player", "get_totals_opponent", "health_probe"}
 )
 DABBLE_OPERATIONS = frozenset(
-    {"competition_lookup", "competition_fixtures", "fixture_details"}
+    {
+        "competition_lookup",
+        "competition_fixtures",
+        "fixture_details",
+        "snapshot_normalization",
+    }
 )
 PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})

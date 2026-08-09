@@ -463,6 +463,39 @@ def test_malformed_prop_is_skipped_and_makes_nonempty_snapshot_partial():
     assert "malformed_record" in snapshot.coverage.warning_codes
 
 
+def test_all_malformed_props_record_one_sanitized_normalization_failure():
+    detail = _payload("fixture_details.valid.json")
+    for prop in detail["sportFixtureDetail"]["playerProps"]:
+        prop["value"] = "secret-token"
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(detail),
+    ]
+    with pytest.raises(ProviderUnavailableError) as raised:
+        DabbleAdapter(session=session).get_snapshot(
+            NBAMarketQuery(), _context(deadline=DEADLINE)
+        )
+
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
+        ("fixture_details", telemetry.OUTCOME_SUCCESS),
+        ("snapshot_normalization", telemetry.OUTCOME_MALFORMED),
+    ]
+    assert {event["request_id"] for event in events} == {"dabble-test"}
+    assert "secret-token" not in json.dumps(events)
+    assert "secret-token" not in str(raised.value.detail)
+
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
+    }
+    assert metrics["application_failures"] == {}
+
+
 def test_dabble_does_not_hide_implementation_value_errors(monkeypatch):
     session = Mock()
     session.get.side_effect = [
@@ -663,6 +696,19 @@ def test_blocking_normalizer_cannot_extend_dabble_deadline(monkeypatch):
 
     assert started.is_set()
     assert time.monotonic() - started_at < 0.5
+
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
+        ("fixture_details", telemetry.OUTCOME_SUCCESS),
+        ("snapshot_normalization", telemetry.OUTCOME_TIMEOUT),
+    ]
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_TIMEOUT: 1}
+    }
+    assert metrics["application_failures"] == {}
 
 
 def test_invalid_json_and_http_errors_are_provider_unavailable():
