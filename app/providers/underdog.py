@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -85,9 +85,11 @@ class UnderdogAdapter:
         *,
         session: requests.Session | Any | None = None,
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.now = now or (lambda: datetime.now(timezone.utc))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -102,7 +104,7 @@ class UnderdogAdapter:
     ) -> ProviderSnapshot:
         """Fetch one complete or partial Underdog observation."""
 
-        retrieved_at = datetime.now(timezone.utc)
+        retrieved_at = self._now_utc()
         try:
             result = self._request_payload(
                 context,
@@ -171,8 +173,9 @@ class UnderdogAdapter:
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> _PayloadResult:
         try:
-            context.ensure_active()
-            timeout = self._bounded_timeout(context)
+            now = self._now_utc()
+            context.ensure_active(now=now)
+            timeout = self._bounded_timeout(context, now=now)
             with provider_call(
                 PROVIDER_UNDERDOG,
                 "get_snapshot",
@@ -181,6 +184,7 @@ class UnderdogAdapter:
             ) as tracker:
                 response = self.session.get(self.BASE_URL, timeout=timeout)
                 tracker.status_code = getattr(response, "status_code", None)
+                context.ensure_active(now=self._now_utc())
                 response.raise_for_status()
                 try:
                     payload = response.json()
@@ -189,13 +193,15 @@ class UnderdogAdapter:
                         "Underdog returned invalid JSON"
                     ) from error
                 try:
-                    return self._normalize_payload(
+                    result = self._normalize_payload(
                         payload,
                         expected_sport=expected_sport,
                         allowed_statuses=allowed_statuses,
                     )
                 except _MalformedPayload as error:
                     raise ProviderResponseError(str(error)) from error
+                context.ensure_active(now=self._now_utc())
+                return result
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "Underdog retrieval deadline exceeded.", detail=error
@@ -211,12 +217,25 @@ class UnderdogAdapter:
         except ProviderResponseError as error:
             raise _MalformedPayload(str(error)) from error
 
-    def _bounded_timeout(self, context: RetrievalContext) -> tuple[float, float]:
-        remaining = context.remaining_seconds()
+    def _bounded_timeout(
+        self,
+        context: RetrievalContext,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[float, float]:
+        current = now if now is not None else self._now_utc()
+        context.ensure_active(now=current)
+        remaining = context.remaining_seconds(now=current)
         if remaining <= 0:
             raise DeadlineExceededError("Underdog retrieval deadline exceeded")
         connect, read = self.timeout
         return min(float(connect), remaining), min(float(read), remaining)
+
+    def _now_utc(self) -> datetime:
+        value = self.now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Underdog clock must return an aware datetime")
+        return value.astimezone(timezone.utc)
 
     @classmethod
     def _normalize_payload(
@@ -341,12 +360,16 @@ class UnderdogAdapter:
         match_id = cls._optional_identifier(appearance.get("match_id"))
         match = games.get(match_id) if match_id is not None else None
         match_type = cls._optional_text(appearance.get("match_type"))
-        if match_type is not None and match_type.casefold() not in {"game", "solo_game"}:
+        if match_type is None:
+            raise _MalformedRecord("missing_match_type")
+        normalized_match_type = match_type.casefold().replace("-", "_").replace(" ", "_")
+        if normalized_match_type not in {"game", "solo_game"}:
             raise _ExcludedRecord("non_game_market")
-        if match is not None:
-            match_sport = cls._optional_text(match.get("sport_id"))
-            if match_sport is not None and match_sport.casefold() != expected_sport.casefold():
-                raise _ExcludedRecord("non_nba_market")
+        if match_id is None or match is None:
+            raise _MalformedRecord("missing_match_relationship")
+        match_sport = cls._required_text(match, "sport_id")
+        if match_sport.casefold() != expected_sport.casefold():
+            raise _ExcludedRecord("non_nba_market")
 
         options_value = row.get("options", [])
         if not isinstance(options_value, list):

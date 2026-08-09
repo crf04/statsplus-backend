@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -58,6 +58,18 @@ class FakeSession:
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
+
+
+class ClockAdvancingSession(FakeSession):
+    def __init__(self, response: object, clock: list[datetime], after: datetime) -> None:
+        super().__init__(response)
+        self.clock = clock
+        self.after = after
+
+    def get(self, url: str, *, timeout):
+        response = super().get(url, timeout=timeout)
+        self.clock[0] = self.after
+        return response
 
 
 def _payload() -> dict[str, object]:
@@ -170,20 +182,110 @@ def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> No
     assert "ineligible_status" in snapshot.coverage.skipped_reasons
 
 
-def test_missing_underdog_match_keeps_supplied_event_id_without_fabrication() -> None:
+def test_underdog_excludes_live_closed_settled_match_future_and_entry_markets() -> None:
     payload = _payload()
-    payload["games"] = []
-    payload["solo_games"] = []
+    appearances = payload["appearances"]
+    rows = payload["over_under_lines"]
+    assert isinstance(appearances, list)
+    assert isinstance(rows, list)
+
+    invalid_appearances = [
+        ("match", "Match"),
+        ("future", "Player"),
+        ("entry-placement", "Entry-placement"),
+    ]
+    for suffix, appearance_type in invalid_appearances:
+        appearance = copy.deepcopy(appearances[0]) | {"id": f"appearance-{suffix}"}
+        if suffix == "future":
+            appearance["match_type"] = "Future"
+            appearance["match_id"] = None
+        else:
+            appearance["type"] = appearance_type
+        appearances.append(appearance)
+        rows.append(
+            copy.deepcopy(rows[0])
+            | {
+                "id": f"line-{suffix}",
+                "over_under": {
+                    "appearance_stat": {
+                        "appearance_id": f"appearance-{suffix}",
+                    }
+                },
+            }
+        )
+
+    for status in ("live", "closed", "settled"):
+        rows.append(copy.deepcopy(rows[0]) | {"id": f"line-{status}", "status": status})
 
     snapshot = UnderdogAdapter(
         session=FakeSession(FakeResponse(payload))
     ).get_snapshot(_query(), _context())
 
-    event = snapshot.markets[0].event
-    assert event is not None
-    assert event.provider_id == "101"
-    assert event.label is None
-    assert event.starts_at is None
+    assert [market.market_id for market in snapshot.markets] == ["line-1"]
+    assert snapshot.coverage.skipped_count == 6
+    assert "non_player_market" in snapshot.coverage.skipped_reasons
+    assert "non_game_market" in snapshot.coverage.skipped_reasons
+    assert "ineligible_status" in snapshot.coverage.skipped_reasons
+
+
+def test_missing_underdog_match_is_partial_without_fabricating_an_event() -> None:
+    payload = _payload()
+    payload["appearances"].append(
+        copy.deepcopy(payload["appearances"][0])
+        | {"id": "appearance-missing-match", "match_id": "missing-match"}
+    )
+    payload["over_under_lines"].append(
+        copy.deepcopy(payload["over_under_lines"][0])
+        | {
+            "id": "line-missing-match",
+            "over_under": {
+                "appearance_stat": {
+                    "appearance_id": "appearance-missing-match",
+                    "display_stat": "Rebounds",
+                }
+            },
+        }
+    )
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["line-1"]
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert snapshot.coverage.fanout_complete is False
+    assert snapshot.coverage.skipped_count == 1
+    assert "missing_match_relationship" in snapshot.coverage.skipped_reasons
+
+
+def test_missing_underdog_match_type_is_partial_with_coverage() -> None:
+    payload = _payload()
+    payload["appearances"].append(
+        copy.deepcopy(payload["appearances"][0])
+        | {"id": "appearance-missing-match-type"}
+    )
+    payload["over_under_lines"].append(
+        copy.deepcopy(payload["over_under_lines"][0])
+        | {
+            "id": "line-missing-match-type",
+            "over_under": {
+                "appearance_stat": {
+                    "appearance_id": "appearance-missing-match-type",
+                    "display_stat": "Rebounds",
+                }
+            },
+        }
+    )
+    payload["appearances"][-1].pop("match_type")
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["line-1"]
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert snapshot.coverage.fanout_complete is False
+    assert "missing_match_type" in snapshot.coverage.skipped_reasons
 
 
 def test_underdog_excludes_linked_final_game_status() -> None:
@@ -244,6 +346,42 @@ def test_underdog_timeout_is_typed_provider_error() -> None:
         UnderdogAdapter(
             session=FakeSession(requests.ReadTimeout("timed out"))
         ).get_snapshot(_query(), _context())
+
+
+def test_underdog_rejects_response_returned_after_absolute_deadline() -> None:
+    start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    deadline = start + timedelta(seconds=1)
+    clock = [start]
+    session = ClockAdvancingSession(FakeResponse(_payload()), clock, deadline)
+
+    with pytest.raises(ProviderUnavailableError, match="deadline"):
+        UnderdogAdapter(
+            session=session,
+            timeout=(10.0, 30.0),
+            now=lambda: clock[0],
+        ).get_snapshot(
+            _query(), RetrievalContext(deadline=deadline, request_id="late-underdog")
+        )
+
+    assert session.calls[0][1] == pytest.approx((1.0, 1.0))
+    event = telemetry.get_recorded_provider_events()[0]
+    assert event["request_id"] == "late-underdog"
+
+
+def test_underdog_does_not_start_after_absolute_deadline() -> None:
+    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    session = FakeSession(FakeResponse(_payload()))
+
+    with pytest.raises(ProviderUnavailableError, match="deadline"):
+        UnderdogAdapter(
+            session=session,
+            now=lambda: deadline,
+        ).get_snapshot(
+            _query(), RetrievalContext(deadline=deadline, request_id="expired-underdog")
+        )
+
+    assert session.calls == []
+    assert telemetry.get_recorded_provider_events() == []
 
 
 def test_malformed_underdog_payload_is_recorded_as_provider_failure() -> None:
