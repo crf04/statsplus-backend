@@ -103,8 +103,13 @@ one worker (there is no distributed lock). One flight shares the whole cache
 decision: a follower adopts the owner's result or failure verbatim, including
 its cache status, age, and sanitized refresh-failure provenance, and never
 substitutes a stale value from its own Redis read. When the owner's deadline
-elapses before an uncancellable refresh finishes, the flight stays active and
-its late result retires the key without publishing anything.
+elapses before an uncancellable refresh finishes, that deadline failure becomes
+the flight's decision immediately: the flight stays active, and every follower
+receives the owner's failure verbatim however much later its own deadline is.
+The late result then only drains and validates the abandoned work and retires
+the key — it publishes nothing, and never turns the shared failure into a
+success carrying cache provenance the abandoned request never had. A follower's
+own deadline still applies to itself alone; it never abandons the refresh.
 
 Publication is decided at a single instant, before the write: work that
 finished at or after the deadline is never written, and a value written before
@@ -116,10 +121,16 @@ read that fails slowly, which calls no provider at all — and before any value
 is returned. Only an unusable payload is cleaned up, comparing and deleting
 atomically so a newer concurrent value survives.
 
-A cached payload is used only when every nested wire field is already exactly
-what the snapshot serializes to. Anything a constructor would normalize, drop,
-canonicalize from an alias, or deduplicate is treated as corrupt data: the key
-is deleted and the request becomes a miss.
+A cached payload is used only when its bytes are already exactly the canonical
+document this codec writes, compared against the stored text rather than a
+normalizing re-dump, so surrounding whitespace, reordered keys, and alternate
+escapes are all rejected. A duplicate key at any nesting level is rejected
+before decoding, because JSON's last-value-wins would otherwise let one payload
+carry a second, conflicting document. Anything a constructor would normalize,
+drop, canonicalize from an alias, or deduplicate is corrupt too, as is a value
+no domain constructor can represent — a wire number whose conversion raises
+`OverflowError`, for example. Every such failure is contained at this seam: the
+key is deleted and the request becomes a miss.
 
 Cache decisions are recorded once per request as bounded cache counters only;
 the cache never emits a provider-operation event, and provider events never

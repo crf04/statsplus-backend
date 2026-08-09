@@ -29,6 +29,7 @@ from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
     deserialize_provider_snapshot,
     ProviderSnapshotCache,
+    SnapshotCacheError,
     SnapshotCacheResult,
     serialize_provider_snapshot,
 )
@@ -51,6 +52,16 @@ def _snapshot(provider: str = "dabble") -> ProviderSnapshot:
         ),
         retrieved_at=_RETRIEVED_AT,
     )
+
+
+def _canonical(payload: dict) -> str:
+    """Re-serialize a mutated payload with the exact canonical wire bytes.
+
+    A pretty-printed or key-reordered re-dump is rejected outright, so a test
+    for one specific field must keep the rest of the document canonical.
+    """
+
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def test_complete_provider_snapshot_serializes_and_round_trips_immutably() -> None:
@@ -138,7 +149,7 @@ def test_snapshot_codec_rejects_noncanonical_wire_values(mutate) -> None:
 
     with pytest.raises(ValueError):
         deserialize_provider_snapshot(
-            json.dumps(payload),
+            _canonical(payload),
             expected_contract_version="1",
             expected_provider="dabble",
             expected_query=NBAMarketQuery(),
@@ -199,7 +210,7 @@ def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) ->
 
     with pytest.raises(ValueError):
         deserialize_provider_snapshot(
-            json.dumps(payload),
+            _canonical(payload),
             expected_contract_version="1",
             expected_provider="dabble",
             expected_query=NBAMarketQuery(),
@@ -211,7 +222,87 @@ def test_snapshot_codec_rejects_noncanonical_contract_version_whitespace() -> No
     payload["contract_version"] = " 1 "
 
     with pytest.raises(ValueError):
-        deserialize_provider_snapshot(json.dumps(payload))
+        deserialize_provider_snapshot(_canonical(payload))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # A conflicting duplicate at the root: the last value would silently win.
+        lambda text: '{"schema":"not-statsplus",' + text[1:],
+        lambda text: '{"provider":"underdog",' + text[1:],
+        lambda text: '{"schema_version":2,' + text[1:],
+        # Nested objects are just as forgeable as the root document.
+        lambda text: text.replace('"team":{', '"team":{"name":"Boston Celtics",', 1),
+        lambda text: text.replace('"query":{', '"query":{"pregame_only":false,', 1),
+        lambda text: text.replace(
+            '"selections":[{', '"selections":[{"american_price":-115,', 1
+        ),
+    ],
+)
+def test_snapshot_codec_rejects_duplicate_wire_keys_at_any_depth(mutate) -> None:
+    """A duplicate key means two conflicting documents share one payload."""
+
+    payload = mutate(serialize_provider_snapshot(_market_payload_snapshot()))
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(
+            payload,
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda text: f"  {text}",
+        lambda text: f"{text}\n",
+        lambda text: "\ufeff" + text,
+        # A semantically equal document whose bytes are not the canonical ones.
+        lambda text: json.dumps(json.loads(text), indent=2, sort_keys=True),
+        lambda text: json.dumps(json.loads(text), sort_keys=True),
+        lambda text: text.replace('"dabble"', '"\\u0064abble"', 1),
+    ],
+)
+def test_snapshot_codec_requires_the_exact_canonical_wire_bytes(mutate) -> None:
+    """The payload must be the bytes this codec writes, not an equal re-dump."""
+
+    payload = mutate(serialize_provider_snapshot(_snapshot()))
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(
+            payload,
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # int(float("inf")) raises OverflowError, not ValueError.
+        lambda text: text.replace('"american_price":null', '"american_price":1e309', 1),
+        # Converting this timestamp to UTC leaves the representable range.
+        lambda text: text.replace(
+            '"starts_at":null', '"starts_at":"9999-12-31T23:59:59-05:00"', 1
+        ),
+    ],
+)
+def test_snapshot_codec_rejects_values_no_domain_constructor_can_represent(mutate) -> None:
+    """A numeric or domain conversion failure is corrupt data, not a defect."""
+
+    payload = mutate(serialize_provider_snapshot(_market_payload_snapshot()))
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(
+            payload,
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
 
 
 class FakeRedis:
@@ -583,7 +674,38 @@ def test_deadline_cancels_pending_refresh_and_late_result_is_not_published() -> 
     assert redis.set_calls == []
 
 
-def test_owner_timeout_keeps_non_cancellable_flight_until_late_result_resolves() -> None:
+def _run_follower(cache: ProviderSnapshotCache, *, seconds: float = 20) -> dict[str, object]:
+    """Join an active flight from another thread and capture its outcome."""
+
+    result: dict[str, object] = {}
+    follower = Thread(
+        target=lambda: _capture_value(
+            result,
+            lambda: cache.get_snapshot(
+                NBAMarketQuery(),
+                RetrievalContext(
+                    deadline=_RETRIEVED_AT + timedelta(seconds=seconds),
+                    request_id="follower",
+                ),
+            ),
+        ),
+        # A follower that is left waiting on an undecided flight must fail the
+        # assertion below rather than hang the suite at interpreter exit.
+        daemon=True,
+    )
+    follower.start()
+    follower.join(timeout=2)
+    assert not follower.is_alive()
+    return result
+
+
+def test_uncancellable_owner_deadline_failure_is_shared_with_later_followers() -> None:
+    """Work the owner could not cancel never becomes another caller's success.
+
+    The follower's deadline is far later than the owner's, but the flight has
+    already been decided: it adopts that failure verbatim.
+    """
+
     redis = FakeRedis()
     clock = ControlledClock()
     executor = ManualExecutor(cancel_result=False)
@@ -613,37 +735,17 @@ def test_owner_timeout_keeps_non_cancellable_flight_until_late_result_resolves()
     assert not executor.future.cancelled
     assert cache.coordinator.pending_count() == 1
 
-    joined = Event()
-    original_submit = cache.coordinator.submit
+    follower_result = _run_follower(cache)
 
-    def observed_submit(key, function):
-        flight, owner = original_submit(key, function)
-        if not owner:
-            joined.set()
-        return flight, owner
+    assert follower_result["error"] is owner_error["error"]
+    assert "value" not in follower_result
+    # The uncancellable refresh is still running, so the key stays active.
+    assert cache.coordinator.pending_count() == 1
 
-    cache.coordinator.submit = observed_submit  # type: ignore[method-assign]
-    follower_result: dict[str, object] = {}
-    follower = Thread(
-        target=lambda: _capture_value(
-            follower_result,
-            lambda: cache.get_snapshot(
-                NBAMarketQuery(),
-                RetrievalContext(
-                    deadline=_RETRIEVED_AT + timedelta(seconds=20),
-                    request_id="follower",
-                ),
-            ),
-        )
-    )
-    follower.start()
-    assert joined.wait(timeout=1)
     executor.future.complete(_snapshot())
-    follower.join(timeout=2)
 
-    assert follower_result["value"] == _snapshot()
-    assert "error" not in follower_result
     assert cache.coordinator.pending_count() == 0
+    assert redis.set_calls == []
     assert redis.values == {}
 
 
@@ -1036,7 +1138,10 @@ def test_unusable_cached_payload_is_only_deleted_while_unchanged() -> None:
     assert len(provider.calls) == 1
 
 
-def test_invalid_late_result_retires_the_abandoned_flight_for_followers() -> None:
+@pytest.mark.parametrize("late_value", [_snapshot(), _snapshot("underdog"), object()])
+def test_late_result_only_retires_an_abandoned_flight(late_value) -> None:
+    """Whatever the late result is, it decides nothing for anyone."""
+
     redis = FakeRedis()
     clock = ControlledClock()
     executor = ManualExecutor(cancel_result=False)
@@ -1065,15 +1170,52 @@ def test_invalid_late_result_retires_the_abandoned_flight_for_followers() -> Non
     owner.join(timeout=2)
     assert isinstance(owner_error["error"], TimeoutError)
 
+    follower_result = _run_follower(cache)
+    executor.future.complete(late_value)
+
+    assert follower_result["error"] is owner_error["error"]
+    assert cache.coordinator.pending_count() == 0
+    assert redis.set_calls == []
+    assert redis.values == {}
+
+
+def test_follower_deadline_never_abandons_the_owner_flight() -> None:
+    """A follower gives up on its own budget without disturbing the refresh."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    executor = ManualExecutor(cancel_result=False)
+    cache = ProviderSnapshotCache(
+        FakeProvider(_snapshot()),
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        executor=executor,
+    )
+    owner_result: dict[str, object] = {}
+    owner = Thread(
+        target=lambda: _capture_value(
+            owner_result,
+            lambda: cache.get_snapshot(
+                NBAMarketQuery(),
+                RetrievalContext(
+                    deadline=_RETRIEVED_AT + timedelta(seconds=100),
+                    request_id="owner",
+                ),
+            ),
+        ),
+        daemon=True,
+    )
     joined = Event()
     original_submit = cache.coordinator.submit
 
     def observed_submit(key, function):
-        flight, owner_flag = original_submit(key, function)
-        if not owner_flag:
+        flight, is_owner = original_submit(key, function)
+        if not is_owner:
             joined.set()
-        return flight, owner_flag
+        return flight, is_owner
 
+    owner.start()
     cache.coordinator.submit = observed_submit  # type: ignore[method-assign]
     follower_result: dict[str, object] = {}
     follower = Thread(
@@ -1082,20 +1224,72 @@ def test_invalid_late_result_retires_the_abandoned_flight_for_followers() -> Non
             lambda: cache.get_snapshot(
                 NBAMarketQuery(),
                 RetrievalContext(
-                    deadline=_RETRIEVED_AT + timedelta(seconds=20),
+                    deadline=_RETRIEVED_AT + timedelta(seconds=3),
                     request_id="follower",
                 ),
             ),
-        )
+        ),
+        daemon=True,
     )
     follower.start()
-    assert joined.wait(timeout=1)
-    executor.future.complete(_snapshot("underdog"))
+    assert joined.wait(timeout=2)
+    clock.advance(4)
     follower.join(timeout=2)
 
-    assert isinstance(follower_result["error"], ValueError)
+    assert isinstance(follower_result["error"], TimeoutError)
+    assert not executor.future.cancelled
+    assert cache.coordinator.pending_count() == 1
+
+    executor.future.complete(_snapshot())
+    owner.join(timeout=2)
+
+    assert owner_result["value"] == _snapshot()
     assert cache.coordinator.pending_count() == 0
-    assert redis.values == {}
+    assert len(redis.set_calls) == 1
+
+
+def test_detached_disabled_flight_records_no_late_hit_provenance() -> None:
+    """A disabled cache cannot report a late refresh as a cache miss."""
+
+    telemetry.clear_recorded_provider_events()
+    try:
+        clock = ControlledClock()
+        executor = ManualExecutor(cancel_result=False)
+        cache = ProviderSnapshotCache(
+            FakeProvider(_snapshot()),
+            provider_name="dabble",
+            redis_client=None,
+            enabled=False,
+            clock=clock.now,
+            executor=executor,
+        )
+        owner_error: dict[str, BaseException] = {}
+        owner = Thread(
+            target=lambda: _capture_error(
+                owner_error,
+                lambda: cache.get_snapshot(
+                    NBAMarketQuery(),
+                    RetrievalContext(
+                        deadline=_RETRIEVED_AT + timedelta(seconds=1),
+                        request_id="owner-timeout",
+                    ),
+                ),
+            )
+        )
+        owner.start()
+        clock.advance(2)
+        owner.join(timeout=2)
+        assert isinstance(owner_error["error"], TimeoutError)
+
+        follower_result = _run_follower(cache)
+        executor.future.complete(_snapshot())
+
+        assert follower_result["error"] is owner_error["error"]
+        assert cache.coordinator.pending_count() == 0
+        # Two requests, two decisions, and neither invents a cache hit or miss.
+        assert telemetry.snapshot_metrics()["cache"]["dabble"] == {"disabled": 2}
+    finally:
+        telemetry.clear_recorded_provider_events()
 
 
 def test_abandoned_flight_retires_when_a_late_result_cannot_be_observed() -> None:
@@ -1195,6 +1389,31 @@ def test_nested_invalid_cached_field_is_a_miss_and_the_key_is_replaced() -> None
     corrupt = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
     corrupt["markets"][0]["athlete"]["team"]["name"] = 123
     redis.values[key] = json.dumps(corrupt)
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+def test_unrepresentable_cached_number_is_a_miss_and_never_reaches_the_board() -> None:
+    """An OverflowError from a wire number must not escape the cache seam."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = serialize_provider_snapshot(_market_payload_snapshot()).replace(
+        '"american_price":null', '"american_price":1e309', 1
+    )
 
     result = cache.get_snapshot(NBAMarketQuery(), _context())
 

@@ -69,6 +69,30 @@ class SnapshotCacheError(ValueError):
     """The Redis payload is not a compatible provider-snapshot document."""
 
 
+#: Failures that mean the cached document is corrupt rather than that this
+#: module has a defect.  Domain constructors raise TypeError/ValueError, but a
+#: malformed wire number escapes as an ArithmeticError instead: ``int(inf)`` and
+#: a timestamp whose UTC conversion leaves the representable range both raise
+#: OverflowError.  Re-reading an already validated key can only fail as a
+#: LookupError.
+_CORRUPT_VALUE_ERRORS = (TypeError, ValueError, LookupError, ArithmeticError)
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject a duplicate key at any nesting level of the wire document.
+
+    ``json.loads`` keeps the last of two conflicting values, so one payload
+    could otherwise carry a second, differing document past every check.
+    """
+
+    decoded: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in decoded:
+            raise SnapshotCacheError("snapshot payload has duplicate keys")
+        decoded[key] = value
+    return decoded
+
+
 def _encoded(value: Any) -> Any:
     """Encode the immutable model tree into JSON-safe primitive values."""
 
@@ -115,7 +139,7 @@ def _nested(
     _keys(data, expected, label=label)
     try:
         return constructor(**data)
-    except (TypeError, ValueError, KeyError) as error:
+    except _CORRUPT_VALUE_ERRORS as error:
         raise SnapshotCacheError(f"snapshot {label} value is invalid") from error
 
 
@@ -393,7 +417,7 @@ def deserialize_provider_snapshot(
     if not isinstance(payload, str):
         raise SnapshotCacheError("snapshot payload must be JSON text")
     try:
-        raw = json.loads(payload)
+        raw = json.loads(payload, object_pairs_hook=_unique_pairs)
     except (TypeError, json.JSONDecodeError) as error:
         raise SnapshotCacheError("snapshot payload is not valid JSON") from error
     data = _mapping(raw, label="root")
@@ -442,7 +466,7 @@ def deserialize_provider_snapshot(
         raise SnapshotCacheError("snapshot query is not canonical")
     try:
         encoded_query = NBAMarketQuery(**query_data)
-    except (TypeError, ValueError) as error:
+    except _CORRUPT_VALUE_ERRORS as error:
         raise SnapshotCacheError("snapshot query is invalid") from error
     if query_data != _query_payload(encoded_query):
         raise SnapshotCacheError("snapshot query is not canonical")
@@ -463,16 +487,16 @@ def deserialize_provider_snapshot(
     }
     try:
         snapshot = ProviderSnapshot(**decoded)
-    except (TypeError, ValueError, MalformedProviderResponseError) as error:
+    except (*_CORRUPT_VALUE_ERRORS, MalformedProviderResponseError) as error:
         raise SnapshotCacheError("snapshot values are incompatible") from error
     if snapshot.status is not SnapshotStatus.COMPLETE:
         raise SnapshotCacheError("cached snapshot is not complete")
-    # Every nested wire field must already be exactly what this snapshot
-    # serializes to.  Anything a constructor normalized, dropped, canonicalized
-    # from an alias, or deduplicated is corrupt data, not a usable cache value.
-    if serialize_provider_snapshot(snapshot, encoded_query) != json.dumps(
-        data, separators=(",", ":"), sort_keys=True
-    ):
+    # The payload must be exactly the bytes this codec writes, compared against
+    # the text as it was stored rather than a normalizing re-dump: surrounding
+    # whitespace, reordered keys, and alternate escapes are all rejected.  So is
+    # anything a constructor normalized, dropped, canonicalized from an alias, or
+    # deduplicated -- that is corrupt data, not a usable cache value.
+    if serialize_provider_snapshot(snapshot, encoded_query) != payload:
         raise SnapshotCacheError("snapshot payload is not canonical")
     return snapshot
 
@@ -884,12 +908,7 @@ class ProviderSnapshotCache:
     ) -> SnapshotCacheResult:
         """Validate one refresh result, publish it when useful, and describe it."""
 
-        if not isinstance(snapshot, ProviderSnapshot):
-            raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
-        if snapshot.provider != self.provider_name:
-            raise ValueError("DFS provider snapshot provider does not match cache provider")
-        if snapshot.contract_version != self.contract_version:
-            raise ValueError("DFS provider snapshot contract version does not match cache")
+        snapshot = self._validate_refresh(snapshot)
         status = "miss" if cache_status == "stale_candidate" else cache_status
         # Publication is decided at one instant, before anything is written.
         # Work that finished at or after the deadline is never published, and a
@@ -917,6 +936,17 @@ class ProviderSnapshotCache:
             cache_status=status,
             age_seconds=max(0.0, self._age_seconds(snapshot, self._clock_utc())),
         )
+
+    def _validate_refresh(self, snapshot: Any) -> ProviderSnapshot:
+        """Reject a refresh result that is not this provider's own snapshot."""
+
+        if not isinstance(snapshot, ProviderSnapshot):
+            raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
+        if snapshot.provider != self.provider_name:
+            raise ValueError("DFS provider snapshot provider does not match cache provider")
+        if snapshot.contract_version != self.contract_version:
+            raise ValueError("DFS provider snapshot contract version does not match cache")
+        return snapshot
 
     def _stale_fallback(
         self,
@@ -955,9 +985,7 @@ class ProviderSnapshotCache:
         while not future.done():
             now = self._clock_utc()
             if now >= context.deadline:
-                if owner:
-                    self._abandon(key, flight)
-                raise DeadlineExceededError("provider retrieval deadline exceeded")
+                raise self._deadline_exceeded(key, flight, owner=owner)
             remaining = max(0.0, (context.deadline - now).total_seconds())
             try:
                 result = future.result(timeout=min(0.05, remaining))
@@ -966,9 +994,7 @@ class ProviderSnapshotCache:
             except CancelledError as error:
                 raise DeadlineExceededError("provider retrieval deadline exceeded") from error
             if self._clock_utc() >= context.deadline:
-                if owner:
-                    self._abandon(key, flight)
-                raise DeadlineExceededError("provider retrieval deadline exceeded")
+                raise self._deadline_exceeded(key, flight, owner=owner)
             return result
         try:
             if self._clock_utc() >= context.deadline:
@@ -980,56 +1006,52 @@ class ProviderSnapshotCache:
         except CancelledError as error:
             raise DeadlineExceededError("provider retrieval deadline exceeded") from error
 
-    def _abandon(self, key: str, flight: _Flight) -> None:
+    def _deadline_exceeded(
+        self, key: str, flight: _Flight, *, owner: bool
+    ) -> DeadlineExceededError:
+        """Build this caller's deadline failure, abandoning an owner's work."""
+
+        error = DeadlineExceededError("provider retrieval deadline exceeded")
+        if owner:
+            self._abandon(key, flight, error)
+        return error
+
+    def _abandon(self, key: str, flight: _Flight, error: BaseException) -> None:
         """Leave a refresh the owner can no longer wait for.
 
         Cancellation can fail because the upstream call is already running.
-        Retiring the key then would let a second caller start duplicate work,
-        so the flight stays active and its late result resolves it instead.
+        Retiring the key then would let a second caller start duplicate work, so
+        the flight stays active until its late result drains it.  The owner's
+        failure is the flight's decision from this moment on: work the owner
+        could not cancel must never become some later follower's success.
         """
 
         if flight.upstream.cancel():
             return
         flight.detached = True
+        self._share(flight, error=error)
         add_done_callback = getattr(flight.upstream, "add_done_callback", None)
         if not callable(add_done_callback):
             # Nothing can observe the late result, so the key must not stay
             # pending for callers that would wait on it forever.
-            self._resolve_flight(
-                key,
-                flight,
-                owner=True,
-                detached=True,
-                error=DeadlineExceededError("provider retrieval deadline exceeded"),
-            )
+            self.coordinator.finish(key, flight)
             return
-        add_done_callback(lambda future: self._resolve_late(key, flight, future))
+        add_done_callback(lambda future: self._drain_late(key, flight, future))
 
-    def _resolve_late(self, key: str, flight: _Flight, future: _FutureLike) -> None:
-        """Resolve an abandoned flight from its late result, publishing nothing."""
+    def _drain_late(self, key: str, flight: _Flight, future: _FutureLike) -> None:
+        """Drain one abandoned refresh and retire its key, deciding nothing.
+
+        Every follower already holds the owner's failure, so this callback only
+        observes and validates the late result.  It publishes nothing and never
+        replaces that shared failure -- including with a late success carrying
+        cache provenance the abandoned request never had.
+        """
 
         try:
-            snapshot = future.result(timeout=0)
-            if not isinstance(snapshot, ProviderSnapshot):
-                raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
-            if snapshot.provider != self.provider_name:
-                raise ValueError("DFS provider snapshot provider does not match cache provider")
-            if snapshot.contract_version != self.contract_version:
-                raise ValueError("DFS provider snapshot contract version does not match cache")
-        except BaseException as error:
-            self._resolve_flight(key, flight, owner=True, detached=True, error=error)
-            return
-        self._resolve_flight(
-            key,
-            flight,
-            owner=True,
-            detached=True,
-            value=SnapshotCacheResult(
-                snapshot=snapshot,
-                cache_status="miss",
-                age_seconds=max(0.0, self._age_seconds(snapshot, self._clock_utc())),
-            ),
-        )
+            self._validate_refresh(future.result(timeout=0))
+        except BaseException:
+            pass
+        self.coordinator.finish(key, flight)
 
     def _resolve_flight(
         self,
@@ -1037,23 +1059,36 @@ class ProviderSnapshotCache:
         flight: _Flight,
         *,
         owner: bool,
-        detached: bool = False,
         value: SnapshotCacheResult | None = None,
         error: BaseException | None = None,
     ) -> None:
         """Hand one outcome to every follower and retire the single-flight key."""
 
-        if not owner or (flight.detached and not detached):
+        # A detached flight was already decided by its owner's deadline failure
+        # and stays active until the work it could not cancel drains it.
+        if not owner or flight.detached:
             return
-        if not flight.result.done():
-            try:
-                if error is not None:
-                    flight.result.set_exception(error)
-                else:
-                    flight.result.set_result(value)
-            except InvalidStateError:  # pragma: no cover - concurrent resolution
-                pass
+        self._share(flight, value=value, error=error)
         self.coordinator.finish(key, flight)
+
+    @staticmethod
+    def _share(
+        flight: _Flight,
+        *,
+        value: SnapshotCacheResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Publish one outcome to the flight exactly once."""
+
+        if flight.result.done():
+            return
+        try:
+            if error is not None:
+                flight.result.set_exception(error)
+            else:
+                flight.result.set_result(value)
+        except InvalidStateError:  # pragma: no cover - concurrent resolution
+            pass
 
     def _write_redis(self, key: str, payload: str, ttl: int) -> None:
         setex = getattr(self.redis_client, "setex", None)
