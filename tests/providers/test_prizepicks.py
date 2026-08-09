@@ -147,6 +147,44 @@ def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
     assert "page_fetch_failed" in snapshot.coverage.warning_codes
 
 
+def test_prizepicks_repeated_wrong_page_is_partial_with_incomplete_pagination() -> None:
+    page_one = _payload("projections.page1.valid.json")
+    session = FakeSession(
+        [
+            FakeResponse(page_one),
+            FakeResponse(copy.deepcopy(page_one)),
+        ]
+    )
+
+    snapshot = PrizePicksAdapter(
+        session=session
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert len(snapshot.markets) == 1
+    assert snapshot.coverage.pagination_complete is False
+    assert "page_metadata_mismatch" in snapshot.coverage.warning_codes
+    assert "pagination_page_mismatch" in snapshot.coverage.skipped_reasons
+    assert [call[1]["page"] for call in session.calls] == [1, 2]
+
+
+def test_prizepicks_shrinking_total_pages_is_partial_with_incomplete_pagination() -> None:
+    page_one = _payload("projections.page1.valid.json")
+    page_one["meta"] = {"current_page": 1, "total_pages": 3}
+    page_two = _payload("projections.page2.valid.json")
+    page_two["meta"] = {"current_page": 2, "total_pages": 2}
+    session = FakeSession([FakeResponse(page_one), FakeResponse(page_two)])
+
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert len(snapshot.markets) == 1
+    assert snapshot.coverage.pagination_complete is False
+    assert "page_metadata_mismatch" in snapshot.coverage.warning_codes
+    assert "pagination_total_pages_changed" in snapshot.coverage.skipped_reasons
+    assert [call[1]["page"] for call in session.calls] == [1, 2]
+
+
 def test_missing_prizepicks_relationship_is_partial_when_another_row_is_valid() -> None:
     payload = _payload("projections.page1.valid.json")
     rows = payload["data"]
@@ -237,6 +275,128 @@ def test_prizepicks_excludes_linked_live_event_and_keeps_eligible_status_evidenc
     ).get_snapshot(_query(), _context())
     assert excluded.markets == ()
     assert "ineligible_event_status" in excluded.coverage.skipped_reasons
+
+
+def test_prizepicks_recorded_boundary_excludes_ineligible_market_kinds_with_coverage() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    included = payload["included"]
+    assert isinstance(rows, list)
+    assert isinstance(included, list)
+
+    for index, status in enumerate(("live", "closed", "settled"), start=1):
+        row = copy.deepcopy(rows[0])
+        row["id"] = f"projection-status-{index}"
+        row["attributes"]["status"] = status
+        rows.append(row)
+
+    for index, kind in enumerate(
+        ("Team", "Match", "Futures", "Entry Placement"), start=1
+    ):
+        row = copy.deepcopy(rows[0])
+        row["id"] = f"projection-kind-{index}"
+        row["attributes"]["projection_type"] = kind
+        rows.append(row)
+
+    non_nba = copy.deepcopy(rows[0])
+    non_nba["id"] = "projection-nfl"
+    non_nba["relationships"]["league"]["data"] = {
+        "type": "league",
+        "id": "nfl",
+    }
+    rows.append(non_nba)
+    included.append(
+        {
+            "type": "league",
+            "id": "nfl",
+            "attributes": {"name": "NFL"},
+        }
+    )
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
+    assert snapshot.coverage.fetched_count == 9
+    assert snapshot.coverage.eligible_count == 1
+    assert snapshot.coverage.skipped_count == 8
+    assert "ineligible_status" in snapshot.coverage.skipped_reasons
+    assert "non_player_market" in snapshot.coverage.skipped_reasons
+    assert "missing_event_relationship" in snapshot.coverage.skipped_reasons
+    assert "non_nba_market" in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_future_with_linked_event_keeps_supplied_event_evidence() -> None:
+    payload = _payload("projections.page1.valid.json")
+    row = payload["data"][0]
+    included = payload["included"]
+    assert isinstance(included, list)
+    row["attributes"]["projection_type"] = "Futures"
+    row["relationships"]["event"] = {
+        "data": {"type": "game", "id": "game-future-1"}
+    }
+    included.append(
+        {
+            "type": "game",
+            "id": "game-future-1",
+            "attributes": {
+                "name": "DAL vs. SAS",
+                "status": "scheduled",
+            },
+        }
+    )
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 1
+    assert snapshot.markets[0].event is not None
+    assert snapshot.markets[0].event.provider_id == "game-future-1"
+    assert snapshot.markets[0].event.label == "DAL vs. SAS"
+
+
+def test_prizepicks_active_player_future_without_event_is_excluded() -> None:
+    payload = _payload("projections.page1.valid.json")
+    row = payload["data"][0]
+    row["attributes"]["projection_type"] = "Futures"
+    row["attributes"]["description"] = "NBA champion"
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets == ()
+    assert snapshot.coverage.skipped_count == 1
+    assert "missing_event_relationship" in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_deadline_is_checked_after_upstream_response() -> None:
+    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    now = {"value": datetime(2029, 12, 31, 23, 59, 55, tzinfo=timezone.utc)}
+    session = FakeSession([FakeResponse(_payload("projections.page1.valid.json"))])
+    original_get = session.get
+
+    def get_and_expire(url, *, params, timeout):
+        response = original_get(url, params=params, timeout=timeout)
+        now["value"] = deadline.replace(second=1)
+        return response
+
+    session.get = get_and_expire
+
+    with pytest.raises(ProviderUnavailableError, match="deadline"):
+        PrizePicksAdapter(session=session, now=lambda: now["value"]).get_snapshot(
+            _query(),
+            RetrievalContext(deadline=deadline),
+        )
+
+    assert session.calls[0][2] == (5.0, 5.0)
 
 
 def test_prizepicks_first_page_timeout_is_typed_provider_error() -> None:

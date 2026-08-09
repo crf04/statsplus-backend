@@ -6,7 +6,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -42,6 +42,19 @@ from app.utils.telemetry import (
 
 logger = logging.getLogger(__name__)
 
+_NON_PLAYER_MARKET_KINDS = {
+    "team",
+    "teams",
+    "match",
+    "matches",
+    "game",
+    "games",
+    "entry",
+    "entry-placement",
+    "placement",
+}
+_FUTURES_MARKET_KINDS = {"future", "futures"}
+
 
 class _MalformedPage(MalformedProviderResponseError):
     """The whole PrizePicks page cannot be interpreted safely."""
@@ -69,6 +82,7 @@ class _PageResult:
     warning_codes: tuple[str, ...]
     skipped_reasons: tuple[str, ...]
     malformed_count: int
+    current_page: int
     total_pages: int
     expected_total: int | None
 
@@ -87,9 +101,11 @@ class PrizePicksAdapter:
         *,
         session: requests.Session | Any | None = None,
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.now = now or (lambda: datetime.now(timezone.utc))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -107,7 +123,7 @@ class PrizePicksAdapter:
         """Fetch every current eligible PrizePicks page for ``query``."""
 
         league_id = self._LEAGUE_IDS[query.league]
-        retrieved_at = datetime.now(timezone.utc)
+        retrieved_at = self._now_utc()
         page = 1
         total_pages = 1
         expected_total: int | None = None
@@ -123,6 +139,7 @@ class PrizePicksAdapter:
         skipped_reasons: list[str] = []
         pagination_complete = True
         fanout_complete = True
+        expected_total_seen = False
 
         while page <= total_pages:
             try:
@@ -147,14 +164,42 @@ class PrizePicksAdapter:
                 pagination_complete = False
                 fanout_complete = False
                 warning_codes.append("page_malformed")
+                if "meta." in str(error):
+                    warning_codes.append("page_metadata_mismatch")
+                    skipped_reasons.append("pagination_metadata_malformed")
                 logger.warning("PrizePicks page %s was malformed after usable data", page)
                 break
 
-            total_pages = result.total_pages
-            if expected_total is None:
+            if result.current_page != page:
+                if not markets:
+                    raise self._invalid_response(
+                        f"requested page {page}, received page {result.current_page}"
+                    )
+                pagination_complete = False
+                fanout_complete = False
+                warning_codes.append("page_metadata_mismatch")
+                skipped_reasons.append("pagination_page_mismatch")
+                break
+            if result.total_pages < total_pages:
+                if not markets:
+                    raise self._invalid_response("pagination total_pages shrank")
+                pagination_complete = False
+                fanout_complete = False
+                warning_codes.append("page_metadata_mismatch")
+                skipped_reasons.append("pagination_total_pages_changed")
+                break
+            total_pages = max(total_pages, result.total_pages)
+            if not expected_total_seen:
                 expected_total = result.expected_total
-            elif result.expected_total is not None and result.expected_total != expected_total:
-                raise self._invalid_response("pagination expected total changed")
+                expected_total_seen = True
+            elif result.expected_total != expected_total:
+                if not markets:
+                    raise self._invalid_response("pagination expected total changed")
+                pagination_complete = False
+                fanout_complete = False
+                warning_codes.append("page_metadata_mismatch")
+                skipped_reasons.append("pagination_expected_total_changed")
+                break
             fetched_count += result.fetched_count
             eligible_count += result.eligible_count
             normalized_count += result.normalized_count
@@ -223,7 +268,7 @@ class PrizePicksAdapter:
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> _PageResult:
         try:
-            context.ensure_active()
+            self._ensure_active(context)
             timeout = self._bounded_timeout(context)
             with provider_call(
                 PROVIDER_PRIZEPICKS,
@@ -241,22 +286,27 @@ class PrizePicksAdapter:
                     },
                     timeout=timeout,
                 )
+                self._ensure_active(context)
                 tracker.status_code = getattr(response, "status_code", None)
                 response.raise_for_status()
+                self._ensure_active(context)
                 try:
                     payload = response.json()
                 except (TypeError, ValueError) as error:
                     raise ProviderResponseError(
                         "PrizePicks returned invalid JSON"
                     ) from error
+                self._ensure_active(context)
                 try:
-                    return self._parse_page(
+                    result = self._parse_page(
                         payload,
                         expected_sport=expected_sport,
                         allowed_statuses=allowed_statuses,
                     )
                 except _MalformedPage as error:
                     raise ProviderResponseError(str(error)) from error
+                self._ensure_active(context)
+                return result
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "PrizePicks retrieval deadline exceeded.", detail=error
@@ -273,11 +323,22 @@ class PrizePicksAdapter:
             raise _MalformedPage(str(error)) from error
 
     def _bounded_timeout(self, context: RetrievalContext) -> tuple[float, float]:
-        remaining = context.remaining_seconds()
+        remaining = context.remaining_seconds(now=self._now_utc())
         if remaining <= 0:
             raise DeadlineExceededError("PrizePicks retrieval deadline exceeded")
         connect, read = self.timeout
         return min(float(connect), remaining), min(float(read), remaining)
+
+    def _ensure_active(self, context: RetrievalContext) -> None:
+        context.ensure_active(now=self._now_utc())
+
+    def _now_utc(self) -> datetime:
+        value = self.now()
+        if not isinstance(value, datetime):
+            raise ValueError("PrizePicks clock must return an aware datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("PrizePicks clock must return an aware datetime")
+        return value.astimezone(timezone.utc)
 
     @classmethod
     def _parse_page(
@@ -297,7 +358,10 @@ class PrizePicksAdapter:
         if not isinstance(meta, Mapping):
             raise _MalformedPage("meta must be an object")
         resources = cls._index_resources(included)
+        current_page = cls._positive_int(meta.get("current_page"), "meta.current_page")
         total_pages = cls._positive_int(meta.get("total_pages", 1), "meta.total_pages")
+        if current_page > total_pages:
+            raise _MalformedPage("meta.current_page must not exceed meta.total_pages")
         expected_total = cls._optional_nonnegative_int(
             meta.get("total_count", meta.get("total_projections")),
             "meta.total_count",
@@ -340,6 +404,7 @@ class PrizePicksAdapter:
             warning_codes=tuple(dict.fromkeys(warning_codes)),
             skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
             malformed_count=malformed_count,
+            current_page=current_page,
             total_pages=total_pages,
             expected_total=expected_total,
         )
@@ -361,7 +426,14 @@ class PrizePicksAdapter:
         relationships = row.get("relationships")
         if not isinstance(attributes, Mapping) or not isinstance(relationships, Mapping):
             raise _MalformedRecord("projection attributes and relationships must be objects")
+        market_kind = cls._market_kind(attributes)
+        if market_kind == "non_player":
+            raise _ExcludedRecord("non_player_market")
+        is_future = market_kind == "future"
         projection_id = cls._required_identifier(row, "id")
+        player_relation = cls._optional_relationship(relationships, "new_player")
+        if player_relation is None and is_future:
+            raise _ExcludedRecord("non_player_market")
         player_id = cls._relationship_id(relationships, "new_player")
         league_id = cls._relationship_id(relationships, "league")
         player = resources.get(("new_player", player_id))
@@ -398,7 +470,12 @@ class PrizePicksAdapter:
             label=league_name,
             sport=sport,
         )
+        event_relation = cls._event_relationship(relationships)
+        if is_future and event_relation is None:
+            raise _ExcludedRecord("missing_event_relationship")
         event = cls._event_from_projection(attributes, relationships, resources)
+        if is_future and event is None:
+            raise _ExcludedRecord("missing_event_relationship")
         variant_label = cls._optional_text(attributes.get("odds_type"))
         variant = normalize_market_variant(variant_label)
         period_label = cls._optional_text(
@@ -448,11 +525,7 @@ class PrizePicksAdapter:
         relationships: Mapping[str, Any],
         resources: Mapping[tuple[str, str], Mapping[str, Any]],
     ) -> EventEvidence | None:
-        relation = None
-        for name in ("event", "game", "fixture"):
-            if name in relationships:
-                relation = cls._optional_relationship(relationships, name)
-                break
+        relation = cls._event_relationship(relationships)
         resource: Mapping[str, Any] | None = None
         provider_id: str | None = None
         if relation is not None:
@@ -485,6 +558,46 @@ class PrizePicksAdapter:
             )
         except ValueError as error:
             raise _MalformedRecord(str(error)) from error
+
+    @classmethod
+    def _event_relationship(
+        cls,
+        relationships: Mapping[str, Any],
+    ) -> tuple[str, str] | None:
+        for name in ("event", "game", "fixture", "match"):
+            if name in relationships:
+                return cls._optional_relationship(relationships, name)
+        return None
+
+    @staticmethod
+    def _market_kind(attributes: Mapping[str, Any]) -> str | None:
+        """Classify provider market labels without treating them as player stats."""
+
+        for key in (
+            "projection_type",
+            "projectionType",
+            "market_type",
+            "marketType",
+            "market_kind",
+            "marketKind",
+            "type",
+            "stat_type",
+            "statType",
+        ):
+            value = attributes.get(key)
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip().casefold().replace("_", "-").replace(" ", "-")
+            if not normalized:
+                continue
+            if normalized in _FUTURES_MARKET_KINDS or "future" in normalized:
+                return "future"
+            if normalized in _NON_PLAYER_MARKET_KINDS or any(
+                normalized.startswith(f"{prefix}-")
+                for prefix in _NON_PLAYER_MARKET_KINDS
+            ):
+                return "non_player"
+        return None
 
     @classmethod
     def _index_resources(
