@@ -2583,6 +2583,11 @@ class _RacingResolver:
         self.race()
         return resolution
 
+    def resolve(self, provider, evidence, season, *, observed_at=None):
+        # Resolving one identity's combined evidence is part of the same read;
+        # the race is what lands between that read and the board's write.
+        return self.resolver.resolve(provider, evidence, season, observed_at=observed_at)
+
 
 def _racing_board(repository, snapshot, race, *, rows=None):
     resolver = _RacingResolver(_resolver(rows=rows, repository=repository), race)
@@ -4914,3 +4919,207 @@ def test_contradiction_table_is_emitted_for_every_dialect(dialect):
     assert "FOREIGN KEY(decision_id) REFERENCES athlete_mapping_decisions (id)" in statement
     assert "ON DELETE CASCADE" in statement
     assert "PRIMARY KEY (decision_id, evidence_index)" in statement
+
+
+def _nameless_market(*, team: TeamEvidence | None = None) -> PlayerProjectionMarket:
+    """One market for pp-15 that names the identity but not the athlete.
+
+    A provider legitimately lists some markets with no athlete name at all.
+    Resolved alone the evidence reaches nothing, but it names the same identity
+    its named sibling does, so the two are one observation rather than two.
+    """
+
+    return PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="m-pp-15-nameless",
+        athlete=AthleteEvidence(provider_id="pp-15", name=None, team=team),
+        statistic=StatisticEvidence(provider_id="pts"),
+        threshold=MarketThreshold(value="20.5", unit="points"),
+        status=MarketStatus.AVAILABLE,
+    )
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_named_market_maps_an_identity_its_sparse_sibling_could_not(
+    mapping_db, swapped
+):
+    """The identity ends the read in the state its combined evidence supports."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = (_nameless_market(), _market())
+    if swapped:
+        markets = tuple(reversed(markets))
+    service = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+
+    board = service.get_board(query)
+
+    (outcome,) = board.mapping_outcomes
+    # The nameless market withheld a fact; it did not object to the one the
+    # other market reported, so the merged evidence maps the identity.
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.canonical_player_id == 15
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic"
+
+    service.get_board(query)
+
+    # The repeat is the same observation, so nothing is appended.
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_sparse_market_adds_the_team_its_named_sibling_omitted(mapping_db, swapped):
+    """Merged evidence is resolved whole, so every added fact still governs."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = (
+        _nameless_market(
+            team=TeamEvidence(
+                provider_id="pp-lal",
+                canonical_id=1610612747,
+                name="Los Angeles Lakers",
+                abbreviation="LAL",
+            )
+        ),
+        _market(),
+    )
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.AUTO
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping.provider_name == "Nikola Jokic"
+    assert mapping.provider_team_abbreviation == "LAL"
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_sparse_market_never_clears_a_team_the_catalog_disputes(mapping_db, swapped):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = (
+        _nameless_market(),
+        _market(
+            market_id="m-pp-15-bos",
+            team=TeamEvidence(
+                provider_id="pp-bos",
+                canonical_id=1610612738,
+                name="Boston Celtics",
+                abbreviation="BOS",
+            ),
+        ),
+    )
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.TEAM_CONFLICT
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_rejected_identity_stays_rejected_when_its_markets_are_merged(
+    mapping_db, swapped
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    markets = (_nameless_market(), _market())
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.REJECTED
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_merged_evidence_an_operator_never_reviewed_fails_closed(mapping_db, swapped):
+    """An approval covers the evidence it was given, not merged evidence."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="reviewed the provider listing",
+        provider_evidence=AthleteEvidence(provider_id="pp-15", name="LeBron James"),
+    )
+    markets = (_nameless_market(), _market())
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.canonical_player_id is None
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_manual_approval_keeps_precedence_over_merged_evidence(mapping_db, swapped):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="reviewed the provider listing",
+        provider_evidence=AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+    )
+    markets = (_nameless_market(), _market())
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    # The operator's decision governs the identity, not the exact name match.
+    assert outcome.state is MappingResolutionState.MANUAL_APPROVED
+    assert outcome.canonical_player_id == 23

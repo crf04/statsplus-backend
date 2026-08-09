@@ -511,10 +511,20 @@ reporting exactly the approved athlete cannot answer for a read that also
 reports another. Markets that do agree about the athlete are combined into one
 durable observation carrying every provider and canonical ID, name, and
 abbreviation any of them reported, so the row keeps the whole read rather than
-whichever market was written last; where they disagree about whether the
-identity may be claimed — one reporting no team where another reports one the
-catalog contradicts — the objection is what the combined evidence supports and
-what stands, and the identity is never claimed and disputed by one read.
+whichever market was written last. That combined evidence is then resolved as a
+whole rather than inheriting any one market's own pre-merge result: a market
+that reported no name said less than its sibling, it did not object to the
+athlete the sibling named, so reusing its `unmatched` result would leave the
+identity unmapped while the durable row recorded the name that maps it.
+Resolving the merged evidence re-raises every objection the catalog or an
+operator genuinely holds against evidence that only grew — a rejection, a
+manual decision the merged evidence falls outside of, a team the catalog
+contradicts, a conflicting established claim — so where the markets disagree
+about whether the identity may be claimed — one reporting no team where another
+reports one the catalog contradicts — the objection is what the combined
+evidence supports and what stands, and the identity is never claimed and
+disputed by one read. The answer depends on the combined evidence alone, so it
+is the same in every order the provider could have listed the markets in.
 Persisting those markets in turn would instead let their arrival order decide
 the identity, because each was judged against what the previous one stored, and
 would append one observation per market, so an unchanged repeat kept growing
@@ -670,7 +680,15 @@ decision candidate, and durable rejection tables. Migration 007 adds
 observation contradicted itself over, keyed by decision and ordered by the same
 deterministic evidence order the conflict was recorded in; the decision itself
 carries only the representative evidence, so without those rows the rest of the
-contradiction would be missing from history and the conflict queue. Operators
+contradiction would be missing from history and the conflict queue. Those rows
+are `ON DELETE CASCADE` children of the decision, and SQLite ignores declared
+foreign keys unless `PRAGMA foreign_keys` is set per connection, so
+`app.utils.db` registers one SQLAlchemy `connect` listener on the `Engine`
+class that sets the pragma on every SQLite DBAPI connection in the process —
+including engines scripts and tests build directly, because referential
+integrity is a property of the schema rather than of one caller's engine. The
+listener recognizes the SQLite driver connection by type and does nothing for
+PostgreSQL, which enforces its own constraints. Operators
 use
 `scripts/athlete_mappings.py` for
 read-only listing, dry runs, audited approve/override/reject/clear actions,

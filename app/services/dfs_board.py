@@ -26,7 +26,6 @@ from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_resolver import (
-    CLAIMING_MAPPING_STATES,
     MappingResolutionState,
     normalize_athlete_name,
 )
@@ -370,7 +369,7 @@ def _merged_evidence(resolutions: Iterable[Any]) -> AthleteEvidence:
     )
 
 
-def _merged_observation(resolutions: Iterable[Any]) -> Any:
+def _merged_observation(resolutions: Iterable[Any], resolve: Any) -> Any:
     """One identity's compatible markets as a single durable observation.
 
     A snapshot's markets for one provider athlete are one observation of it,
@@ -381,22 +380,28 @@ def _merged_observation(resolutions: Iterable[Any]) -> Any:
     mapped the identity -- and appended one durable observation per market, so
     an unchanged repeat of the same snapshot kept growing the audit.
 
-    The markets agree about who the identity is but not necessarily about
-    whether it may be claimed: one may report no team while another reports one
-    the catalog contradicts, or evidence an operator's approval does not cover.
-    The objection is therefore what the whole group observed, and the claims it
-    was raised against add their evidence to it, so the identity ends the read
-    in the state its combined evidence supports whatever order it arrived in.
+    The combined evidence is then resolved as a whole rather than being carried
+    onto the least-claiming market's own result.  A market that reported no
+    name did not object to the athlete its sibling named, it simply said less,
+    and reusing its result left the identity unmapped while the durable row
+    recorded the name that would have mapped it.  Resolving the merged evidence
+    asks the catalog what the group actually observed, so an objection an
+    operator or the catalog genuinely raises -- a rejection, a manual decision,
+    a team the catalog contradicts, a conflicting established claim -- is raised
+    again against evidence that only grew, while evidence that merely completes
+    a sparse market is allowed to claim the identity.  The answer depends on
+    the combined evidence alone, so it is the same in every order the provider
+    could have listed the markets in.
     """
 
-    ordered = sorted(
-        resolutions,
-        key=lambda resolution: (
-            resolution.state in CLAIMING_MAPPING_STATES,
-            _evidence_order(resolution),
-        ),
+    ordered = sorted(resolutions, key=_evidence_order)
+    merged = _merged_evidence(ordered)
+    return resolve(
+        ordered[0].provider,
+        merged,
+        ordered[0].season,
+        observed_at=ordered[0].observed_at,
     )
-    return replace(ordered[0], provider_evidence=_merged_evidence(ordered))
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,7 +929,7 @@ class DFSBoardService:
         # Every market is resolved before anything is written, so what one
         # identity's markets assert is known before any of them is acted on.
         contradictory = _contradictory_identities(resolved)
-        observed: list[Any] = []
+        groups: list[tuple[Any, ...]] = []
         for key, group in _identity_groups(resolved):
             if key in contradictory:
                 # The contradiction is one observation of the identity, so the
@@ -932,9 +937,18 @@ class DFSBoardService:
                 group = (_fail_closed_conflict(group),)
             elif key is not None and len(group) > 1:
                 # The markets agree about the identity, so together they are
-                # one observation of it and are written once, with everything
-                # they reported about it.
-                group = (_merged_observation(group),)
+                # one observation of it and are written once, resolved from
+                # everything they reported about it.
+                try:
+                    group = (
+                        _merged_observation(group, self.athlete_resolver.resolve),
+                    )
+                except AthleteMappingPersistenceError:
+                    logger.warning("Could not observe one athlete mapping")
+                    continue
+            groups.append(group)
+        observed: list[Any] = []
+        for group in groups:
             governed = None
             for resolution in group:
                 try:
