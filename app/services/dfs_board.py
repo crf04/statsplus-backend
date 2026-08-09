@@ -13,7 +13,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -29,11 +29,13 @@ from app.providers.dfs import (
     DeadlineExceededError,
     MalformedProviderResponseError,
     NBAMarketQuery,
+    PlayerProjectionMarket,
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
     SnapshotStatus,
 )
+from app.services.statistic_catalog import MatchState, StatisticCatalog, StatisticResolver
 from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
     BoardTelemetryEvent,
@@ -299,6 +301,56 @@ class DFSBoard:
 
         return bool(self.snapshots)
 
+    @property
+    def resolved_markets(self) -> tuple[PlayerProjectionMarket, ...]:
+        """Flatten usable snapshots after statistic resolution."""
+
+        return tuple(market for snapshot in self.snapshots for market in snapshot.markets)
+
+    @property
+    def canonical_markets(self) -> tuple[PlayerProjectionMarket, ...]:
+        """Markets with a reviewed canonical statistic identity."""
+
+        return tuple(
+            market
+            for market in self.resolved_markets
+            if market.statistic_match is not None
+            and market.statistic_match.is_comparable
+        )
+
+    @property
+    def unmapped_markets(self) -> tuple[PlayerProjectionMarket, ...]:
+        """Markets retained outside comparisons because their statistic is unmapped."""
+
+        return tuple(
+            market
+            for market in self.resolved_markets
+            if market.statistic_match_state is MatchState.UNMAPPED
+            or market.statistic_match_state == MatchState.UNMAPPED
+        )
+
+    @property
+    def non_comparable_markets(self) -> tuple[PlayerProjectionMarket, ...]:
+        """Canonical/provider-specific facts excluded from comparisons."""
+
+        return tuple(
+            market
+            for market in self.resolved_markets
+            if market.statistic_match is not None
+            and market.statistic_match.state is MatchState.CANONICAL
+            and not market.statistic_match.is_comparable
+        )
+
+    @property
+    def statistic_matches(self) -> tuple[Any, ...]:
+        """Typed statistic matches retained alongside each resolved market."""
+
+        return tuple(
+            market.statistic_match
+            for market in self.resolved_markets
+            if market.statistic_match is not None
+        )
+
 
 class DFSBoardService:
     """Collect enabled DFS providers under one absolute retrieval deadline."""
@@ -318,6 +370,8 @@ class DFSBoardService:
             [str, ProviderSnapshotProvider], ProviderSnapshotProvider
         ]
         | None = None,
+        statistic_catalog: StatisticCatalog | None = None,
+        statistic_resolver: StatisticResolver | None = None,
     ) -> None:
         registry = self._build_registry(provider_registry)
         decorator = snapshot_cache
@@ -356,6 +410,23 @@ class DFSBoardService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic = monotonic or time.monotonic
         self.telemetry_recorder = telemetry_recorder or BoundedBoardTelemetryRecorder()
+        if statistic_resolver is not None and not isinstance(
+            statistic_resolver, StatisticResolver
+        ):
+            raise TypeError("statistic_resolver must be a StatisticResolver")
+        if statistic_catalog is not None and not isinstance(
+            statistic_catalog, StatisticCatalog
+        ):
+            raise TypeError("statistic_catalog must be a StatisticCatalog")
+        if statistic_resolver is not None and statistic_catalog is not None and (
+            statistic_resolver.catalog is not statistic_catalog
+        ):
+            raise ValueError("statistic_resolver and statistic_catalog must agree")
+        catalog = statistic_catalog or (
+            statistic_resolver.catalog if statistic_resolver is not None else StatisticCatalog.load_default()
+        )
+        self.statistic_catalog = catalog
+        self.statistic_resolver = statistic_resolver or StatisticResolver(catalog)
 
     @staticmethod
     def _build_registry(
@@ -473,7 +544,9 @@ class DFSBoardService:
                     reason=ProviderFailureReason.DEADLINE_EXCEEDED,
                 )
 
-        ordered = tuple(outcomes[name] for name in names if name in outcomes)
+        ordered = tuple(
+            self._resolve_outcome(outcomes[name]) for name in names if name in outcomes
+        )
         board = DFSBoard(
             query=query,
             provider_outcomes=ordered,
@@ -487,6 +560,46 @@ class DFSBoardService:
             request_id=context.request_id,
         )
         return board
+
+    def _resolve_outcome(self, outcome: ProviderOutcome) -> ProviderOutcome:
+        if not outcome.usable or outcome.snapshot is None:
+            return outcome
+        return replace(outcome, snapshot=self._resolve_snapshot(outcome.snapshot))
+
+    def _resolve_snapshot(self, snapshot: ProviderSnapshot) -> ProviderSnapshot:
+        resolved_markets: list[PlayerProjectionMarket] = []
+        for market in snapshot.markets:
+            if market.statistic is None:
+                resolved_markets.append(market)
+                continue
+            match = self.statistic_resolver.resolve_market(market)
+            evidence = market.statistic
+            canonical_id = (
+                match.canonical_id
+                if match.canonical_id is not None
+                else evidence.canonical_id
+            )
+            components = (
+                match.canonical.components
+                if match.canonical is not None
+                else evidence.components
+            )
+            resolved_evidence = replace(
+                evidence,
+                canonical_id=canonical_id,
+                components=components,
+                match_state=match.state,
+            )
+            resolved_markets.append(
+                replace(
+                    market,
+                    statistic=resolved_evidence,
+                    statistic_match=match,
+                )
+            )
+        if tuple(resolved_markets) == snapshot.markets:
+            return snapshot
+        return replace(snapshot, markets=tuple(resolved_markets))
 
     def _record_telemetry(
         self,

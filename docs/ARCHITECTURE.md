@@ -151,8 +151,33 @@ providers. Expected upstream failures become sanitized `ProviderOutcome`
 reason codes (`timeout`, `deadline_exceeded`, `rate_limited`,
 `access_denied`, `upstream_error`, or `malformed_response`), while unexpected
 implementation defects propagate. Results and disabled-provider metadata are
-sorted deterministically. The collector is intentionally not a route, cache,
-identity resolver, comparison builder, or statistic catalog.
+sorted deterministically. The collector does not resolve athlete/event
+identity or build comparison groups. Before returning a board it does apply
+the injected immutable Statistic Catalog to each market, preserving the
+provider `StatisticEvidence` and attaching a typed canonical or unmapped
+`MatchState`.
+
+### Statistic Catalog
+
+`app/config/statistic_catalog.yaml` is the version-controlled source of truth
+for the reviewed cross-provider statistic identities. `StatisticCatalog.load`
+validates the document before constructing immutable `CanonicalStatistic`,
+`StatisticMapping`, and `StatisticMatch` objects. Application dependency
+assembly loads it before provider construction, so malformed schema, duplicate
+canonical identities, duplicate/conflicting provider labels, invalid periods or
+units, and inconsistent ordered components fail startup clearly. Route imports
+never load or mutate the catalog.
+
+The initial catalog maps full-game points, rebounds, assists, three-pointers
+made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use
+the reviewed component order (`PRA` is points, rebounds, assists) regardless of
+the source label order. Dabble, PrizePicks, and Underdog labels are accepted
+only when explicitly listed in the definition; case normalization preserves
+presentation evidence but does not infer meaning. Unknown labels, unknown or
+period-specific scoring periods, unit mismatches, and provider fantasy labels
+return `MatchState.UNMAPPED`, retain the original provider evidence, and are
+not included in the board's canonical-market view. This slice does not create
+comparison groups or a public route.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

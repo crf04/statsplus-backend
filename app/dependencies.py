@@ -33,6 +33,7 @@ class ApplicationDependencies:
     nl_service: Any
     user_service: Any
     dfs_snapshot_cache: Any | None = None
+    statistic_catalog: Any | None = None
 
 
 def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
@@ -47,6 +48,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.job_service import build_data_refresh_job_service
     from app.services.provider_health_service import ProviderHealthService
     from app.services.athlete_catalog_service import AthleteCatalogService
+    from app.services.statistic_catalog import StatisticCatalog
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
@@ -59,6 +61,11 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.providers.underdog import UnderdogAdapter
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
+
+    # Load the reviewed statistic definitions before constructing providers.
+    # This keeps schema failures at the app-factory boundary and avoids any
+    # route-import or request-time catalog side effects.
+    statistic_catalog = StatisticCatalog.load_default()
 
     engine = get_engine(settings)
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
@@ -103,6 +110,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
         settings=settings,
+        statistic_catalog=statistic_catalog,
     )
 
     game_service = GameService(
@@ -167,6 +175,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
         dfs_snapshot_cache=dfs_snapshot_cache,
+        statistic_catalog=statistic_catalog,
     )
 
 

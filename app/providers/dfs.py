@@ -381,6 +381,7 @@ class StatisticEvidence:
     canonical_id: str | None = None
     label: str | None = None
     components: tuple[str, ...] = ()
+    match_state: str | None = None
 
     def __post_init__(self) -> None:
         provider_id = _optional_identifier(
@@ -399,10 +400,16 @@ class StatisticEvidence:
             for component in self.components
             if isinstance(component, str) and component.strip()
         )
+        match_state = self.match_state
+        if match_state is not None and (
+            not isinstance(match_state, str) or not match_state.strip()
+        ):
+            raise ValueError("statistic match_state must be a non-empty string or None")
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "canonical_id", canonical_id)
         object.__setattr__(self, "label", label or None)
         object.__setattr__(self, "components", components)
+        object.__setattr__(self, "match_state", match_state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +566,7 @@ class PlayerProjectionMarket:
     updated_at: datetime | str | None = None
     selections: tuple[Selection, ...] = ()
     appearance: AppearanceEvidence | None = None
+    statistic_match: Any | None = None
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -621,6 +629,14 @@ class PlayerProjectionMarket:
         object.__setattr__(self, "starts_at", normalize_timestamp(self.starts_at))
         object.__setattr__(self, "updated_at", normalize_timestamp(self.updated_at))
         object.__setattr__(self, "selections", selections)
+
+    @property
+    def statistic_match_state(self) -> str | None:
+        """Return the board resolver state while retaining source evidence."""
+
+        if self.statistic_match is not None:
+            return getattr(self.statistic_match, "state", None)
+        return self.statistic.match_state if self.statistic is not None else None
 
     @property
     def source_identity(self) -> tuple[str, str] | None:
