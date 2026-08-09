@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.dfs_catalog import DFS_PROVIDER_NAMES, DFS_PROVIDER_NAME_SET
+from app.dfs_catalog import DFS_PROVIDER_NAME_SET
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -31,7 +31,6 @@ SUPPORTED_ENVIRONMENTS = frozenset({*LOCAL_ENVIRONMENTS, "staging", "production"
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000",)
-DEFAULT_LOCAL_DFS_PROVIDERS = DFS_PROVIDER_NAMES
 
 
 class ConfigurationError(ValueError):
@@ -147,12 +146,6 @@ class ProviderSettings(BaseModel):
                 providers.append(provider)
                 seen.add(provider)
         return tuple(providers)
-
-    @property
-    def enabled_dfs_providers(self) -> tuple[str, ...]:
-        """Readable alias for the explicit DFS registry setting."""
-
-        return self.dfs_enabled_providers
 
 
 class LLMSettings(BaseModel):
@@ -370,8 +363,6 @@ def _build_settings(
     database_url = reader.text("DATABASE_URL", DEFAULT_SQLITE_URL) or DEFAULT_SQLITE_URL
 
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
-    if configured_dfs_providers is None and environment in LOCAL_ENVIRONMENTS:
-        configured_dfs_providers = DEFAULT_LOCAL_DFS_PROVIDERS
 
     auth = _validated_model(
         AuthenticationSettings,
@@ -612,7 +603,6 @@ __all__ = [
     "CatalogSettings",
     "CORSSettings",
     "ConfigurationError",
-    "DEFAULT_LOCAL_DFS_PROVIDERS",
     "DatabaseSettings",
     "LLMSettings",
     "NBASeasonSettings",

@@ -31,10 +31,10 @@ application can make is
 `workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
 
 The internal DFS collector receives an explicit injected provider registry. In
-development and testing, omitting `DFS_ENABLED_PROVIDERS` opts into the three
-recorded provider adapters (`dabble`, `prizepicks`, and `underdog`) for local
-experimentation; an empty value disables them. Production must provide a
-non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list.
+development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
+adapters. Tests and local experiments may explicitly configure the recorded
+provider adapters (`dabble`, `prizepicks`, and `underdog`). Production must
+provide a non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list.
 
 The board deadline defaults to 15 seconds. Each DFS GET defaults to a 3-second
 connect cap and an 8-second read cap, both reduced to the remaining absolute

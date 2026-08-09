@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,11 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.utils.telemetry import ProviderResponseError
+from app.utils.telemetry import (
+    BoardTelemetryEvent,
+    BoardTelemetryRecorder,
+    BoundedBoardTelemetryRecorder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +224,7 @@ class DFSBoardService:
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
         settings: RuntimeSettings | None = None,
+        telemetry_recorder: BoardTelemetryRecorder | None = None,
     ) -> None:
         registry = self._build_registry(provider_registry)
         enabled = tuple(registry)
@@ -243,6 +250,7 @@ class DFSBoardService:
         self.deadline_seconds = min(float(deadline_seconds), DEFAULT_BOARD_DEADLINE_SECONDS)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic = monotonic or time.monotonic
+        self.telemetry_recorder = telemetry_recorder or BoundedBoardTelemetryRecorder()
 
     @staticmethod
     def _build_registry(
@@ -361,11 +369,39 @@ class DFSBoardService:
                 )
 
         ordered = tuple(outcomes[name] for name in names if name in outcomes)
-        return DFSBoard(
+        board = DFSBoard(
             query=query,
             provider_outcomes=ordered,
             disabled_providers=self.disabled_providers,
             generated_at=generated_at,
+        )
+        self._record_telemetry(self.monotonic() - start, board)
+        return board
+
+    def _record_telemetry(self, duration: float, board: DFSBoard) -> None:
+        outcome_counts = Counter(outcome.status.value for outcome in board.provider_outcomes)
+        reason_counts = Counter(
+            outcome.reason.value
+            for outcome in board.provider_outcomes
+            if outcome.reason is not None
+        )
+        fetched = eligible = normalized = skipped = 0
+        for outcome in board.provider_outcomes:
+            if outcome.coverage is not None:
+                fetched += outcome.coverage.fetched_count
+                eligible += outcome.coverage.eligible_count
+                normalized += outcome.coverage.normalized_count
+                skipped += outcome.coverage.skipped_count
+        self.telemetry_recorder.record(
+            BoardTelemetryEvent(
+                duration_ms=max(0.0, duration * 1000.0),
+                outcome_counts=tuple(sorted(outcome_counts.items())),
+                failure_reason_counts=tuple(sorted(reason_counts.items())),
+                fetched_count=fetched,
+                eligible_count=eligible,
+                normalized_count=normalized,
+                skipped_count=skipped,
+            )
         )
 
     def _retrieve_one(

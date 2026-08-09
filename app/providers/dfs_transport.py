@@ -97,6 +97,7 @@ def _run_request(
     parse: Callable[[Any], _Result],
     invalid_json_message: str,
     request_get: Callable[..., Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Run the complete potentially blocking response pipeline in a daemon."""
 
@@ -152,7 +153,7 @@ def _run_request(
         result.error = error
     finally:
         clear_retry_progress_callback()
-        result.completed_at = time.monotonic()
+        result.completed_at = monotonic()
         _request_slots.release()
         result.done.set()
 
@@ -179,6 +180,7 @@ def _run_bounded(
     deadline_message: str = "provider retrieval deadline exceeded",
     observe_result: _ResultObserver | None = None,
     prepare: _Preparation | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> _RequestResult:
     """Own one bounded worker lifecycle for every provider pipeline.
 
@@ -190,7 +192,7 @@ def _run_bounded(
     growing separate slot, thread, and deadline implementations.
     """
 
-    monotonic_start = time.monotonic()
+    monotonic_start = monotonic()
     current = now()
     context.ensure_active(now=current)
     remaining = context.remaining_seconds(now=current)
@@ -205,9 +207,9 @@ def _run_bounded(
             # The absolute monotonic deadline is intentionally separate from
             # Requests' (connect, read) timeout tuple.
             prepared_release = prepare(monotonic_deadline)
-        if time.monotonic() >= monotonic_deadline:
+        if monotonic() >= monotonic_deadline:
             raise DeadlineExceededError(deadline_message)
-        slot_wait = max(0.0, monotonic_deadline - time.monotonic())
+        slot_wait = max(0.0, monotonic_deadline - monotonic())
         if not _request_slots.acquire(timeout=slot_wait):
             raise DeadlineExceededError(deadline_message)
         slot_acquired = True
@@ -218,6 +220,8 @@ def _run_bounded(
             try:
                 worker(holder)
             finally:
+                if holder.completed_at is None:
+                    holder.completed_at = monotonic()
                 if prepared_release is not None:
                     prepared_release()
 
@@ -244,7 +248,7 @@ def _run_bounded(
         if observe_result is not None:
             observe_result(result, monotonic_deadline)
 
-    remaining = max(0.0, monotonic_deadline - time.monotonic())
+    remaining = max(0.0, monotonic_deadline - monotonic())
     if not result.done.wait(timeout=remaining):
         observe()
         raise DeadlineExceededError(deadline_message)
@@ -253,7 +257,6 @@ def _run_bounded(
     if (
         result.completed_at is None
         or result.completed_at > monotonic_deadline
-        or time.monotonic() >= monotonic_deadline
     ):
         raise DeadlineExceededError(deadline_message)
     context.ensure_active(now=now())
@@ -311,6 +314,7 @@ def request_json(
     operation: str,
     parse: Callable[[Any], _Result],
     error_policy: TransportErrorPolicy,
+    monotonic: Callable[[], float] | None = None,
 ) -> _Result:
     """Execute one instrumented JSON request under an absolute deadline.
 
@@ -399,11 +403,13 @@ def request_json(
                     parse,
                     error_policy.invalid_json_message,
                     request_get=get_request,
+                    monotonic=monotonic or time.monotonic,
                 ),
                 worker_name=f"statsplus-{provider}-request",
                 deadline_message=f"{provider} retrieval deadline exceeded",
                 observe_result=observe_result,
                 prepare=prepare_request,
+                monotonic=monotonic or time.monotonic,
             )
             return result.value
     except DeadlineExceededError as error:

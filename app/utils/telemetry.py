@@ -159,6 +159,96 @@ class ProviderEvent:
     status_code: int | None = None
 
 
+@dataclass(frozen=True)
+class BoardTelemetryEvent:
+    """Bounded aggregate telemetry for one internal DFS board collection."""
+
+    duration_ms: float
+    outcome_counts: tuple[tuple[str, int], ...]
+    failure_reason_counts: tuple[tuple[str, int], ...]
+    fetched_count: int
+    eligible_count: int
+    normalized_count: int
+    skipped_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.duration_ms, (int, float)) or self.duration_ms < 0:
+            raise ValueError("board telemetry duration must be non-negative")
+        for labels, allowed in (
+            (self.outcome_counts, {"complete", "partial", "failed"}),
+            (
+                self.failure_reason_counts,
+                {
+                    "timeout",
+                    "deadline_exceeded",
+                    "rate_limited",
+                    "access_denied",
+                    "upstream_error",
+                    "malformed_response",
+                },
+            ),
+        ):
+            if any(
+                not isinstance(label, str)
+                or not label
+                or label not in allowed
+                or not isinstance(count, int)
+                or count < 1
+                for label, count in labels
+            ):
+                raise ValueError("board telemetry labels must be stable and bounded")
+        if any(
+            not isinstance(count, int) or count < 0
+            for count in (
+                self.fetched_count,
+                self.eligible_count,
+                self.normalized_count,
+                self.skipped_count,
+            )
+        ):
+            raise ValueError("board telemetry coverage counts must be non-negative")
+
+
+class BoardTelemetryRecorder:
+    """Typed recorder seam for board aggregates."""
+
+    def record(self, event: BoardTelemetryEvent) -> None:
+        raise NotImplementedError
+
+
+class BoundedBoardTelemetryRecorder(BoardTelemetryRecorder):
+    """Record board aggregates in the existing bounded event buffer."""
+
+    def record(self, event: BoardTelemetryEvent) -> None:
+        payload = {
+            "provider": "dfs_board",
+            "operation": "get_board",
+            "outcome": "complete"
+            if event.outcome_counts == (("complete", 1),)
+            else "aggregate",
+            "duration_ms": float(event.duration_ms),
+            "retry_count": 0,
+            "cache_status": CACHE_DISABLED,
+            "status_code": None,
+            "request_id": "-",
+            "outcome_counts": dict(event.outcome_counts),
+            "failure_reason_counts": dict(event.failure_reason_counts),
+            "fetched_count": event.fetched_count,
+            "eligible_count": event.eligible_count,
+            "normalized_count": event.normalized_count,
+            "skipped_count": event.skipped_count,
+        }
+        logger.info(
+            "board_event operation=get_board outcome=%s duration_ms=%.1f",
+            payload["outcome"],
+            event.duration_ms,
+        )
+        with _buffer_lock:
+            _event_buffer.append(payload)
+            global _provider_events_total
+            _provider_events_total += 1
+
+
 def set_clock(
     monotonic: Callable[[], float] | None = None,
     now_iso: Callable[[], str] | None = None,
@@ -493,6 +583,9 @@ __all__ = [
     "UNDERDOG_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
+    "BoardTelemetryEvent",
+    "BoardTelemetryRecorder",
+    "BoundedBoardTelemetryRecorder",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",

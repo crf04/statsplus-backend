@@ -117,12 +117,13 @@ def test_settings_parse_internal_dfs_board_registry_and_bounds(monkeypatch):
     assert settings.providers.dfs_dabble_detail_concurrency == 2
 
 
-def test_local_dfs_registry_defaults_to_all_and_is_not_feature_flagged(monkeypatch):
+def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypatch):
     monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
     monkeypatch.delenv("DFS_BOARD_ENABLED", raising=False)
     settings = load_settings(environ={"FLASK_ENV": "testing"})
-    assert settings.providers.dfs_enabled_providers == ("dabble", "prizepicks", "underdog")
+    assert settings.providers.dfs_enabled_providers == ()
     assert not hasattr(settings.providers, "dfs_board_enabled")
+    assert not hasattr(settings.providers, "enabled_dfs_providers")
 
 
 def test_board_deadline_setting_cannot_exceed_fifteen_seconds():

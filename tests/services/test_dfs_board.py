@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,6 +20,8 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.services.dfs_board import DFSBoardService, ProviderFailureReason, ProviderOutcomeStatus
+from app.utils.telemetry import BoardTelemetryEvent
+from app.utils import telemetry
 
 
 _RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
@@ -49,18 +50,39 @@ def _context(seconds: float = 2.0) -> RetrievalContext:
     )
 
 
+class FakeBoardTelemetry:
+    def __init__(self) -> None:
+        self.events: list[BoardTelemetryEvent] = []
+
+    def record(self, event: BoardTelemetryEvent) -> None:
+        self.events.append(event)
+
+
+class ControlledClock:
+    def __init__(self) -> None:
+        self.wall = _RETRIEVED_AT
+        self.monotonic_value = 0.0
+
+    def now(self) -> datetime:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.monotonic_value
+
+    def advance(self, seconds: float) -> None:
+        self.monotonic_value += seconds
+        self.wall += timedelta(seconds=seconds)
+
+
 class FakeProvider:
-    def __init__(self, name: str, result=None, *, delay: float = 0.0, error=None):
+    def __init__(self, name: str, result=None, *, error=None):
         self.name = name
         self.result = result if result is not None else _snapshot(name)
-        self.delay = delay
         self.error = error
         self.calls: list[tuple[NBAMarketQuery, RetrievalContext]] = []
 
     def get_snapshot(self, query, context):
         self.calls.append((query, context))
-        if self.delay:
-            time.sleep(self.delay)
         if self.error is not None:
             raise self.error
         return self.result
@@ -91,7 +113,7 @@ def test_bare_timeout_error_has_stable_timeout_reason() -> None:
     assert outcome.reason is ProviderFailureReason.TIMEOUT
 
 
-def test_completed_provider_result_at_deadline_is_harvested() -> None:
+def test_provider_result_after_deadline_is_dropped_without_sleep() -> None:
     started = threading.Event()
     release = threading.Event()
 
@@ -103,21 +125,67 @@ def test_completed_provider_result_at_deadline_is_harvested() -> None:
             return self.result
 
     provider = BoundaryProvider("dabble")
-    service = DFSBoardService(provider_registry={"dabble": provider}, deadline_seconds=0.05)
+    clock = ControlledClock()
+    telemetry = FakeBoardTelemetry()
+    service = DFSBoardService(
+        provider_registry={"dabble": provider},
+        deadline_seconds=1,
+        clock=clock.now,
+        monotonic=clock.monotonic,
+        telemetry_recorder=telemetry,
+    )
     result: dict[str, object] = {}
+    context = RetrievalContext(deadline=clock.wall + timedelta(seconds=10), request_id="board-test")
 
     def retrieve() -> None:
-        result["board"] = service.get_board(NBAMarketQuery(), _context(1))
+        result["board"] = service.get_board(NBAMarketQuery(), context)
 
     thread = threading.Thread(target=retrieve)
     thread.start()
     assert started.wait(timeout=1)
-    time.sleep(0.04)
+    clock.advance(2)
     release.set()
     thread.join(timeout=1)
     assert not thread.is_alive()
     board = result["board"]
-    assert board.snapshots == (provider.result,)
+    assert board.snapshots == ()
+    assert telemetry.events[0].outcome_counts == (("failed", 1),)
+
+
+def test_board_telemetry_records_bounded_outcomes_and_coverage() -> None:
+    telemetry = FakeBoardTelemetry()
+    coverage = CoverageEvidence(
+        fetched_count=4,
+        eligible_count=2,
+        normalized_count=1,
+        skipped_count=2,
+        pagination_complete=True,
+        fanout_complete=True,
+    )
+    provider = FakeProvider("dabble", _snapshot("dabble", coverage=coverage))
+    board = DFSBoardService(
+        provider_registry={"dabble": provider}, telemetry_recorder=telemetry
+    ).get_board(NBAMarketQuery(), _context())
+
+    assert board.usable
+    event = telemetry.events[0]
+    assert event.duration_ms >= 0
+    assert event.outcome_counts == (("complete", 1),)
+    assert event.failure_reason_counts == ()
+    assert (event.fetched_count, event.eligible_count, event.normalized_count, event.skipped_count) == (4, 2, 1, 2)
+
+
+def test_default_board_telemetry_uses_bounded_events_without_provider_failure_count() -> None:
+    telemetry.clear_recorded_provider_events()
+    try:
+        service = DFSBoardService(provider_registry={"dabble": FakeProvider("dabble")})
+        service.get_board(NBAMarketQuery(), _context())
+        event = telemetry.get_recorded_provider_events()[-1]
+        assert event["provider"] == "dfs_board"
+        assert event["outcome_counts"] == {"complete": 1}
+        assert "dfs_board" not in telemetry.snapshot_metrics()["provider_failures"]
+    finally:
+        telemetry.clear_recorded_provider_events()
 
 
 def test_production_settings_require_an_explicit_nonempty_provider_list():
@@ -147,16 +215,37 @@ def test_disabled_providers_are_metadata_not_failed_outcomes():
 
 
 def test_enabled_provider_registry_is_concurrent_and_context_is_shared():
-    providers = {name: FakeProvider(name, delay=0.04) for name in ("dabble", "prizepicks", "underdog")}
+    release = threading.Event()
+    started = [threading.Event() for _ in range(3)]
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+
+    class BoundedProvider(FakeProvider):
+        def get_snapshot(self, query, context):
+            nonlocal active, maximum
+            self.calls.append((query, context))
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            started[tuple(providers).index(self.name)].set()
+            release.wait()
+            with lock:
+                active -= 1
+            return self.result
+
+    providers = {name: BoundedProvider(name) for name in ("dabble", "prizepicks", "underdog")}
     service = DFSBoardService(provider_registry=providers, max_concurrency=2)
     context = _context()
-
-    started = time.monotonic()
-    board = service.get_board(NBAMarketQuery(), context)
-    elapsed = time.monotonic() - started
-
-    assert elapsed >= 0.08
-    assert elapsed < 0.20
+    result: dict[str, object] = {}
+    thread = threading.Thread(target=lambda: result.setdefault("board", service.get_board(NBAMarketQuery(), context)))
+    thread.start()
+    assert started[0].wait(timeout=1)
+    assert started[1].wait(timeout=1)
+    assert maximum == 2
+    release.set()
+    thread.join(timeout=1)
+    board = result["board"]
     child_contexts = [call_context for provider in providers.values() for _, call_context in provider.calls]
     assert child_contexts
     assert all(call_context is child_contexts[0] for call_context in child_contexts)
