@@ -335,32 +335,70 @@ def test_complete_empty_snapshot_is_usable_and_coverage_is_preserved():
     assert board.snapshots == (outcome.snapshot,)
 
 
-def test_partial_snapshot_is_one_observation_and_keeps_coverage():
+@pytest.mark.parametrize("provider_name", ["dabble", "prizepicks", "underdog"])
+@pytest.mark.parametrize(
+    ("coverage_code", "expected_reason"),
+    [
+        (CoverageCode.MALFORMED_RECORD, ProviderFailureReason.MALFORMED_RESPONSE),
+        (CoverageCode.PAGINATION_METADATA_MALFORMED, ProviderFailureReason.MALFORMED_RESPONSE),
+        (CoverageCode.PAGE_METADATA_MISMATCH, ProviderFailureReason.MALFORMED_RESPONSE),
+        (CoverageCode.PAGE_FETCH_FAILED, ProviderFailureReason.UPSTREAM_ERROR),
+    ],
+)
+def test_partial_provider_coverage_has_stable_reason(provider_name, coverage_code, expected_reason):
     coverage = CoverageEvidence(
         fetched_count=2,
         eligible_count=1,
         normalized_count=1,
         skipped_count=1,
         pagination_complete=False,
-        warning_codes=(CoverageCode.PAGE_FETCH_FAILED,),
+        warning_codes=(coverage_code,),
     )
     snapshot = ProviderSnapshot(
-        provider="dabble",
+        provider=provider_name,
         status=SnapshotStatus.PARTIAL,
-        markets=(PlayerProjectionMarket(provider="dabble"),),
+        markets=(PlayerProjectionMarket(provider=provider_name),),
         coverage=coverage,
         retrieved_at=_RETRIEVED_AT,
     )
-    provider = FakeProvider("dabble", snapshot)
+    provider = FakeProvider(provider_name, snapshot)
 
-    outcome = DFSBoardService(provider_registry={"dabble": provider}).get_board(
+    outcome = DFSBoardService(provider_registry={provider_name: provider}).get_board(
         NBAMarketQuery(), _context()
     ).provider_outcomes[0]
 
     assert outcome.status is ProviderOutcomeStatus.PARTIAL
     assert outcome.snapshot is snapshot
     assert outcome.coverage is coverage
-    assert outcome.reason is ProviderFailureReason.UPSTREAM_ERROR
+    assert outcome.reason is expected_reason
+
+
+def test_board_telemetry_records_partial_malformed_reason() -> None:
+    recorder = FakeBoardTelemetry()
+    coverage = CoverageEvidence(
+        fetched_count=2,
+        eligible_count=1,
+        normalized_count=1,
+        skipped_count=1,
+        pagination_complete=False,
+        warning_codes=(CoverageCode.MALFORMED_RECORD,),
+    )
+    provider = FakeProvider(
+        "underdog",
+        ProviderSnapshot(
+            provider="underdog",
+            status=SnapshotStatus.PARTIAL,
+            markets=(PlayerProjectionMarket(provider="underdog"),),
+            coverage=coverage,
+            retrieved_at=_RETRIEVED_AT,
+        ),
+    )
+
+    DFSBoardService(
+        provider_registry={"underdog": provider}, telemetry_recorder=recorder
+    ).get_board(NBAMarketQuery(), _context())
+
+    assert recorder.events[0].failure_reason_counts == (("malformed_response", 1),)
 
 
 def test_expected_provider_failures_do_not_erase_usable_snapshots():

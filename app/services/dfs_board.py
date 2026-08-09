@@ -46,6 +46,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_BOARD_DEADLINE_SECONDS = 15.0
 DEFAULT_BOARD_MAX_CONCURRENCY = 3
 
+# CoverageCode is a closed shared vocabulary. Keep the board's semantic
+# classification closed too, so newly reviewed malformed/pagination codes
+# cannot silently fall through to ``upstream_error``.
+_MALFORMED_COVERAGE_CODES = frozenset(
+    {
+        CoverageCode.CONFLICTING_SOURCE_IDENTITY,
+        CoverageCode.FIXTURE_MALFORMED,
+        CoverageCode.MALFORMED_RECORD,
+        CoverageCode.PAGE_MALFORMED,
+        CoverageCode.PAGE_METADATA_MISMATCH,
+        CoverageCode.PAGINATION_EXPECTED_TOTAL_CHANGED,
+        CoverageCode.PAGINATION_METADATA_MALFORMED,
+        CoverageCode.PAGINATION_PAGE_MISMATCH,
+        CoverageCode.PAGINATION_TOTAL_PAGES_CHANGED,
+    }
+)
+_UPSTREAM_COVERAGE_CODES = frozenset(
+    {
+        CoverageCode.FIXTURE_FAILED,
+        CoverageCode.FIXTURE_LIST_FAILED,
+        CoverageCode.PAGE_FETCH_FAILED,
+    }
+)
+
 
 class ProviderOutcomeStatus(str, Enum):
     """Stable status for one enabled provider attempt."""
@@ -533,13 +557,9 @@ class DFSBoardService:
     @staticmethod
     def _partial_reason(snapshot: ProviderSnapshot) -> ProviderFailureReason | None:
         codes = set(snapshot.coverage.warning_codes) | set(snapshot.coverage.skipped_reasons)
-        if CoverageCode.PAGE_MALFORMED in codes or CoverageCode.FIXTURE_MALFORMED in codes:
+        if codes & _MALFORMED_COVERAGE_CODES:
             return ProviderFailureReason.MALFORMED_RESPONSE
-        if codes & {
-            CoverageCode.PAGE_FETCH_FAILED,
-            CoverageCode.FIXTURE_FAILED,
-            CoverageCode.FIXTURE_LIST_FAILED,
-        }:
+        if codes & _UPSTREAM_COVERAGE_CODES:
             return ProviderFailureReason.UPSTREAM_ERROR
         return ProviderFailureReason.UPSTREAM_ERROR if not snapshot.coverage.is_complete else None
 
