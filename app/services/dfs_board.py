@@ -632,7 +632,13 @@ class DFSBoardService:
                     continue
                 try:
                     resolution = self.athlete_resolver.resolve_market(
-                        market, board.query.season
+                        market,
+                        board.query.season,
+                        # The snapshot is temporally coherent, so its retrieval
+                        # instant is when every market in it was observed.  A
+                        # slow provider read must be ordered by when it saw the
+                        # provider, not by when the board got around to it.
+                        observed_at=snapshot.retrieved_at,
                     )
                     self.athlete_mapping_repository.record_resolution(resolution)
                 except AthleteMappingPersistenceError:

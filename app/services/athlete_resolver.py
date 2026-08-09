@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -14,6 +15,7 @@ from app.providers.dfs import (
     AthleteEvidence,
     PlayerProjectionMarket,
     TeamEvidence,
+    normalize_timestamp,
 )
 from app.providers.nba_stats import validate_canonical_season
 from app.services.athlete_mapping_errors import (
@@ -102,6 +104,11 @@ class AthleteResolution:
     canonical_athlete: CanonicalAthlete | None = None
     candidates: tuple[CanonicalAthlete, ...] = ()
     reason: str | None = None
+    #: When the provider observation behind this result was retrieved, in UTC.
+    #: It is the provider's own instant, never a persistence time, so a slow
+    #: read that lands after a later decision can still be recognized as older
+    #: than it.  ``None`` when the caller observed no provider read.
+    observed_at: datetime | str | None = None
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -124,6 +131,7 @@ class AthleteResolution:
         object.__setattr__(self, "season", season)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "observed_at", normalize_timestamp(self.observed_at))
 
     @property
     def provider_athlete_id(self) -> str | None:
@@ -189,9 +197,28 @@ class AthleteResolver:
         provider: str,
         evidence: AthleteEvidence,
         season: str,
+        *,
+        observed_at: datetime | str | None = None,
     ) -> AthleteResolution:
-        """Resolve one provider's typed athlete evidence for one season."""
+        """Resolve one provider's typed athlete evidence for one season.
 
+        ``observed_at`` is when the provider was read.  Resolution itself is a
+        pure function of the evidence and the catalog, so the instant is only
+        carried onto the result for the persistence seam to order it against
+        decisions taken while the read was in flight.
+        """
+
+        resolution = self._resolve(provider, evidence, season)
+        if observed_at is None:
+            return resolution
+        return replace(resolution, observed_at=observed_at)
+
+    def _resolve(
+        self,
+        provider: str,
+        evidence: AthleteEvidence,
+        season: str,
+    ) -> AthleteResolution:
         if not isinstance(evidence, AthleteEvidence):
             raise TypeError("evidence must be AthleteEvidence")
         canonical_season = validate_canonical_season(season)
@@ -368,7 +395,11 @@ class AthleteResolver:
         )
 
     def resolve_market(
-        self, market: PlayerProjectionMarket, season: str
+        self,
+        market: PlayerProjectionMarket,
+        season: str,
+        *,
+        observed_at: datetime | str | None = None,
     ) -> AthleteResolution:
         """Resolve the athlete evidence carried by one normalized market."""
 
@@ -384,7 +415,9 @@ class AthleteResolver:
                 name=evidence.name,
                 team=market.team,
             )
-        return self.resolve(market.provider, evidence, season)
+        return self.resolve(
+            market.provider, evidence, season, observed_at=observed_at
+        )
 
     def _catalog_rows(self, season: str) -> Sequence[Mapping[str, Any]]:
         try:

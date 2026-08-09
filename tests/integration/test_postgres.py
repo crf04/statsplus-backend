@@ -266,6 +266,7 @@ def _mapping_resolution(
     provider_id="pp-15",
     rows=None,
     team_canonical_id=1610612747,
+    observed_at=None,
 ):
     from app.providers.dfs import AthleteEvidence, TeamEvidence
     from app.services.athlete_resolver import AthleteResolver
@@ -296,6 +297,7 @@ def _mapping_resolution(
             team=TeamEvidence(provider_id="pp-lal", canonical_id=team_canonical_id),
         ),
         "2024-25",
+        observed_at=observed_at,
     )
 
 
@@ -596,3 +598,88 @@ def test_repeated_state_after_a_different_observation_persists_on_postgres(mappi
         item.decision_state
         for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "ambiguous", "auto"]
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        {"conflict_canonical_player_id": 23},
+        {"conflict_canonical_name": "LeBron James"},
+    ],
+)
+def test_conflict_columns_check_rejects_a_non_conflict_row_on_postgres(
+    mapping_engine, conflict
+):
+    """Only a current conflict may name a conflicting athlete on Postgres too."""
+    from sqlalchemy import insert
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.athlete_mapping import ProviderAthleteMapping
+
+    with pytest.raises(IntegrityError), mapping_engine.begin() as connection:
+        connection.execute(
+            insert(ProviderAthleteMapping.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-99",
+                mapping_state="auto",
+                is_active=True,
+                first_seen_at=_CLEARED_AT,
+                last_seen_at=_CLEARED_AT,
+                **conflict,
+            )
+        )
+
+
+def test_a_delayed_observation_cannot_undo_a_clearance_on_postgres(mapping_engine):
+    """Observation order has to hold against real timestamptz columns."""
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    observed_before = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
+    observed_after = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+    reused_rows = [
+        {
+            "season": "2024-25",
+            "player_id": 23,
+            "display_name": "LeBron James",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+    ]
+    # The operator decisions are taken between the two provider reads.
+    repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
+    stale = _mapping_resolution(observed_at=observed_before)
+
+    assert repository.record_resolution(stale).state == "auto"
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    assert repository.clear_rejection(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="the identity was reinstated",
+    )
+    reused = _mapping_resolution(
+        name="LeBron James", rows=reused_rows, observed_at=observed_after
+    )
+    assert repository.record_resolution(reused).state == "auto"
+
+    replayed = repository.record_resolution(stale)
+
+    assert replayed.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 23
+    assert mapping.conflict_canonical_player_id is None
+    assert repository.list_conflicts() == []
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto", "rejected", "rejection_cleared", "auto"]

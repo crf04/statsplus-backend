@@ -46,6 +46,13 @@ from app.services.dfs_board import DFSBoardService
 #: Fixed clearing timestamp for direct-insert constraint cases.
 _CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
 
+#: Provider observation instants for out-of-order board reads.  The operator
+#: fixture clock sits between them, so a read retrieved at ``_OBSERVED_BEFORE``
+#: predates every operator decision and one retrieved at ``_OBSERVED_AFTER``
+#: postdates them.
+_OBSERVED_BEFORE = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
+_OBSERVED_AFTER = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+
 
 def _catalog_row(
     player_id: int,
@@ -270,6 +277,60 @@ def test_active_state_check_rejects_an_incoherent_row(mapping_db):
 
 
 @pytest.mark.parametrize(
+    ("mapping_state", "is_active"),
+    [("auto", True), ("manual_approved", True), ("rejected", False)],
+)
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        {"conflict_canonical_player_id": 23},
+        {"conflict_canonical_name": "LeBron James"},
+    ],
+)
+def test_conflict_columns_check_rejects_a_non_conflict_row(
+    mapping_db, mapping_state, is_active, conflict
+):
+    """Only a current conflict may name a conflicting canonical athlete."""
+
+    engine, now = mapping_db
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert(ProviderAthleteMapping.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-99",
+                mapping_state=mapping_state,
+                is_active=is_active,
+                first_seen_at=now,
+                last_seen_at=now,
+                **conflict,
+            )
+        )
+
+
+def test_conflict_columns_check_still_allows_a_current_conflict(mapping_db):
+    engine, now = mapping_db
+
+    with engine.begin() as connection:
+        connection.execute(
+            insert(ProviderAthleteMapping.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-99",
+                mapping_state="mapping_conflict",
+                is_active=False,
+                conflict_canonical_player_id=23,
+                conflict_canonical_name="LeBron James",
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+        )
+
+    mapping = AthleteMappingRepository(engine).get_mapping("prizepicks", "pp-99")
+    assert mapping is not None
+    assert mapping.conflict_canonical_player_id == 23
+
+
+@pytest.mark.parametrize(
     "clearing",
     [
         # An active rejection carries no clearing evidence at all.
@@ -297,6 +358,17 @@ def test_rejection_clear_check_rejects_partial_clearing_evidence(mapping_db, cle
                 **clearing,
             )
         )
+
+
+@pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
+def test_conflict_columns_check_is_emitted_for_every_dialect(dialect):
+    statement = str(
+        CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect)
+    )
+
+    assert "ck_provider_mapping_conflict_fields" in statement
+    for column in ("conflict_canonical_player_id", "conflict_canonical_name"):
+        assert f"{column} IS NULL" in statement
 
 
 @pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
@@ -330,7 +402,12 @@ def _resolver(*, rows=None, repository=None) -> AthleteResolver:
     return AthleteResolver(FakeCatalog(rows), mapping_repository=repository)
 
 
-def _auto_resolution(*, provider_id: str = "pp-15", name: str = "Nikola Jokic"):
+def _auto_resolution(
+    *,
+    provider_id: str = "pp-15",
+    name: str = "Nikola Jokic",
+    observed_at: datetime | None = None,
+):
     return _resolver().resolve(
         "prizepicks",
         AthleteEvidence(
@@ -344,6 +421,7 @@ def _auto_resolution(*, provider_id: str = "pp-15", name: str = "Nikola Jokic"):
             ),
         ),
         "2024-25",
+        observed_at=observed_at,
     )
 
 
@@ -2136,7 +2214,10 @@ def _market(
     )
 
 
-def _snapshot(*markets: PlayerProjectionMarket) -> ProviderSnapshot:
+def _snapshot(
+    *markets: PlayerProjectionMarket,
+    retrieved_at: datetime = datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+) -> ProviderSnapshot:
     return ProviderSnapshot(
         provider="prizepicks",
         status=SnapshotStatus.COMPLETE,
@@ -2148,7 +2229,7 @@ def _snapshot(*markets: PlayerProjectionMarket) -> ProviderSnapshot:
             pagination_complete=True,
             fanout_complete=True,
         ),
-        retrieved_at=datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+        retrieved_at=retrieved_at,
     )
 
 
@@ -2309,7 +2390,7 @@ def test_board_returns_market_when_mapping_persistence_fails():
     market = _market()
 
     class Resolver:
-        def resolve_market(self, market, season):
+        def resolve_market(self, market, season, *, observed_at=None):
             return type("Resolution", (), {"is_auto_qualifying": True})()
 
     class BrokenRepository:
@@ -2328,7 +2409,7 @@ def test_board_returns_markets_when_a_mapping_read_fails():
     market = _market()
 
     class BrokenReadResolver:
-        def resolve_market(self, market, season):
+        def resolve_market(self, market, season, *, observed_at=None):
             raise AthleteMappingPersistenceError("mapping state is unreadable")
 
     class Repository:
@@ -2341,3 +2422,340 @@ def test_board_returns_markets_when_a_mapping_read_fails():
 
     assert _unresolved_markets(board) == (market,)
     assert board.mapping_outcomes == ()
+
+
+def _reused_identity_auto(
+    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
+):
+    """The provider now reports LeBron James under the reused pp-15 identity."""
+
+    return _resolver(repository=repository).resolve(
+        "prizepicks",
+        _reused_identity_evidence(),
+        "2024-25",
+        observed_at=observed_at,
+    )
+
+
+def test_resolution_carries_the_observation_instant_in_utc():
+    resolver = _resolver()
+    evidence = AthleteEvidence(provider_id="pp-15", name="Nikola Jokic")
+
+    resolved = resolver.resolve(
+        "prizepicks", evidence, "2024-25", observed_at="2026-08-09T13:00:00+00:00"
+    )
+
+    assert resolved.observed_at == _OBSERVED_AFTER
+    with pytest.raises(ValueError, match="timezone-aware"):
+        resolver.resolve(
+            "prizepicks", evidence, "2024-25", observed_at=datetime(2026, 8, 9, 13)
+        )
+
+
+def test_the_decision_audit_records_the_observation_instant(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_AFTER))
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+
+    history = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [item.decision_state for item in history] == ["auto", "rejected"]
+    # A board observation records when the provider was read; an operator
+    # decision has no observation of its own to record.
+    assert history[0].observed_at == _OBSERVED_AFTER.isoformat()
+    assert history[0].to_dict()["observed_at"] == _OBSERVED_AFTER.isoformat()
+    assert history[1].observed_at is None
+
+
+def test_a_delayed_pre_clear_observation_cannot_deactivate_a_newer_mapping(mapping_db):
+    """The rejection and its clearing govern every earlier board read.
+
+    The identity was mapped, rejected, cleared, and mapped again to a different
+    canonical athlete.  A read the provider produced before the clearing may
+    still be in flight; landing it now would deactivate the newer mapping and
+    queue a conflict from evidence that predates the operator's decision.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    stale = _auto_resolution(observed_at=_OBSERVED_BEFORE)
+    assert repository.record_resolution(stale).state == "auto"
+    _reject_and_clear(repository, "pp-15")
+    fresh = _reused_identity_auto(repository, observed_at=_OBSERVED_AFTER)
+    assert repository.record_resolution(fresh).state == "auto"
+
+    replayed = repository.record_resolution(stale)
+
+    assert replayed.state == "auto"
+    assert replayed.persisted is False
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 23
+    assert active.provider_name == "LeBron James"
+    assert active.conflict_canonical_player_id is None
+    assert repository.list_conflicts() == []
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+
+
+def test_a_delayed_pre_clear_conflict_cannot_requeue_a_newer_mapping(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    assert repository.record_resolution(
+        _auto_resolution(observed_at=_OBSERVED_BEFORE)
+    ).state == "auto"
+    # Resolved while the identity was still mapped to player 15, so it reports
+    # a conflict against that mapping rather than against the current one.
+    stale_conflict = _resolver(
+        rows=[_catalog_row(15, "Other Name"), _catalog_row(23, "Nikola Jokic")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+    assert stale_conflict.state is MappingResolutionState.MAPPING_CONFLICT
+    _reject_and_clear(repository, "pp-15")
+    repository.record_resolution(_reused_identity_auto(repository, observed_at=_OBSERVED_AFTER))
+
+    replayed = repository.record_resolution(stale_conflict)
+
+    assert replayed.state == "auto"
+    assert replayed.persisted is False
+    assert repository.list_conflicts() == []
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.is_active is True
+    assert mapping.canonical_player_id == 23
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+
+
+def test_a_delayed_pre_clear_unmatched_observation_cannot_requeue_an_identity(
+    mapping_db,
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    stale = _resolver(
+        rows=[_catalog_row(23, "LeBron James")], repository=repository
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="King James"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+    assert repository.record_resolution(stale).persisted is True
+    _reject_and_clear(repository, "pp-77")
+    named = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+        "2024-25",
+        observed_at=_OBSERVED_AFTER,
+    )
+    assert repository.record_resolution(named).state == "auto"
+
+    replayed = repository.record_resolution(stale)
+
+    assert replayed.persisted is False
+    assert repository.list_unresolved(provider="prizepicks") == []
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+    ] == ["unmatched", "rejected", "rejection_cleared", "auto"]
+
+
+def test_a_racing_delayed_observation_never_beats_the_newer_one(mapping_db):
+    """Whichever read commits first, the older observation changes nothing."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    stale = _auto_resolution(observed_at=_OBSERVED_BEFORE)
+    repository.record_resolution(stale)
+    _reject_and_clear(repository, "pp-15")
+    fresh = _reused_identity_auto(repository, observed_at=_OBSERVED_AFTER)
+    barrier = threading.Barrier(2)
+
+    def _record(resolution):
+        barrier.wait(timeout=5)
+        return repository.record_resolution(resolution)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(_record, stale),
+            executor.submit(_record, fresh),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 23
+    assert repository.list_conflicts() == []
+    states = [item.decision_state for item in repository.history()]
+    assert states == ["auto", "rejected", "rejection_cleared", "auto"]
+
+
+def test_a_reactivated_identity_retains_no_conflict_fields(mapping_db):
+    """A conflict is evidence for one state, not a scar on every later one."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_BEFORE))
+    conflict = _resolver(
+        rows=[_catalog_row(15, "Other Name"), _catalog_row(23, "Nikola Jokic")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+    assert repository.record_resolution(conflict).state == "mapping_conflict"
+    queued = repository.get_mapping("prizepicks", "pp-15")
+    assert queued is not None
+    assert queued.conflict_canonical_player_id == 23
+
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    rejected = repository.get_mapping("prizepicks", "pp-15")
+    assert rejected is not None
+    assert rejected.mapping_state == "rejected"
+    assert rejected.conflict_canonical_player_id is None
+    assert rejected.conflict_canonical_name is None
+
+    assert repository.clear_rejection(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="the identity was reinstated",
+    )
+    assert repository.record_resolution(
+        _reused_identity_auto(repository, observed_at=_OBSERVED_AFTER)
+    ).state == "auto"
+
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "auto"
+    assert active.canonical_player_id == 23
+    assert active.conflict_canonical_player_id is None
+    assert active.conflict_canonical_name is None
+    assert repository.list_conflicts() == []
+
+
+def test_a_manual_reactivation_retains_no_conflict_fields(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    conflict = _resolver(
+        rows=[_catalog_row(15, "Other Name"), _catalog_row(23, "Nikola Jokic")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+    )
+    assert repository.record_resolution(conflict).state == "mapping_conflict"
+
+    repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the provider reused the identity",
+    )
+
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.conflict_canonical_player_id is None
+    assert active.conflict_canonical_name is None
+    assert repository.list_conflicts() == []
+
+
+def test_board_fences_a_snapshot_retrieved_before_a_cleared_rejection(mapping_db):
+    """The board plumbs the snapshot's retrieval instant into the audit."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    provider = _StaticProvider(_snapshot(_market(), retrieved_at=_OBSERVED_BEFORE))
+    service = DFSBoardService(
+        provider_registry={"prizepicks": provider},
+        athlete_resolver=_resolver(repository=repository),
+        athlete_mapping_repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+    service.get_board(query)
+    _reject_and_clear(repository, "pp-15")
+
+    provider.snapshot = _snapshot(
+        _market(name="LeBron James"), retrieved_at=_OBSERVED_AFTER
+    )
+    service.get_board(query)
+    # A slow provider read retrieved before the clearing finally arrives.
+    provider.snapshot = _snapshot(_market(), retrieved_at=_OBSERVED_BEFORE)
+    delayed = service.get_board(query)
+
+    assert delayed.usable
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 23
+    assert repository.list_conflicts() == []
+    history = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [item.decision_state for item in history] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+    assert history[0].observed_at == _OBSERVED_BEFORE.isoformat()
+    assert history[-1].observed_at == _OBSERVED_AFTER.isoformat()
+
+
+def test_a_delayed_pre_clear_observation_of_an_unmapped_identity_writes_nothing(
+    mapping_db,
+):
+    """An identity may be governed without ever holding a mapping row."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    stale = _resolver(
+        rows=[_catalog_row(23, "LeBron James")], repository=repository
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="King James"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+    assert repository.record_resolution(stale).persisted is True
+    _reject_and_clear(repository, "pp-77")
+
+    replayed = repository.record_resolution(stale)
+
+    assert replayed.state == "unmatched"
+    assert replayed.persisted is False
+    assert replayed.mapping is None
+    assert repository.get_mapping("prizepicks", "pp-77") is None
+    assert repository.list_unresolved(provider="prizepicks") == []
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+    ] == ["unmatched", "rejected", "rejection_cleared"]

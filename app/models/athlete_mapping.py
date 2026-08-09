@@ -95,6 +95,15 @@ class ProviderAthleteMapping(Base):
             "(is_active = false AND mapping_state IN ('mapping_conflict', 'rejected'))",
             name="ck_provider_mapping_active_state",
         ),
+        # The conflicting canonical athlete is evidence for one state only.  A
+        # row that has left ``mapping_conflict`` -- reactivated automatically,
+        # remapped by an operator, or rejected -- has no conflict left to
+        # review, so it may not keep naming one.
+        CheckConstraint(
+            "mapping_state = 'mapping_conflict' OR "
+            "(conflict_canonical_player_id IS NULL AND conflict_canonical_name IS NULL)",
+            name="ck_provider_mapping_conflict_fields",
+        ),
         Index(
             "ix_provider_athlete_mappings_active",
             "provider",
@@ -133,6 +142,10 @@ class AthleteMappingDecision(Base):
     # reappear after a different observation or decision.  The repository
     # compares it with the latest decision for the identity instead.
     idempotency_key = Column(String(128), nullable=True)
+    # When the provider was observed, as opposed to when the observation was
+    # persisted.  Only board observations carry one; an operator decision is
+    # its own event and is ordered by ``created_at``.
+    observed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

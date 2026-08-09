@@ -60,6 +60,17 @@ _MANUAL_MAPPING_STATES = frozenset(
     }
 )
 
+#: Decision states an operator recorded.  Each is its own event, so its
+#: ``created_at`` is when the identity was decided and is the instant a board
+#: observation has to postdate to still be news.
+_OPERATOR_DECISION_STATES = frozenset(
+    _MANUAL_MAPPING_STATES
+    | {
+        MappingResolutionState.REJECTED.value,
+        MappingResolutionState.REJECTION_CLEARED.value,
+    }
+)
+
 #: Decision states whose provider evidence is a direct board observation of the
 #: identity.  Operator decisions only ever copy evidence forward, and a
 #: mapping conflict records the *contradicting* side of a disagreement, so
@@ -230,6 +241,7 @@ class MappingDecisionRecord:
     provider_team_abbreviation: str | None
     operator_id: str | None
     reason: str | None
+    observed_at: str | None
     created_at: str
     candidates: tuple[MappingCandidateRecord, ...] = ()
 
@@ -252,6 +264,7 @@ class MappingDecisionRecord:
             "provider_team_abbreviation": self.provider_team_abbreviation,
             "operator_id": self.operator_id,
             "reason": self.reason,
+            "observed_at": self.observed_at,
             "created_at": self.created_at,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
@@ -584,7 +597,7 @@ class AthleteMappingRepository:
         self,
         resolution: AthleteResolution,
         *,
-        observed_at: datetime | None = None,
+        recorded_at: datetime | None = None,
     ) -> MappingPersistenceResult:
         """Persist the first qualifying automatic result transactionally.
 
@@ -596,14 +609,14 @@ class AthleteMappingRepository:
             raise TypeError("resolution must be AthleteResolution")
         if not resolution.is_auto_qualifying:
             if resolution.state is MappingResolutionState.MAPPING_CONFLICT:
-                return self._persist_mapping_conflict(resolution, observed_at=observed_at)
+                return self._persist_mapping_conflict(resolution, recorded_at=recorded_at)
             if resolution.state in UNRESOLVED_OBSERVATION_STATES:
                 return self._persist_unresolved_observation(
-                    resolution, observed_at=observed_at
+                    resolution, recorded_at=recorded_at
                 )
             return MappingPersistenceResult(resolution.state.value, False)
         provider, provider_id = self._resolution_key(resolution)
-        now = _utc(observed_at or self._clock())
+        now = _utc(recorded_at or self._clock())
         values = self._resolution_values(resolution)
         fingerprint = self._idempotency_key(resolution)
 
@@ -611,6 +624,9 @@ class AthleteMappingRepository:
             governed = self._governing_decision(connection, provider, provider_id)
             if governed is not None:
                 return governed
+            stale = self._stale_observation(connection, provider, provider_id, resolution)
+            if stale is not None:
+                return stale
 
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if existing is not None:
@@ -651,6 +667,10 @@ class AthleteMappingRepository:
                         **values,
                         mapping_state=MappingResolutionState.AUTO.value,
                         is_active=True,
+                        # Whatever this row was before, it is now an automatic
+                        # mapping, so it names no conflict for an operator.
+                        conflict_canonical_player_id=None,
+                        conflict_canonical_name=None,
                         last_seen_at=now,
                     )
                 )
@@ -700,7 +720,7 @@ class AthleteMappingRepository:
         self,
         resolution: AthleteResolution,
         *,
-        observed_at: datetime | None,
+        recorded_at: datetime | None,
     ) -> MappingPersistenceResult:
         """Retain one typed unresolved observation in the audit log.
 
@@ -713,11 +733,14 @@ class AthleteMappingRepository:
         """
 
         provider, provider_id = self._resolution_key(resolution)
-        now = _utc(observed_at or self._clock())
+        now = _utc(recorded_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
             governed = self._governing_decision(connection, provider, provider_id)
             if governed is not None:
                 return governed
+            stale = self._stale_observation(connection, provider, provider_id, resolution)
+            if stale is not None:
+                return stale
             if resolution.state is MappingResolutionState.TEAM_CONFLICT:
                 # The active mapping has to be read inside this serialized
                 # transaction.  A lookup taken before the lock can miss an
@@ -743,12 +766,12 @@ class AthleteMappingRepository:
         self,
         resolution: AthleteResolution,
         *,
-        observed_at: datetime | None = None,
+        recorded_at: datetime | None = None,
     ) -> MappingPersistenceResult:
         """Persist a qualifying result or a later evidence conflict."""
 
         try:
-            return self.persist_auto_decision(resolution, observed_at=observed_at)
+            return self.persist_auto_decision(resolution, recorded_at=recorded_at)
         except SQLAlchemyError as exc:
             raise AthleteMappingPersistenceError(DEFAULT_MAPPING_FAILURE_SUMMARY) from exc
 
@@ -756,10 +779,10 @@ class AthleteMappingRepository:
         self,
         resolution: AthleteResolution,
         *,
-        observed_at: datetime | None,
+        recorded_at: datetime | None,
     ) -> MappingPersistenceResult:
         provider, provider_id = self._resolution_key(resolution)
-        now = _utc(observed_at or self._clock())
+        now = _utc(recorded_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
             governed = self._governing_decision(
                 connection,
@@ -770,6 +793,9 @@ class AthleteMappingRepository:
             )
             if governed is not None:
                 return governed
+            stale = self._stale_observation(connection, provider, provider_id, resolution)
+            if stale is not None:
+                return stale
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if self._is_repeated_conflict(existing, resolution):
                 # The resolver read the conflict this row already records, so
@@ -984,6 +1010,9 @@ class AthleteMappingRepository:
                     .values(
                         mapping_state=MappingResolutionState.REJECTED.value,
                         is_active=False,
+                        # A suppressed identity has no conflict left to review.
+                        conflict_canonical_player_id=None,
+                        conflict_canonical_name=None,
                         last_seen_at=now,
                     )
                 )
@@ -1213,6 +1242,78 @@ class AthleteMappingRepository:
         return None
 
     @classmethod
+    def _stale_observation(
+        cls,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+        resolution: AthleteResolution,
+    ) -> MappingPersistenceResult | None:
+        """Return the current state when this read predates the governing one.
+
+        A provider read can be slow, retried, or replayed, so an observation
+        may land long after the identity moved on: rejected and cleared by an
+        operator, or mapped again from a newer read.  Landing it then would
+        deactivate the newer mapping and queue a conflict between two
+        canonical athletes that were never claimed at the same time.
+
+        The read is therefore ordered by when the provider was observed
+        against the newest governing instant for the identity -- an operator
+        decision's ``created_at``, and the ``observed_at`` of every durable
+        board observation.  Both are UTC instants of the event itself, never a
+        persistence time.  An observation contemporaneous with the governing
+        instant is not from before it, so only a strictly earlier read is
+        fenced and replaying the same read stays idempotent.  A caller that
+        reports no observation instant cannot be ordered and is left alone.
+        """
+
+        observed_at = resolution.observed_at
+        if observed_at is None:
+            return None
+        governing = cls._governing_observation_instant(connection, provider, provider_id)
+        if governing is None or _utc(observed_at) >= governing:
+            return None
+        mapping = cls._select_mapping(connection, provider, provider_id, lock=True)
+        state = (
+            resolution.state.value
+            if mapping is None
+            else str(mapping["mapping_state"])
+        )
+        return MappingPersistenceResult(state, False, mapping=cls._mapping_record(mapping))
+
+    @staticmethod
+    def _governing_observation_instant(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> datetime | None:
+        """Return the newest instant this identity was decided or observed."""
+
+        identity = and_(
+            AthleteMappingDecision.provider == provider,
+            AthleteMappingDecision.provider_athlete_id == provider_id,
+        )
+        decided_at = connection.execute(
+            select(AthleteMappingDecision.created_at)
+            .where(
+                and_(
+                    identity,
+                    AthleteMappingDecision.decision_state.in_(_OPERATOR_DECISION_STATES),
+                )
+            )
+            .order_by(AthleteMappingDecision.created_at.desc())
+            .limit(1)
+        ).scalar()
+        observed_at = connection.execute(
+            select(AthleteMappingDecision.observed_at)
+            .where(and_(identity, AthleteMappingDecision.observed_at.isnot(None)))
+            .order_by(AthleteMappingDecision.observed_at.desc())
+            .limit(1)
+        ).scalar()
+        instants = [_utc(value) for value in (decided_at, observed_at) if value is not None]
+        return max(instants) if instants else None
+
+    @classmethod
     def _conflict_still_applies(
         cls,
         connection: Connection,
@@ -1228,9 +1329,10 @@ class AthleteMappingRepository:
         stale read may only land afterwards.  Only the provider-side evidence
         decides, and it is compared with the governing manual decision read
         inside this transaction -- the operator who recorded it saw exactly
-        that evidence.  A decision timestamp cannot stand in for that
-        comparison, because ``observed_at`` is when a read is persisted rather
-        than when the resolver produced it.
+        that evidence.  Observation order cannot stand in for that comparison:
+        a read taken after the decision may still carry evidence the operator
+        never reviewed.  Ordering only fences reads from before the decision,
+        and ``_stale_observation`` has already applied it.
 
         The canonical choice is deliberately not compared.  An operator who
         accepts the provider's observation may still keep or pick a canonical
@@ -1513,6 +1615,7 @@ class AthleteMappingRepository:
             operator_id=None,
             reason=reason or resolution.reason,
             idempotency_key=idempotency_key,
+            observed_at=resolution.observed_at,
             created_at=now,
         )
         decision = self._insert_decision_values(connection, **values)
@@ -1574,6 +1677,7 @@ class AthleteMappingRepository:
         operator_id: str | None = None,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        observed_at: datetime | None = None,
         created_at: datetime,
     ) -> Mapping[str, Any] | None:
         values = {
@@ -1594,6 +1698,7 @@ class AthleteMappingRepository:
             "operator_id": operator_id,
             "reason": reason,
             "idempotency_key": idempotency_key,
+            "observed_at": None if observed_at is None else _utc(observed_at),
             "created_at": created_at,
         }
         result = connection.execute(
@@ -1915,6 +2020,7 @@ class AthleteMappingRepository:
             provider_team_abbreviation=row["provider_team_abbreviation"],
             operator_id=row["operator_id"],
             reason=row["reason"],
+            observed_at=_iso(row["observed_at"]),
             created_at=_iso(row["created_at"]) or "",
             candidates=candidates,
         )

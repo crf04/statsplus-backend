@@ -483,10 +483,25 @@ governing manual decision read inside that transaction. The canonical choice is
 not compared: an operator who accepts the provider's observation may still keep
 or pick a canonical athlete the automatic side would not have chosen — that
 disagreement is the decision — so a stale automatic candidate cannot undo it.
-A decision timestamp cannot stand in for the comparison either, because the
-observation time a write carries is when the read is persisted, not when the
-resolver produced it. Evidence the governed decision does contradict is
-evidence nobody reviewed, and still promotes a conflict.
+Observation order cannot stand in for the comparison either: a read taken after
+a decision may still carry evidence the operator never reviewed. Evidence the
+governed decision does contradict is evidence nobody reviewed, and still
+promotes a conflict.
+Ordering fences the other case — a read from *before* the governing decision.
+Each `ProviderSnapshot` is temporally coherent, so the board carries its
+`retrieved_at` through the resolver onto the typed resolution and into the
+`observed_at` column of the decision it appends. That is when the provider was
+observed, never when the observation was persisted; the persistence-time
+override is named `recorded_at` so the two cannot be confused. Inside the
+identity transaction an automatic, unresolved, or conflict write is compared
+against the newest governing instant for that identity — an operator
+decision's `created_at`, and the `observed_at` of every durable board
+observation, all UTC. A strictly earlier read changes nothing, so a slow read
+retrieved before a reject/clear cannot deactivate the mapping a newer read
+established or queue a conflict between two canonical athletes that were never
+claimed at the same time. A read contemporaneous with the governing instant is
+not from before it, so replaying one stays idempotent, and a caller that
+reports no observation instant is never fenced.
 The per-identity lock row is inserted inside a savepoint that is always left
 before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
@@ -497,8 +512,12 @@ test gives each worker its own engine and repository and releases them from a
 barrier — the overlap is resolved by the database, not by a shared lock.
 Migration 006 also creates a per-identity lock table and database checks for
 closed mapping states, the closed decision-state set, active-state coherence,
-and cleared-rejection coherence — an active rejection carries no `cleared_at`,
-`cleared_by`, or `clear_reason`, and a cleared one carries all three. Those
+cleared-rejection coherence — an active rejection carries no `cleared_at`,
+`cleared_by`, or `clear_reason`, and a cleared one carries all three — and
+conflict-column coherence: only a current `mapping_conflict` row may name a
+`conflict_canonical_player_id`/`conflict_canonical_name`, so an identity that
+is reactivated automatically, remapped by an operator, or rejected keeps no
+conflict an operator has already left behind. Those
 checks compare booleans with
 `true`/`false` rather than `1`/`0`, so they are valid on PostgreSQL as well as
 SQLite. The operator CLI never runs migrations implicitly; run
