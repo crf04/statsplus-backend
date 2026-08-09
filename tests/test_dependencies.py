@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.config.settings import RuntimeSettings
 
 
@@ -90,3 +92,40 @@ def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):
         "app.routes.user_routes",
     ):
         importlib.reload(importlib.import_module(module_name))
+
+
+def test_dependency_assembly_validates_catalog_before_provider_construction(monkeypatch):
+    from app.dependencies import build_dependencies
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+    )
+    constructor = Mock(side_effect=AssertionError("provider constructed before catalog"))
+    monkeypatch.setattr("app.providers.dabble.DabbleAdapter", constructor)
+    loader = Mock(side_effect=ValueError("invalid statistic schema"))
+
+    with pytest.raises(ValueError, match="invalid statistic schema"):
+        build_dependencies(settings, statistic_catalog_path="invalid.yaml", statistic_catalog_loader=loader)
+
+    loader.assert_called_once_with("invalid.yaml")
+    constructor.assert_not_called()
+
+
+def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, tmp_path):
+    from app.dependencies import build_dependencies
+    from app.services.statistic_catalog import StatisticCatalogError
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+    )
+    constructor = Mock(side_effect=AssertionError("provider constructed before catalog"))
+    monkeypatch.setattr("app.providers.dabble.DabbleAdapter", constructor)
+    definition_path = tmp_path / "unhashable-key-statistics.yaml"
+    definition_path.write_text("schema_version: 1\n? [points, assists]\n: value\n", encoding="utf-8")
+
+    with pytest.raises(StatisticCatalogError, match="could not be loaded"):
+        build_dependencies(settings, statistic_catalog_path=definition_path)
+
+    constructor.assert_not_called()

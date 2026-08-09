@@ -86,6 +86,13 @@ the most important variables:
 
 Never commit `.env`, Firebase service-account JSON, OpenAI keys, database dumps containing private users, or provider credentials.
 
+The internal DFS board loads the reviewed statistic definitions from
+`app/config/statistic_catalog.yaml` during dependency assembly. The immutable
+catalog supports full-game points, rebounds, assists, three-pointers made,
+steals, blocks, turnovers, PRA, PA, PR, and RA. Unknown, period-specific, and
+provider fantasy labels remain visible as unmapped evidence; they are not
+silently compared. Invalid catalog schema or conflicting mappings fail startup.
+
 ## Demo database
 
 `nba_play_types.db` is intentionally tracked for public demos and local onboarding. It should contain public NBA-derived data only. The local `users` table is created by the app and should not be populated with real user data in public snapshots.

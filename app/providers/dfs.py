@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+
 from app.utils.request_id import is_valid_request_id
 
 
@@ -40,17 +42,6 @@ class MarketStatus(str, Enum):
 
     AVAILABLE = "available"
     SUSPENDED = "suspended"
-
-
-class ScoringPeriod(str, Enum):
-    """Reviewed scoring periods; unknown provider labels remain evidence."""
-
-    FULL_GAME = "full_game"
-    FIRST_HALF = "first_half"
-    SECOND_HALF = "second_half"
-    FIRST_QUARTER = "first_quarter"
-    SECOND_QUARTER = "second_quarter"
-    UNKNOWN = "unknown"
 
 
 EnumValue = TypeVar("EnumValue", bound=Enum)
@@ -142,15 +133,26 @@ def normalize_market_status(label: str | MarketStatus | None) -> NormalizedLabel
     return NormalizedLabel(status, label)
 
 
+_SCORING_PERIOD_VALUES = {period.value: period for period in ScoringPeriod}
+
+
 def normalize_scoring_period(
     label: str | ScoringPeriod | None,
 ) -> NormalizedLabel[ScoringPeriod]:
-    """Normalize reviewed scoring periods without guessing unknown labels."""
+    """Normalize reviewed scoring periods without guessing unknown labels.
+
+    Canonical closed-vocabulary values such as ``full_game`` resolve exactly;
+    everything else falls back to the reviewed label map and stays UNKNOWN.
+    """
 
     if isinstance(label, ScoringPeriod):
         original_label = None if label is ScoringPeriod.UNKNOWN else label.value
         return NormalizedLabel(label, original_label)
-    normalized = label.strip().casefold().replace("-", " ") if isinstance(label, str) else ""
+    cleaned = label.strip().casefold() if isinstance(label, str) else ""
+    canonical = _SCORING_PERIOD_VALUES.get(cleaned)
+    if canonical is not None:
+        return NormalizedLabel(canonical, label)
+    normalized = cleaned.replace("-", " ")
     values = {
         "full game": ScoringPeriod.FULL_GAME,
         "game": ScoringPeriod.FULL_GAME,
@@ -553,12 +555,13 @@ class PlayerProjectionMarket:
     status_label: str | None = None
     variant: MarketVariant | str = MarketVariant.STANDARD
     variant_label: str | None = None
-    scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME
+    scoring_period: ScoringPeriod | str | None = ScoringPeriod.UNKNOWN
     scoring_period_label: str | None = None
     starts_at: datetime | str | None = None
     updated_at: datetime | str | None = None
     selections: tuple[Selection, ...] = ()
     appearance: AppearanceEvidence | None = None
+    statistic_match: StatisticMatch | None = None
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -594,6 +597,10 @@ class PlayerProjectionMarket:
             self.statistic, StatisticEvidence
         ):
             raise ValueError("market statistic must be StatisticEvidence or None")
+        if self.statistic_match is not None and not isinstance(
+            self.statistic_match, StatisticMatch
+        ):
+            raise ValueError("market statistic_match must be StatisticMatch or None")
         if self.threshold is not None and not isinstance(self.threshold, MarketThreshold):
             raise ValueError("market threshold must be MarketThreshold or None")
         status = normalize_market_status(self.status)
@@ -621,6 +628,14 @@ class PlayerProjectionMarket:
         object.__setattr__(self, "starts_at", normalize_timestamp(self.starts_at))
         object.__setattr__(self, "updated_at", normalize_timestamp(self.updated_at))
         object.__setattr__(self, "selections", selections)
+
+    @property
+    def statistic_match_state(self) -> MatchState | None:
+        """Return the board resolver state while retaining source evidence."""
+
+        if self.statistic_match is not None:
+            return self.statistic_match.state
+        return None
 
     @property
     def source_identity(self) -> tuple[str, str] | None:

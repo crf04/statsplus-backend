@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from flask import current_app
@@ -33,9 +35,15 @@ class ApplicationDependencies:
     nl_service: Any
     user_service: Any
     dfs_snapshot_cache: Any | None = None
+    statistic_catalog: Any | None = None
 
 
-def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
+def build_dependencies(
+    settings: RuntimeSettings,
+    *,
+    statistic_catalog_path: str | Path | None = None,
+    statistic_catalog_loader: Callable[[str | Path], Any] | None = None,
+) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
     from app.services.data_service import DataService
@@ -47,6 +55,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.job_service import build_data_refresh_job_service
     from app.services.provider_health_service import ProviderHealthService
     from app.services.athlete_catalog_service import AthleteCatalogService
+    from app.services.statistic_catalog import StatisticCatalog
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
@@ -59,6 +68,20 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.providers.underdog import UnderdogAdapter
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
+
+    # Load the reviewed statistic definitions before constructing providers.
+    # This keeps schema failures at the app-factory boundary and avoids any
+    # route-import or request-time catalog side effects.
+    if statistic_catalog_loader is not None and statistic_catalog_path is None:
+        statistic_catalog = statistic_catalog_loader(StatisticCatalog.DEFAULT_PATH)
+    elif statistic_catalog_loader is not None:
+        statistic_catalog = statistic_catalog_loader(statistic_catalog_path)
+    elif statistic_catalog_path is not None:
+        statistic_catalog = StatisticCatalog.load(statistic_catalog_path)
+    else:
+        statistic_catalog = StatisticCatalog.load_default()
+    if not isinstance(statistic_catalog, StatisticCatalog):
+        raise TypeError("statistic catalog loader must return a StatisticCatalog")
 
     engine = get_engine(settings)
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
@@ -103,6 +126,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
         settings=settings,
+        statistic_catalog=statistic_catalog,
     )
 
     game_service = GameService(
@@ -167,6 +191,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
         dfs_snapshot_cache=dfs_snapshot_cache,
+        statistic_catalog=statistic_catalog,
     )
 
 

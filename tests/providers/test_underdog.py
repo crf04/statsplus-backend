@@ -157,6 +157,21 @@ def test_missing_underdog_variant_label_remains_missing() -> None:
     assert market.variant_label is None
 
 
+def test_underdog_canonical_scoring_period_resolves_with_label_evidence() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = "full_game"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.scoring_period is ScoringPeriod.FULL_GAME
+    assert market.scoring_period_label == "full_game"
+
+
 def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> None:
     payload = _payload()
     players = payload["players"]

@@ -92,7 +92,10 @@ without guessing missing facts; they expose no provider-specific public routes.
 
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
-includes the adapter-contract version; it never serializes a `DFSBoard`.
+includes the adapter-contract version; it never serializes a `DFSBoard`. The
+cache sits below Statistic Catalog resolution, so a cached market carries
+provider evidence only: a resolved market is refused on the way in, and a wire
+value with a `statistic_match` is rejected as corrupt rather than decoded.
 Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a
@@ -151,8 +154,60 @@ providers. Expected upstream failures become sanitized `ProviderOutcome`
 reason codes (`timeout`, `deadline_exceeded`, `rate_limited`,
 `access_denied`, `upstream_error`, or `malformed_response`), while unexpected
 implementation defects propagate. Results and disabled-provider metadata are
-sorted deterministically. The collector is intentionally not a route, cache,
-identity resolver, comparison builder, or statistic catalog.
+sorted deterministically. The collector does not resolve athlete/event
+identity or build comparison groups. Before returning a board it does apply
+the injected immutable Statistic Catalog to each market, preserving the
+provider `StatisticEvidence` and attaching a typed canonical or unmapped
+`MatchState`.
+
+### Statistic Catalog
+
+`app/config/statistic_catalog.yaml` is the version-controlled source of truth
+for the reviewed cross-provider statistic identities. The
+`statistic_catalog_schema` loader owns YAML decoding and the implemented schema
+version; the shared `app.domain.statistics` module owns the closed
+`ScoringPeriod`, `StatisticUnit`, `MatchState`, and `MatchReason` vocabularies
+plus the immutable typed `StatisticMatch`, while the catalog service owns
+resolution. Schema v1's field vocabulary is exact and closed: a document has
+`schema_version` (required, exactly `1`), optional `component_order`, and
+`statistics`; each statistic has `id`, `label`, `unit`, `scoring_periods`,
+`components`, and optional `provider_mappings` and `comparable`. There are no
+aliases — `version`, `canonical_statistics`, `canonical_id`, `display_name`,
+`name`, `period`, `periods`, `ordered_components`, `mappings`,
+`provider_labels`, `comparison_allowed`, and mapping `alias`/`aliases` are all
+rejected, so two spellings of one reviewed fact can never disagree. The
+document's values are read exactly rather than normalized: identifiers, units,
+scoring periods, and provider names must already be the canonical value, labels
+must carry no surrounding whitespace, and list fields must be lists (a scalar
+`scoring_periods: full_game` or `provider_mappings: {dabble: points}` is a
+defect, not a shorthand). Directly constructed `StatisticCatalog` values are
+held to the same version.
+`StatisticCatalog.load`
+validates the document before constructing immutable `CanonicalStatistic`,
+`StatisticMapping`, and `StatisticMatch` objects. Application dependency
+assembly loads it before provider construction, so malformed schema, duplicate
+canonical identities, duplicate/conflicting provider labels, invalid periods or
+units, and inconsistent ordered components fail startup clearly. Route imports
+never load or mutate the catalog. A market with absent statistic evidence is
+given an immutable `UNMAPPED` match with reason `missing_statistic_evidence`
+during snapshot resolution, so every market on `board.snapshots` carries an
+explicit match; the provider's coverage evidence and observation remain
+unchanged.
+
+The initial catalog maps full-game points, rebounds, assists, three-pointers
+made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use
+the reviewed component order (`PRA` is points, rebounds, assists) regardless of
+the source label order. Dabble, PrizePicks, and Underdog labels are accepted
+only when explicitly listed in the definition; provider evidence is matched
+case-insensitively and preserves presentation evidence but does not infer
+meaning. Omitted period evidence
+stays `ScoringPeriod.UNKNOWN` rather than being guessed as full game, so a
+canonical identity always requires explicit full-game evidence. Unknown labels,
+unknown or period-specific scoring periods, unit mismatches, and provider
+fantasy labels return `MatchState.UNMAPPED` with a closed `MatchReason`, retain
+the original provider evidence, and are not included in the board's
+canonical-market view. This slice does not create
+comparison groups or a public route.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

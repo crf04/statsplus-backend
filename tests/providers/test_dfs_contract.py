@@ -37,6 +37,7 @@ from app.providers.dfs import (
     normalize_market_variant,
     normalize_market_status,
     normalize_selection_direction,
+    normalize_scoring_period,
 )
 
 
@@ -228,6 +229,60 @@ def test_player_projection_market_preserves_evidence_and_uses_exact_threshold():
     assert market.selections[0].selection_id is None
     assert not hasattr(market, "provider_market_id")
     assert not hasattr(market, "period")
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("full_game", ScoringPeriod.FULL_GAME),
+        ("FULL_GAME", ScoringPeriod.FULL_GAME),
+        (" full_game ", ScoringPeriod.FULL_GAME),
+        ("first_half", ScoringPeriod.FIRST_HALF),
+        ("second_half", ScoringPeriod.SECOND_HALF),
+        ("first_quarter", ScoringPeriod.FIRST_QUARTER),
+        ("second_quarter", ScoringPeriod.SECOND_QUARTER),
+    ],
+)
+def test_normalize_scoring_period_resolves_canonical_closed_values(label, expected):
+    normalized = normalize_scoring_period(label)
+
+    assert normalized.value is expected
+    assert normalized.original_label == label
+
+
+@pytest.mark.parametrize("label", ["unknown", "overtime", "full_gam", "full_game_2", ""])
+def test_normalize_scoring_period_keeps_unreviewed_labels_unknown(label):
+    normalized = normalize_scoring_period(label)
+
+    assert normalized.value is ScoringPeriod.UNKNOWN
+    assert normalized.original_label == label
+
+
+def test_player_projection_market_accepts_canonical_scoring_period_string():
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="market-1",
+        statistic=StatisticEvidence(label="Points"),
+        scoring_period="full_game",
+    )
+
+    assert market.scoring_period is ScoringPeriod.FULL_GAME
+    assert market.scoring_period_label == "full_game"
+
+
+def test_player_projection_market_omitted_scoring_period_stays_unknown():
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="market-1",
+        statistic=StatisticEvidence(label="Points"),
+    )
+
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label is None
+    assert (
+        PlayerProjectionMarket(provider="prizepicks", scoring_period=None).scoring_period
+        is ScoringPeriod.UNKNOWN
+    )
 
 
 @pytest.mark.parametrize(

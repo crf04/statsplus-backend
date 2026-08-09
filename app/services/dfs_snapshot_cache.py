@@ -363,8 +363,14 @@ def _market(value: Any) -> PlayerProjectionMarket:
         "updated_at",
         "selections",
         "appearance",
+        "statistic_match",
     }
     _keys(data, expected, label="market")
+    # The cache stores provider evidence as retrieved;  statistic resolution
+    # happens in the board above this seam, so a wire value carrying a match is
+    # not something this codec ever wrote.
+    if data["statistic_match"] is not None:
+        raise SnapshotCacheError("snapshot market statistic_match schema is invalid")
     decoded = dict(data)
     decoded["athlete"] = _athlete(data["athlete"])
     decoded["event"] = _event(data["event"])
@@ -442,6 +448,10 @@ def serialize_provider_snapshot(
         raise TypeError("snapshot must be ProviderSnapshot")
     if snapshot.status is not SnapshotStatus.COMPLETE:
         raise ValueError("only complete provider snapshots may be cached")
+    # Statistic resolution happens in the board above this seam, so a resolved
+    # market is not a value this codec ever writes.
+    if any(market.statistic_match is not None for market in snapshot.markets):
+        raise ValueError("only unresolved provider snapshots may be cached")
     query = query or NBAMarketQuery()
     if not isinstance(query, NBAMarketQuery):
         raise TypeError("query must be NBAMarketQuery")

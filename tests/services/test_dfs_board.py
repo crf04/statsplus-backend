@@ -368,7 +368,11 @@ def test_partial_provider_coverage_has_stable_reason(provider_name, coverage_cod
     ).provider_outcomes[0]
 
     assert outcome.status is ProviderOutcomeStatus.PARTIAL
-    assert outcome.snapshot is snapshot
+    assert outcome.snapshot is not None
+    assert outcome.snapshot.provider == snapshot.provider
+    assert outcome.snapshot.status is snapshot.status
+    assert outcome.snapshot.retrieved_at == snapshot.retrieved_at
+    # Statistic resolution attaches a match without altering the observation.
     assert outcome.coverage is coverage
     assert outcome.reason is expected_reason
 

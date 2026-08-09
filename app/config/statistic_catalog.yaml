@@ -1,0 +1,115 @@
+schema_version: 1
+component_order:
+  - points
+  - rebounds
+  - assists
+  - three_pointers_made
+  - steals
+  - blocks
+  - turnovers
+statistics:
+  - id: points
+    label: Points
+    unit: count
+    scoring_periods: [full_game]
+    components: [points]
+    provider_mappings:
+      dabble: [points]
+      prizepicks: [Points]
+      underdog: [Points]
+  - id: rebounds
+    label: Rebounds
+    unit: count
+    scoring_periods: [full_game]
+    components: [rebounds]
+    provider_mappings:
+      dabble: [rebounds]
+      prizepicks: [Rebounds]
+      underdog: [Rebounds]
+  - id: assists
+    label: Assists
+    unit: count
+    scoring_periods: [full_game]
+    components: [assists]
+    provider_mappings:
+      dabble: [assists]
+      prizepicks: [Assists]
+      underdog: [Assists]
+  - id: three_pointers_made
+    label: Three-Pointers Made
+    unit: count
+    scoring_periods: [full_game]
+    components: [three_pointers_made]
+    provider_mappings:
+      dabble: [three-pointers-made, threes, 3PM]
+      prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
+      underdog: [3-Pointers Made, Three Pointers Made, 3PM]
+  - id: steals
+    label: Steals
+    unit: count
+    scoring_periods: [full_game]
+    components: [steals]
+    provider_mappings:
+      dabble: [steals]
+      prizepicks: [Steals]
+      underdog: [Steals]
+  - id: blocks
+    label: Blocks
+    unit: count
+    scoring_periods: [full_game]
+    components: [blocks]
+    provider_mappings:
+      dabble: [blocks]
+      prizepicks: [Blocks]
+      underdog: [Blocks]
+  - id: turnovers
+    label: Turnovers
+    unit: count
+    scoring_periods: [full_game]
+    components: [turnovers]
+    provider_mappings:
+      dabble: [turnovers]
+      prizepicks: [Turnovers]
+      underdog: [Turnovers]
+  - id: pra
+    label: Points + Rebounds + Assists
+    unit: count
+    scoring_periods: [full_game]
+    components: [points, rebounds, assists]
+    provider_mappings:
+      dabble:
+        - assists+points+rebounds
+        - assists+rebounds+points
+        - points+assists+rebounds
+        - points+rebounds+assists
+        - rebounds+assists+points
+        - rebounds+points+assists
+      prizepicks: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
+      underdog: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
+  - id: pa
+    label: Points + Assists
+    unit: count
+    scoring_periods: [full_game]
+    components: [points, assists]
+    provider_mappings:
+      dabble: [assists+points, points+assists]
+      prizepicks: [PA, Points + Assists, Pts+Asts]
+      underdog: [PA, Points + Assists, Pts+Asts]
+  - id: pr
+    label: Points + Rebounds
+    unit: count
+    scoring_periods: [full_game]
+    components: [points, rebounds]
+    provider_mappings:
+      dabble: [points+rebounds, rebounds+points]
+      prizepicks: [PR, Points + Rebounds, Pts+Rebs]
+      underdog: [PR, Points + Rebounds, Pts+Rebs]
+  - id: ra
+    label: Rebounds + Assists
+    unit: count
+    scoring_periods: [full_game]
+    components: [rebounds, assists]
+    provider_mappings:
+      dabble: [assists+rebounds, rebounds+assists]
+      prizepicks: [RA, Rebounds + Assists, Rebs+Asts]
+      underdog: [RA, Rebounds + Assists, Rebs+Asts]
