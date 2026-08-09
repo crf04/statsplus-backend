@@ -25,6 +25,10 @@ from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+from app.services.athlete_resolver import (
+    MappingResolutionState,
+    normalize_athlete_name,
+)
 from app.providers.dfs import (
     CoverageCode,
     DeadlineExceededError,
@@ -127,10 +131,83 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
 def _identity_key(resolution: Any) -> tuple[str, str] | None:
     """The provider identity one resolution describes, if it names one."""
 
-    provider_athlete_id = resolution.provider_athlete_id
+    provider_athlete_id = getattr(resolution, "provider_athlete_id", None)
     if not isinstance(provider_athlete_id, str) or not provider_athlete_id.strip():
         return None
     return resolution.provider, provider_athlete_id.strip()
+
+
+def _evidence_key(resolution: Any) -> tuple[Any, ...]:
+    """The identity facts one observation asserts, normalized for comparison.
+
+    Only what could name a different athlete is compared: the athlete's name
+    and canonical ID, and the team evidence at every tier the provider
+    reported.  Presentation differences the resolver already ignores -- accents,
+    case, punctuation -- are ignored here too, so equivalent spellings of one
+    athlete are one assertion rather than a contradiction.
+    """
+
+    evidence = resolution.provider_evidence
+    team = evidence.team
+    return (
+        normalize_athlete_name(evidence.name),
+        evidence.canonical_id,
+        None
+        if team is None
+        else (
+            (team.provider_id or "").strip(),
+            team.canonical_id,
+            normalize_athlete_name(team.name),
+            (team.abbreviation or "").strip().casefold(),
+        ),
+    )
+
+
+def _contradictory_identities(
+    observed: Iterable[tuple[tuple[str, str] | None, Any]],
+) -> set[tuple[str, str]]:
+    """Identities one board read observed asserting more than one athlete."""
+
+    asserted: dict[tuple[str, str], set[tuple[Any, ...]]] = {}
+    for key, resolution in observed:
+        if key is not None:
+            asserted.setdefault(key, set()).add(_evidence_key(resolution))
+    return {key for key, evidence in asserted.items() if len(evidence) > 1}
+
+
+def _fail_closed_conflict(resolutions: Iterable[Any]) -> Any:
+    """One governed conflict for an identity its own board read contradicts.
+
+    Every snapshot is temporally coherent, so one provider identity carrying
+    two different athletes across its markets is not a sequence of observations
+    that supersede each other -- it is one observation that cannot say who the
+    identity is.  Resolving the markets in turn would let their arrival order
+    decide, because each market is judged against whatever the previous one
+    stored: an unmatched name followed by an exact one maps the identity
+    automatically, while the reverse promotes a conflict.  The identity
+    therefore fails closed on the contradiction itself, whatever the order, and
+    never enters a canonical comparison on evidence that disagrees with itself.
+
+    The conflict is recorded on the identity's first observed evidence, which
+    is what an operator sees the board opened the identity with; every athlete
+    the contradicting markets named is retained as a candidate to review.
+    """
+
+    resolutions = tuple(resolutions)
+    candidates: list[Any] = []
+    for resolution in resolutions:
+        canonical = resolution.canonical_athlete
+        if canonical is not None and canonical not in candidates:
+            candidates.append(canonical)
+    return replace(
+        resolutions[0],
+        state=MappingResolutionState.MAPPING_CONFLICT,
+        # One athlete the markets disagreed over is the candidate an operator
+        # weighs; several equally named ones name none of them.
+        canonical_athlete=(candidates[0] if len(candidates) == 1 else None),
+        candidates=tuple(candidates),
+        reason="contradictory_provider_evidence",
+    )
 
 
 def _consolidate_mapping_outcomes(
@@ -664,7 +741,7 @@ class DFSBoardService:
             or board.query.season is None
         ):
             return board
-        observed: list[tuple[tuple[str, str] | None, Any]] = []
+        resolved: list[tuple[tuple[str, str] | None, Any]] = []
         for snapshot in board.snapshots:
             for market in snapshot.markets:
                 if market.athlete is None:
@@ -679,21 +756,39 @@ class DFSBoardService:
                         # provider, not by when the board got around to it.
                         observed_at=snapshot.retrieved_at,
                     )
-                    result = self.athlete_mapping_repository.record_resolution(
-                        resolution
-                    )
                 except AthleteMappingPersistenceError:
                     # Board retrieval is a normalized read; mapping storage is
                     # an audit side effect and must never remove a market.
                     logger.warning("Could not observe one athlete mapping")
                     continue
-                # The resolver read before the write's transaction opened, so
-                # what it computed is only what this observation proposed.  The
-                # write returns the state governance reached for the identity,
-                # and the board reports that -- converted from the value in
-                # hand, never re-read, so the report cannot race the write.
-                outcome = result.board_outcome(resolution)
-                observed.append((_identity_key(resolution), outcome))
+                resolved.append((_identity_key(resolution), resolution))
+        # Every market is resolved before anything is written, so what one
+        # identity's markets assert is known before any of them is acted on.
+        contradictory = _contradictory_identities(resolved)
+        observed: list[tuple[tuple[str, str] | None, Any]] = []
+        governed: set[tuple[str, str]] = set()
+        for key, resolution in resolved:
+            if key in contradictory:
+                if key in governed:
+                    # The contradiction is one observation of the identity, so
+                    # the remaining markets add nothing to write or report.
+                    continue
+                governed.add(key)
+                resolution = _fail_closed_conflict(
+                    other for identity, other in resolved if identity == key
+                )
+            try:
+                result = self.athlete_mapping_repository.record_resolution(resolution)
+            except AthleteMappingPersistenceError:
+                logger.warning("Could not observe one athlete mapping")
+                continue
+            # The resolver read before the write's transaction opened, so
+            # what it computed is only what this observation proposed.  The
+            # write returns the state governance reached for the identity,
+            # and the board reports that -- converted from the value in
+            # hand, never re-read, so the report cannot race the write.
+            outcome = result.board_outcome(resolution)
+            observed.append((key, outcome))
         return DFSBoard(
             query=board.query,
             provider_outcomes=board.provider_outcomes,

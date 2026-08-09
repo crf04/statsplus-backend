@@ -482,7 +482,22 @@ it never catches broad exceptions and still returns usable markets.
 An injected DFS board read may transactionally record the first qualifying
 automatic decision. The repository is idempotent under repeated and concurrent
 reads, never replaces manual approvals or overrides, and isolates persistence
-failures from the normalized market result. Later evidence that disagrees with
+failures from the normalized market result. One board read resolves every
+market before it writes anything, because a snapshot is temporally coherent:
+markets sharing one `(provider, provider_athlete_id)` are one observation of
+one athlete, not a sequence of observations that supersede each other. When
+they disagree about the athlete's name, canonical ID, or team evidence — after
+the same accent/case/punctuation normalization resolution uses, so equivalent
+spellings are not a disagreement — the identity fails closed on the
+contradiction itself as one `mapping_conflict` reasoned
+`contradictory_provider_evidence`, recorded on the first observed evidence with
+every athlete the markets named as a candidate. Resolving those markets in turn
+would let their arrival order decide the identity, because each is judged
+against what the previous one stored: an unmatched or team-conflicting market
+followed by an exactly matching one would map automatically while the reverse
+order promoted a conflict. Contradicted evidence therefore never enters a
+canonical comparison in any market order, and the repeated markets and repeated
+board reads append no further decision. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve

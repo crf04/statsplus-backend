@@ -2827,6 +2827,86 @@ def test_board_reports_the_conflict_a_contradictory_snapshot_ended_in(mapping_db
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
 
 
+def _contradictory_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
+    """Two markets that share one provider identity but disagree about it."""
+
+    if case == "unmatched_name":
+        return (_market(), _market(name="Unknown Player", market_id="m-pp-15-alt"))
+    if case == "different_athlete":
+        return (_market(), _market(name="LeBron James", market_id="m-pp-15-alt"))
+    return (
+        _market(),
+        _market(
+            market_id="m-pp-15-alt",
+            team=TeamEvidence(
+                provider_id="pp-bos",
+                canonical_id=1610612738,
+                name="Boston Celtics",
+                abbreviation="BOS",
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["unmatched_name", "different_athlete", "conflicting_team"]
+)
+@pytest.mark.parametrize("swapped", [False, True])
+def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(
+    mapping_db, case, swapped
+):
+    """One snapshot cannot both claim and dispute the same provider identity."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _contradictory_markets(case)
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    assert len(board.snapshots[0].markets) == 2
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    # The identity never enters a canonical comparison on evidence that
+    # contradicts itself, whichever market the provider listed first.
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    stored = repository.get_mapping("prizepicks", "pp-15")
+    assert stored.mapping_state == "mapping_conflict"
+    assert stored.is_active is False
+
+
+@pytest.mark.parametrize(
+    "case", ["unmatched_name", "different_athlete", "conflicting_team"]
+)
+def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(
+    mapping_db, case
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    service = _board_service(
+        _snapshot(*_contradictory_markets(case)),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+
+    service.get_board(query)
+    repeated = service.get_board(query)
+
+    (outcome,) = repeated.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    # The contradiction is one durable observation, not one per market or read.
+    decisions = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [decision.decision_state for decision in decisions] == ["mapping_conflict"]
+
+
 def test_board_keeps_every_observation_that_names_no_provider_identity(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
