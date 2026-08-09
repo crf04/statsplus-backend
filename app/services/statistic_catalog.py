@@ -160,12 +160,27 @@ def _unit(value: Any, *, field_name: str) -> StatisticUnit:
 
 
 def _as_nonempty_list(value: Any, *, field_name: str) -> tuple[Any, ...]:
+    """Read one raw document list field; decoded schema v1 holds actual lists."""
+
+    if not isinstance(value, list) or not value:
+        raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty list")
+    return tuple(value)
+
+
+def _as_nonempty_sequence(value: Any, *, field_name: str) -> tuple[Any, ...]:
+    """Read one constructed domain collection, whose immutable form is a tuple."""
+
     if not isinstance(value, (list, tuple)) or not value:
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty list")
     return tuple(value)
 
 
-def _label_object(value: Mapping[str, Any], *, field_name: str) -> tuple[str, ...]:
+def _label_object(
+    value: Mapping[str, Any],
+    *,
+    field_name: str,
+    as_list: Any = _as_nonempty_list,
+) -> tuple[str, ...]:
     """Read one explicit ``label``/``labels`` object."""
 
     unknown = set(value) - {"label", "labels"}
@@ -181,25 +196,30 @@ def _label_object(value: Mapping[str, Any], *, field_name: str) -> tuple[str, ..
         return (_label(value["label"], field_name=f"{field_name}.label"),)
     return tuple(
         _label(candidate, field_name=f"{field_name}.labels")
-        for candidate in _as_nonempty_list(
+        for candidate in as_list(
             value["labels"], field_name=f"{field_name}.labels"
         )
     )
 
 
-def _mapping_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
+def _mapping_labels(
+    value: Any,
+    *,
+    field_name: str,
+    as_list: Any = _as_nonempty_list,
+) -> tuple[str, ...]:
     """Read one provider mapping as a label list or one explicit label object."""
 
     if isinstance(value, Mapping):
-        return _label_object(value, field_name=field_name)
+        return _label_object(value, field_name=field_name, as_list=as_list)
     if isinstance(value, (list, tuple)):
         labels: list[str] = []
-        for index, item in enumerate(
-            _as_nonempty_list(value, field_name=field_name)
-        ):
+        for index, item in enumerate(as_list(value, field_name=field_name)):
             item_field = f"{field_name}[{index}]"
             if isinstance(item, Mapping):
-                labels.extend(_label_object(item, field_name=item_field))
+                labels.extend(
+                    _label_object(item, field_name=item_field, as_list=as_list)
+                )
             else:
                 labels.append(_label(item, field_name=item_field))
         return tuple(labels)
@@ -283,6 +303,7 @@ class CanonicalStatistic:
             labels = _mapping_labels(
                 raw_labels,
                 field_name=f"statistic {statistic_id} provider mapping {provider}",
+                as_list=_as_nonempty_sequence,
             )
             if len({_label_key(value) for value in labels}) != len(labels):
                 raise StatisticCatalogSchemaError(

@@ -471,6 +471,62 @@ def test_definition_rejects_wrong_container_shapes(mutate) -> None:
         StatisticCatalog.from_mapping(definition)
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda definition: definition.__setitem__(
+            "statistics", (definition["statistics"][0],)
+        ),
+        lambda definition: definition.__setitem__("component_order", ("points",)),
+        lambda definition: definition.__setitem__("component_order", {"points"}),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "scoring_periods", ("full_game",)
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "components", ("points",)
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "components", {"points"}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": ("points",)}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": {"labels": ("points",)}}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": [{"labels": ("points",)}]}
+        ),
+    ],
+)
+def test_definition_rejects_tuples_and_other_non_lists_in_list_fields(mutate) -> None:
+    definition = _schema_v1_definition()
+    mutate(definition)
+
+    with pytest.raises(StatisticCatalogError, match="non-empty list"):
+        StatisticCatalog.from_mapping(definition)
+
+
+def test_constructed_statistics_keep_immutable_tuple_provider_mappings() -> None:
+    statistic = CanonicalStatistic(
+        id="points",
+        label="Points",
+        unit="count",
+        scoring_periods=(ScoringPeriod.FULL_GAME,),
+        components=("points",),
+        provider_mappings={"dabble": ("POINTS",), "underdog": {"labels": ("Pts",)}},
+    )
+
+    assert statistic.provider_mappings["dabble"] == ("POINTS",)
+    assert statistic.provider_mappings["underdog"] == ("Pts",)
+    assert (
+        StatisticCatalog(statistics=(statistic,))
+        .resolve("dabble", "points", scoring_period=ScoringPeriod.FULL_GAME)
+        .state
+        is MatchState.CANONICAL
+    )
+
+
 def test_definition_keeps_exact_provider_label_presentation_casing() -> None:
     definition = _schema_v1_definition()
     definition["statistics"][0]["provider_mappings"] = {
