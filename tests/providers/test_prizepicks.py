@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -163,6 +163,35 @@ def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
     assert "page_fetch_failed" in snapshot.coverage.warning_codes
 
 
+def test_later_prizepicks_page_deadline_failure_is_not_partial() -> None:
+    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    now = {"value": deadline - timedelta(seconds=5)}
+    session = FakeSession(
+        [
+            FakeResponse(_payload("projections.page1.valid.json")),
+            FakeResponse(_payload("projections.page2.valid.json")),
+        ]
+    )
+    original_get = session.get
+
+    def get_and_expire(url, *, params, timeout):
+        response = original_get(url, params=params, timeout=timeout)
+        if params["page"] == 2:
+            now["value"] = deadline.replace(second=1)
+        return response
+
+    session.get = get_and_expire
+
+    with pytest.raises(ProviderUnavailableError, match="deadline"):
+        PrizePicksAdapter(session=session, now=lambda: now["value"]).get_snapshot(
+            _query(), RetrievalContext(deadline=deadline)
+        )
+
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 2
+    assert events[-1]["outcome"] == telemetry.OUTCOME_TIMEOUT
+
+
 def test_prizepicks_repeated_wrong_page_is_partial_with_incomplete_pagination() -> None:
     page_one = _payload("projections.page1.valid.json")
     session = FakeSession(
@@ -242,6 +271,21 @@ def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error()
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
     with pytest.raises(ProviderUnavailableError):
+        PrizePicksAdapter(
+            session=FakeSession([FakeResponse(payload)])
+        ).get_snapshot(_query(), _context())
+
+
+def test_empty_incomplete_prizepicks_pagination_is_provider_error() -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["data"] = []
+    payload["meta"] = {
+        "current_page": 1,
+        "total_pages": 1,
+        "total_count": 2,
+    }
+
+    with pytest.raises(ProviderUnavailableError, match="invalid response"):
         PrizePicksAdapter(
             session=FakeSession([FakeResponse(payload)])
         ).get_snapshot(_query(), _context())
@@ -423,6 +467,29 @@ def test_prizepicks_linked_future_relationship_is_excluded_with_coverage() -> No
 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.fetched_count == 2
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_null_future_before_linked_futures_is_excluded() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    assert isinstance(rows, list)
+
+    linked_future = copy.deepcopy(rows[0])
+    linked_future["id"] = "projection-linked-futures"
+    linked_future["relationships"]["future"] = {"data": None}
+    linked_future["relationships"]["futures"] = {
+        "data": {"type": "futures", "id": "futures-2026-nba-champion"}
+    }
+    rows.append(linked_future)
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.skipped_count == 1
     assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
 

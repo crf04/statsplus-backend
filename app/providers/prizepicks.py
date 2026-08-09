@@ -17,6 +17,7 @@ from app.providers.dfs import (
     CoverageCode,
     CoverageRecordExcluded,
     CoverageRecordMalformed,
+    DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
     MarketStatus,
@@ -142,6 +143,8 @@ class PrizePicksAdapter:
                     allowed_statuses=query.market_statuses,
                 )
             except ProviderUnavailableError as error:
+                if self._is_deadline_error(error):
+                    raise
                 if not collection.markets:
                     raise
                 pagination_complete = False
@@ -221,6 +224,14 @@ class PrizePicksAdapter:
 
         if malformed_count and not markets:
             raise self._invalid_response("no usable PrizePicks projection records")
+        if (
+            not markets
+            and expected_total is not None
+            and fetched_count < expected_total
+        ):
+            raise self._invalid_response(
+                "pagination ended before the expected PrizePicks records were fetched"
+            )
         snapshot = _build_snapshot(
             provider=self.name,
             markets=markets,
@@ -488,19 +499,21 @@ class PrizePicksAdapter:
     ) -> tuple[str, str] | None:
         """Recognize a linked future before resolving player/event resources."""
 
+        relation_value: tuple[str, str] | None = None
         for name in ("future", "futures"):
             if name not in relationships:
                 continue
             relation = cls._optional_relationship(relationships, name)
             if relation is None:
-                return None
+                continue
             relation_type, _ = relation
             if relation_type.casefold() not in _FUTURES_MARKET_KINDS:
                 raise CoverageRecordMalformed(
                     f"{name} relationship has an unexpected type"
                 )
-            return relation
-        return None
+            if relation_value is None:
+                relation_value = relation
+        return relation_value
 
     @staticmethod
     def _market_kind(attributes: Mapping[str, Any]) -> str | None:
@@ -643,6 +656,15 @@ class PrizePicksAdapter:
         return ProviderUnavailableError(
             "PrizePicks returned an invalid response.", detail=detail
         )
+
+    @staticmethod
+    def _is_deadline_error(error: ProviderUnavailableError) -> bool:
+        cause = error.__cause__
+        while cause is not None:
+            if isinstance(cause, DeadlineExceededError):
+                return True
+            cause = cause.__cause__
+        return False
 
 
 __all__ = ["PrizePicksAdapter"]
