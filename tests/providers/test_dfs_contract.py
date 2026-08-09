@@ -9,6 +9,7 @@ import pytest
 
 from app.providers.dfs import (
     AthleteEvidence,
+    AppearanceEvidence,
     CompetitionEvidence,
     EventEvidence,
     LeagueEvidence,
@@ -123,6 +124,7 @@ def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
         provider_id="fixture-1",
         canonical_id="0022600001",
         label="Los Angeles Lakers @ Chicago Bulls",
+        status_label="scheduled",
         starts_at=datetime(2026, 8, 9, 11, 30, tzinfo=timezone(timedelta(hours=-5))),
         home_team=athlete.team,
     )
@@ -133,6 +135,13 @@ def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
     )
 
     assert athlete.provider_id is None
+    appearance = AppearanceEvidence(
+        provider_id="appearance-1", appearance_type="Player", label="LeBron James"
+    )
+    assert appearance.appearance_id == "appearance-1"
+    assert appearance.type == "Player"
+    assert appearance.label == "LeBron James"
+    assert event.status_label == "scheduled"
     assert event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc)
     assert statistic.label == "Points"
 

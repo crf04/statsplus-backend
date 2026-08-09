@@ -17,7 +17,8 @@
       "match_id": 101,
       "match_type": "Game",
       "type": "Player",
-      "team_id": "team-den"
+      "team_id": "team-den",
+      "label": "Nikola Jokic"
     }
   ],
   "games": [
@@ -25,6 +26,7 @@
       "id": 101,
       "sport_id": "NBA",
       "title": "DEN @ OKC",
+      "status": "scheduled",
       "scheduled_at": "2026-08-10T01:00:00-05:00",
       "home_team_id": "team-okc",
       "home_team_name": "Oklahoma City Thunder",

@@ -11,17 +11,26 @@ import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
+from app.utils import telemetry
 from app.providers.dfs import (
     MarketVariant,
     MalformedProviderResponseError,
     NBAMarketQuery,
     RetrievalContext,
+    ScoringPeriod,
     SnapshotStatus,
 )
 from app.providers.prizepicks import PrizePicksAdapter
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "prizepicks"
+
+
+@pytest.fixture(autouse=True)
+def _clean_telemetry():
+    telemetry.clear_recorded_provider_events()
+    yield
+    telemetry.clear_recorded_provider_events()
 
 
 class FakeResponse:
@@ -55,8 +64,8 @@ def _payload(name: str) -> dict[str, object]:
     return json.loads((FIXTURES / name).read_text())
 
 
-def _context() -> RetrievalContext:
-    return RetrievalContext(deadline="2030-01-01T00:00:00Z")
+def _context(request_id: str | None = None) -> RetrievalContext:
+    return RetrievalContext(deadline="2030-01-01T00:00:00Z", request_id=request_id)
 
 
 def _query() -> NBAMarketQuery:
@@ -71,7 +80,9 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
         ]
     )
 
-    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(
+        _query(), _context("prizepicks-request")
+    )
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert len(snapshot.markets) == 1
@@ -101,6 +112,8 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert market.threshold.original_value == "27.500"
     assert market.variant is MarketVariant.STANDARD
     assert market.variant_label == "standard"
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label is None
     assert market.selections == ()
     assert snapshot.coverage.fetched_count == 2
     assert snapshot.coverage.eligible_count == 2
@@ -109,6 +122,13 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert snapshot.coverage.pagination_complete is True
     assert "duplicate_source_identity" in snapshot.coverage.warning_codes
     assert [call[1]["page"] for call in session.calls] == [1, 2]
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 2
+    assert {event["provider"] for event in events} == {
+        telemetry.PROVIDER_PRIZEPICKS
+    }
+    assert {event["operation"] for event in events} == {"get_snapshot"}
+    assert {event["request_id"] for event in events} == {"prizepicks-request"}
 
 
 def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
@@ -186,6 +206,37 @@ def test_prizepicks_excludes_closed_rows_and_preserves_unknown_variant_label() -
     assert snapshot.markets == ()
     assert snapshot.coverage.skipped_count == 1
     assert "ineligible_status" in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_excludes_linked_live_event_and_keeps_eligible_status_evidence() -> None:
+    payload = _payload("projections.page1.valid.json")
+    row = payload["data"][0]
+    included = payload["included"]
+    assert isinstance(included, list)
+    row["relationships"]["event"] = {
+        "data": {"type": "game", "id": "game-1"}
+    }
+    included.append(
+        {
+            "type": "game",
+            "id": "game-1",
+            "attributes": {"name": "DAL vs. SAS", "status": "scheduled"},
+        }
+    )
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    eligible = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+    assert eligible.markets[0].event is not None
+    assert eligible.markets[0].event.status_label == "scheduled"
+
+    payload["included"][-1]["attributes"]["status"] = "in-play"
+    excluded = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+    assert excluded.markets == ()
+    assert "ineligible_event_status" in excluded.coverage.skipped_reasons
 
 
 def test_prizepicks_first_page_timeout_is_typed_provider_error() -> None:

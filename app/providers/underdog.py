@@ -13,6 +13,7 @@ import requests
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
+    AppearanceEvidence,
     CoverageEvidence,
     DeadlineExceededError,
     EventEvidence,
@@ -23,6 +24,7 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     ProviderSnapshot,
     RetrievalContext,
+    ScoringPeriod,
     Selection,
     SelectionModifier,
     SnapshotStatus,
@@ -31,6 +33,12 @@ from app.providers.dfs import (
     TeamEvidence,
     normalize_market_variant,
     normalize_timestamp,
+)
+from app.utils.telemetry import (
+    CACHE_DISABLED,
+    PROVIDER_UNDERDOG,
+    ProviderResponseError,
+    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +109,6 @@ class UnderdogAdapter:
                 payload,
                 expected_sport=query.sport,
                 allowed_statuses=query.market_statuses,
-                requested_period=query.scoring_period,
             )
         except ProviderUnavailableError:
             raise
@@ -161,9 +168,21 @@ class UnderdogAdapter:
         try:
             context.ensure_active()
             timeout = self._bounded_timeout(context)
-            response = self.session.get(self.BASE_URL, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
+            with provider_call(
+                PROVIDER_UNDERDOG,
+                "get_snapshot",
+                cache_status=CACHE_DISABLED,
+                request_id=context.request_id,
+            ) as tracker:
+                response = self.session.get(self.BASE_URL, timeout=timeout)
+                tracker.status_code = getattr(response, "status_code", None)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except (TypeError, ValueError) as error:
+                    raise ProviderResponseError(
+                        "Underdog returned invalid JSON"
+                    ) from error
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "Underdog retrieval deadline exceeded.", detail=error
@@ -176,7 +195,7 @@ class UnderdogAdapter:
             raise ProviderUnavailableError(
                 "Underdog could not be reached.", detail=error
             ) from error
-        except (TypeError, ValueError) as error:
+        except ProviderResponseError as error:
             raise ProviderUnavailableError(
                 "Underdog returned an invalid response.", detail=error
             ) from error
@@ -195,7 +214,6 @@ class UnderdogAdapter:
         *,
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-        requested_period: str,
     ) -> _PayloadResult:
         if not isinstance(payload, Mapping):
             raise _MalformedPayload("payload must be an object")
@@ -230,7 +248,6 @@ class UnderdogAdapter:
                     games=games,
                     expected_sport=expected_sport,
                     allowed_statuses=allowed_statuses,
-                    requested_period=requested_period,
                 )
             except _ExcludedRecord as error:
                 skipped_count += 1
@@ -266,7 +283,6 @@ class UnderdogAdapter:
         games: Mapping[str, Mapping[str, Any]],
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-        requested_period: str,
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise _MalformedRecord("line must be an object")
@@ -286,6 +302,16 @@ class UnderdogAdapter:
             raise _MalformedRecord("appearance type must be present")
         if appearance_type.casefold() != "player":
             raise _ExcludedRecord("non_player_market")
+        appearance_label = (
+            cls._optional_text(appearance.get("label"))
+            or cls._optional_text(appearance.get("display_name"))
+            or cls._optional_text(appearance.get("name"))
+        )
+        appearance_evidence = AppearanceEvidence(
+            provider_id=appearance_id,
+            appearance_type=appearance_type,
+            label=appearance_label,
+        )
 
         player_id = cls._required_identifier(appearance, "player_id")
         player = players.get(player_id)
@@ -327,7 +353,10 @@ class UnderdogAdapter:
         starts_at = event.starts_at if event is not None else None
         period_label = cls._optional_text(
             appearance_stat.get("scoring_period", appearance_stat.get("period"))
-        ) or requested_period
+        )
+        scoring_period = (
+            period_label if period_label is not None else ScoringPeriod.UNKNOWN
+        )
 
         try:
             return PlayerProjectionMarket(
@@ -338,6 +367,7 @@ class UnderdogAdapter:
                     name=player_name,
                     team=team,
                 ),
+                appearance=appearance_evidence,
                 event=event,
                 team=team,
                 opponent=cls._opponent_from_match(match, team),
@@ -352,7 +382,7 @@ class UnderdogAdapter:
                 status_label=raw_status,
                 variant=variant.value,
                 variant_label=variant_label,
-                scoring_period=requested_period,
+                scoring_period=scoring_period,
                 scoring_period_label=period_label,
                 starts_at=starts_at,
                 updated_at=updated_at,
@@ -413,12 +443,21 @@ class UnderdogAdapter:
             label = cls._optional_text(match.get("name"))
         starts_at = match.get("scheduled_at") if match else None
         updated_at = match.get("updated_at") if match else None
+        status_label = (
+            cls._optional_text(match.get("status"))
+            or cls._optional_text(match.get("status_label"))
+            if match
+            else None
+        )
+        if status_label is not None and cls._is_ineligible_event_status(status_label):
+            raise _ExcludedRecord("ineligible_event_status")
         cls._validate_timestamp(starts_at, "scheduled_at")
         cls._validate_timestamp(updated_at, "match updated_at")
         try:
             return EventEvidence(
                 provider_id=match_id,
                 label=label,
+                status_label=status_label,
                 starts_at=starts_at,
                 updated_at=updated_at,
                 home_team=cls._team_from_mapping(match, prefix="home_team") if match else None,
@@ -585,6 +624,11 @@ class UnderdogAdapter:
         if normalized in {"suspended", "paused"}:
             return MarketStatus.SUSPENDED
         return None
+
+    @staticmethod
+    def _is_ineligible_event_status(label: str) -> bool:
+        normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
+        return normalized in {"live", "closed", "settled", "final", "in_play", "inplay"}
 
     @staticmethod
     def _invalid_response(detail: Any) -> ProviderUnavailableError:

@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 PROVIDER_NBA_STATS = "nba_stats"
 PROVIDER_PBP_STATS = "pbp_stats"
 PROVIDER_DABBLE = "dabble"
+PROVIDER_PRIZEPICKS = "prizepicks"
+PROVIDER_UNDERDOG = "underdog"
 
 # Keep provider operation names in one place.  These names are part of the
 # telemetry contract: adapter methods, provider health checks, and the admin
@@ -62,10 +64,14 @@ PBP_STATS_OPERATIONS = frozenset(
 DABBLE_OPERATIONS = frozenset(
     {"competition_lookup", "competition_fixtures", "fixture_details"}
 )
+PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
+UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
     PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
     PROVIDER_DABBLE: DABBLE_OPERATIONS,
+    PROVIDER_PRIZEPICKS: PRIZEPICKS_OPERATIONS,
+    PROVIDER_UNDERDOG: UNDERDOG_OPERATIONS,
 }
 
 OUTCOME_SUCCESS = "success"
@@ -317,10 +323,12 @@ class ProviderTracker:
         operation: str,
         *,
         cache_status: str = CACHE_MISS,
+        request_id: str | None = None,
     ) -> None:
         self.provider = provider
         self.operation = operation
         self.cache_status = cache_status
+        self.request_id = request_id
         self.status_code: int | None = None
 
     def __enter__(self) -> "ProviderTracker":
@@ -352,7 +360,11 @@ class ProviderTracker:
                 duration_ms=duration_ms,
                 retry_count=current_retry_count(),
                 cache_status=self.cache_status,
-                request_id=current_request_id(),
+                request_id=(
+                    self.request_id
+                    if self.request_id is not None
+                    else current_request_id()
+                ),
                 status_code=self.status_code,
             )
         )
@@ -364,6 +376,7 @@ def provider_call(
     operation: str,
     *,
     cache_status: str = CACHE_MISS,
+    request_id: str | None = None,
 ) -> ProviderTracker:
     """Return a context manager that records telemetry for a provider call.
 
@@ -373,7 +386,12 @@ def provider_call(
             tracker.status_code = ...
             result = endpoint.get_data_frames()[0]
     """
-    return ProviderTracker(provider, operation, cache_status=cache_status)
+    return ProviderTracker(
+        provider,
+        operation,
+        cache_status=cache_status,
+        request_id=request_id,
+    )
 
 
 __all__ = [
@@ -389,9 +407,13 @@ __all__ = [
     "PROVIDER_NBA_STATS",
     "PROVIDER_PBP_STATS",
     "PROVIDER_DABBLE",
+    "DABBLE_OPERATIONS",
+    "PROVIDER_PRIZEPICKS",
+    "PROVIDER_UNDERDOG",
     "NBA_STATS_OPERATIONS",
     "PBP_STATS_OPERATIONS",
-    "DABBLE_OPERATIONS",
+    "PRIZEPICKS_OPERATIONS",
+    "UNDERDOG_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "ProviderResponseError",

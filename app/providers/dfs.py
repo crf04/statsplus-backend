@@ -143,7 +143,8 @@ def normalize_scoring_period(
     """Normalize reviewed scoring periods without guessing unknown labels."""
 
     if isinstance(label, ScoringPeriod):
-        return NormalizedLabel(label, label.value)
+        original_label = None if label is ScoringPeriod.UNKNOWN else label.value
+        return NormalizedLabel(label, original_label)
     normalized = label.strip().casefold().replace("-", " ") if isinstance(label, str) else ""
     values = {
         "full game": ScoringPeriod.FULL_GAME,
@@ -329,6 +330,43 @@ class AthleteEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class AppearanceEvidence:
+    """Provider evidence for the appearance that owns a market line."""
+
+    provider_id: str | None = None
+    appearance_type: str | None = None
+    label: str | None = None
+
+    def __post_init__(self) -> None:
+        provider_id = _optional_identifier(
+            self.provider_id, field="appearance provider_id"
+        )
+        if provider_id is not None and not isinstance(provider_id, str):
+            raise ValueError("appearance provider_id must be a string or None")
+        appearance_type = (
+            self.appearance_type.strip()
+            if isinstance(self.appearance_type, str)
+            else None
+        )
+        label = self.label.strip() if isinstance(self.label, str) else None
+        object.__setattr__(self, "provider_id", provider_id)
+        object.__setattr__(self, "appearance_type", appearance_type or None)
+        object.__setattr__(self, "label", label or None)
+
+    @property
+    def appearance_id(self) -> str | None:
+        """Alias clarifying that ``provider_id`` is the upstream ID."""
+
+        return self.provider_id
+
+    @property
+    def type(self) -> str | None:
+        """The provider's appearance type label."""
+
+        return self.appearance_type
+
+
+@dataclass(frozen=True, slots=True)
 class EventEvidence:
     """Provider and canonical evidence for one NBA game/event."""
 
@@ -340,6 +378,7 @@ class EventEvidence:
     updated_at: datetime | str | None = None
     home_team: TeamEvidence | None = None
     away_team: TeamEvidence | None = None
+    status_label: str | None = None
 
     def __post_init__(self) -> None:
         provider_id = _optional_identifier(self.provider_id, field="event provider_id")
@@ -349,12 +388,18 @@ class EventEvidence:
         if canonical_id is not None and not isinstance(canonical_id, str):
             raise ValueError("event canonical_id must be a string or None")
         label = self.label.strip() if isinstance(self.label, str) else None
+        status_label = (
+            self.status_label.strip()
+            if isinstance(self.status_label, str)
+            else None
+        )
         for team in (self.home_team, self.away_team):
             if team is not None and not isinstance(team, TeamEvidence):
                 raise ValueError("event teams must be TeamEvidence or None")
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "canonical_id", canonical_id)
         object.__setattr__(self, "label", label or None)
+        object.__setattr__(self, "status_label", status_label or None)
         object.__setattr__(self, "starts_at", normalize_timestamp(self.starts_at))
         object.__setattr__(self, "ends_at", normalize_timestamp(self.ends_at))
         object.__setattr__(self, "updated_at", normalize_timestamp(self.updated_at))
@@ -558,6 +603,7 @@ class PlayerProjectionMarket:
     starts_at: datetime | str | None = None
     updated_at: datetime | str | None = None
     selections: tuple[Selection, ...] = ()
+    appearance: AppearanceEvidence | None = None
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -568,6 +614,10 @@ class PlayerProjectionMarket:
             raise ValueError("market market_id must be a string or None")
         if self.athlete is not None and not isinstance(self.athlete, AthleteEvidence):
             raise ValueError("market athlete must be AthleteEvidence or None")
+        if self.appearance is not None and not isinstance(
+            self.appearance, AppearanceEvidence
+        ):
+            raise ValueError("market appearance must be AppearanceEvidence or None")
         if self.event is not None and not isinstance(self.event, EventEvidence):
             raise ValueError("market event must be EventEvidence or None")
         for evidence, name in (
@@ -927,6 +977,7 @@ ProviderAdapter = ProviderSnapshotProvider
 
 __all__ = [
     "AthleteEvidence",
+    "AppearanceEvidence",
     "CompetitionEvidence",
     "EventEvidence",
     "LeagueEvidence",

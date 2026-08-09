@@ -11,10 +11,13 @@ import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
+from app.utils import telemetry
 from app.providers.dfs import (
+    AppearanceEvidence,
     MalformedProviderResponseError,
     NBAMarketQuery,
     RetrievalContext,
+    ScoringPeriod,
     SelectionDirection,
     SnapshotStatus,
 )
@@ -22,6 +25,13 @@ from app.providers.underdog import UnderdogAdapter
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "underdog"
+
+
+@pytest.fixture(autouse=True)
+def _clean_telemetry():
+    telemetry.clear_recorded_provider_events()
+    yield
+    telemetry.clear_recorded_provider_events()
 
 
 class FakeResponse:
@@ -54,8 +64,8 @@ def _payload() -> dict[str, object]:
     return json.loads((FIXTURES / "over_under_lines.valid.json").read_text())
 
 
-def _context() -> RetrievalContext:
-    return RetrievalContext(deadline="2030-01-01T00:00:00Z")
+def _context(request_id: str | None = None) -> RetrievalContext:
+    return RetrievalContext(deadline="2030-01-01T00:00:00Z", request_id=request_id)
 
 
 def _query() -> NBAMarketQuery:
@@ -65,7 +75,9 @@ def _query() -> NBAMarketQuery:
 def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None:
     session = FakeSession(FakeResponse(_payload()))
 
-    snapshot = UnderdogAdapter(session=session).get_snapshot(_query(), _context())
+    snapshot = UnderdogAdapter(session=session).get_snapshot(
+        _query(), _context("underdog-request")
+    )
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert len(snapshot.markets) == 1
@@ -74,17 +86,24 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert market.athlete is not None
     assert market.athlete.provider_id == "player-1"
     assert market.athlete.name == "Nikola Jokic"
+    assert isinstance(market.appearance, AppearanceEvidence)
+    assert market.appearance.provider_id == "appearance-1"
+    assert market.appearance.appearance_type == "Player"
+    assert market.appearance.label == "Nikola Jokic"
     assert market.team is not None
     assert market.team.provider_id == "team-den"
     assert market.team.abbreviation == "DEN"
     assert market.event is not None
     assert market.event.provider_id == "101"
     assert market.event.label == "DEN @ OKC"
+    assert market.event.status_label == "scheduled"
     assert market.event.starts_at == datetime(2026, 8, 10, 6, tzinfo=timezone.utc)
     assert market.starts_at == market.event.starts_at
     assert market.updated_at == datetime(2026, 8, 10, 0, tzinfo=timezone.utc)
     assert market.statistic is not None
     assert market.statistic.label == "Rebounds"
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label is None
     assert market.threshold is not None
     assert str(market.threshold.value) == "12.500"
     assert market.variant_label == "balanced"
@@ -102,6 +121,11 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert lower.direction is SelectionDirection.LOWER
     assert snapshot.coverage.fanout_complete is True
     assert session.calls
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 1
+    assert events[0]["provider"] == telemetry.PROVIDER_UNDERDOG
+    assert events[0]["operation"] == "get_snapshot"
+    assert events[0]["request_id"] == "underdog-request"
 
 
 def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> None:
@@ -160,6 +184,18 @@ def test_missing_underdog_match_keeps_supplied_event_id_without_fabrication() ->
     assert event.provider_id == "101"
     assert event.label is None
     assert event.starts_at is None
+
+
+def test_underdog_excludes_linked_final_game_status() -> None:
+    payload = _payload()
+    payload["games"][0]["status"] = "final"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets == ()
+    assert "ineligible_event_status" in snapshot.coverage.skipped_reasons
 
 
 def test_malformed_underdog_row_is_partial_when_another_row_is_valid() -> None:

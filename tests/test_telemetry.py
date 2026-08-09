@@ -63,6 +63,24 @@ def test_provider_event_includes_status_code_when_set():
     assert event["status_code"] == 200
 
 
+def test_provider_call_uses_explicit_request_id_and_closed_dfs_catalog():
+    with telemetry.provider_call(
+        telemetry.PROVIDER_UNDERDOG,
+        "get_snapshot",
+        request_id="retrieval-123",
+    ):
+        pass
+
+    event = telemetry.get_recorded_provider_events()[0]
+    assert event["request_id"] == "retrieval-123"
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
+        telemetry.PROVIDER_UNDERDOG
+    ]
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
+        telemetry.PROVIDER_PRIZEPICKS
+    ]
+
+
 def test_event_outcome_distinguishes_timeout_http_and_malformed():
     with pytest.raises(requests.exceptions.ReadTimeout):
         with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"):

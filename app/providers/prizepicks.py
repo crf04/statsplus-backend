@@ -25,12 +25,19 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     ProviderSnapshot,
     RetrievalContext,
+    ScoringPeriod,
     SnapshotStatus,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
     normalize_market_variant,
     normalize_timestamp,
+)
+from app.utils.telemetry import (
+    CACHE_DISABLED,
+    PROVIDER_PRIZEPICKS,
+    ProviderResponseError,
+    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,7 +135,6 @@ class PrizePicksAdapter:
                     payload,
                     expected_sport=query.league,
                     allowed_statuses=query.market_statuses,
-                    requested_period=query.scoring_period,
                 )
             except ProviderUnavailableError as error:
                 if not markets:
@@ -220,18 +226,30 @@ class PrizePicksAdapter:
         try:
             context.ensure_active()
             timeout = self._bounded_timeout(context)
-            response = self.session.get(
-                self.BASE_URL,
-                params={
-                    "league_id": league_id,
-                    "page": page,
-                    "per_page": 250,
-                    "single_stat": "true",
-                },
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return response.json()
+            with provider_call(
+                PROVIDER_PRIZEPICKS,
+                "get_snapshot",
+                cache_status=CACHE_DISABLED,
+                request_id=context.request_id,
+            ) as tracker:
+                response = self.session.get(
+                    self.BASE_URL,
+                    params={
+                        "league_id": league_id,
+                        "page": page,
+                        "per_page": 250,
+                        "single_stat": "true",
+                    },
+                    timeout=timeout,
+                )
+                tracker.status_code = getattr(response, "status_code", None)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except (TypeError, ValueError) as error:
+                    raise ProviderResponseError(
+                        "PrizePicks returned invalid JSON"
+                    ) from error
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "PrizePicks retrieval deadline exceeded.", detail=error
@@ -244,7 +262,7 @@ class PrizePicksAdapter:
             raise ProviderUnavailableError(
                 "PrizePicks could not be reached.", detail=error
             ) from error
-        except (TypeError, ValueError) as error:
+        except ProviderResponseError as error:
             raise ProviderUnavailableError(
                 "PrizePicks returned an invalid response.", detail=error
             ) from error
@@ -263,7 +281,6 @@ class PrizePicksAdapter:
         *,
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-        requested_period: str,
     ) -> _PageResult:
         if not isinstance(payload, Mapping):
             raise _MalformedPage("payload must be an object")
@@ -295,7 +312,6 @@ class PrizePicksAdapter:
                     resources=resources,
                     expected_sport=expected_sport,
                     allowed_statuses=allowed_statuses,
-                    requested_period=requested_period,
                 )
             except _ExcludedRecord as error:
                 skipped_count += 1
@@ -331,7 +347,6 @@ class PrizePicksAdapter:
         resources: Mapping[tuple[str, str], Mapping[str, Any]],
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-        requested_period: str,
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise _MalformedRecord("projection must be an object")
@@ -384,8 +399,9 @@ class PrizePicksAdapter:
         period_label = cls._optional_text(
             attributes.get("scoring_period", attributes.get("period"))
         )
-        if period_label is None:
-            period_label = requested_period
+        scoring_period = (
+            period_label if period_label is not None else ScoringPeriod.UNKNOWN
+        )
 
         try:
             return PlayerProjectionMarket(
@@ -411,7 +427,7 @@ class PrizePicksAdapter:
                 status_label=raw_status,
                 variant=variant.value,
                 variant_label=variant_label,
-                scoring_period=requested_period,
+                scoring_period=scoring_period,
                 scoring_period_label=period_label,
                 starts_at=start_value,
                 updated_at=updated_value,
@@ -445,6 +461,11 @@ class PrizePicksAdapter:
         ) or cls._optional_text(attributes.get("description"))
         starts_at = event_attributes.get("start_time", attributes.get("start_time"))
         updated_at = event_attributes.get("updated_at", attributes.get("updated_at"))
+        status_label = cls._optional_text(event_attributes.get("status")) or cls._optional_text(
+            event_attributes.get("status_label")
+        )
+        if status_label is not None and cls._is_ineligible_event_status(status_label):
+            raise _ExcludedRecord("ineligible_event_status")
         cls._validate_timestamp(starts_at, "event start_time")
         cls._validate_timestamp(updated_at, "event updated_at")
         if provider_id is None and label is None and starts_at is None and updated_at is None:
@@ -453,6 +474,7 @@ class PrizePicksAdapter:
             return EventEvidence(
                 provider_id=provider_id,
                 label=label,
+                status_label=status_label,
                 starts_at=starts_at,
                 updated_at=updated_at,
             )
@@ -518,6 +540,11 @@ class PrizePicksAdapter:
         if normalized in {"suspended", "paused"}:
             return MarketStatus.SUSPENDED
         return None
+
+    @staticmethod
+    def _is_ineligible_event_status(label: str) -> bool:
+        normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
+        return normalized in {"live", "closed", "settled", "final", "in_play", "inplay"}
 
     @staticmethod
     def _required_identifier(value: Mapping[str, Any], key: str) -> str:
