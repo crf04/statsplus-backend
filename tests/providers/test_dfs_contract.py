@@ -230,6 +230,21 @@ def test_player_projection_market_preserves_evidence_and_uses_exact_threshold():
     assert not hasattr(market, "period")
 
 
+def test_player_projection_market_omitted_scoring_period_stays_unknown():
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="market-1",
+        statistic=StatisticEvidence(label="Points"),
+    )
+
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label is None
+    assert (
+        PlayerProjectionMarket(provider="prizepicks", scoring_period=None).scoring_period
+        is ScoringPeriod.UNKNOWN
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "evidence", "expected_type"),
     [

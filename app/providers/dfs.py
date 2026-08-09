@@ -544,7 +544,7 @@ class PlayerProjectionMarket:
     status_label: str | None = None
     variant: MarketVariant | str = MarketVariant.STANDARD
     variant_label: str | None = None
-    scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME
+    scoring_period: ScoringPeriod | str | None = ScoringPeriod.UNKNOWN
     scoring_period_label: str | None = None
     starts_at: datetime | str | None = None
     updated_at: datetime | str | None = None

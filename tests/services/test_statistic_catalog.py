@@ -610,10 +610,9 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
         "dabble",
         "prizepicks",
     }
-    assert [market.statistic.canonical_id for market in board.canonical_markets] == [
-        "pra",
-        "points",
-    ]
+    assert [
+        market.statistic_match.canonical_id for market in board.canonical_markets
+    ] == ["pra", "points"]
     assert [market.provider for market in board.unmapped_markets] == ["underdog"]
     unmapped = board.unmapped_markets[0]
     assert unmapped.statistic.label == "Fantasy Points"
@@ -661,3 +660,77 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
     assert snapshot_market.statistic_match.provider == "dabble"
     with pytest.raises(AttributeError):
         snapshot_market.statistic_match.state = MatchState.CANONICAL
+
+
+def _board_for(market: PlayerProjectionMarket):
+    snapshot = ProviderSnapshot(
+        provider=market.provider,
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1, eligible_count=1, normalized_count=1,
+            pagination_complete=True, fanout_complete=True,
+        ),
+        retrieved_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+    )
+
+    class Provider:
+        def get_snapshot(
+            self, query: NBAMarketQuery, context: RetrievalContext
+        ) -> ProviderSnapshot:
+            return snapshot
+
+    return DFSBoardService(
+        provider_registry={market.provider: Provider()}, deadline_seconds=5
+    ).get_board(
+        NBAMarketQuery(),
+        RetrievalContext(deadline=datetime(2026, 8, 9, 20, 0, 5, tzinfo=timezone.utc)),
+    )
+
+
+def test_board_leaves_mapped_label_without_period_evidence_unmapped() -> None:
+    board = _board_for(
+        PlayerProjectionMarket(
+            provider="prizepicks",
+            market_id="no-period",
+            statistic=StatisticEvidence(provider_id="pp-stat", label="Points"),
+            threshold=MarketThreshold("25.5", unit="count"),
+        )
+    )
+
+    assert board.canonical_markets == ()
+    market = board.unmapped_markets[0]
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.statistic_match.state is MatchState.UNMAPPED
+    assert market.statistic_match.reason is MatchReason.UNKNOWN_SCORING_PERIOD
+    assert market.statistic_match.canonical is None
+
+
+def test_board_resolution_leaves_provider_statistic_evidence_untouched() -> None:
+    evidence = StatisticEvidence(
+        provider_id="dabble-stat",
+        label="assists+points+rebounds",
+        components=("assists", "points", "rebounds"),
+    )
+    board = _board_for(
+        PlayerProjectionMarket(
+            provider="dabble",
+            market_id="identity",
+            statistic=evidence,
+            threshold=MarketThreshold("30.5", unit="count"),
+            scoring_period=ScoringPeriod.FULL_GAME,
+        )
+    )
+
+    market = board.canonical_markets[0]
+    assert market.statistic is evidence
+    assert market.statistic == evidence
+    assert market.statistic.canonical_id is None
+    assert market.statistic.components == ("assists", "points", "rebounds")
+    assert market.statistic_match.evidence is evidence
+    assert market.statistic_match.canonical_id == "pra"
+    assert market.statistic_match.canonical.components == (
+        "points",
+        "rebounds",
+        "assists",
+    )

@@ -589,24 +589,12 @@ class DFSBoardService:
                     )
                 )
                 continue
-            match = self.statistic_resolver.resolve_market(market)
-            evidence = market.statistic
-            canonical_id = (
-                match.canonical_id
-                if match.canonical_id is not None
-                else evidence.canonical_id
-            )
-            components = (
-                match.canonical.components
-                if match.canonical is not None
-                else evidence.components
-            )
-            resolved_evidence = replace(evidence, canonical_id=canonical_id, components=components)
+            # The provider's own evidence is the observation of record, so the
+            # canonical interpretation is carried only by the attached match.
             resolved_markets.append(
                 replace(
                     market,
-                    statistic=resolved_evidence,
-                    statistic_match=match,
+                    statistic_match=self.statistic_resolver.resolve_market(market),
                 )
             )
         if tuple(resolved_markets) == snapshot.markets:
