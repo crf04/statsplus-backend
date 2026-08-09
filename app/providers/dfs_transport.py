@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from dataclasses import dataclass
 import threading
 import time
 from typing import Any, TypeVar
@@ -31,6 +32,17 @@ _FailureFactory = Callable[[str, Exception], Exception]
 _Worker = Callable[["_RequestResult"], None]
 _ResultObserver = Callable[["_RequestResult", float], None]
 _Preparation = Callable[[float], Callable[[], None] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class TransportErrorPolicy:
+    """Immutable public messages and translation for one transport seam."""
+
+    deadline_message: str
+    timeout_message: str
+    unavailable_message: str
+    invalid_json_message: str
+    failure_factory: _FailureFactory | None = None
 
 # A Requests timeout is advisory to the implementation supplied by the
 # caller.  A bounded set of daemon workers gives us a hard caller-side escape
@@ -266,11 +278,7 @@ def request_json(
     provider: str,
     operation: str,
     parse: Callable[[Any], _Result],
-    deadline_message: str,
-    timeout_message: str,
-    unavailable_message: str,
-    invalid_json_message: str,
-    failure_factory: _FailureFactory | None = None,
+    error_policy: TransportErrorPolicy,
 ) -> _Result:
     """Execute one instrumented JSON request under an absolute deadline.
 
@@ -339,7 +347,7 @@ def request_json(
                     context,
                     now,
                     parse,
-                    invalid_json_message,
+                    error_policy.invalid_json_message,
                     request_get=get_request,
                 ),
                 worker_name=f"statsplus-{provider}-request",
@@ -349,21 +357,32 @@ def request_json(
             )
             return result.value
     except DeadlineExceededError as error:
-        if failure_factory is not None:
-            raise failure_factory("deadline_exceeded", error) from error
-        raise ProviderUnavailableError(deadline_message, detail=error) from error
+        if error_policy.failure_factory is not None:
+            raise error_policy.failure_factory("deadline_exceeded", error) from error
+        raise ProviderUnavailableError(error_policy.deadline_message, detail=error) from error
     except requests.exceptions.Timeout as error:
-        if failure_factory is not None:
-            raise failure_factory("timeout", error) from error
-        raise ProviderUnavailableError(timeout_message, detail=error) from error
+        if error_policy.failure_factory is not None:
+            raise error_policy.failure_factory("timeout", error) from error
+        raise ProviderUnavailableError(error_policy.timeout_message, detail=error) from error
     except requests.exceptions.HTTPError as error:
-        if failure_factory is not None:
-            raise failure_factory("http_error", error) from error
-        raise ProviderUnavailableError(unavailable_message, detail=error) from error
+        if error_policy.failure_factory is not None:
+            raise error_policy.failure_factory("http_error", error) from error
+        raise ProviderUnavailableError(
+            error_policy.unavailable_message,
+            detail=error,
+        ) from error
     except requests.exceptions.RequestException as error:
-        if failure_factory is not None:
-            raise failure_factory("request_error", error) from error
-        raise ProviderUnavailableError(unavailable_message, detail=error) from error
+        if error_policy.failure_factory is not None:
+            raise error_policy.failure_factory("request_error", error) from error
+        raise ProviderUnavailableError(
+            error_policy.unavailable_message,
+            detail=error,
+        ) from error
 
 
-__all__ = ["bounded_timeout", "request_json", "run_bounded"]
+__all__ = [
+    "TransportErrorPolicy",
+    "bounded_timeout",
+    "request_json",
+    "run_bounded",
+]

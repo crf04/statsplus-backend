@@ -1,9 +1,11 @@
-"""Structured provider telemetry for NBA Stats, PBP Stats, and DFS providers.
+"""Structured telemetry for provider seams and local normalization decisions.
 
-One :class:`ProviderEvent` is emitted per upstream invocation.  The event is
-written to the application log as a single structured line and retained in an
-in-process, bounded, thread-safe buffer so operators and tests can inspect the
-contract without a logging backend.
+One :class:`ProviderEvent` is emitted per instrumented provider seam.  Most
+seams are upstream invocations; adapters may also explicitly instrument a
+local normalization seam when no upstream invocation represents a terminal
+failure.  The event is written to the application log as a single structured
+line and retained in an in-process, bounded, thread-safe buffer so operators
+and tests can inspect the contract without a logging backend.
 
 Events carry the provider name, operation, duration, outcome, retry count,
 cache status, and the ``request_id`` that correlates them with the incoming
@@ -71,6 +73,10 @@ DABBLE_OPERATIONS = frozenset(
         "snapshot_normalization",
     }
 )
+DABBLE_UPSTREAM_OPERATIONS = frozenset(
+    {"competition_lookup", "competition_fixtures", "fixture_details"}
+)
+DABBLE_NORMALIZATION_OPERATIONS = frozenset({"snapshot_normalization"})
 PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 PROVIDER_OPERATION_CATALOG = {
@@ -351,7 +357,7 @@ def clear_recorded_provider_events() -> None:
 
 
 class ProviderTracker:
-    """Context manager that records one :class:`ProviderEvent` around a call.
+    """Context manager that records one :class:`ProviderEvent` around a seam.
 
     Enclosing code can set ``tracker.status_code`` when an upstream response is
     available so the event reflects the HTTP status rather than only an
@@ -423,7 +429,7 @@ def provider_call(
     cache_status: str = CACHE_MISS,
     request_id: str | None = None,
 ) -> ProviderTracker:
-    """Return a context manager that records telemetry for a provider call.
+    """Instrument one upstream provider invocation.
 
     Usage::
 
@@ -431,6 +437,28 @@ def provider_call(
             tracker.status_code = ...
             result = endpoint.get_data_frames()[0]
     """
+    return ProviderTracker(
+        provider,
+        operation,
+        cache_status=cache_status,
+        request_id=request_id,
+    )
+
+
+def provider_normalization_call(
+    provider: str,
+    operation: str,
+    *,
+    cache_status: str = CACHE_MISS,
+    request_id: str | None = None,
+) -> ProviderTracker:
+    """Instrument an explicit local provider-normalization seam.
+
+    The event and counter shape intentionally matches :func:`provider_call`.
+    Adapters decide locally whether this seam is needed, so an upstream
+    malformed or timeout event is never recounted as a normalization failure.
+    """
+
     return ProviderTracker(
         provider,
         operation,
@@ -453,6 +481,8 @@ __all__ = [
     "PROVIDER_PBP_STATS",
     "PROVIDER_DABBLE",
     "DABBLE_OPERATIONS",
+    "DABBLE_UPSTREAM_OPERATIONS",
+    "DABBLE_NORMALIZATION_OPERATIONS",
     "PROVIDER_PRIZEPICKS",
     "PROVIDER_UNDERDOG",
     "NBA_STATS_OPERATIONS",
@@ -471,6 +501,7 @@ __all__ = [
     "get_recorded_provider_events",
     "increment_retry_count",
     "provider_call",
+    "provider_normalization_call",
     "record_application_failure",
     "record_cached_provider_event",
     "record_provider_event",

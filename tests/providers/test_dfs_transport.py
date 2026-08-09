@@ -10,10 +10,18 @@ import pytest
 from app.errors import ProviderUnavailableError
 from app.providers.dabble import DabbleAdapter
 from app.providers.dfs import NBAMarketQuery, RetrievalContext
-from app.providers.dfs_transport import request_json
+from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.providers.prizepicks import PrizePicksAdapter
 from app.providers.underdog import UnderdogAdapter
 from app.utils import telemetry
+
+
+_TEST_TRANSPORT_POLICY = TransportErrorPolicy(
+    deadline_message="deadline",
+    timeout_message="timeout",
+    unavailable_message="unavailable",
+    invalid_json_message="invalid json",
+)
 
 
 class _LateResponse:
@@ -242,10 +250,7 @@ def test_blocking_provider_parser_returns_at_absolute_deadline() -> None:
                 provider="prizepicks",
                 operation="get_snapshot",
                 parse=parse,
-                deadline_message="deadline",
-                timeout_message="timeout",
-                unavailable_message="unavailable",
-                invalid_json_message="invalid json",
+                error_policy=_TEST_TRANSPORT_POLICY,
             )
         assert parser_started.is_set()
     finally:
@@ -278,10 +283,7 @@ def test_retry_progress_is_recorded_when_worker_outlives_deadline() -> None:
                 provider="prizepicks",
                 operation="get_snapshot",
                 parse=lambda _payload: "late result",
-                deadline_message="deadline",
-                timeout_message="timeout",
-                unavailable_message="unavailable",
-                invalid_json_message="invalid json",
+                error_policy=_TEST_TRANSPORT_POLICY,
             )
         assert session.retry_seen.is_set()
     finally:
@@ -293,3 +295,15 @@ def test_retry_progress_is_recorded_when_worker_outlives_deadline() -> None:
     assert events[0]["request_id"] == request_id
     assert events[0]["outcome"] == telemetry.OUTCOME_TIMEOUT
     assert events[0]["retry_count"] == 1
+
+
+def test_transport_error_policy_is_immutable_and_translates_messages():
+    policy = TransportErrorPolicy(
+        deadline_message="deadline",
+        timeout_message="timeout",
+        unavailable_message="unavailable",
+        invalid_json_message="invalid json",
+    )
+
+    with pytest.raises(AttributeError):
+        policy.timeout_message = "changed"  # type: ignore[misc]

@@ -496,6 +496,113 @@ def test_all_malformed_props_record_one_sanitized_normalization_failure():
     assert metrics["application_failures"] == {}
 
 
+def test_all_malformed_competitions_record_one_local_normalization_failure():
+    competitions = _payload("competitions.valid.json")
+    competitions["data"] = [{"name": "NBA"}, {"name": "NBA"}]
+    session = Mock()
+    session.get.return_value = FakeResponse(competitions)
+
+    with pytest.raises(ProviderUnavailableError):
+        DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("snapshot_normalization", telemetry.OUTCOME_MALFORMED),
+    ]
+    assert telemetry.snapshot_metrics()["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
+    }
+
+
+def test_all_malformed_fixtures_record_one_local_normalization_failure():
+    competitions = _payload("competitions.valid.json")
+    fixtures = _payload("fixtures.valid.json")
+    fixtures["data"] = [{"status": "Open"}, {"status": "Open"}]
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(competitions),
+        FakeResponse(fixtures),
+    ]
+
+    with pytest.raises(ProviderUnavailableError):
+        DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
+        ("snapshot_normalization", telemetry.OUTCOME_MALFORMED),
+    ]
+    assert telemetry.snapshot_metrics()["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
+    }
+
+
+def test_all_malformed_detail_payload_is_not_counted_again_at_normalization():
+    detail = {"sportFixtureDetail": {"playerProps": "not-a-list"}}
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(detail),
+    ]
+
+    with pytest.raises(ProviderUnavailableError):
+        DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
+        ("fixture_details", telemetry.OUTCOME_MALFORMED),
+    ]
+    assert telemetry.snapshot_metrics()["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
+    }
+
+
+def test_partial_snapshot_does_not_emit_total_failure_normalization_event():
+    fixtures = _payload("fixtures.valid.json")
+    fixtures["data"].append(
+        {
+            "id": "fixture-2",
+            "competitionId": fixtures["data"][0]["competitionId"],
+            "competitionName": "NBA",
+            "advertisedStart": "2026-08-10T16:30:00.000Z",
+            "status": "Open",
+        }
+    )
+    session = Mock()
+
+    def get(url, **kwargs):
+        del kwargs
+        if url.endswith("/competitions"):
+            return FakeResponse(_payload("competitions.valid.json"))
+        if url.endswith("sport-fixtures"):
+            return FakeResponse(fixtures)
+        if url.endswith("fixture-1"):
+            return FakeResponse(_payload("fixture_details.valid.json"))
+        return FakeResponse({"sportFixtureDetail": {"playerProps": "not-a-list"}})
+
+    session.get.side_effect = get
+
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    events = telemetry.get_recorded_provider_events()
+    assert [(event["operation"], event["outcome"]) for event in events] == [
+        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
+        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
+        ("fixture_details", telemetry.OUTCOME_SUCCESS),
+        ("fixture_details", telemetry.OUTCOME_MALFORMED),
+        ("snapshot_normalization", telemetry.OUTCOME_SUCCESS),
+    ]
+    assert telemetry.snapshot_metrics()["provider_failures"] == {
+        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
+    }
+
+
 def test_dabble_does_not_hide_implementation_value_errors(monkeypatch):
     session = Mock()
     session.get.side_effect = [

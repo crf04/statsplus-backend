@@ -37,7 +37,7 @@ from app.providers.dfs import (
     normalize_market_variant,
     normalize_market_status,
 )
-from app.providers.dfs_transport import request_json
+from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.providers.dfs_normalization import (
     display_number,
     is_ineligible_event_status,
@@ -53,6 +53,13 @@ from app.utils.telemetry import (
 )
 
 logger = logging.getLogger(__name__)
+
+_UNDERDOG_TRANSPORT_POLICY = TransportErrorPolicy(
+    deadline_message="Underdog retrieval deadline exceeded.",
+    timeout_message="Underdog timed out while fetching lines.",
+    unavailable_message="Underdog could not be reached.",
+    invalid_json_message="Underdog returned invalid JSON",
+)
 
 
 class _MalformedPayload(MalformedProviderResponseError):
@@ -149,10 +156,7 @@ class UnderdogAdapter:
                     expected_sport=expected_sport,
                     allowed_statuses=allowed_statuses,
                 ),
-                deadline_message="Underdog retrieval deadline exceeded.",
-                timeout_message="Underdog timed out while fetching lines.",
-                unavailable_message="Underdog could not be reached.",
-                invalid_json_message="Underdog returned invalid JSON",
+                error_policy=_UNDERDOG_TRANSPORT_POLICY,
             )
         except ProviderResponseError as error:
             raise _MalformedPayload(str(error)) from error

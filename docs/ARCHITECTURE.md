@@ -64,14 +64,19 @@ otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
 ID flows into provider telemetry events, so a log, a provider event, and a
 response header share one correlation key.
 
-Provider calls at the five external provider seams are wrapped in one structured event
-(`app.utils.telemetry.ProviderEvent`):
+External provider invocations and explicit local provider-normalization seams
+are wrapped in one structured event (`app.utils.telemetry.ProviderEvent`).
+`provider_call` identifies upstream work; `provider_normalization_call` is an
+adapter-owned normalization/empty-result decision.  The latter is emitted
+only when the local retrieval outcome says no upstream malformed or timeout
+event already represents the terminal failure, so one underlying defect is
+not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
-| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, fixture details, and the bounded snapshot normalization/empty-result decision remain inside the adapter; the closed telemetry operations are `competition_lookup`, `competition_fixtures`, `fixture_details`, and `snapshot_normalization`. Production requests use a thread-local session factory with `_DabbleRetry`; explicitly injected sessions serialize only their `get` call. |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory with `_DabbleRetry`; explicitly injected sessions serialize only their `get` call. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 
@@ -93,11 +98,13 @@ retained in a bounded, thread-safe buffer (capacity 5000); credentials,
 authorization headers, URLs, raw bodies, and exception messages are never
 captured.
 
-Provider failures are counted at the provider seam. The central error handler
-in `app.errors` counts only *application* failures (actual `AppError` codes and
-HTTP >= 500 responses) and skips `provider_unavailable` so the same provider
-error is never double counted. Operators read the bounded counters and recent
-events from the admin-only `GET /api/data/telemetry` endpoint.
+Provider failures are counted once at the seam that owns the failure. The
+central error handler in `app.errors` counts only *application* failures
+(actual `AppError` codes and HTTP >= 500 responses) and skips
+`provider_unavailable`; adapters also avoid emitting a local normalization
+failure when an upstream malformed or timeout event already represents the
+same terminal retrieval outcome. Operators read the bounded counters and
+recent events from the admin-only `GET /api/data/telemetry` endpoint.
 
 ## Request flows
 
