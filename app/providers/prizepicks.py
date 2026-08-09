@@ -32,6 +32,7 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    _NormalizedBatch,
     _build_snapshot,
     normalize_market_variant,
     normalize_market_status,
@@ -73,15 +74,7 @@ class _MalformedPage(MalformedProviderResponseError):
 
 @dataclass(frozen=True, slots=True)
 class _PageResult:
-    markets: tuple[PlayerProjectionMarket, ...]
-    fetched_count: int
-    eligible_count: int
-    normalized_count: int
-    skipped_count: int
-    warning_codes: tuple[CoverageCode, ...]
-    skipped_reasons: tuple[CoverageCode, ...]
-    diagnostic_details: tuple[str, ...]
-    malformed_count: int
+    batch: _NormalizedBatch
     current_page: int
     total_pages: int
     expected_total: int | None
@@ -199,18 +192,19 @@ class PrizePicksAdapter:
                 warning_codes.append(CoverageCode.PAGE_METADATA_MISMATCH)
                 skipped_reasons.append(CoverageCode.PAGINATION_EXPECTED_TOTAL_CHANGED)
                 break
-            fetched_count += result.fetched_count
-            eligible_count += result.eligible_count
-            normalized_count += result.normalized_count
-            skipped_count += result.skipped_count
-            malformed_count += result.malformed_count
-            warning_codes.extend(result.warning_codes)
-            skipped_reasons.extend(result.skipped_reasons)
-            diagnostic_details.extend(result.diagnostic_details)
-            if result.malformed_count:
+            batch = result.batch
+            fetched_count += batch.fetched_count
+            eligible_count += batch.eligible_count
+            normalized_count += batch.normalized_count
+            skipped_count += batch.skipped_count
+            malformed_count += batch.malformed_count
+            warning_codes.extend(batch.warning_codes)
+            skipped_reasons.extend(batch.skipped_reasons)
+            diagnostic_details.extend(batch.diagnostic_details)
+            if batch.malformed_count:
                 fanout_complete = False
 
-            collection.extend(result.markets)
+            collection.extend(batch.markets)
 
             page += 1
 
@@ -328,15 +322,7 @@ class PrizePicksAdapter:
         )
 
         return _PageResult(
-            markets=tuple(records.markets),
-            fetched_count=records.fetched_count,
-            eligible_count=records.eligible_count,
-            normalized_count=records.normalized_count,
-            skipped_count=records.skipped_count,
-            warning_codes=records.warning_values(),
-            skipped_reasons=records.skipped_values(),
-            diagnostic_details=records.diagnostic_values(),
-            malformed_count=records.malformed_count,
+            batch=_NormalizedBatch.from_accumulator(records),
             current_page=current_page,
             total_pages=total_pages,
             expected_total=expected_total,

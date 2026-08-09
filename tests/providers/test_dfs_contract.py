@@ -61,6 +61,17 @@ def test_market_variant_normalization_is_closed_and_retains_original_label(
     assert normalized.original_label == label
 
 
+def test_unknown_variant_enum_does_not_create_provider_label() -> None:
+    normalized = normalize_market_variant(MarketVariant.UNKNOWN)
+
+    assert normalized.value is MarketVariant.UNKNOWN
+    assert normalized.original_label is None
+
+    explicit = normalize_market_variant("unknown")
+    assert explicit.value is MarketVariant.UNKNOWN
+    assert explicit.original_label == "unknown"
+
+
 @pytest.mark.parametrize(
     ("label", "expected"),
     [
@@ -217,6 +228,37 @@ def test_player_projection_market_preserves_evidence_and_uses_exact_threshold():
     assert market.selections[0].selection_id is None
     assert not hasattr(market, "provider_market_id")
     assert not hasattr(market, "period")
+
+
+def test_player_projection_market_keeps_missing_variant_label_missing():
+    market = PlayerProjectionMarket(provider="underdog", variant=MarketVariant.UNKNOWN)
+
+    assert market.variant is MarketVariant.UNKNOWN
+    assert market.variant_label is None
+
+
+def test_provider_snapshot_status_must_match_coverage_completion():
+    market = PlayerProjectionMarket(provider="dabble")
+    incomplete = CoverageEvidence(pagination_complete=False)
+    complete = CoverageEvidence(pagination_complete=True, fanout_complete=True)
+
+    with pytest.raises(ValueError, match="complete snapshots require complete coverage"):
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(market,),
+            coverage=incomplete,
+            retrieved_at="2026-08-09T16:30:00Z",
+        )
+
+    with pytest.raises(ValueError, match="partial snapshots require incomplete coverage"):
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.PARTIAL,
+            markets=(market,),
+            coverage=complete,
+            retrieved_at="2026-08-09T16:30:00Z",
+        )
 
 
 def test_contract_models_expose_only_canonical_count_and_timestamp_fields():

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,6 +32,7 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    _NormalizedBatch,
     _build_snapshot,
     normalize_market_variant,
     normalize_market_status,
@@ -57,19 +57,6 @@ logger = logging.getLogger(__name__)
 
 class _MalformedPayload(MalformedProviderResponseError):
     """The Underdog payload cannot be interpreted safely."""
-
-
-@dataclass(frozen=True, slots=True)
-class _PayloadResult:
-    markets: tuple[PlayerProjectionMarket, ...]
-    fetched_count: int
-    eligible_count: int
-    normalized_count: int
-    skipped_count: int
-    warning_codes: tuple[CoverageCode, ...]
-    skipped_reasons: tuple[CoverageCode, ...]
-    diagnostic_details: tuple[str, ...]
-    malformed_count: int
 
 
 class UnderdogAdapter:
@@ -153,7 +140,7 @@ class UnderdogAdapter:
         *,
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-    ) -> _PayloadResult:
+    ) -> _NormalizedBatch:
         try:
             return request_json(
                 context=context,
@@ -190,7 +177,7 @@ class UnderdogAdapter:
         *,
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
-    ) -> _PayloadResult:
+    ) -> _NormalizedBatch:
         if not isinstance(payload, Mapping):
             raise _MalformedPayload("payload must be an object")
         rows = cls._required_list(payload, "over_under_lines")
@@ -221,17 +208,7 @@ class UnderdogAdapter:
             ),
         )
 
-        return _PayloadResult(
-            markets=tuple(records.markets),
-            fetched_count=records.fetched_count,
-            eligible_count=records.eligible_count,
-            normalized_count=records.normalized_count,
-            skipped_count=records.skipped_count,
-            warning_codes=records.warning_values(),
-            skipped_reasons=records.skipped_values(),
-            diagnostic_details=records.diagnostic_values(),
-            malformed_count=records.malformed_count,
-        )
+        return _NormalizedBatch.from_accumulator(records)
 
     @classmethod
     def _normalize_line(

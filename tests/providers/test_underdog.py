@@ -16,6 +16,7 @@ from app.providers.dfs import (
     AppearanceEvidence,
     CoverageCode,
     MalformedProviderResponseError,
+    MarketVariant,
     NBAMarketQuery,
     RetrievalContext,
     ScoringPeriod,
@@ -139,6 +140,21 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert events[0]["provider"] == telemetry.PROVIDER_UNDERDOG
     assert events[0]["operation"] == "get_snapshot"
     assert events[0]["request_id"] == "underdog-request"
+
+
+def test_missing_underdog_variant_label_remains_missing() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0].pop("line_type", None)
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.variant is MarketVariant.UNKNOWN
+    assert market.variant_label is None
 
 
 def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> None:

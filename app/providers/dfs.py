@@ -68,7 +68,8 @@ def normalize_market_variant(label: str | MarketVariant | None) -> NormalizedLab
     """Normalize a provider variant label without guessing unknown values."""
 
     if isinstance(label, MarketVariant):
-        return NormalizedLabel(label, label.value)
+        original_label = None if label is MarketVariant.UNKNOWN else label.value
+        return NormalizedLabel(label, original_label)
 
     normalized = label.strip().casefold() if isinstance(label, str) else ""
     values = {
@@ -822,6 +823,40 @@ class _RecordCoverageAccumulator:
 
 
 @dataclass(frozen=True, slots=True)
+class _NormalizedBatch:
+    """Immutable normalized records plus their shared coverage accounting."""
+
+    markets: tuple[PlayerProjectionMarket, ...]
+    fetched_count: int
+    eligible_count: int
+    normalized_count: int
+    skipped_count: int
+    warning_codes: tuple[CoverageCode, ...]
+    skipped_reasons: tuple[CoverageCode, ...]
+    diagnostic_details: tuple[str, ...]
+    malformed_count: int
+
+    @classmethod
+    def from_accumulator(
+        cls,
+        accumulator: _RecordCoverageAccumulator,
+    ) -> "_NormalizedBatch":
+        """Finalize one normalized-record accumulator consistently."""
+
+        return cls(
+            markets=tuple(accumulator.markets),
+            fetched_count=accumulator.fetched_count,
+            eligible_count=accumulator.eligible_count,
+            normalized_count=accumulator.normalized_count,
+            skipped_count=accumulator.skipped_count,
+            warning_codes=accumulator.warning_values(),
+            skipped_reasons=accumulator.skipped_values(),
+            diagnostic_details=accumulator.diagnostic_values(),
+            malformed_count=accumulator.malformed_count,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageEvidence:
     """Counts and completion evidence for one provider retrieval."""
 
@@ -901,6 +936,8 @@ class ProviderSnapshot:
             raise ValueError("snapshot markets must be PlayerProjectionMarket values")
         if any(market.provider != provider for market in markets):
             raise ValueError("snapshot market providers must match the snapshot provider")
+        if status is SnapshotStatus.COMPLETE and not self.coverage.is_complete:
+            raise ValueError("complete snapshots require complete coverage evidence")
         if status is SnapshotStatus.PARTIAL:
             if not markets:
                 raise ValueError("partial snapshots require at least one market")

@@ -132,6 +132,21 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert {event["request_id"] for event in events} == {"prizepicks-request"}
 
 
+def test_missing_prizepicks_variant_label_remains_missing() -> None:
+    payload = _payload("projections.page1.valid.json")
+    row = payload["data"][0]
+    row["attributes"].pop("odds_type", None)
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.variant is MarketVariant.UNKNOWN
+    assert market.variant_label is None
+
+
 def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
     session = FakeSession(
         [
