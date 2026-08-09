@@ -89,6 +89,17 @@ def test_settings_parse_env_values(monkeypatch):
     assert settings.llm.enable_fallback is True
 
 
+def test_settings_parse_athlete_catalog_freshness_window(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    monkeypatch.setenv("ATHLETE_CATALOG_FRESHNESS_DAYS", "14")
+
+    settings = load_settings()
+
+    assert settings.catalog.athlete_freshness_days == 14
+    assert not hasattr(settings, "athlete_catalog_freshness_days")
+
+
 def test_app_startup_exposes_one_settings_object(monkeypatch):
     from app import create_app
 

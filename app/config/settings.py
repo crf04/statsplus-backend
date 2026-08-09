@@ -227,6 +227,14 @@ class NBASeasonSettings(BaseModel):
     current_season: str = Field(default_factory=current_nba_season)
 
 
+class CatalogSettings(BaseModel):
+    """Freshness policy for persisted canonical catalogs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    athlete_freshness_days: int = Field(default=7, ge=0)
+
+
 class RuntimeSettings(BaseModel):
     """Complete, typed settings object created during application startup."""
 
@@ -240,6 +248,7 @@ class RuntimeSettings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
+    catalog: CatalogSettings = Field(default_factory=CatalogSettings)
     port: int = Field(default=5000, ge=1, le=65535)
     debug: bool = True
     log_level: str = "INFO"
@@ -256,7 +265,6 @@ class RuntimeSettings(BaseModel):
                 f"got {value!r}"
             )
         return normalized
-
 
 class _EnvironmentReader:
     """Read environment values while keeping parsing errors actionable."""
@@ -381,6 +389,12 @@ def _build_settings(
             llm=llm,
             cors=cors,
             nba=_validated_model(NBASeasonSettings),
+            catalog=_validated_model(
+                CatalogSettings,
+                athlete_freshness_days=reader.integer(
+                    "ATHLETE_CATALOG_FRESHNESS_DAYS", 7
+                ),
+            ),
             port=reader.integer("PORT", 5000),
             debug=reader.boolean("FLASK_DEBUG", True),
             log_level=reader.text("LOG_LEVEL", "INFO") or "INFO",
@@ -533,6 +547,7 @@ def get_runtime_settings() -> RuntimeSettings:
 __all__ = [
     "AuthenticationSettings",
     "CacheSettings",
+    "CatalogSettings",
     "CORSSettings",
     "ConfigurationError",
     "DatabaseSettings",

@@ -41,10 +41,17 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "001_create_users",
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
+        "004_create_athlete_catalog",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
-        ["schema_migrations", "users", "data_refresh_jobs"]
+        [
+            "schema_migrations",
+            "users",
+            "data_refresh_jobs",
+            "athlete_catalog",
+            "athlete_catalog_freshness",
+        ]
     )
     assert {
         column["name"] for column in inspect(engine).get_columns("users")
@@ -83,6 +90,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (1, "001_create_users"),
             (2, "002_create_data_refresh_jobs"),
             (3, "003_durable_data_refresh_queue"),
+            (4, "004_create_athlete_catalog"),
         ]
 
 
@@ -100,6 +108,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "001_create_users",
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
+        "004_create_athlete_catalog",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -118,6 +127,14 @@ def test_demo_database_validation_is_read_only():
     assert result.valid
     assert result.user_count == 0
     assert before == after
+
+
+def test_run_migrations_rejects_demo_database_without_mutating_it():
+    database_path = Path("nba_play_types.db")
+    before = _sqlite_schema_snapshot(database_path)
+    with pytest.raises(ValueError, match="read-only demo database"):
+        run_migrations(create_engine("sqlite:///nba_play_types.db"))
+    assert _sqlite_schema_snapshot(database_path) == before
 
 
 def test_app_factory_does_not_migrate_demo_database(monkeypatch):
@@ -141,7 +158,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
     monkeypatch.setenv("FLASK_ENV", "testing")
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
 
-    create_app(
+    application = create_app(
         {
             "DATABASE_URL": database_url,
             "TESTING": True,
@@ -151,8 +168,16 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
 
     engine = create_engine(database_url)
     assert sorted(inspect(engine).get_table_names()) == sorted(
-        ["schema_migrations", "users", "data_refresh_jobs"]
+        [
+            "schema_migrations",
+            "users",
+            "data_refresh_jobs",
+            "athlete_catalog",
+            "athlete_catalog_freshness",
+        ]
     )
+    assert application.extensions["dependencies"].athlete_catalog_service is not None
+    assert "athlete_catalog" not in application.extensions["request_services"]
 
 
 def test_demo_database_validation_reports_missing_tables(tmp_path):

@@ -134,7 +134,7 @@ def _validate_frame(
             "NBA Stats returned an invalid data frame."
         )
     required = tuple(required_columns)
-    if frame.empty and not required:
+    if frame.empty and not required and validator is None:
         raise ProviderResponseError(
             "NBA Stats returned an empty data frame without a declared schema."
         )
@@ -156,6 +156,8 @@ def _validate_frame(
             raise ProviderResponseError(
                 "NBA Stats returned a data frame with an invalid schema."
             )
+        if isinstance(valid, pd.DataFrame):
+            frame = valid
     return frame
 
 
@@ -198,6 +200,44 @@ def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
             ) from error
 
 
+def parse_recorded_player_roster(
+    payload: dict[str, Any], season: str
+) -> pd.DataFrame:
+    """Normalize a recorded ``CommonAllPlayers`` payload without network access."""
+
+    import json
+
+    from nba_api.stats.endpoints import commonallplayers
+    from nba_api.stats.library.http import NBAStatsResponse
+
+    from app.providers.nba_stats import normalize_player_roster
+
+    with provider_call(
+        PROVIDER_NBA_STATS,
+        "player_roster_recorded",
+        cache_status=CACHE_DISABLED,
+    ):
+        try:
+            response = NBAStatsResponse(
+                response=json.dumps(payload),
+                status_code=200,
+                url="https://stats.nba.com/stats/commonallplayers",
+            )
+            endpoint = commonallplayers.CommonAllPlayers(
+                get_request=False, season=season
+            )
+            endpoint.nba_response = response
+            endpoint.load_response()
+            frame = endpoint.get_data_frames()[0]
+            return normalize_player_roster(frame, season=season)
+        except ProviderResponseError:
+            raise
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            raise ProviderResponseError(
+                "The recorded NBA Stats roster response could not be parsed."
+            ) from error
+
+
 def _response_status(endpoint: object) -> int | None:
     """Extract the upstream HTTP status ``nba_api`` recorded, if any.
 
@@ -223,6 +263,7 @@ class NBAStatsAdapter:
         settings: RuntimeSettings | None = None,
         *,
         endpoint_factory: Callable[..., object] | None = None,
+        roster_endpoint_factory: Callable[..., object] | None = None,
     ):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
@@ -230,6 +271,7 @@ class NBAStatsAdapter:
         self._bound = _shared_concurrency_bound(self._concurrency_limit)
         self._last_status_code: int | None = None
         self._endpoint_factory = endpoint_factory
+        self._roster_endpoint_factory = roster_endpoint_factory
 
     @property
     def max_concurrency(self) -> int:
@@ -405,6 +447,43 @@ class NBAStatsAdapter:
             ) from error
         normalized = normalize_archetype_game_logs(frame)
         return normalized[normalized["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
+
+    def get_player_roster(self, *, season: str) -> pd.DataFrame:
+        """Return one explicit season's normalized CommonAllPlayers roster."""
+
+        from app.providers.nba_stats import normalize_player_roster
+        from app.providers.nba_stats import validate_canonical_season
+
+        season = validate_canonical_season(season)
+        factory = self._roster_endpoint_factory or endpoints.commonallplayers.CommonAllPlayers
+
+        def normalize(frame: pd.DataFrame) -> pd.DataFrame:
+            return normalize_player_roster(frame, season=season)
+
+        try:
+            frame = self.run_endpoint(
+                "player_roster",
+                lambda timeout: factory(
+                    is_only_current_season=0,
+                    season=season,
+                    timeout=timeout,
+                ),
+                validator=normalize,
+            )
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError(
+                "The upstream stats provider timed out. Please try again shortly.",
+                detail=error,
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats provider is unavailable.", detail=error
+            ) from error
+        except ProviderResponseError as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats roster response was malformed.", detail=error
+            ) from error
+        return frame
 
     def fetch_player_game_logs(
         self,

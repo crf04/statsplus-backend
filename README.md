@@ -73,6 +73,7 @@ the most important variables:
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
+| `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
@@ -115,6 +116,21 @@ python scripts/validate_demo_db.py
 
 The validator checks the required public tables and columns and fails if the
 `users` table contains records.
+
+Refresh the canonical athlete catalog from an operator or deployment process
+for explicit seasons. The command requires a writable database target and
+never uses the bundled demo database or a wall-clock season default:
+
+```bash
+python scripts/refresh_athlete_catalog.py \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --season 2024-25 --season 2025-26
+```
+
+`AthleteCatalogService.get_catalog()` and `get_freshness()` read the persisted
+season rows and independent success/failure metadata. Provider or publication
+failures preserve the last successful catalog. The command prints each
+season's outcome and exits nonzero if any requested season fails.
 
 ## Run locally
 
