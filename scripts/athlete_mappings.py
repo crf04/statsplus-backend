@@ -64,12 +64,14 @@ def _build_parser() -> argparse.ArgumentParser:
     add_identity(approve, season=True)
     approve.add_argument("--canonical-player-id", required=True, type=int)
     _add_operator_options(approve)
+    _add_evidence_options(approve, required_name=False)
 
     override = subparsers.add_parser("override", help="override a canonical identity")
     add_database_option(override)
     add_identity(override, season=True)
     override.add_argument("--canonical-player-id", required=True, type=int)
     _add_operator_options(override)
+    _add_evidence_options(override, required_name=False)
 
     reject = subparsers.add_parser("reject", help="suppress a provider identity")
     add_database_option(reject)
@@ -90,8 +92,10 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_evidence_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--name", required=True)
+def _add_evidence_options(
+    parser: argparse.ArgumentParser, *, required_name: bool = True
+) -> None:
+    parser.add_argument("--name", required=required_name)
     parser.add_argument("--provider-team-id")
     parser.add_argument("--team-id", type=int, help="canonical team ID evidence")
     parser.add_argument("--team-name")
@@ -133,6 +137,27 @@ def _build_services(database_url: str):
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(catalog, mapping_repository=repository)
     return engine, catalog, repository, resolver
+
+
+def _optional_evidence(args: argparse.Namespace) -> AthleteEvidence | None:
+    """Build provider evidence only when an operator supplied any.
+
+    Manual decisions retain the previously observed evidence when the
+    operator has nothing new to record.
+    """
+
+    if not any(
+        value is not None
+        for value in (
+            args.name,
+            args.provider_team_id,
+            args.team_id,
+            args.team_name,
+            args.team_abbreviation,
+        )
+    ):
+        return None
+    return _evidence(args)
 
 
 def _evidence(args: argparse.Namespace) -> AthleteEvidence:
@@ -189,6 +214,7 @@ def _run(database_url: str, args: argparse.Namespace) -> Any:
                 "rejections": repository.list_rejections(
                     provider=args.provider, active_only=not args.all
                 ),
+                "unresolved": repository.list_unresolved(provider=args.provider),
             }
         if args.command == "history":
             return repository.history(
@@ -210,6 +236,7 @@ def _run(database_url: str, args: argparse.Namespace) -> Any:
                 season=args.season,
                 operator_id=args.operator_id,
                 reason=args.reason,
+                provider_evidence=_optional_evidence(args),
             )
         if args.command == "override":
             return repository.override(
@@ -219,6 +246,7 @@ def _run(database_url: str, args: argparse.Namespace) -> Any:
                 season=args.season,
                 operator_id=args.operator_id,
                 reason=args.reason,
+                provider_evidence=_optional_evidence(args),
             )
         if args.command == "reject":
             return repository.reject(

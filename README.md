@@ -172,8 +172,13 @@ python scripts/athlete_mappings.py dry-run \
 ```
 
 Automatic decisions are idempotent and retain provider name/team evidence.
-Manual approve, override, reject, and clear commands require `--operator`
-and `--reason`; rejected identities stay suppressed until cleared. The CLI is
+`list` also reports the latest ambiguous, inactive-only, unmatched, or
+team-conflict observation per provider identity, so unresolved evidence is
+visible instead of silently dropped. Manual approve, override, reject, and
+clear commands require `--operator` and `--reason`; approve and override
+accept the same `--name` and `--team-*` evidence options as `dry-run` and
+retain them on the mapping and in the audit log. Rejected identities stay
+suppressed until cleared. The CLI is
 read-only with respect to providers and rejects the bundled demo database.
 Read-only commands never run migrations; initialize or upgrade the writable
 schema explicitly with `python scripts/migrate.py` first.

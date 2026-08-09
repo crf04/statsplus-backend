@@ -24,7 +24,7 @@ import requests
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
-from app.services.athlete_mapping_repository import AthleteMappingPersistenceError
+from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.providers.dfs import (
     CoverageCode,
     DeadlineExceededError,
@@ -381,9 +381,6 @@ class DFSBoardService:
         statistic_resolver: StatisticResolver | None = None,
         athlete_resolver: Any | None = None,
         athlete_mapping_repository: Any | None = None,
-        mapping_resolver: Any | None = None,
-        mapping_repository: Any | None = None,
-        persist_athlete_mappings: bool = True,
     ) -> None:
         registry = self._build_registry(provider_registry)
         decorator = snapshot_cache
@@ -439,13 +436,8 @@ class DFSBoardService:
         )
         self.statistic_catalog = catalog
         self.statistic_resolver = statistic_resolver or StatisticResolver(catalog)
-        self.athlete_resolver = athlete_resolver or mapping_resolver
-        self.athlete_mapping_repository = (
-            athlete_mapping_repository or mapping_repository
-        )
-        if not isinstance(persist_athlete_mappings, bool):
-            raise ValueError("persist_athlete_mappings must be a boolean")
-        self.persist_athlete_mappings = persist_athlete_mappings
+        self.athlete_resolver = athlete_resolver
+        self.athlete_mapping_repository = athlete_mapping_repository
 
     @staticmethod
     def _build_registry(
@@ -621,13 +613,14 @@ class DFSBoardService:
         """Observe typed market evidence without making board reads fragile.
 
         Mapping persistence is opt-in through the injected resolver and
-        repository.  Any persistence failure is sanitized and isolated from
-        the normalized provider snapshots returned to the caller.
+        repository.  Both the mapping-state read and the write translate their
+        storage failures to ``AthleteMappingPersistenceError`` at the
+        repository/service boundary, so this seam isolates exactly that type
+        and never catches broad exceptions.
         """
 
         if (
-            not self.persist_athlete_mappings
-            or self.athlete_resolver is None
+            self.athlete_resolver is None
             or self.athlete_mapping_repository is None
             or board.query.season is None
         ):
@@ -638,15 +631,16 @@ class DFSBoardService:
                 if market.athlete is None:
                     continue
                 try:
-                    resolution = self.athlete_resolver.resolve(
+                    resolution = self.athlete_resolver.resolve_market(
                         market, board.query.season
                     )
-                    outcomes.append(resolution)
                     self.athlete_mapping_repository.record_resolution(resolution)
                 except AthleteMappingPersistenceError:
                     # Board retrieval is a normalized read; mapping storage is
                     # an audit side effect and must never remove a market.
-                    logger.warning("Could not persist one athlete mapping observation")
+                    logger.warning("Could not observe one athlete mapping")
+                    continue
+                outcomes.append(resolution)
         return DFSBoard(
             query=board.query,
             provider_outcomes=board.provider_outcomes,

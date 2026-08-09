@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any
 
 from sqlalchemy import and_, insert, select, update
@@ -25,6 +26,10 @@ from app.models.athlete_mapping import (
 from app.models.athlete_catalog import AthleteCatalog
 from app.providers.dfs import AthleteEvidence
 from app.providers.nba_stats import validate_canonical_season
+from app.services.athlete_mapping_errors import (
+    DEFAULT_MAPPING_FAILURE_SUMMARY,
+    AthleteMappingPersistenceError,
+)
 from app.services.athlete_resolver import (
     AthleteResolution,
     CanonicalAthlete,
@@ -33,18 +38,31 @@ from app.services.athlete_resolver import (
 from app.utils.db import is_demo_database_url
 
 
-MAPPING_DECISION_STATES = frozenset(
+#: Unresolved outcomes retained as durable, typed observations.  They never
+#: create current mapping state because no canonical identity was established.
+UNRESOLVED_OBSERVATION_STATES = frozenset(
     {
-        state.value
-        for state in MappingResolutionState
+        MappingResolutionState.UNMATCHED,
+        MappingResolutionState.AMBIGUOUS,
+        MappingResolutionState.INACTIVE_ONLY,
+        MappingResolutionState.TEAM_CONFLICT,
     }
-    | {"rejection_cleared"}
 )
-DEFAULT_MAPPING_FAILURE_SUMMARY = "The athlete mapping operation could not complete."
 
 
-class AthleteMappingPersistenceError(RuntimeError):
-    """A storage failure safe to isolate from a normalized board read."""
+def _translate_read_failures(method):
+    """Translate storage failures at the repository boundary."""
+
+    @wraps(method)
+    def wrapper(*args: Any, **kwargs: Any):
+        try:
+            return method(*args, **kwargs)
+        except SQLAlchemyError as exc:
+            raise AthleteMappingPersistenceError(
+                DEFAULT_MAPPING_FAILURE_SUMMARY
+            ) from exc
+
+    return wrapper
 
 
 def _utc(value: datetime | None = None) -> datetime:
@@ -85,7 +103,9 @@ def _reason(reason: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderAthleteMappingRecord(Mapping[str, Any]):
+class ProviderAthleteMappingRecord:
+    """Current mapping state for one provider athlete identity."""
+
     provider: str
     provider_athlete_id: str
     mapping_state: str
@@ -105,33 +125,11 @@ class ProviderAthleteMappingRecord(Mapping[str, Any]):
     first_seen_at: str
     last_seen_at: str
 
-    @property
-    def state(self) -> str:
-        return self.mapping_state
-
-    @property
-    def provider_id(self) -> str:
-        return self.provider_athlete_id
-
-    @property
-    def canonical_athlete_id(self) -> int | None:
-        return self.canonical_player_id
-
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
-
-    def __iter__(self):
-        return iter(self.to_dict())
-
-    def __len__(self) -> int:
-        return len(self.to_dict())
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
             "provider_athlete_id": self.provider_athlete_id,
             "mapping_state": self.mapping_state,
-            "state": self.mapping_state,
             "is_active": self.is_active,
             "season": self.season,
             "canonical_player_id": self.canonical_player_id,
@@ -151,7 +149,9 @@ class ProviderAthleteMappingRecord(Mapping[str, Any]):
 
 
 @dataclass(frozen=True, slots=True)
-class MappingDecisionRecord(Mapping[str, Any]):
+class MappingDecisionRecord:
+    """One append-only decision or durable unresolved observation."""
+
     id: int
     provider: str
     provider_athlete_id: str
@@ -170,31 +170,6 @@ class MappingDecisionRecord(Mapping[str, Any]):
     reason: str | None
     created_at: str
 
-    @property
-    def state(self) -> str:
-        return self.decision_state
-
-    @property
-    def provider_id(self) -> str:
-        return self.provider_athlete_id
-
-    @property
-    def canonical_athlete_id(self) -> int | None:
-        return self.canonical_player_id
-
-    @property
-    def operator_identity(self) -> str | None:
-        return self.operator_id
-
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
-
-    def __iter__(self):
-        return iter(self.to_dict())
-
-    def __len__(self) -> int:
-        return len(self.to_dict())
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -202,7 +177,6 @@ class MappingDecisionRecord(Mapping[str, Any]):
             "provider_athlete_id": self.provider_athlete_id,
             "requested_season": self.requested_season,
             "decision_state": self.decision_state,
-            "state": self.decision_state,
             "canonical_player_id": self.canonical_player_id,
             "canonical_name": self.canonical_name,
             "canonical_team_id": self.canonical_team_id,
@@ -219,7 +193,9 @@ class MappingDecisionRecord(Mapping[str, Any]):
 
 
 @dataclass(frozen=True, slots=True)
-class MappingRejectionRecord(Mapping[str, Any]):
+class MappingRejectionRecord:
+    """Durable suppression state for one provider athlete identity."""
+
     provider: str
     provider_athlete_id: str
     is_active: bool
@@ -229,23 +205,6 @@ class MappingRejectionRecord(Mapping[str, Any]):
     cleared_at: str | None
     cleared_by: str | None
     clear_reason: str | None
-
-    @property
-    def provider_id(self) -> str:
-        return self.provider_athlete_id
-
-    @property
-    def operator_identity(self) -> str:
-        return self.operator_id
-
-    def __getitem__(self, key: str) -> Any:
-        return self.to_dict()[key]
-
-    def __iter__(self):
-        return iter(self.to_dict())
-
-    def __len__(self) -> int:
-        return len(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -269,11 +228,6 @@ class MappingPersistenceResult:
     persisted: bool
     mapping: ProviderAthleteMappingRecord | None = None
     decision: MappingDecisionRecord | None = None
-    error_summary: str | None = None
-
-    @property
-    def status(self) -> str:
-        return self.state
 
 
 class AthleteMappingRepository:
@@ -284,14 +238,10 @@ class AthleteMappingRepository:
 
     def __init__(
         self,
-        engine: Engine | None = None,
+        engine: Engine,
         *,
-        db_engine: Engine | None = None,
         clock: Any | None = None,
     ) -> None:
-        engine = engine or db_engine
-        if engine is None:
-            raise TypeError("a database engine is required")
         self.engine = engine
         if is_demo_database_url(str(getattr(engine, "url", ""))):
             raise InvalidConfigurationError(
@@ -311,15 +261,18 @@ class AthleteMappingRepository:
         with self._identity_locks_guard:
             lock = self._identity_locks.setdefault(key, threading.RLock())
         with lock, self.engine.begin() as connection:
-            with connection.begin_nested():
-                try:
+            try:
+                # The savepoint must be released or rolled back by leaving the
+                # block, so the duplicate is caught outside it.  PostgreSQL
+                # otherwise leaves the surrounding transaction aborted.
+                with connection.begin_nested():
                     connection.execute(
                         insert(AthleteMappingLock.__table__).values(
                             provider=provider, provider_athlete_id=provider_id
                         )
                     )
-                except IntegrityError:
-                    pass
+            except IntegrityError:
+                pass
             connection.execute(
                 select(AthleteMappingLock.__table__)
                 .where(
@@ -334,6 +287,7 @@ class AthleteMappingRepository:
 
     # -- reads -------------------------------------------------------------
 
+    @_translate_read_failures
     def get_mapping(
         self, provider: str, provider_athlete_id: str
     ) -> ProviderAthleteMappingRecord | None:
@@ -355,6 +309,7 @@ class AthleteMappingRepository:
         mapping = self.get_mapping(provider, provider_athlete_id)
         return mapping if mapping is not None and mapping.is_active else None
 
+    @_translate_read_failures
     def get_rejection(
         self, provider: str, provider_athlete_id: str
     ) -> MappingRejectionRecord | None:
@@ -374,6 +329,7 @@ class AthleteMappingRepository:
         rejection = self.get_rejection(provider, provider_athlete_id)
         return bool(rejection and rejection.is_active)
 
+    @_translate_read_failures
     def list_mappings(
         self,
         *,
@@ -394,6 +350,7 @@ class AthleteMappingRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._mapping_record(row) for row in rows if row is not None]
 
+    @_translate_read_failures
     def list_rejections(
         self,
         *,
@@ -414,6 +371,7 @@ class AthleteMappingRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._rejection_record(row) for row in rows if row is not None]
 
+    @_translate_read_failures
     def history(
         self,
         *,
@@ -439,10 +397,37 @@ class AthleteMappingRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._decision_record(row) for row in rows if row is not None]
 
-    list_history = history
+    @_translate_read_failures
+    def list_unresolved(
+        self,
+        *,
+        provider: str | None = None,
+    ) -> list[MappingDecisionRecord]:
+        """Return the latest unresolved observation per provider identity.
 
-    def list_active_mappings(self, **kwargs: Any) -> list[ProviderAthleteMappingRecord]:
-        return self.list_mappings(active_only=True, **kwargs)
+        Ambiguous, inactive-only, unmatched, and team-conflict evidence never
+        becomes current mapping state, so the durable audit rows are the only
+        record an operator can act on.
+        """
+
+        statement = select(AthleteMappingDecision.__table__).where(
+            AthleteMappingDecision.decision_state.in_(
+                sorted(state.value for state in UNRESOLVED_OBSERVATION_STATES)
+            )
+        )
+        if provider is not None:
+            normalized_provider, _ = _normalized_key(provider, "_placeholder")
+            statement = statement.where(
+                AthleteMappingDecision.provider == normalized_provider
+            )
+        statement = statement.order_by(AthleteMappingDecision.id)
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        latest: dict[tuple[str, str], MappingDecisionRecord] = {}
+        for row in rows:
+            record = self._decision_record(row)
+            latest[(record.provider, record.provider_athlete_id)] = record
+        return [latest[key] for key in sorted(latest)]
 
     # -- automatic board observations -------------------------------------
 
@@ -469,6 +454,10 @@ class AthleteMappingRepository:
                     return self._persist_mapping_conflict(
                         resolution, observed_at=observed_at
                     )
+            if resolution.state in UNRESOLVED_OBSERVATION_STATES:
+                return self._persist_unresolved_observation(
+                    resolution, observed_at=observed_at
+                )
             return MappingPersistenceResult(resolution.state.value, False)
         provider, provider_id = self._resolution_key(resolution)
         now = _utc(observed_at or self._clock())
@@ -571,36 +560,33 @@ class AthleteMappingRepository:
                 decision=self._decision_record(decision),
             )
 
-    persist_auto_mapping = persist_auto_decision
-    save_auto_decision = persist_auto_decision
-
-    record_auto_decision = persist_auto_decision
-
-    def save_auto_mapping(
+    def _persist_unresolved_observation(
         self,
-        provider: str,
-        provider_evidence: Any,
-        canonical_athlete: CanonicalAthlete | Mapping[str, Any],
-        season: str,
+        resolution: AthleteResolution,
         *,
-        observed_at: datetime | None = None,
+        observed_at: datetime | None,
     ) -> MappingPersistenceResult:
-        """Build and persist an automatic decision from typed source values."""
+        """Retain one typed unresolved observation in the audit log.
 
-        if not isinstance(provider_evidence, AthleteEvidence):
-            raise TypeError("provider_evidence must be AthleteEvidence")
-        if not isinstance(canonical_athlete, CanonicalAthlete):
-            canonical_athlete = CanonicalAthlete.from_row(canonical_athlete)
-        resolution = AthleteResolution(
-            provider=provider,
-            provider_evidence=provider_evidence,
-            season=validate_canonical_season(season),
-            state=MappingResolutionState.AUTO,
-            canonical_athlete=canonical_athlete,
-            candidates=(canonical_athlete,),
-            reason="exact_normalized_name",
+        No current mapping row is written because no canonical identity was
+        established; the idempotency key keeps repeated board reads to one
+        durable observation per distinct evidence shape.
+        """
+
+        provider, provider_id = self._resolution_key(resolution)
+        now = _utc(observed_at or self._clock())
+        with self._transaction(provider, provider_id) as connection:
+            decision = self._insert_decision(
+                connection,
+                resolution,
+                now=now,
+                idempotency_key=self._idempotency_key(resolution),
+            )
+        return MappingPersistenceResult(
+            resolution.state.value,
+            decision is not None,
+            decision=self._decision_record(decision),
         )
-        return self.persist_auto_decision(resolution, observed_at=observed_at)
 
     def record_resolution(
         self,
@@ -711,83 +697,58 @@ class AthleteMappingRepository:
         self,
         provider: str,
         provider_athlete_id: str,
-        canonical_player_id: int | None = None,
+        canonical_player_id: int,
         *,
         season: str | None = None,
-        operator_id: str | None = None,
-        reason: str | None = None,
-        operator: str | None = None,
-        canonical_athlete_id: int | None = None,
-        canonical_id: int | None = None,
+        operator_id: str,
+        reason: str,
         provider_evidence: AthleteEvidence | None = None,
     ) -> MappingPersistenceResult:
-        selected_player_id = (
-            canonical_player_id
-            if canonical_player_id is not None
-            else canonical_athlete_id
-            if canonical_athlete_id is not None
-            else canonical_id
-        )
         return self._manual_map(
             MappingResolutionState.MANUAL_APPROVED,
             provider,
             provider_athlete_id,
-            selected_player_id,
+            canonical_player_id,
             season=season,
-            operator_id=operator or operator_id or "",
-            reason=reason or "",
+            operator_id=operator_id,
+            reason=reason,
             provider_evidence=provider_evidence,
         )
-
-    approve_mapping = approve
 
     def override(
         self,
         provider: str,
         provider_athlete_id: str,
-        canonical_player_id: int | None = None,
+        canonical_player_id: int,
         *,
         season: str | None = None,
-        operator_id: str | None = None,
-        reason: str | None = None,
-        operator: str | None = None,
-        canonical_athlete_id: int | None = None,
-        canonical_id: int | None = None,
+        operator_id: str,
+        reason: str,
         provider_evidence: AthleteEvidence | None = None,
     ) -> MappingPersistenceResult:
-        selected_player_id = (
-            canonical_player_id
-            if canonical_player_id is not None
-            else canonical_athlete_id
-            if canonical_athlete_id is not None
-            else canonical_id
-        )
         return self._manual_map(
             MappingResolutionState.MANUAL_OVERRIDE,
             provider,
             provider_athlete_id,
-            selected_player_id,
+            canonical_player_id,
             season=season,
-            operator_id=operator or operator_id or "",
-            reason=reason or "",
+            operator_id=operator_id,
+            reason=reason,
             provider_evidence=provider_evidence,
         )
-
-    override_mapping = override
 
     def reject(
         self,
         provider: str,
         provider_athlete_id: str,
         *,
-        operator_id: str | None = None,
-        reason: str | None = None,
+        operator_id: str,
+        reason: str,
         season: str | None = None,
-        operator: str | None = None,
     ) -> MappingPersistenceResult:
         provider, provider_id = _normalized_key(provider, provider_athlete_id)
-        operator_id = _operator(operator or operator_id or "")
-        reason = _reason(reason or "")
+        operator_id = _operator(operator_id)
+        reason = _reason(reason)
         requested_season = validate_canonical_season(season) if season else None
         now = _utc(self._clock())
         with self._transaction(provider, provider_id) as connection:
@@ -857,20 +818,17 @@ class AthleteMappingRepository:
             decision=self._decision_record(decision),
         )
 
-    reject_mapping = reject
-
     def clear_rejection(
         self,
         provider: str,
         provider_athlete_id: str,
         *,
-        operator_id: str | None = None,
-        reason: str | None = None,
-        operator: str | None = None,
+        operator_id: str,
+        reason: str,
     ) -> bool:
         provider, provider_id = _normalized_key(provider, provider_athlete_id)
-        operator_id = _operator(operator or operator_id or "")
-        reason = _reason(reason or "")
+        operator_id = _operator(operator_id)
+        reason = _reason(reason)
         now = _utc(self._clock())
         with self._transaction(provider, provider_id) as connection:
             rejection = self._select_rejection(connection, provider, provider_id, lock=True)
@@ -896,15 +854,12 @@ class AthleteMappingRepository:
                 provider=provider,
                 provider_athlete_id=provider_id,
                 requested_season=None,
-                decision_state="rejection_cleared",
+                decision_state=MappingResolutionState.REJECTION_CLEARED.value,
                 operator_id=operator_id,
                 reason=reason,
-                now=now,
+                created_at=now,
             )
         return True
-
-    clear = clear_rejection
-    clear_mapping_rejection = clear_rejection
 
     def _manual_map(
         self,
@@ -1062,6 +1017,8 @@ class AthleteMappingRepository:
         state: str | None = None,
         reason: str | None = None,
     ) -> Mapping[str, Any] | None:
+        """Append one automatic decision or unresolved observation."""
+
         provider, provider_id = self._resolution_key(resolution)
         canonical = resolution.canonical_athlete
         values = self._resolution_values(resolution)
@@ -1090,8 +1047,7 @@ class AthleteMappingRepository:
         provider: str,
         provider_athlete_id: str,
         requested_season: str | None,
-        decision_state: str | None = None,
-        state: str | None = None,
+        decision_state: str,
         canonical_player_id: int | None = None,
         canonical_name: str | None = None,
         canonical_team_id: int | None = None,
@@ -1104,14 +1060,13 @@ class AthleteMappingRepository:
         operator_id: str | None = None,
         reason: str | None = None,
         idempotency_key: str | None = None,
-        created_at: datetime | None = None,
-        now: datetime | None = None,
+        created_at: datetime,
     ) -> Mapping[str, Any] | None:
         values = {
             "provider": provider,
             "provider_athlete_id": provider_athlete_id,
             "requested_season": requested_season,
-            "decision_state": decision_state or state,
+            "decision_state": decision_state,
             "canonical_player_id": canonical_player_id,
             "canonical_name": canonical_name,
             "canonical_team_id": canonical_team_id,
@@ -1124,10 +1079,8 @@ class AthleteMappingRepository:
             "operator_id": operator_id,
             "reason": reason,
             "idempotency_key": idempotency_key,
-            "created_at": created_at or now or _utc(),
+            "created_at": created_at,
         }
-        if not values["decision_state"]:
-            raise ValueError("mapping decision state is required")
         try:
             with connection.begin_nested():
                 result = connection.execute(
@@ -1160,7 +1113,7 @@ class AthleteMappingRepository:
         now: datetime,
     ) -> Mapping[str, Any] | None:
         existing = existing or {}
-        canonical = canonical or self._canonical_from_mapping(existing, season or "2024-25")
+        canonical = canonical or self._canonical_from_mapping(existing, season)
         return self._insert_decision_values(
             connection,
             provider=provider,
@@ -1254,13 +1207,13 @@ class AthleteMappingRepository:
 
     @staticmethod
     def _canonical_from_mapping(
-        mapping: Mapping[str, Any], season: str
+        mapping: Mapping[str, Any], season: str | None
     ) -> CanonicalAthlete | None:
         player_id = mapping.get("canonical_player_id")
         if player_id is None:
             return None
         return CanonicalAthlete(
-            season=str(mapping.get("season") or season),
+            season=str(mapping.get("season") or season or ""),
             player_id=int(player_id),
             display_name=str(mapping.get("canonical_name") or ""),
             roster_status="active",
@@ -1362,8 +1315,8 @@ class AthleteMappingRepository:
 
 
 __all__ = [
+    "UNRESOLVED_OBSERVATION_STATES",
     "AthleteMappingRepository",
-    "DEFAULT_MAPPING_FAILURE_SUMMARY",
     "AthleteMappingPersistenceError",
     "MappingDecisionRecord",
     "MappingPersistenceResult",

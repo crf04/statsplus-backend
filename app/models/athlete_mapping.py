@@ -8,8 +8,38 @@ the append-only decision log records every automatic or operator action.
 from __future__ import annotations
 
 from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Index, Integer, String, Text
+from sqlalchemy.sql import expression
 
 from . import Base
+
+
+#: Closed set of mapping states one row may hold as current state.
+MAPPING_STATES = (
+    "auto",
+    "manual_approved",
+    "manual_override",
+    "mapping_conflict",
+    "rejected",
+)
+
+#: Closed set of append-only decision states.  This mirrors
+#: ``app.services.athlete_resolver.MappingResolutionState`` and is duplicated
+#: here because models must not import services.
+MAPPING_DECISION_STATES = frozenset(
+    MAPPING_STATES
+    + (
+        "ambiguous",
+        "inactive_only",
+        "team_conflict",
+        "unmatched",
+        "missing_identity",
+        "rejection_cleared",
+    )
+)
+
+
+def _quoted_states(states) -> str:
+    return ", ".join(f"'{state}'" for state in sorted(states))
 
 
 class ProviderAthleteMapping(Base):
@@ -20,7 +50,9 @@ class ProviderAthleteMapping(Base):
     provider = Column(String(32), primary_key=True)
     provider_athlete_id = Column(String(128), primary_key=True)
     mapping_state = Column(String(32), nullable=False)
-    is_active = Column(Boolean, nullable=False, default=False, server_default="0")
+    is_active = Column(
+        Boolean, nullable=False, default=False, server_default=expression.false()
+    )
 
     season = Column(String(7), nullable=True)
     canonical_player_id = Column(Integer, nullable=True)
@@ -41,12 +73,15 @@ class ProviderAthleteMapping(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "mapping_state IN ('auto', 'manual_approved', 'manual_override', 'mapping_conflict', 'rejected')",
+            f"mapping_state IN ({_quoted_states(MAPPING_STATES)})",
             name="ck_provider_mapping_state",
         ),
+        # ``true``/``false`` keep the comparison valid on PostgreSQL, where
+        # a boolean column cannot be compared with an integer literal.
         CheckConstraint(
-            "(is_active = 1 AND mapping_state IN ('auto', 'manual_approved', 'manual_override')) OR "
-            "(is_active = 0 AND mapping_state IN ('mapping_conflict', 'rejected'))",
+            "(is_active = true AND mapping_state IN "
+            "('auto', 'manual_approved', 'manual_override')) OR "
+            "(is_active = false AND mapping_state IN ('mapping_conflict', 'rejected'))",
             name="ck_provider_mapping_active_state",
         ),
         Index(
@@ -85,6 +120,10 @@ class AthleteMappingDecision(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
+        CheckConstraint(
+            f"decision_state IN ({_quoted_states(MAPPING_DECISION_STATES)})",
+            name="ck_athlete_mapping_decision_state",
+        ),
         Index(
             "ix_athlete_mapping_decisions_identity",
             "provider",
@@ -101,7 +140,9 @@ class AthleteMappingRejection(Base):
 
     provider = Column(String(32), primary_key=True)
     provider_athlete_id = Column(String(128), primary_key=True)
-    is_active = Column(Boolean, nullable=False, default=True, server_default="1")
+    is_active = Column(
+        Boolean, nullable=False, default=True, server_default=expression.true()
+    )
     reason = Column(Text, nullable=False)
     operator_id = Column(String(128), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
@@ -110,7 +151,13 @@ class AthleteMappingRejection(Base):
     clear_reason = Column(Text, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("is_active IN (0, 1)", name="ck_mapping_rejection_active"),
+        # A cleared rejection must carry its clearing evidence, and the
+        # boolean literals stay valid on both PostgreSQL and SQLite.
+        CheckConstraint(
+            "(is_active = true AND cleared_at IS NULL) OR "
+            "(is_active = false AND cleared_at IS NOT NULL)",
+            name="ck_mapping_rejection_active",
+        ),
         Index(
             "ix_athlete_mapping_rejections_active",
             "provider",
@@ -130,6 +177,8 @@ class AthleteMappingLock(Base):
 
 
 __all__ = [
+    "MAPPING_DECISION_STATES",
+    "MAPPING_STATES",
     "AthleteMappingDecision",
     "AthleteMappingRejection",
     "AthleteMappingLock",

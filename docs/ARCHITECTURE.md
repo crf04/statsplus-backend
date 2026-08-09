@@ -362,9 +362,15 @@ database is rejected as a migration or catalog target.
 
 ### Provider athlete mappings
 
-`AthleteResolver` accepts one typed provider `AthleteEvidence` value and an
-explicit requested season. It compares only the accent/case/punctuation-
-normalized official name among active `is_active_for_season` catalog rows.
+`AthleteResolver.resolve(provider, evidence, season)` accepts one typed
+provider `AthleteEvidence` value and an explicit requested season;
+`resolve_market(market, season)` is the board-facing spelling that lifts a
+market's athlete and team evidence. There is no other call shape. Resolution
+compares only the accent/case/punctuation-normalized official name among
+active `is_active_for_season` catalog rows. Normalization strips combining
+marks and folds the documented non-decomposing Latin letters (`ø`→`o`,
+`œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`, `ŧ`→`t`,
+`ı`→`i`) to ASCII; it applies no aliases, nicknames, or fuzzy similarity.
 Exactly one candidate with non-conflicting canonical team evidence is
 automatically qualifying; missing team evidence is allowed. Duplicate names,
 inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
@@ -374,17 +380,32 @@ non-matches. `AthleteMappingRepository` persists one current
 `athlete_mapping_rejections` suppressions. Provider names and team IDs,
 names, and abbreviations are retained as typed evidence.
 
+Ambiguous, inactive-only, unmatched, and team-conflict evidence never becomes
+current mapping state, but each is retained as one durable typed observation
+in the decision log under the same idempotency key, so repeated board reads
+add nothing and `scripts/athlete_mappings.py list` can show what an operator
+still has to decide. Repository reads and writes translate `SQLAlchemyError`
+to `AthleteMappingPersistenceError` (defined in
+`app.services.athlete_mapping_errors`), and the resolver translates the same
+failure from a catalog read. That single type is what the DFS Board isolates;
+it never catches broad exceptions and still returns usable markets.
+
 An injected DFS board read may transactionally record the first qualifying
 automatic decision. The repository is idempotent under repeated and concurrent
 reads, never replaces manual approvals or overrides, and isolates persistence
 failures from the normalized market result. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
-approve/override/reject/clear actions require an identity and reason; active
-rejections suppress future automatic mappings until explicitly cleared.
+approve/override/reject/clear actions require an identity and reason; approve
+and override also accept and retain provider name and team evidence, keeping
+the previously observed evidence when none is supplied. Active rejections
+suppress future automatic mappings until explicitly cleared.
 Migration 006 also creates a per-identity lock table and database checks for
-closed mapping states and active-state coherence. The operator CLI never runs
-migrations implicitly; run `scripts/migrate.py` explicitly first.
+closed mapping states, the closed decision-state set, active-state coherence,
+and cleared-rejection coherence. Those checks compare booleans with
+`true`/`false` rather than `1`/`0`, so they are valid on PostgreSQL as well as
+SQLite. The operator CLI never runs migrations implicitly; run
+`scripts/migrate.py` explicitly first.
 
 PBP Stats:
 
@@ -426,8 +447,9 @@ Migration 006 creates the provider athlete mapping, append-only decision, and
 durable rejection tables. Operators use
 `scripts/athlete_mappings.py` for
 read-only listing, dry runs, audited approve/override/reject/clear actions,
-and history. These commands require an explicit writable database URL and
-never contact a provider.
+and history. `list` reports current mappings, active rejections, and the
+latest unresolved observation per provider identity. These commands require an
+explicit writable database URL and never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

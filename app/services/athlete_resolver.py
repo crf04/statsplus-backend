@@ -8,12 +8,18 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.providers.dfs import (
     AthleteEvidence,
     PlayerProjectionMarket,
     TeamEvidence,
 )
 from app.providers.nba_stats import validate_canonical_season
+from app.services.athlete_mapping_errors import (
+    DEFAULT_MAPPING_FAILURE_SUMMARY,
+    AthleteMappingPersistenceError,
+)
 
 
 class MappingResolutionState(str, Enum):
@@ -32,6 +38,23 @@ class MappingResolutionState(str, Enum):
     REJECTION_CLEARED = "rejection_cleared"
 
 
+#: Latin letters that Unicode decomposition cannot reduce to ASCII because the
+#: stroke, bar, or ligature is part of the letter rather than a combining mark.
+#: Only these documented substitutions are applied; nothing here is an alias,
+#: nickname, or fuzzy rule.
+_NON_DECOMPOSING_LATIN_LETTERS = {
+    "ø": "o",
+    "œ": "oe",
+    "æ": "ae",
+    "ł": "l",
+    "đ": "d",
+    "ð": "d",
+    "þ": "th",
+    "ħ": "h",
+    "ŧ": "t",
+    "ı": "i",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CanonicalAthlete:
@@ -46,10 +69,6 @@ class CanonicalAthlete:
     team_id: int | None = None
     team_name: str | None = None
     team_abbreviation: str | None = None
-
-    @property
-    def canonical_player_id(self) -> int:
-        return self.player_id
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "CanonicalAthlete":
@@ -70,32 +89,6 @@ class CanonicalAthlete:
                 else str(row["team_abbreviation"]).strip().upper()
             ),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderAthleteEvidence:
-    """Provider-qualified wrapper around the shared typed athlete evidence."""
-
-    provider: str
-    athlete: AthleteEvidence
-
-    def __post_init__(self) -> None:
-        provider = _provider_name(self.provider)
-        if not isinstance(self.athlete, AthleteEvidence):
-            raise ValueError("athlete must be AthleteEvidence")
-        object.__setattr__(self, "provider", provider)
-
-    @property
-    def provider_id(self) -> str | None:
-        return self.athlete.provider_id
-
-    @property
-    def name(self) -> str | None:
-        return self.athlete.name
-
-    @property
-    def team(self) -> TeamEvidence | None:
-        return self.athlete.team
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,56 +130,37 @@ class AthleteResolution:
         return self.provider_evidence.provider_id
 
     @property
-    def provider_id(self) -> str | None:
-        return self.provider_athlete_id
-
-    @property
     def canonical_player_id(self) -> int | None:
         return self.canonical_athlete.player_id if self.canonical_athlete else None
-
-    @property
-    def canonical_athlete_id(self) -> int | None:
-        return self.canonical_player_id
-
-    @property
-    def qualified(self) -> bool:
-        return self.is_auto_qualifying
-
-    @property
-    def status(self) -> MappingResolutionState:
-        """Compatibility spelling for callers that use ``status``."""
-
-        return self.state
 
     @property
     def is_auto_qualifying(self) -> bool:
         return self.state is MappingResolutionState.AUTO and self.canonical_athlete is not None
 
-    @property
-    def mapped(self) -> bool:
-        return self.canonical_athlete is not None and self.state in {
-            MappingResolutionState.AUTO,
-            MappingResolutionState.MANUAL_APPROVED,
-            MappingResolutionState.MANUAL_OVERRIDE,
-        }
-
 
 def normalize_athlete_name(value: str | None) -> str:
     """Normalize accents and presentation punctuation for exact comparisons.
 
-    This deliberately does not apply aliases, initials, nicknames, or fuzzy
-    similarity.  A normalized comparison is still exact after the reviewed
-    Unicode/case/spacing normalization.
+    Unicode decomposition removes combining marks, and the documented
+    ``_NON_DECOMPOSING_LATIN_LETTERS`` table folds the Latin letters whose
+    stroke or ligature is not a combining mark (``ø``, ``ł``, ``œ``, and the
+    rest of that table) to their ASCII equivalents.  This deliberately does
+    not apply aliases, initials, nicknames, or fuzzy similarity.  A normalized
+    comparison is still exact after the reviewed Unicode/case/spacing
+    normalization.
     """
 
     if not isinstance(value, str):
         return ""
     decomposed = unicodedata.normalize("NFKD", value).casefold()
     without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    folded = "".join(
+        _NON_DECOMPOSING_LATIN_LETTERS.get(char, char) for char in without_marks
+    )
     # Punctuation and underscores are presentation, not identity.  Removing
     # them (rather than turning them into spaces) keeps D'Angelo/DAngelo and
     # Nikola_Jokic/Nikola Jokic exact matches while retaining no fuzzy logic.
-    return "".join(char for char in without_marks if char.isalnum())
+    return "".join(char for char in folded if char.isalnum())
 
 
 def _provider_name(value: str | None) -> str:
@@ -196,42 +170,15 @@ def _provider_name(value: str | None) -> str:
     return name
 
 
-def _evidence_from_value(value: AthleteEvidence | Mapping[str, Any]) -> AthleteEvidence:
-    if isinstance(value, AthleteEvidence):
-        return value
-    if not isinstance(value, Mapping):
-        raise TypeError("athlete evidence must be AthleteEvidence or a mapping")
-    raw_team = value.get("team")
-    team = raw_team
-    if isinstance(raw_team, Mapping):
-        team = TeamEvidence(
-            provider_id=raw_team.get("provider_id"),
-            canonical_id=raw_team.get("canonical_id"),
-            name=raw_team.get("name"),
-            abbreviation=raw_team.get("abbreviation"),
-        )
-    return AthleteEvidence(
-        provider_id=value.get("provider_id"),
-        canonical_id=value.get("canonical_id"),
-        name=value.get("name"),
-        team=team,
-    )
-
-
 class AthleteResolver:
     """Resolve provider athlete evidence against one requested catalog season."""
 
     def __init__(
         self,
-        catalog: Any | None = None,
+        catalog: Any,
         *,
-        athlete_catalog: Any | None = None,
-        catalog_service: Any | None = None,
         mapping_repository: Any | None = None,
-        repository: Any | None = None,
     ) -> None:
-        catalog = catalog or athlete_catalog or catalog_service
-        mapping_repository = mapping_repository or repository
         if not callable(getattr(catalog, "get_catalog", None)):
             raise TypeError("athlete catalog must expose get_catalog")
         self.catalog = catalog
@@ -239,81 +186,15 @@ class AthleteResolver:
 
     def resolve(
         self,
-        provider_or_market: str | PlayerProjectionMarket | ProviderAthleteEvidence | AthleteEvidence | Mapping[str, Any] | None = None,
-        evidence_or_season: AthleteEvidence | Mapping[str, Any] | str | None = None,
-        season: str | None = None,
-        *,
-        provider: str | None = None,
-        evidence: AthleteEvidence | Mapping[str, Any] | None = None,
-        provider_evidence: ProviderAthleteEvidence | AthleteEvidence | Mapping[str, Any] | None = None,
-        requested_season: str | None = None,
+        provider: str,
+        evidence: AthleteEvidence,
+        season: str,
     ) -> AthleteResolution:
-        """Resolve ``(provider, evidence, season)`` or ``(market, season)``.
+        """Resolve one provider's typed athlete evidence for one season."""
 
-        The market form keeps board integration typed while the explicit
-        provider/evidence form is convenient for operators and tests.
-        """
-
-        if requested_season is not None and season is None:
-            season = requested_season
-
-        if provider_evidence is not None:
-            if isinstance(provider_evidence, ProviderAthleteEvidence):
-                provider = provider_evidence.provider
-                evidence = provider_evidence.athlete
-            else:
-                evidence = provider_evidence
-        if provider is not None:
-            requested_provider = provider
-            requested_evidence = evidence
-            if requested_evidence is None and not isinstance(provider_or_market, str):
-                requested_evidence = provider_or_market
-            if requested_evidence is None and isinstance(evidence_or_season, (AthleteEvidence, Mapping)):
-                requested_evidence = evidence_or_season
-            if requested_evidence is None:
-                raise ValueError("provider athlete evidence is required")
-            provider = requested_provider
-            evidence = _evidence_from_value(requested_evidence)
-            requested_season = requested_season or season or (
-                evidence_or_season if isinstance(evidence_or_season, str) else None
-            )
-        elif isinstance(provider_or_market, ProviderAthleteEvidence):
-            provider = provider_or_market.provider
-            evidence = provider_or_market.athlete
-            requested_season = season or (
-                evidence_or_season if isinstance(evidence_or_season, str) else None
-            )
-        elif isinstance(provider_or_market, PlayerProjectionMarket):
-            market = provider_or_market
-            provider = market.provider
-            requested_season = season or (
-                evidence_or_season if isinstance(evidence_or_season, str) else None
-            )
-            if market.athlete is None:
-                raise ValueError("provider market has no athlete evidence")
-            evidence = market.athlete
-            if evidence.team is None and market.team is not None:
-                evidence = AthleteEvidence(
-                    provider_id=evidence.provider_id,
-                    canonical_id=evidence.canonical_id,
-                    name=evidence.name,
-                    team=market.team,
-                )
-        elif isinstance(provider_or_market, str):
-            provider = provider_or_market
-            evidence = _evidence_from_value(evidence_or_season)  # type: ignore[arg-type]
-            requested_season = season
-        else:
-            if provider is None:
-                raise ValueError("provider is required for athlete evidence")
-            evidence = _evidence_from_value(provider_or_market)  # type: ignore[arg-type]
-            requested_season = requested_season or season or (
-                evidence_or_season if isinstance(evidence_or_season, str) else None
-            )
-
-        if requested_season is None:
-            raise ValueError("an explicit requested NBA season is required")
-        canonical_season = validate_canonical_season(requested_season)
+        if not isinstance(evidence, AthleteEvidence):
+            raise TypeError("evidence must be AthleteEvidence")
+        canonical_season = validate_canonical_season(season)
         normalized_provider = _provider_name(provider)
 
         if not evidence.provider_id:
@@ -327,11 +208,8 @@ class AthleteResolver:
 
         existing = self._get_mapping(normalized_provider, evidence.provider_id)
         if existing is not None:
-            existing_state = str(
-                existing.get("mapping_state", existing.get("state", ""))
-            )
             try:
-                state = MappingResolutionState(existing_state)
+                state = MappingResolutionState(str(existing.get("mapping_state", "")))
             except ValueError:
                 state = None
             if state is MappingResolutionState.MAPPING_CONFLICT:
@@ -453,38 +331,45 @@ class AthleteResolver:
             reason="exact_normalized_name",
         )
 
-    def resolve_evidence(
-        self, provider: str, evidence: AthleteEvidence, season: str
-    ) -> AthleteResolution:
-        return self.resolve(provider, evidence, season)
-
-    resolve_provider_athlete = resolve_evidence
-
     def resolve_market(
         self, market: PlayerProjectionMarket, season: str
     ) -> AthleteResolution:
-        return self.resolve(market, season)
+        """Resolve the athlete evidence carried by one normalized market."""
+
+        if not isinstance(market, PlayerProjectionMarket):
+            raise TypeError("market must be PlayerProjectionMarket")
+        if market.athlete is None:
+            raise ValueError("provider market has no athlete evidence")
+        evidence = market.athlete
+        if evidence.team is None and market.team is not None:
+            evidence = AthleteEvidence(
+                provider_id=evidence.provider_id,
+                canonical_id=evidence.canonical_id,
+                name=evidence.name,
+                team=market.team,
+            )
+        return self.resolve(market.provider, evidence, season)
 
     def _catalog_rows(self, season: str) -> Sequence[Mapping[str, Any]]:
         try:
             rows = self.catalog.get_catalog(season, active_only=False)
-        except TypeError:
-            rows = self.catalog.get_catalog(season)
+        except SQLAlchemyError as exc:
+            raise AthleteMappingPersistenceError(
+                DEFAULT_MAPPING_FAILURE_SUMMARY
+            ) from exc
         return tuple(rows or ())
 
     def _get_mapping(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
-        repository = self.mapping_repository
-        if repository is None:
+        if self.mapping_repository is None:
             return None
-        value = repository.get_mapping(provider, provider_id)
-        return _as_mapping(value)
+        record = self.mapping_repository.get_mapping(provider, provider_id)
+        return None if record is None else record.to_dict()
 
     def _get_rejection(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
-        repository = self.mapping_repository
-        if repository is None:
+        if self.mapping_repository is None:
             return None
-        value = repository.get_rejection(provider, provider_id)
-        return _as_mapping(value)
+        record = self.mapping_repository.get_rejection(provider, provider_id)
+        return None if record is None else record.to_dict()
 
     @staticmethod
     def _team_conflicts(
@@ -515,8 +400,7 @@ class AthleteResolver:
     ) -> bool:
         if not existing or not bool(existing.get("is_active", False)):
             return False
-        state = str(existing.get("mapping_state", existing.get("state", "")))
-        if state not in {MappingResolutionState.AUTO.value, "auto_mapped"}:
+        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
             return False
         previous_player_id = existing.get("canonical_player_id")
         if previous_player_id is not None and int(previous_player_id) != candidate.player_id:
@@ -539,8 +423,7 @@ class AthleteResolver:
     ) -> bool:
         if not existing or not bool(existing.get("is_active", False)):
             return False
-        state = str(existing.get("mapping_state", existing.get("state", "")))
-        if state not in {MappingResolutionState.AUTO.value, "auto_mapped"}:
+        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
             return False
         previous_name = existing.get("provider_name")
         return bool(
@@ -595,26 +478,10 @@ class AthleteResolver:
         )
 
 
-def _as_mapping(value: Any) -> Mapping[str, Any] | None:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return value
-    if hasattr(value, "to_dict"):
-        candidate = value.to_dict()
-        if isinstance(candidate, Mapping):
-            return candidate
-    try:
-        return {key: getattr(value, key) for key in vars(value)}
-    except (TypeError, AttributeError):
-        return None
-
-
 __all__ = [
     "AthleteResolution",
     "AthleteResolver",
     "CanonicalAthlete",
     "MappingResolutionState",
-    "ProviderAthleteEvidence",
     "normalize_athlete_name",
 ]
