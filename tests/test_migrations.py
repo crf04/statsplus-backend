@@ -165,7 +165,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
     monkeypatch.setenv("FLASK_ENV", "testing")
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
 
-    create_app(
+    application = create_app(
         {
             "DATABASE_URL": database_url,
             "TESTING": True,
@@ -185,6 +185,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "event_catalog_refreshes",
         ]
     )
+    assert application.extensions["dependencies"].athlete_catalog_service is not None
+    assert "athlete_catalog" not in application.extensions["request_services"]
 
 
 def test_demo_database_validation_reports_missing_tables(tmp_path):

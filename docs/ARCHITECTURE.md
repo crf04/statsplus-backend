@@ -74,7 +74,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -233,6 +233,29 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+### Canonical athlete catalog
+
+`AthleteCatalogService` owns the application tables `athlete_catalog` and
+`athlete_catalog_freshness`. An operator invokes
+`scripts/refresh_athlete_catalog.py` with one or more explicit `YYYY-YY`
+seasons; there is no wall-clock season default and no background timer. The
+NBA Stats `player_roster` seam requests `CommonAllPlayers` for each season and
+normalizes stable NBA player IDs, official display names, roster status,
+season, and team identity. A `(season, player_id)` key lets a later official
+display-name update replace that season's label without rewriting prior
+history. Active, inactive, and historical rows remain distinguishable.
+
+Provider collection happens before publication. Each requested season's
+catalog rows and success metadata are written in one transaction, so an
+interrupted publication rolls back to the prior catalog. Failure metadata is
+recorded independently afterward; it never clears the last successful
+catalog and is not coupled to a future Event Catalog. A multi-season refresh
+returns and prints one sanitized success/failure result per season; the
+operator command exits nonzero if any season fails while retaining successful
+seasons. `get_catalog()` and `get_freshness()` read the persisted rows, with
+freshness controlled by `ATHLETE_CATALOG_FRESHNESS_DAYS` (default seven days).
+The tracked demo database is rejected as a migration or catalog target.
+
 PBP Stats:
 
 ```text
@@ -250,8 +273,10 @@ providers or perform provider calls in route modules.
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and
-the `scripts/migrate.py` command. A fresh or existing application database can
-be created or upgraded with an explicit `--database-url` argument or
+the `scripts/migrate.py` command. Migration 004 adds the canonical
+`athlete_catalog` and `athlete_catalog_freshness` tables. A fresh or existing
+application database can be created or upgraded with an explicit
+`--database-url` argument or
 `DATABASE_URL`; the CLI has no database-file fallback and fails if neither is
 provided. Rerunning the command is idempotent because applied versions are
 recorded in `schema_migrations`. Status output masks database passwords.
@@ -288,7 +313,7 @@ validator must not be used to repair the fixture.
 - Route/service interaction: replace methods on the dependency graph supplied
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
-- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`) with no network.
+- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`) with no network.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.
