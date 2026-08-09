@@ -158,6 +158,35 @@ def test_settings_ignore_undocumented_dfs_cache_window_spellings(monkeypatch):
     assert not hasattr(settings.providers, "dfs_snapshot_cache_stale_if_error_seconds")
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"DFS_CACHE_FRESH_SECONDS": True},
+        {"DFS_CACHE_STALE_IF_ERROR_SECONDS": False},
+        {"DFS_DABBLE_CACHE_FRESH_SECONDS": True},
+        {"DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS": True},
+    ],
+)
+def test_settings_reject_boolean_dfs_cache_windows(overrides):
+    # ``True`` is an int in Python, so an unguarded float() would silently
+    # configure a one-second window.
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing"}, overrides=overrides)
+
+
+@pytest.mark.parametrize(
+    "window",
+    [True, {"dabble": True}],
+)
+def test_provider_settings_reject_boolean_cache_windows(window):
+    from app.config.settings import ProviderSettings
+
+    with pytest.raises(ValueError):
+        ProviderSettings(dfs_cache_fresh_seconds=window)
+    with pytest.raises(ValueError):
+        ProviderSettings(dfs_cache_stale_if_error_seconds=window)
+
+
 def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypatch):
     monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
     monkeypatch.delenv("DFS_BOARD_ENABLED", raising=False)

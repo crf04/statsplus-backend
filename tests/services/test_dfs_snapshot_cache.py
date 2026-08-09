@@ -145,6 +145,75 @@ def test_snapshot_codec_rejects_noncanonical_wire_values(mutate) -> None:
         )
 
 
+def _market_payload_snapshot() -> ProviderSnapshot:
+    market = PlayerProjectionMarket(
+        provider="dabble",
+        market_id="market-1",
+        athlete=AthleteEvidence(
+            provider_id="athlete-1",
+            name="LeBron James",
+            team=TeamEvidence(provider_id="team-1", name="Los Angeles Lakers"),
+        ),
+        event=EventEvidence(
+            provider_id="game-1",
+            home_team=TeamEvidence(abbreviation="LAL"),
+        ),
+        statistic=StatisticEvidence(label="Points", components=("points",)),
+        threshold=MarketThreshold(value=Decimal("25.5"), unit="points"),
+        selections=(Selection(selection_id="selection-1", direction="higher"),),
+    )
+    return ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            pagination_complete=True,
+            fanout_complete=True,
+        ),
+        retrieved_at=_RETRIEVED_AT,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # A constructor would quietly drop a non-string nested name.
+        lambda market: market["athlete"]["team"].__setitem__("name", 123),
+        lambda market: market["event"]["home_team"].__setitem__("abbreviation", "lal"),
+        lambda market: market["athlete"].__setitem__("name", "  LeBron James  "),
+        # Aliases must not be canonicalized on the way out of Redis.
+        lambda market: market.__setitem__("status", "open"),
+        lambda market: market.__setitem__("variant", "main"),
+        lambda market: market.__setitem__("scoring_period", "full game"),
+        lambda market: market["selections"][0].__setitem__("direction", "over"),
+        lambda market: market["statistic"].__setitem__("components", [" points "]),
+        lambda market: market["threshold"].__setitem__("value", 25.5),
+    ],
+)
+def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) -> None:
+    payload = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
+    mutate(payload["markets"][0])
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(
+            json.dumps(payload),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+def test_snapshot_codec_rejects_noncanonical_contract_version_whitespace() -> None:
+    payload = json.loads(serialize_provider_snapshot(_snapshot()))
+    payload["contract_version"] = " 1 "
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(json.dumps(payload))
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
@@ -753,7 +822,71 @@ def test_late_cleanup_does_not_delete_a_newer_redis_value() -> None:
     assert redis.deleted == []
 
 
-def test_late_publication_is_removed_when_the_value_is_still_ours() -> None:
+def test_deadline_late_work_is_never_published_or_observed() -> None:
+    """Work that finishes at or after the deadline must never reach Redis.
+
+    Publication is decided once, before the write, so no concurrent reader can
+    observe a value that a later retraction would have to remove again.
+    """
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    reader_ready = Event()
+    work_done = Event()
+
+    def late_work(query, context):
+        del query, context
+        reader_ready.wait(timeout=2)
+        clock.advance(2)  # the provider finished past the caller's deadline
+        work_done.set()
+        return _snapshot()
+
+    provider = FakeProvider(_snapshot())
+    provider.get_snapshot = late_work  # type: ignore[method-assign]
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    context = RetrievalContext(
+        deadline=_RETRIEVED_AT + timedelta(seconds=1),
+        request_id="late-work",
+    )
+    observations: set[str | None] = set()
+    stop = Event()
+
+    def observe() -> None:
+        reader_ready.set()
+        while not stop.is_set():
+            observations.add(redis.values.get(key))
+        observations.add(redis.values.get(key))
+
+    reader = Thread(target=observe)
+    reader.start()
+    owner_error: dict[str, BaseException] = {}
+    _capture_error(
+        owner_error,
+        lambda: cache.get_snapshot(NBAMarketQuery(), context),
+    )
+    stop.set()
+    reader.join(timeout=2)
+
+    assert work_done.is_set()
+    assert isinstance(owner_error["error"], TimeoutError)
+    assert redis.set_calls == []
+    assert redis.deleted == []
+    assert observations == {None}
+
+
+def test_publication_decided_before_the_deadline_is_never_retracted() -> None:
+    """A write that returns late still holds pre-deadline work, so it stands.
+
+    Retracting it would create exactly the window where a concurrent reader
+    sees a value that then disappears.
+    """
+
     redis = FakeRedis()
     clock = ControlledClock()
     cache = ProviderSnapshotCache(
@@ -765,12 +898,12 @@ def test_late_publication_is_removed_when_the_value_is_still_ours() -> None:
     key = cache.cache_key(NBAMarketQuery())
     original_setex = redis.setex
 
-    def publish_then_expire(write_key: str, ttl: int, payload: str) -> bool:
+    def slow_setex(write_key: str, ttl: int, payload: str) -> bool:
         result = original_setex(write_key, ttl, payload)
         clock.advance(2)
         return result
 
-    redis.setex = publish_then_expire  # type: ignore[method-assign]
+    redis.setex = slow_setex  # type: ignore[method-assign]
     context = RetrievalContext(
         deadline=_RETRIEVED_AT + timedelta(seconds=1),
         request_id="late-write",
@@ -779,8 +912,100 @@ def test_late_publication_is_removed_when_the_value_is_still_ours() -> None:
     with pytest.raises(TimeoutError):
         cache.get_snapshot(NBAMarketQuery(), context)
 
-    assert redis.deleted == [key]
-    assert redis.values == {}
+    assert redis.deleted == []
+    assert redis.values[key] == redis.set_calls[0][1]
+    assert deserialize_provider_snapshot(redis.values[key]) == _snapshot()
+
+
+def test_redis_read_failure_past_the_deadline_calls_no_provider() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+
+    def slow_failing_get(read_key: str):
+        del read_key
+        clock.advance(2)
+        raise ConnectionError("redis unavailable")
+
+    redis.get = slow_failing_get  # type: ignore[method-assign]
+    context = RetrievalContext(
+        deadline=_RETRIEVED_AT + timedelta(seconds=1),
+        request_id="slow-failing-read",
+    )
+
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), context)
+
+    assert provider.calls == []
+
+
+def test_follower_adopts_the_owner_failure_instead_of_its_own_stale_copy() -> None:
+    """Followers take the owner's decision; they never race on their own read."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    started = Event()
+    release = Event()
+    original_get_snapshot = provider.get_snapshot
+
+    def blocking_failure(query, context):
+        started.set()
+        release.wait(timeout=2)
+        return original_get_snapshot(query, context)
+
+    provider.get_snapshot = blocking_failure  # type: ignore[method-assign]
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    context = _context()
+    errors: list[BaseException] = []
+    results: list[ProviderSnapshot] = []
+
+    def retrieve() -> None:
+        try:
+            results.append(cache.get_snapshot(NBAMarketQuery(), context))
+        except BaseException as error:
+            errors.append(error)
+
+    owner = Thread(target=retrieve)
+    owner.start()
+    assert started.wait(timeout=1)
+    # The owner read an empty key;  a stale value appears only for the follower.
+    stale_payload = serialize_provider_snapshot(_snapshot())
+    redis.values[key] = stale_payload
+    clock.advance(600)
+    joined = Event()
+    original_submit = cache.coordinator.submit
+
+    def observed_submit(flight_key, function):
+        flight, is_owner = original_submit(flight_key, function)
+        if not is_owner:
+            joined.set()
+        return flight, is_owner
+
+    cache.coordinator.submit = observed_submit  # type: ignore[method-assign]
+    follower = Thread(target=retrieve)
+    follower.start()
+    assert joined.wait(timeout=1)
+    release.set()
+    owner.join(timeout=2)
+    follower.join(timeout=2)
+
+    assert results == []
+    assert len(errors) == 2
+    assert all(isinstance(error, TimeoutError) for error in errors)
+    assert redis.values[key] == stale_payload
 
 
 def test_unusable_cached_payload_is_only_deleted_while_unchanged() -> None:
@@ -956,8 +1181,68 @@ def test_each_snapshot_request_records_one_cache_decision_and_no_provider_event(
         telemetry.clear_recorded_provider_events()
 
 
+def test_nested_invalid_cached_field_is_a_miss_and_the_key_is_replaced() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    corrupt = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
+    corrupt["markets"][0]["athlete"]["team"]["name"] = 123
+    redis.values[key] = json.dumps(corrupt)
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+def test_provider_events_never_increment_cache_decision_counters() -> None:
+    """One wrapper request is one cache decision, whatever the provider does."""
+
+    telemetry.clear_recorded_provider_events()
+    try:
+        redis = FakeRedis()
+        clock = ControlledClock()
+        provider = FakeProvider(_snapshot())
+        original_get_snapshot = provider.get_snapshot
+
+        def multi_event_retrieval(query, context):
+            # Dabble fans out over fixture details;  each real upstream call
+            # records its own provider event with a cache status.
+            for index in range(3):
+                with telemetry.ProviderTracker("dabble", f"fixture_detail_{index}"):
+                    pass
+            return original_get_snapshot(query, context)
+
+        provider.get_snapshot = multi_event_retrieval  # type: ignore[method-assign]
+        cache = ProviderSnapshotCache(
+            provider,
+            provider_name="dabble",
+            redis_client=redis,
+            clock=clock.now,
+        )
+
+        cache.get_snapshot(NBAMarketQuery(), _context())
+
+        events = telemetry.get_recorded_provider_events()
+        assert len(events) == 3
+        assert {event["cache_status"] for event in events} == {"miss"}
+        assert telemetry.snapshot_metrics()["cache"]["dabble"] == {"miss": 1}
+    finally:
+        telemetry.clear_recorded_provider_events()
+
+
 def test_cache_surface_keeps_no_undocumented_aliases() -> None:
     import app.services.dfs_snapshot_cache as module
+    from app.services.dfs_board import ProviderOutcome
 
     for name in ("decorate_provider", "get_snapshot_with_cache_info", "cache_info", "wrap"):
         assert not hasattr(module, name)
@@ -965,6 +1250,8 @@ def test_cache_surface_keeps_no_undocumented_aliases() -> None:
         assert not hasattr(module.ProviderSnapshotCacheCoordinator, name)
     for name in ("age", "failure_reason", "failure_at"):
         assert not hasattr(SnapshotCacheResult, name)
+    for name in ("cache_age", "cache_retrieved"):
+        assert not hasattr(ProviderOutcome, name)
 
 
 def _capture_error(target: dict[str, BaseException], function) -> None:

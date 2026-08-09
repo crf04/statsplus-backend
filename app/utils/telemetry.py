@@ -388,17 +388,16 @@ def record_provider_event(event: ProviderEvent) -> None:
         event.request_id,
     )
 
+    # Cache decision counters belong to the cache seam alone.  A retrieval that
+    # makes several real upstream calls records several provider events but
+    # still exactly one cache decision, so this does not touch _cache_counts.
     with _buffer_lock:
         _event_buffer.append(payload)
-        global _provider_events_total, _provider_failures, _cache_counts
+        global _provider_events_total, _provider_failures
         _provider_events_total += 1
         if event.outcome != OUTCOME_SUCCESS:
             key = (event.provider, event.outcome)
             _provider_failures[key] = _provider_failures.get(key, 0) + 1
-        per_provider = _cache_counts.setdefault(event.provider, {})
-        per_provider[event.cache_status] = (
-            per_provider.get(event.cache_status, 0) + 1
-        )
 
 
 def record_cached_provider_event(
@@ -413,8 +412,12 @@ def record_cached_provider_event(
     observable on the same shape as every other provider event.  Any retries
     accrued by an earlier call on this thread must not leak into the cache-hit
     event, so the counter is reset and the event reports ``retry_count=0``.
+
+    This is the one seam where a cache decision and a provider event describe
+    the same moment, so the decision is counted here explicitly.
     """
     reset_retry_count()
+    record_cache_status(provider, cache_status)
     record_provider_event(
         ProviderEvent(
             provider=provider,

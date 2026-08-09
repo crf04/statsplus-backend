@@ -104,6 +104,24 @@ def _provider_window(
     return float(value)
 
 
+def _cache_window_number(value: Any) -> float:
+    """Parse one positive cache window, rejecting booleans as numbers.
+
+    ``True`` is an ``int`` in Python, so an unguarded ``float()`` would turn a
+    misconfigured flag into a one-second window instead of a startup error.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError("DFS cache windows must be numbers")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("DFS cache windows must be numbers") from error
+    if number <= 0 or not isfinite(number):
+        raise ValueError("DFS cache windows must be positive")
+    return number
+
+
 class CacheSettings(BaseModel):
     """Optional Redis cache settings."""
 
@@ -178,21 +196,9 @@ class ProviderSettings(BaseModel):
                 name = str(provider).strip().casefold()
                 if not name:
                     raise ValueError("DFS cache provider names must be non-empty")
-                try:
-                    number = float(window)
-                except (TypeError, ValueError) as error:
-                    raise ValueError("DFS cache windows must be numbers") from error
-                if number <= 0 or not isfinite(number):
-                    raise ValueError("DFS cache windows must be positive")
-                normalized[name] = number
+                normalized[name] = _cache_window_number(window)
             return normalized
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as error:
-            raise ValueError("DFS cache windows must be numbers") from error
-        if number <= 0 or not isfinite(number):
-            raise ValueError("DFS cache windows must be positive")
-        return number
+        return _cache_window_number(value)
 
     def dfs_cache_fresh_seconds_for(self, provider: str) -> float:
         """Return the configured fresh window for one provider."""
@@ -412,6 +418,9 @@ class _EnvironmentReader:
 
     def decimal(self, name: str, default: float, *aliases: str) -> float:
         value = self.raw(name, default, *aliases)
+        if isinstance(value, bool):
+            # ``float(True)`` would silently accept a boolean as 1.0.
+            raise ConfigurationError(f"{name} must be a number, got {value!r}")
         try:
             return float(value)
         except (TypeError, ValueError) as error:
@@ -440,15 +449,15 @@ def _build_settings(
         stale_value = reader.raw(f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS")
         if fresh_value is not None:
             try:
-                fresh_overrides[provider_name] = float(fresh_value)
-            except (TypeError, ValueError) as error:
+                fresh_overrides[provider_name] = _cache_window_number(fresh_value)
+            except ValueError as error:
                 raise ConfigurationError(
                     f"DFS_{env_name}_CACHE_FRESH_SECONDS must be a number"
                 ) from error
         if stale_value is not None:
             try:
-                stale_overrides[provider_name] = float(stale_value)
-            except (TypeError, ValueError) as error:
+                stale_overrides[provider_name] = _cache_window_number(stale_value)
+            except ValueError as error:
                 raise ConfigurationError(
                     f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS must be a number"
                 ) from error

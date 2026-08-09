@@ -40,6 +40,7 @@ from app.providers.dfs import (
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
+    ScoringPeriod,
     Selection,
     SelectionModifier,
     SnapshotStatus,
@@ -54,6 +55,8 @@ SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 SNAPSHOT_SCHEMA_VERSION = 1
 DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
+
+_SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
@@ -295,8 +298,11 @@ def _market(value: Any) -> PlayerProjectionMarket:
     decoded["sport"] = _sport(data["sport"])
     decoded["statistic"] = _statistic(data["statistic"])
     decoded["threshold"] = _threshold(data["threshold"])
-    if isinstance(decoded["scoring_period"], str):
-        decoded["scoring_period"] = decoded["scoring_period"].replace("_", " ")
+    # A canonical wire value is decoded as the closed enum member it names;  a
+    # provider alias stays a string so the canonical check below rejects it.
+    period = decoded["scoring_period"]
+    if isinstance(period, str) and period in _SCORING_PERIOD_VALUES:
+        decoded["scoring_period"] = ScoringPeriod(period)
     selections = data["selections"]
     if not isinstance(selections, list):
         raise SnapshotCacheError("snapshot market selections schema is invalid")
@@ -413,7 +419,13 @@ def deserialize_provider_snapshot(
     ):
         raise SnapshotCacheError("snapshot schema version is incompatible")
     contract_version = data["contract_version"]
-    if not isinstance(contract_version, str) or not contract_version.strip():
+    # The wire value must already be canonical;  accepting surrounding
+    # whitespace would let two spellings of one version share a cache key.
+    if (
+        not isinstance(contract_version, str)
+        or not contract_version
+        or contract_version != contract_version.strip()
+    ):
         raise SnapshotCacheError("snapshot contract version is invalid")
     if expected_contract_version is not None and contract_version != expected_contract_version:
         raise SnapshotCacheError("snapshot contract version is incompatible")
@@ -455,6 +467,13 @@ def deserialize_provider_snapshot(
         raise SnapshotCacheError("snapshot values are incompatible") from error
     if snapshot.status is not SnapshotStatus.COMPLETE:
         raise SnapshotCacheError("cached snapshot is not complete")
+    # Every nested wire field must already be exactly what this snapshot
+    # serializes to.  Anything a constructor normalized, dropped, canonicalized
+    # from an alias, or deduplicated is corrupt data, not a usable cache value.
+    if serialize_provider_snapshot(snapshot, encoded_query) != json.dumps(
+        data, separators=(",", ":"), sort_keys=True
+    ):
+        raise SnapshotCacheError("snapshot payload is not canonical")
     return snapshot
 
 
@@ -736,6 +755,10 @@ class ProviderSnapshotCache:
             raw = self.redis_client.get(key)
         except Exception:
             decision.status = "error"
+            # A slow failing read can consume the whole budget on its own;  the
+            # provider must not be called once the deadline has already passed.
+            if self._clock_utc() >= context.deadline:
+                raise DeadlineExceededError("provider retrieval deadline exceeded")
             return self._direct_refresh(
                 query,
                 context,
@@ -829,7 +852,10 @@ class ProviderSnapshotCache:
                 # provenance is never lost on the way through the flight.
                 result = self._await(key, flight, context, owner=False)
         except _EXPECTED_REFRESH_ERRORS as error:
-            fallback = self._stale_fallback(stale, context, error)
+            # Only the owner may substitute its own stale read.  A follower
+            # deciding separately would race the owner's decision against
+            # whatever its own Redis read happened to see.
+            fallback = self._stale_fallback(stale, context, error) if owner else None
             if fallback is None:
                 self._resolve_flight(key, flight, owner=owner, error=error)
                 raise
@@ -865,24 +891,25 @@ class ProviderSnapshotCache:
         if snapshot.contract_version != self.contract_version:
             raise ValueError("DFS provider snapshot contract version does not match cache")
         status = "miss" if cache_status == "stale_candidate" else cache_status
+        # Publication is decided at one instant, before anything is written.
+        # Work that finished at or after the deadline is never published, and a
+        # value published before it is never retracted, so no reader can observe
+        # a value that a late cleanup would have to remove again.
+        if self._clock_utc() >= context.deadline:
+            raise DeadlineExceededError("provider refresh completed at deadline")
         # Partial observations are useful to this caller, but are never written
         # over the last complete Redis value.
-        if (
-            self.enabled
-            and snapshot.status is SnapshotStatus.COMPLETE
-            and self._clock_utc() < context.deadline
-        ):
+        if self.enabled and snapshot.status is SnapshotStatus.COMPLETE:
             try:
                 self._write_redis(
                     key,
                     serialize_provider_snapshot(snapshot, query),
                     max(1, int(self.stale_if_error_seconds)),
-                    context.deadline,
                 )
             except Exception:
-                if self._clock_utc() >= context.deadline:
-                    raise DeadlineExceededError("provider refresh completed at deadline")
                 status = "error"
+        # The write itself may outlive the budget;  the value stands, but this
+        # caller may no longer be served past its own absolute deadline.
         if self._clock_utc() >= context.deadline:
             raise DeadlineExceededError("provider refresh completed at deadline")
         return SnapshotCacheResult(
@@ -1028,9 +1055,7 @@ class ProviderSnapshotCache:
                 pass
         self.coordinator.finish(key, flight)
 
-    def _write_redis(self, key: str, payload: str, ttl: int, deadline: datetime) -> None:
-        if self._clock_utc() >= deadline:
-            raise DeadlineExceededError("provider refresh completed at deadline")
+    def _write_redis(self, key: str, payload: str, ttl: int) -> None:
         setex = getattr(self.redis_client, "setex", None)
         if callable(setex):
             setex(key, ttl, payload)
@@ -1039,12 +1064,9 @@ class ProviderSnapshotCache:
             if not callable(setter):
                 raise AttributeError("Redis client does not support setex or set")
             setter(key, payload, ex=ttl)
-        if self._clock_utc() >= deadline:
-            self._delete_if_unchanged(key, payload)
-            raise DeadlineExceededError("provider refresh publication exceeded deadline")
 
     def _delete_if_unchanged(self, key: str, payload: Any) -> None:
-        """Remove only the exact value this worker wrote or read.
+        """Remove only the unusable value this worker read.
 
         A blind delete would drop a newer value another worker published in the
         meantime, so cleanup compares and deletes in one atomic step and

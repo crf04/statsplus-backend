@@ -196,7 +196,9 @@ def test_provider_failure_counters_are_segregated_from_application():
     }
 
 
-def test_cache_status_is_counted_per_provider():
+def test_cache_decisions_are_counted_apart_from_provider_operations():
+    """A real upstream call is a provider event, not a cache decision."""
+
     telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
     with pytest.raises(requests.exceptions.ReadTimeout):
         with telemetry.provider_call(
@@ -207,10 +209,12 @@ def test_cache_status_is_counted_per_provider():
             raise requests.exceptions.ReadTimeout("miss")
 
     metrics = telemetry.snapshot_metrics()
-    assert metrics["cache"][telemetry.PROVIDER_NBA_STATS] == {
-        "hit": 1,
-        "miss": 1,
-    }
+    assert metrics["cache"][telemetry.PROVIDER_NBA_STATS] == {"hit": 1}
+    assert metrics["provider_events_total"] == 2
+    assert [event["cache_status"] for event in telemetry.get_recorded_provider_events()] == [
+        telemetry.CACHE_HIT,
+        telemetry.CACHE_MISS,
+    ]
 
 
 def test_provider_events_never_write_secret_text(caplog):

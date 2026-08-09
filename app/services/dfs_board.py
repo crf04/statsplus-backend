@@ -243,18 +243,6 @@ class ProviderOutcome:
 
         return self.snapshot.coverage if self.snapshot is not None else None
 
-    @property
-    def cache_age(self) -> float | None:
-        """Short alias for the cache age exposed on this provider outcome."""
-
-        return self.cache_age_seconds
-
-    @property
-    def cache_retrieved(self) -> datetime | None:
-        """Return the source retrieval time represented by the cache result."""
-
-        return self.cache_retrieved_at
-
 
 @dataclass(frozen=True, slots=True)
 class DFSBoard:

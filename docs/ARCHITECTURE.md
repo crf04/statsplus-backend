@@ -100,14 +100,32 @@ stale-if-error fallback after a later expected total refresh failure. Redis
 failure bypasses the cache without an in-process stale copy, and
 `ProviderSnapshotCacheCoordinator` suppresses duplicate refreshes only within
 one worker (there is no distributed lock). One flight shares the whole cache
-decision, so a follower keeps the owner's cache status, age, and sanitized
-refresh-failure provenance. When the owner's deadline elapses before an
-uncancellable refresh finishes, the flight stays active and its late result
-retires the key without publishing anything. The absolute deadline is enforced
-after the Redis read and before any value is returned, and cleanup of a late
-publication or an unusable payload compares and deletes atomically so a newer
-concurrent value survives. Cache decisions are recorded once per request as
-bounded cache counters only; the cache never emits a provider-operation event.
+decision: a follower adopts the owner's result or failure verbatim, including
+its cache status, age, and sanitized refresh-failure provenance, and never
+substitutes a stale value from its own Redis read. When the owner's deadline
+elapses before an uncancellable refresh finishes, the flight stays active and
+its late result retires the key without publishing anything.
+
+Publication is decided at a single instant, before the write: work that
+finished at or after the deadline is never written, and a value written before
+that instant is never retracted, so no concurrent reader can observe a value
+that a later cleanup would remove again. A write that itself outlives the
+budget still stands, but its caller is not served past its own deadline. The
+absolute deadline is also enforced after the Redis read — including after a
+read that fails slowly, which calls no provider at all — and before any value
+is returned. Only an unusable payload is cleaned up, comparing and deleting
+atomically so a newer concurrent value survives.
+
+A cached payload is used only when every nested wire field is already exactly
+what the snapshot serializes to. Anything a constructor would normalize, drop,
+canonicalize from an alias, or deduplicate is treated as corrupt data: the key
+is deleted and the request becomes a miss.
+
+Cache decisions are recorded once per request as bounded cache counters only;
+the cache never emits a provider-operation event, and provider events never
+increment the cache counters. A retrieval that makes many upstream calls (the
+Dabble fixture-detail fan-out) therefore records many provider events and still
+exactly one cache decision.
 
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
