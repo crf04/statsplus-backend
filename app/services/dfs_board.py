@@ -640,13 +640,20 @@ class DFSBoardService:
                         # provider, not by when the board got around to it.
                         observed_at=snapshot.retrieved_at,
                     )
-                    self.athlete_mapping_repository.record_resolution(resolution)
+                    result = self.athlete_mapping_repository.record_resolution(
+                        resolution
+                    )
                 except AthleteMappingPersistenceError:
                     # Board retrieval is a normalized read; mapping storage is
                     # an audit side effect and must never remove a market.
                     logger.warning("Could not observe one athlete mapping")
                     continue
-                outcomes.append(resolution)
+                # The resolver read before the write's transaction opened, so
+                # what it computed is only what this observation proposed.  The
+                # write returns the state governance reached for the identity,
+                # and the board reports that -- converted from the value in
+                # hand, never re-read, so the report cannot race the write.
+                outcomes.append(result.board_outcome(resolution))
         return DFSBoard(
             query=board.query,
             provider_outcomes=board.provider_outcomes,

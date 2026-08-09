@@ -74,6 +74,18 @@ _MANUAL_MAPPING_STATES = frozenset(
     }
 )
 
+#: Mapping states that still assert a canonical claim for the identity.  Only
+#: these may hand a stored mapping to a caller that compares athletes; every
+#: other governed state means the identity is suppressed, disputed, or
+#: withdrawn, and must fail closed with no canonical athlete at all.
+CLAIMING_MAPPING_STATES = frozenset(
+    {
+        MappingResolutionState.AUTO,
+        MappingResolutionState.MANUAL_APPROVED,
+        MappingResolutionState.MANUAL_OVERRIDE,
+    }
+)
+
 #: Decision states an operator recorded.  Each is its own event, so its
 #: ``created_at`` is when the identity was decided and is the instant a board
 #: observation has to postdate to still be news.
@@ -335,6 +347,59 @@ class MappingRejectionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BoardMappingOutcome:
+    """What one board observation turned out to mean for the identity.
+
+    The board resolves each market before the mapping transaction opens, so the
+    state the resolver computed is only a proposal: an operator can reject,
+    approve, or override the identity in between, and a concurrent observation
+    can promote it to a conflict.  This value keeps both sides -- the
+    ``resolution`` the board observed and the ``state`` governance actually
+    reached -- so a caller never has to re-read the repository to learn which
+    one holds, and therefore cannot race the write it just made.
+    """
+
+    resolution: AthleteResolution
+    state: MappingResolutionState
+    persisted: bool
+    mapping: ProviderAthleteMappingRecord | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resolution, AthleteResolution):
+            raise ValueError("board mapping outcome requires an AthleteResolution")
+        state = (
+            self.state
+            if isinstance(self.state, MappingResolutionState)
+            else MappingResolutionState(self.state)
+        )
+        if self.mapping is not None and state not in CLAIMING_MAPPING_STATES:
+            raise ValueError("a fail-closed mapping outcome may not carry a mapping")
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "persisted", bool(self.persisted))
+
+    @property
+    def observed_state(self) -> MappingResolutionState:
+        """What the board resolved before governance had its say."""
+
+        return self.resolution.state
+
+    @property
+    def canonical_player_id(self) -> int | None:
+        """The canonical athlete this identity may be compared as.
+
+        ``None`` whenever the governed state asserts no claim, so a suppressed,
+        disputed, or withdrawn identity cannot reach a comparison through the
+        canonical athlete the pre-transaction resolution happened to name.
+        """
+
+        if self.state not in CLAIMING_MAPPING_STATES:
+            return None
+        if self.mapping is not None:
+            return self.mapping.canonical_player_id
+        return self.resolution.canonical_player_id
+
+
+@dataclass(frozen=True, slots=True)
 class MappingPersistenceResult:
     """Outcome of one auto-observation or manual decision."""
 
@@ -342,6 +407,38 @@ class MappingPersistenceResult:
     persisted: bool
     mapping: ProviderAthleteMappingRecord | None = None
     decision: MappingDecisionRecord | None = None
+
+    def board_outcome(self, resolution: AthleteResolution) -> BoardMappingOutcome:
+        """Restate one resolution as the governed state this write reached."""
+
+        state = MappingResolutionState(self.state)
+        return BoardMappingOutcome(
+            resolution=resolution,
+            state=state,
+            persisted=self.persisted,
+            mapping=self._claimed_mapping(state),
+        )
+
+    def _claimed_mapping(
+        self, state: MappingResolutionState
+    ) -> ProviderAthleteMappingRecord | None:
+        """The stored mapping, but only while it still asserts this claim.
+
+        A governing read returns the row it found alongside the state that now
+        holds, and those disagree exactly when the identity failed closed: a
+        rejection leaves the deactivated row it suppressed, and a conflict
+        leaves the athlete the mapping used to name.  Handing that row on would
+        let a caller compare against a canonical athlete governance has already
+        taken out of comparisons, so it is withheld unless the row itself is
+        active and says the same thing the governed state does.
+        """
+
+        mapping = self.mapping
+        if mapping is None or state not in CLAIMING_MAPPING_STATES:
+            return None
+        if not mapping.is_active or mapping.mapping_state != state.value:
+            return None
+        return mapping
 
 
 class AthleteMappingRepository:
@@ -2219,9 +2316,11 @@ class AthleteMappingRepository:
 
 
 __all__ = [
+    "CLAIMING_MAPPING_STATES",
     "UNRESOLVED_OBSERVATION_STATES",
     "AthleteMappingRepository",
     "AthleteMappingPersistenceError",
+    "BoardMappingOutcome",
     "MappingCandidateRecord",
     "MappingConflictRecord",
     "MappingDecisionRecord",

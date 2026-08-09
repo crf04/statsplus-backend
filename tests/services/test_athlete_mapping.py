@@ -36,7 +36,12 @@ from app.providers.dfs import (
     StatisticEvidence,
 )
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
-from app.services.athlete_mapping_repository import AthleteMappingRepository
+from app.services.athlete_mapping_repository import (
+    AthleteMappingRepository,
+    BoardMappingOutcome,
+    MappingPersistenceResult,
+    ProviderAthleteMappingRecord,
+)
 from app.services.athlete_resolver import (
     AthleteResolver,
     MappingResolutionState,
@@ -2513,6 +2518,238 @@ def test_board_returns_markets_when_a_mapping_read_fails():
 
     assert _unresolved_markets(board) == (market,)
     assert board.mapping_outcomes == ()
+
+
+def test_a_fail_closed_governed_result_never_hands_over_its_stored_mapping():
+    resolution = _auto_resolution()
+    suppressed = ProviderAthleteMappingRecord(
+        provider="prizepicks",
+        provider_athlete_id="pp-15",
+        mapping_state="auto",
+        is_active=True,
+        season="2024-25",
+        canonical_player_id=15,
+        canonical_name="Nikola Jokić",
+        canonical_team_id=1610612747,
+        canonical_team_name="Los Angeles Lakers",
+        canonical_team_abbreviation="LAL",
+        provider_name="Nikola Jokic",
+        provider_team_id=None,
+        provider_team_canonical_id=None,
+        provider_team_name=None,
+        provider_team_abbreviation=None,
+        conflict_canonical_player_id=None,
+        conflict_canonical_name=None,
+        first_seen_at="2026-08-09T12:00:00+00:00",
+        last_seen_at="2026-08-09T12:00:00+00:00",
+    )
+
+    outcome = MappingPersistenceResult("rejected", False, mapping=suppressed).board_outcome(
+        resolution
+    )
+
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    # The invariant is enforced by the type, not only by the conversion.
+    with pytest.raises(ValueError):
+        BoardMappingOutcome(
+            resolution=resolution,
+            state=MappingResolutionState.REJECTED,
+            persisted=False,
+            mapping=suppressed,
+        )
+
+
+class _RacingResolver:
+    """Resolve one market, then let a decision land before the board persists.
+
+    The board resolves outside the mapping transaction, so this gap is exactly
+    where a real race lands.  Running the racing action here reproduces it
+    deterministically, with no threads and no sleeping.
+    """
+
+    def __init__(self, resolver: AthleteResolver, race) -> None:
+        self.resolver = resolver
+        self.race = race
+        self.resolved = []
+
+    def resolve_market(self, market, season, *, observed_at=None):
+        resolution = self.resolver.resolve_market(market, season, observed_at=observed_at)
+        self.resolved.append(resolution)
+        self.race()
+        return resolution
+
+
+def _racing_board(repository, snapshot, race, *, rows=None):
+    resolver = _RacingResolver(_resolver(rows=rows, repository=repository), race)
+    board = _board_service(
+        snapshot, resolver=resolver, repository=repository
+    ).get_board(NBAMarketQuery(season="2024-25"))
+    return board, resolver
+
+
+def test_board_reports_the_rejection_that_raced_its_auto_resolution(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    board, resolver = _racing_board(
+        repository,
+        _snapshot(_market()),
+        lambda: repository.reject(
+            "prizepicks",
+            "pp-15",
+            operator_id="ops@example.com",
+            reason="provider identity is not trusted",
+        ),
+    )
+
+    assert board.snapshots[0].markets[0].market_id == "m-pp-15"
+    (outcome,) = board.mapping_outcomes
+    # The board resolved an automatic mapping, but the rejection governs it.
+    assert resolver.resolved[0].state is MappingResolutionState.AUTO
+    assert outcome.observed_state is MappingResolutionState.AUTO
+    assert outcome.state is MappingResolutionState.REJECTED
+    assert outcome.persisted is False
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+def test_board_withholds_a_suppressed_mapping_it_had_already_established(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _board_service(
+        _snapshot(_market()),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    board, _ = _racing_board(
+        repository,
+        _snapshot(_market()),
+        lambda: repository.reject(
+            "prizepicks",
+            "pp-15",
+            operator_id="ops@example.com",
+            reason="provider identity is not trusted",
+        ),
+    )
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.REJECTED
+    # The row the earlier board read established is still durable, but a
+    # suppressed identity may not reach a comparison through it.
+    assert repository.get_mapping("prizepicks", "pp-15").canonical_player_id == 15
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+
+
+def test_board_reports_the_conflict_an_auto_promotion_raced_into(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    disagreeing_team = _market(
+        "pp-15",
+        "Nikola Jokic",
+        team=TeamEvidence(
+            provider_id="pp-bos",
+            canonical_id=1610612738,
+            name="Boston Celtics",
+            abbreviation="BOS",
+        ),
+    )
+
+    board, resolver = _racing_board(
+        repository,
+        _snapshot(disagreeing_team),
+        lambda: repository.record_resolution(_auto_resolution(observed_at=now)),
+    )
+
+    (outcome,) = board.mapping_outcomes
+    # The observation could only say the provider's team disagrees; the mapping
+    # a concurrent read established made that disagreement a conflict.
+    assert resolver.resolved[0].state is MappingResolutionState.TEAM_CONFLICT
+    assert outcome.observed_state is MappingResolutionState.TEAM_CONFLICT
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping.mapping_state == "mapping_conflict"
+    assert mapping.is_active is False
+
+
+def test_board_reports_the_manual_mapping_that_raced_its_auto_resolution(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    board, resolver = _racing_board(
+        repository,
+        _snapshot(_market()),
+        lambda: repository.approve(
+            "prizepicks",
+            "pp-15",
+            23,
+            season="2024-25",
+            operator_id="ops@example.com",
+            reason="reviewed source identity",
+        ),
+    )
+
+    (outcome,) = board.mapping_outcomes
+    assert resolver.resolved[0].canonical_player_id == 15
+    assert outcome.state is MappingResolutionState.MANUAL_APPROVED
+    assert outcome.persisted is False
+    # The operator's athlete is what the identity means now, not the one this
+    # board read resolved before the decision landed.
+    assert outcome.mapping.canonical_player_id == 23
+    assert outcome.canonical_player_id == 23
+    assert repository.get_active_mapping("prizepicks", "pp-15").canonical_player_id == 23
+
+
+def test_board_reports_current_state_for_a_read_fenced_as_stale(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_AFTER))
+
+    board = _board_service(
+        _snapshot(_market("pp-15", "LeBron James"), retrieved_at=_OBSERVED_BEFORE),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    # The read was taken before the mapping it disagrees with was observed, so
+    # it is fenced -- and the board reports the identity as it currently is.
+    assert outcome.resolution.canonical_player_id == 23
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.persisted is False
+    assert outcome.canonical_player_id == 15
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic"
+
+
+def test_board_keeps_reporting_the_mapping_a_repeated_read_left_alone(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    service = _board_service(
+        _snapshot(_market()),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+
+    first = service.get_board(query)
+    second = service.get_board(query)
+
+    (established,) = first.mapping_outcomes
+    (repeated,) = second.mapping_outcomes
+    assert established.state is MappingResolutionState.AUTO
+    assert established.persisted is True
+    # The repeat changed nothing, which is not the same as observing nothing.
+    assert repeated.state is MappingResolutionState.AUTO
+    assert repeated.persisted is False
+    assert repeated.canonical_player_id == 15
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
 
 
 def _reused_identity_auto(
