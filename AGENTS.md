@@ -2,30 +2,41 @@
 
 ## Start here
 
-Run `./scripts/bootstrap.sh` once, then use `./scripts/check.sh` as the completion gate for every change.
+Run `./scripts/bootstrap.sh` once; it enforces the Python version pinned in
+`runtime.txt`. Run `./scripts/check.sh` as the completion gate for every
+change.
 
-Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing route or service interfaces, database access, authentication, caching, natural-language parsing, or either external NBA provider. It records the non-obvious runtime seams and safe test surfaces.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing runtime seams,
+database access, authentication, caching, parsing, or providers. Read
+[docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) before changing a
+public route, request, response, error, or authorization contract.
+
+## Cross-repository coordination
+
+Keep backend-only work in this repository. When an outcome changes a
+frontend-visible API, authentication flow, or error contract, work through the
+`crf04/statsplus` coordination repository first. Read its agent guide,
+architecture map, and workflow; agree on the boundary contract before
+implementation, then keep the backend branch, issue, commits, tests, and pull
+request here.
 
 ## Change loop
 
 1. Reproduce the requested behavior at the narrowest real seam.
 2. Add or update a test that fails for the behavior being changed.
 3. Make the smallest coherent implementation change.
-4. Run `./scripts/check.sh`; completion means both Ruff and the full pytest suite pass.
-5. Update the relevant README or `docs/` reference when configuration, routes, auth, or query behavior changes.
+4. Update the relevant documentation when configuration or public behavior
+   changes.
+5. Run `./scripts/check.sh`; completion means the entire command passes.
 
 ## Repository constraints
 
-- Use Python 3.11. Run commands from the repository root because the default SQLite URL and prompt paths are relative.
-- Keep automated tests offline and credential-free. Patch provider calls and create apps with `SKIP_FIREBASE_INIT` and `SKIP_TABLE_CREATE` where appropriate.
-- Treat `nba_play_types.db` as a public demo fixture. Preserve it unless the task explicitly requires refreshing demo data, and never add real user records.
-- `stats.nba.com` calls go through `nba_api`; `api.pbpstats.com` calls use the shared requests session. Keep their timeouts and health signals distinct.
-- Routes under `/api/data` can replace local tables. Exercise their service methods with mocks or a temporary database during tests.
-- Preserve the app-factory entry point (`app.create_app`) and the production WSGI contract (`wsgi:app`).
-
-## Security contract
-
-- Protected routes must fail closed when Firebase Admin is unavailable. The only credential-free bypass is the explicit `FIREBASE_ADMIN_DISABLED=true` setting in development/tests; it must be rejected outside a local/test environment and must never be enabled in deployments.
-- Admin authorization accepts only verified Firebase custom claims `admin=true`, `role=admin`, or `roles` containing `admin`.
-- Treat every `/api/data/*` endpoint and `PUT /api/players/fetch` as admin-only. Preserve their public methods: `POST /api/data/update_database`, `POST /api/data/fetch_players_with_teams`, `PUT` for both PBP routes, and `GET /api/data/fetch_playtypes`.
-- Keep docs and curl examples aligned with these auth requirements and methods when changing routes.
+- Run commands from the repository root; database and prompt defaults are
+  relative.
+- Keep automated tests offline and credential-free by injecting or patching
+  provider boundaries.
+- Treat `nba_play_types.db` as a public, read-only demo fixture containing no
+  real user records.
+- Exercise data-replacement services with mocks or a temporary database.
+- Treat authentication and data-update routes as security boundaries; verify
+  their behavior against the authoritative architecture and API documents.
