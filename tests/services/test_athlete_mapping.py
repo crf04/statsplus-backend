@@ -14,6 +14,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
 
+from app.domain.statistics import ScoringPeriod
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
 from app.models.athlete_mapping import (
@@ -4626,3 +4627,62 @@ def test_an_operator_resolves_a_vanished_claim_by_approving_another_athlete(mapp
     assert result.mapping.is_active is True
     assert result.mapping.canonical_player_id == 23
     assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_one_board_read_keeps_cache_statistics_and_governed_mappings(mapping_db):
+    """One retrieval must carry all three reviewed board features at once.
+
+    The snapshot cache seam, the statistic catalog, and the governed athlete
+    mappings each decorate the same retrieval.  Every one of them is covered
+    independently elsewhere, so only this assembly test catches a change that
+    keeps some of them while silently dropping another.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    canonical = replace(
+        _market(),
+        market_id="m-canonical",
+        statistic=StatisticEvidence(provider_id="pts", label="Points"),
+        threshold=MarketThreshold(value="20.5", unit="count"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    unmapped = replace(
+        _market(),
+        market_id="m-unmapped",
+        statistic=StatisticEvidence(provider_id="wiz", label="Fantasy Wizard Score"),
+        threshold=MarketThreshold(value="20.5", unit="count"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    decorated: list[str] = []
+
+    class _Cache:
+        """Stand-in for the snapshot cache seam the app factory injects."""
+
+        def decorate(self, provider_name, provider):
+            decorated.append(provider_name)
+            return provider
+
+    board = DFSBoardService(
+        provider_registry={"prizepicks": _StaticProvider(_snapshot(canonical, unmapped))},
+        snapshot_cache=_Cache(),
+        athlete_resolver=_resolver(repository=repository),
+        athlete_mapping_repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    # Cache seam: the enabled provider was decorated before retrieval.
+    assert decorated == ["prizepicks"]
+
+    # Statistic catalog: the canonical market is comparable, and the unmapped
+    # one stays on the snapshot rather than being dropped.
+    assert {market.market_id for market in board.canonical_markets} == {"m-canonical"}
+    assert {market.market_id for market in board.unmapped_markets} == {"m-unmapped"}
+    assert len(board.resolved_markets) == 2
+
+    # Governed mappings: both markets name one identity, so the board reports
+    # that identity once and the mapping is durable.
+    assert len(board.mapping_outcomes) == 1
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "auto"
+    assert mapping.canonical_player_id == 15
