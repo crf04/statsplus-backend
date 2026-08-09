@@ -209,25 +209,29 @@ class SelectionModifier:
     value: Decimal | int | str | float
     kind: str
     scope: str
-    label: str
+    label: str | None = None
 
     def __post_init__(self) -> None:
         decimal = _decimal_value(self.value, field="selection modifier value")
         kind = self.kind.strip() if isinstance(self.kind, str) else ""
         scope = self.scope.strip() if isinstance(self.scope, str) else ""
-        label = self.label if isinstance(self.label, str) else ""
         if not kind:
             raise ValueError("selection modifier kind must be a non-empty string")
         if not scope:
             raise ValueError("selection modifier scope must be a non-empty string")
-        if not label.strip():
-            raise ValueError("selection modifier label must be a non-empty string")
+        if self.label is None:
+            label = None
+        elif not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("selection modifier label must be a non-empty string or None")
+        else:
+            label = self.label
         object.__setattr__(self, "value", decimal)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "label", label)
 
     @property
-    def original_label(self) -> str:
+    def original_label(self) -> str | None:
         """Alias used by normalized-label consumers."""
 
         return self.label

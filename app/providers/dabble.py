@@ -288,6 +288,10 @@ class DabbleAdapter:
         fixtures: list[tuple[dict[str, Any], dict[str, Any]]] = []
         fixture_fetch_failed = False
         for competition in nba_competitions:
+            if context.is_expired(now=self._now_utc()):
+                raise self._unavailable(
+                    _DabbleRequestFailure("deadline_exceeded")
+                )
             try:
                 fixtures_result = self._request_json(
                     context,
@@ -298,6 +302,8 @@ class DabbleAdapter:
                     parser=self._parse_fixtures,
                 )
             except (_DabbleRequestFailure, ProviderResponseError) as error:
+                if getattr(error, "reason", None) == "deadline_exceeded":
+                    raise self._unavailable(error) from error
                 fixture_fetch_failed = True
                 fanout_complete = False
                 warn("fixture_list_failed")
@@ -323,6 +329,9 @@ class DabbleAdapter:
                     skipped("ineligible_status")
                     continue
                 fixtures.append((fixture, competition))
+
+        if context.is_expired(now=self._now_utc()):
+            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
 
         if not fixtures:
             if fixture_fetch_failed:
@@ -352,8 +361,13 @@ class DabbleAdapter:
             )
 
         detail_results = self._fetch_details(fixtures, context)
+        if context.is_expired(now=self._now_utc()):
+            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+        deadline_error = False
         for result in detail_results:
             if result.error is not None:
+                if getattr(result.error, "reason", None) == "deadline_exceeded":
+                    deadline_error = True
                 fanout_complete = False
                 if result.malformed:
                     malformed_seen = True
@@ -408,6 +422,9 @@ class DabbleAdapter:
                     skipped("conflicting_source_identity", warning=True)
                     malformed_seen = True
                     fanout_complete = False
+
+        if deadline_error or context.is_expired(now=self._now_utc()):
+            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
 
         markets = merged_markets
 
@@ -547,20 +564,31 @@ class DabbleAdapter:
             pending[future] = (index, fixture, competition)
             return True
 
+        def cancel_pending() -> None:
+            for future in pending:
+                future.cancel()
+
         try:
             for _ in range(min(self.detail_concurrency, len(fixtures))):
                 if not submit_next():
                     break
             while pending:
-                if context.is_expired(now=self._now_utc()):
-                    for future in pending:
-                        future.cancel()
+                remaining = context.remaining_seconds(now=self._now_utc())
+                if remaining <= 0:
+                    cancel_pending()
                     break
                 done, _ = concurrent.futures.wait(
                     pending,
+                    timeout=remaining,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
+                if not done or context.is_expired(now=self._now_utc()):
+                    cancel_pending()
+                    break
                 for future in done:
+                    if context.is_expired(now=self._now_utc()):
+                        cancel_pending()
+                        break
                     index, fixture, competition = pending.pop(future)
                     try:
                         detail = future.result()
@@ -585,6 +613,7 @@ class DabbleAdapter:
                     except Exception:  # implementation defects stay visible
                         executor.shutdown(wait=False, cancel_futures=True)
                         raise
+                else:
                     submit_next()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -832,17 +861,22 @@ class DabbleAdapter:
 
         modifiers: tuple[SelectionModifier, ...] = ()
         if "multiplier" in prop and prop.get("multiplier") is not None:
-            multiplier, multiplier_display = self._decimal_source(
+            multiplier, _ = self._decimal_source(
                 prop.get("multiplier"), "multiplier"
             )
             if multiplier <= 0:
                 raise ProviderResponseError("Dabble multiplier must be positive")
+            multiplier_label = self._optional_text(
+                prop.get("multiplierLabel")
+                or prop.get("payoutMultiplierLabel")
+                or prop.get("modifierLabel")
+            )
             modifiers = (
                 SelectionModifier(
                     value=multiplier,
                     kind="multiplier",
                     scope="selection",
-                    label=f"{multiplier_display}x",
+                    label=multiplier_label,
                 ),
             )
         selection = Selection(
@@ -979,6 +1013,7 @@ class DabbleAdapter:
                     timeout=timeout,
                 )
                 tracker.status_code = getattr(response, "status_code", None)
+                context.ensure_active(now=self._now_utc())
                 response.raise_for_status()
                 try:
                     payload = response.json()
@@ -986,7 +1021,9 @@ class DabbleAdapter:
                     raise ProviderResponseError(
                         "Dabble returned invalid JSON"
                     ) from error
-                return parser(payload)
+                parsed = parser(payload)
+                context.ensure_active(now=self._now_utc())
+                return parsed
         except ProviderResponseError:
             raise
         except DeadlineExceededError as error:
@@ -1007,8 +1044,9 @@ class DabbleAdapter:
             raise _DabbleRequestFailure("upstream_error", error) from error
 
     def _timeout_for(self, context: RetrievalContext) -> tuple[float, float]:
-        context.ensure_active(now=self._now_utc())
-        remaining = context.remaining_seconds(now=self._now_utc())
+        current = self._now_utc()
+        context.ensure_active(now=current)
+        remaining = context.remaining_seconds(now=current)
         if remaining <= 0:
             raise DeadlineExceededError("provider retrieval deadline exceeded")
         return (

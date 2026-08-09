@@ -108,6 +108,20 @@ def test_selection_modifier_is_decimal_evidence_not_a_payout():
     assert not hasattr(modifier, "payout")
 
 
+def test_selection_modifier_can_preserve_a_missing_provider_label():
+    modifier = SelectionModifier(
+        value="1.500",
+        kind="multiplier",
+        scope="selection",
+    )
+
+    assert modifier.value == Decimal("1.500")
+    assert modifier.kind == "multiplier"
+    assert modifier.scope == "selection"
+    assert modifier.label is None
+    assert modifier.original_label is None
+
+
 def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
     athlete = AthleteEvidence(
         provider_id=None,

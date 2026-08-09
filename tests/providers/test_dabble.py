@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -106,7 +107,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.selections[0].modifiers[0].value == Decimal("1.5")
     assert first.selections[0].modifiers[0].kind == "multiplier"
     assert first.selections[0].modifiers[0].scope == "selection"
-    assert first.selections[0].modifiers[0].label == "1.5x"
+    assert first.selections[0].modifiers[0].label is None
     assert first.variant.value == "unknown"
     assert first.variant_label is None
 
@@ -337,6 +338,50 @@ def test_deadline_before_discovery_translates_to_provider_unavailable():
         ).get_snapshot(NBAMarketQuery(), context)
 
     session.get.assert_not_called()
+
+
+def test_detail_response_after_absolute_deadline_is_not_accepted():
+    now = datetime(2026, 8, 9, 17, tzinfo=timezone.utc)
+    deadline = datetime(2026, 8, 9, 17, 0, 5, tzinfo=timezone.utc)
+    detail_may_return = threading.Event()
+    fixture_fanout_started = False
+    detail_returned = False
+    main_detail_checks = 0
+    session = Mock()
+
+    def get(url, **kwargs):
+        nonlocal detail_returned, fixture_fanout_started
+        del kwargs
+        if url.endswith("/competitions"):
+            return FakeResponse(_payload("competitions.valid.json"))
+        if url.endswith("sport-fixtures"):
+            fixture_fanout_started = True
+            return FakeResponse(_payload("fixtures.valid.json"))
+        detail_may_return.wait()
+        detail_returned = True
+        return FakeResponse(_payload("fixture_details.valid.json"))
+
+    session.get.side_effect = get
+
+    def clock():
+        nonlocal main_detail_checks
+        if fixture_fanout_started and threading.current_thread() is threading.main_thread():
+            main_detail_checks += 1
+            if main_detail_checks == 2:
+                detail_may_return.set()
+        return deadline if detail_returned else now
+
+    with pytest.raises(ProviderUnavailableError):
+        DabbleAdapter(
+            session=session,
+            detail_concurrency=1,
+            now=clock,
+        ).get_snapshot(
+            NBAMarketQuery(),
+            _context(deadline=deadline.isoformat().replace("+00:00", "Z")),
+        )
+
+    assert session.get.call_count == 3
 
 
 def test_identical_repeated_market_identity_deduplicates():
