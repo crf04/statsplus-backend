@@ -71,6 +71,15 @@ Provider calls at the two external seams are wrapped in one structured event
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details remain inside the adapter; the closed telemetry operations are `competition_lookup`, `competition_fixtures`, and `fixture_details` |
+
+The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
+context)`. Dabble, PrizePicks, and Underdog accept the same semantic NBA query
+and absolute retrieval deadline and return immutable, market-centric provider
+snapshots. The shared model retains nullable provider identity and typed source
+evidence, exact decimal thresholds and modifiers, original labels, coverage,
+and complete/partial status. Adapters exclude ineligible offerings without
+guessing missing facts; they expose no provider-specific public routes.
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (thread-safe counter incremented by
@@ -209,6 +218,9 @@ validator must not be used to repair the fixture.
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `PBPTotalsAdapter.parse_totals`) with no network.
+- DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
+  against its recorded fixtures through `get_snapshot`; the shared compliance
+  suite verifies the same immutable `ProviderSnapshot` boundary for all three.
 - `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
