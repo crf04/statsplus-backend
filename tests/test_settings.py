@@ -100,6 +100,25 @@ def test_settings_parse_athlete_catalog_freshness_window(monkeypatch):
     assert not hasattr(settings, "athlete_catalog_freshness_days")
 
 
+def test_settings_parse_internal_dfs_board_registry_and_bounds(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("DFS_BOARD_ENABLED", "true")
+    monkeypatch.setenv("DFS_ENABLED_PROVIDERS", "Underdog, dabble,underdog")
+    monkeypatch.setenv("DFS_BOARD_DEADLINE_SECONDS", "12")
+    monkeypatch.setenv("DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("DFS_PROVIDER_READ_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("DFS_DABBLE_DETAIL_CONCURRENCY", "2")
+
+    settings = load_settings()
+
+    assert settings.providers.dfs_board_enabled is True
+    assert settings.providers.dfs_enabled_providers == ("underdog", "dabble")
+    assert settings.providers.dfs_board_deadline_seconds == 12.0
+    assert settings.providers.dfs_provider_connect_timeout_seconds == 2.0
+    assert settings.providers.dfs_provider_read_timeout_seconds == 7.0
+    assert settings.providers.dfs_dabble_detail_concurrency == 2
+
+
 def test_app_startup_exposes_one_settings_object(monkeypatch):
     from app import create_app
 

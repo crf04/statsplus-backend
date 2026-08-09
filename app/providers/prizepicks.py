@@ -93,7 +93,9 @@ class PrizePicksAdapter:
 
     name = "prizepicks"
     BASE_URL = "https://api.prod01.universe.prizepicks.com/projections"
-    DEFAULT_TIMEOUT = (10.0, 30.0)
+    # The central DFS board caps each safe GET at three seconds to connect
+    # and eight seconds to read (or the remaining board budget).
+    DEFAULT_TIMEOUT = (3.0, 8.0)
     _LEAGUE_IDS = {"NBA": 7}
 
     def __init__(

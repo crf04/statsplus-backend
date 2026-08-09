@@ -76,7 +76,7 @@ not counted twice:
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
-| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory with `_DabbleRetry`; explicitly injected sessions serialize only their `get` call. |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 
@@ -89,6 +89,27 @@ resolution. The shared model retains nullable provider identity and typed
 source evidence, exact decimal thresholds and modifiers, original labels,
 coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
+
+`DFSBoardService.get_board(query, context)` is the internal collector seam. Its
+provider registry is injected explicitly; it never discovers or constructs
+providers while collecting. Enabled providers run concurrently behind one
+absolute `RetrievalContext` deadline (15 seconds by default), with at most
+three concurrent provider workers. A complete empty snapshot is usable, while
+partial snapshots remain one coherent provider observation with their original
+`CoverageEvidence`; failed providers cannot remove usable snapshots from other
+providers. Expected upstream failures become sanitized `ProviderOutcome`
+reason codes (`timeout`, `deadline_exceeded`, `rate_limited`,
+`access_denied`, `upstream_error`, or `malformed_response`), while unexpected
+implementation defects propagate. Results and disabled-provider metadata are
+sorted deterministically. The collector is intentionally not a route, cache,
+identity resolver, comparison builder, or statistic catalog.
+
+DFS provider requests use connection/read caps of 3/8 seconds (or the
+remaining absolute budget), and safe GET transport retries at most once for a
+timeout, 429, or retryable 5xx response. Access-denied, ordinary 4xx, and
+malformed responses are not retried. Dabble fixture-detail fan-out remains
+bounded at three workers. Late daemon work is ignored after the board deadline
+and cannot alter the returned board.
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (updated only when a configured

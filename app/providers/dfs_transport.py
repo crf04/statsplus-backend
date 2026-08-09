@@ -103,11 +103,40 @@ def _run_request(
         # reaches its deadline can report progress before this worker finishes.
         set_retry_progress_callback(result.record_retry_progress)
         get = request_get or session.get
-        if params is None:
-            response = get(url, timeout=timeout)
-        else:
-            response = get(url, params=params, timeout=timeout)
-        result.status_code = getattr(response, "status_code", None)
+        response: Any | None = None
+        # The adapter contract permits one and only one safe GET retry.  Do
+        # this in the bounded worker so retry time is charged to the same
+        # absolute RetrievalContext deadline as the initial request.
+        for attempt in range(2):
+            context.ensure_active(now=now())
+            remaining = context.remaining_seconds(now=now())
+            if remaining <= 0:
+                raise DeadlineExceededError("provider retrieval deadline exceeded")
+            attempt_timeout = (
+                min(float(timeout[0]), remaining),
+                min(float(timeout[1]), remaining),
+            )
+            try:
+                if params is None:
+                    response = get(url, timeout=attempt_timeout)
+                else:
+                    response = get(url, params=params, timeout=attempt_timeout)
+            except requests.exceptions.Timeout:
+                if attempt == 0:
+                    increment_retry_count()
+                    continue
+                raise
+            result.status_code = getattr(response, "status_code", None)
+            status_code = result.status_code
+            if attempt == 0 and (
+                status_code == 429
+                or isinstance(status_code, int) and 500 <= status_code <= 599
+            ):
+                increment_retry_count()
+                continue
+            break
+        if response is None:  # pragma: no cover - every loop branch returns/raises
+            raise requests.exceptions.RequestException("provider returned no response")
         context.ensure_active(now=now())
         response.raise_for_status()
         try:
@@ -321,13 +350,31 @@ def request_json(
                     if callable(release):
                         release()
                     raise TypeError("request lease must expose get() and release()")
-                return release
+
+                def release_request() -> None:
+                    current_lease = request_lease
+                    if current_lease is not None:
+                        current_release = getattr(current_lease, "release", None)
+                        if callable(current_release):
+                            current_release()
+
+                return release_request
 
             def get_request(url_value: str, **kwargs: Any) -> Any:
                 """Use the lease when a session supplies the safe contract."""
 
+                nonlocal request_lease
                 if request_lease is None:
                     return session.get(url_value, **kwargs)
+                if getattr(request_lease, "_released", False):
+                    # Serialized sessions release their lock immediately after
+                    # each response so response decoding does not block other
+                    # detail workers.  A retry therefore reserves a fresh
+                    # lease, still bounded by the same absolute context.
+                    request_lease = acquire_request(
+                        time.monotonic()
+                        + context.remaining_seconds(now=now())
+                    )
                 return request_lease.get(url_value, **kwargs)
 
             def observe_result(result: _RequestResult, _deadline: float) -> None:

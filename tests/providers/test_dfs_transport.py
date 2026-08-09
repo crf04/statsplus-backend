@@ -6,8 +6,10 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import requests
 
 from app.errors import ProviderUnavailableError
+from app.utils.telemetry import ProviderResponseError
 from app.providers.dabble import DabbleAdapter
 from app.providers.dfs import NBAMarketQuery, RetrievalContext
 from app.providers.dfs_transport import TransportErrorPolicy, request_json
@@ -108,6 +110,37 @@ class _RetryThenBlockingSession:
         self.release.wait()
         self.finished.set()
         return _LateResponse()
+
+
+class _RetryResponse:
+    def __init__(self, payload: object, status_code: int = 200) -> None:
+        self.payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            error = requests.HTTPError(f"HTTP {self.status_code}")
+            error.response = self  # type: ignore[assignment]
+            raise error
+
+    def json(self) -> object:
+        if isinstance(self.payload, BaseException):
+            raise self.payload
+        return self.payload
+
+
+class _RetrySequenceSession:
+    def __init__(self, *responses: object) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    def get(self, url: str, **kwargs: object) -> _RetryResponse:
+        del url, kwargs
+        self.calls += 1
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response  # type: ignore[return-value]
 
 
 @pytest.fixture(autouse=True)
@@ -295,6 +328,68 @@ def test_retry_progress_is_recorded_when_worker_outlives_deadline() -> None:
     assert events[0]["request_id"] == request_id
     assert events[0]["outcome"] == telemetry.OUTCOME_TIMEOUT
     assert events[0]["retry_count"] == 1
+
+
+@pytest.mark.parametrize("first", [requests.exceptions.Timeout(), _RetryResponse({}, 429), _RetryResponse({}, 503)])
+def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
+    session = _RetrySequenceSession(first, _RetryResponse({"ok": True}))
+    context = RetrievalContext(
+        deadline=datetime.now(timezone.utc) + timedelta(seconds=1),
+        request_id="retry-safe-get",
+    )
+
+    result = request_json(
+        context=context,
+        session=session,
+        url="https://example.test/snapshot",
+        params=None,
+        timeout=(3.0, 8.0),
+        now=lambda: datetime.now(timezone.utc),
+        provider="prizepicks",
+        operation="get_snapshot",
+        parse=lambda payload: payload,
+        error_policy=_TEST_TRANSPORT_POLICY,
+    )
+
+    assert result == {"ok": True}
+    assert session.calls == 2
+    assert telemetry.get_recorded_provider_events()[-1]["retry_count"] == 1
+
+
+def test_safe_get_does_not_retry_access_denial_or_malformed_payload() -> None:
+    access_denied = _RetrySequenceSession(
+        _RetryResponse({}, 403), _RetryResponse({"late": True})
+    )
+    with pytest.raises(ProviderUnavailableError):
+        request_json(
+            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            session=access_denied,
+            url="https://example.test/snapshot",
+            params=None,
+            timeout=(3.0, 8.0),
+            now=lambda: datetime.now(timezone.utc),
+            provider="prizepicks",
+            operation="get_snapshot",
+            parse=lambda payload: payload,
+            error_policy=_TEST_TRANSPORT_POLICY,
+        )
+    assert access_denied.calls == 1
+
+    malformed = _RetrySequenceSession(_RetryResponse(ValueError("bad json")), _RetryResponse({"late": True}))
+    with pytest.raises(ProviderResponseError):
+        request_json(
+            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            session=malformed,
+            url="https://example.test/snapshot",
+            params=None,
+            timeout=(3.0, 8.0),
+            now=lambda: datetime.now(timezone.utc),
+            provider="prizepicks",
+            operation="get_snapshot",
+            parse=lambda payload: payload,
+            error_policy=_TEST_TRANSPORT_POLICY,
+        )
+    assert malformed.calls == 1
 
 
 def test_transport_error_policy_is_immutable_and_translates_messages():

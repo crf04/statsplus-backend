@@ -152,6 +152,7 @@ def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
         [
             FakeResponse(_payload("projections.page1.valid.json")),
             requests.ReadTimeout("later page timed out"),
+            requests.ReadTimeout("later page timed out after retry"),
         ]
     )
 
@@ -591,13 +592,18 @@ def test_prizepicks_deadline_is_checked_after_upstream_response() -> None:
             RetrievalContext(deadline=deadline),
         )
 
-    assert session.calls[0][2] == (5.0, 5.0)
+    assert session.calls[0][2] == (3.0, 5.0)
 
 
 def test_prizepicks_first_page_timeout_is_typed_provider_error() -> None:
     with pytest.raises(ProviderUnavailableError):
         PrizePicksAdapter(
-            session=FakeSession([requests.ReadTimeout("timed out")])
+            session=FakeSession(
+                [
+                    requests.ReadTimeout("timed out"),
+                    requests.ReadTimeout("timed out after retry"),
+                ]
+            )
         ).get_snapshot(_query(), _context())
 
 

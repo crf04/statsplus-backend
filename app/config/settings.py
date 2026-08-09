@@ -29,6 +29,8 @@ SUPPORTED_ENVIRONMENTS = frozenset({*LOCAL_ENVIRONMENTS, "staging", "production"
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000",)
+DFS_PROVIDER_NAMES = frozenset({"dabble", "prizepicks", "underdog"})
+DEFAULT_LOCAL_DFS_PROVIDERS = ("dabble", "prizepicks", "underdog")
 
 
 class ConfigurationError(ValueError):
@@ -101,7 +103,7 @@ class CacheSettings(BaseModel):
 
 
 class ProviderSettings(BaseModel):
-    """Timeout, retry, and pooling settings for external NBA providers."""
+    """Timeout, retry, pooling, and internal DFS board settings."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -112,6 +114,45 @@ class ProviderSettings(BaseModel):
     pbp_max_retries: int = Field(default=3, ge=0)
     pbp_pool_connections: int = Field(default=10, ge=1)
     pbp_pool_maxsize: int = Field(default=20, ge=1)
+    dfs_board_enabled: bool = False
+    dfs_enabled_providers: tuple[str, ...] = ()
+    dfs_board_deadline_seconds: float = Field(default=15.0, gt=0)
+    dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
+    dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
+    dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
+
+    @field_validator("dfs_enabled_providers", mode="before")
+    @classmethod
+    def validate_dfs_enabled_providers(cls, value: Any) -> tuple[str, ...]:
+        """Normalize the explicit DFS provider registry setting."""
+
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            raise ValueError("DFS_ENABLED_PROVIDERS must be a comma-separated list")
+        providers: list[str] = []
+        seen: set[str] = set()
+        for raw_provider in value:
+            provider = str(raw_provider).strip().casefold()
+            if not provider:
+                continue
+            if provider not in DFS_PROVIDER_NAMES:
+                raise ValueError(
+                    "DFS_ENABLED_PROVIDERS contains an unsupported provider: "
+                    + provider
+                )
+            if provider not in seen:
+                providers.append(provider)
+                seen.add(provider)
+        return tuple(providers)
+
+    @property
+    def enabled_dfs_providers(self) -> tuple[str, ...]:
+        """Readable alias for the explicit DFS registry setting."""
+
+        return self.dfs_enabled_providers
 
 
 class LLMSettings(BaseModel):
@@ -328,6 +369,10 @@ def _build_settings(
     environment = reader.text("FLASK_ENV", "development") or "development"
     database_url = reader.text("DATABASE_URL", DEFAULT_SQLITE_URL) or DEFAULT_SQLITE_URL
 
+    configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
+    if configured_dfs_providers is None and environment in LOCAL_ENVIRONMENTS:
+        configured_dfs_providers = DEFAULT_LOCAL_DFS_PROVIDERS
+
     auth = _validated_model(
         AuthenticationSettings,
         firebase_admin_disabled=reader.boolean("FIREBASE_ADMIN_DISABLED", False),
@@ -356,6 +401,20 @@ def _build_settings(
         pbp_max_retries=reader.integer("NBA_API_MAX_RETRIES", 3),
         pbp_pool_connections=reader.integer("NBA_API_POOL_CONNECTIONS", 10),
         pbp_pool_maxsize=reader.integer("NBA_API_POOL_MAXSIZE", 20),
+        dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
+        dfs_enabled_providers=configured_dfs_providers,
+        dfs_board_deadline_seconds=reader.decimal(
+            "DFS_BOARD_DEADLINE_SECONDS", 15.0
+        ),
+        dfs_provider_connect_timeout_seconds=reader.decimal(
+            "DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS", 3.0
+        ),
+        dfs_provider_read_timeout_seconds=reader.decimal(
+            "DFS_PROVIDER_READ_TIMEOUT_SECONDS", 8.0
+        ),
+        dfs_dabble_detail_concurrency=reader.integer(
+            "DFS_DABBLE_DETAIL_CONCURRENCY", 3
+        ),
     )
 
     api_key = reader.text("OPENAI_API_KEY")
@@ -439,6 +498,10 @@ def _validate_environment_requirements(
 
     errors: list[str] = []
     if settings.environment == "production":
+        if not settings.providers.dfs_enabled_providers:
+            errors.append(
+                "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider"
+            )
         if cors_origins_configured is None:
             cors_origins_configured = (
                 settings.cors.allowed_origins != DEFAULT_LOCAL_CORS_ORIGINS
@@ -550,6 +613,7 @@ __all__ = [
     "CatalogSettings",
     "CORSSettings",
     "ConfigurationError",
+    "DEFAULT_LOCAL_DFS_PROVIDERS",
     "DatabaseSettings",
     "LLMSettings",
     "NBASeasonSettings",

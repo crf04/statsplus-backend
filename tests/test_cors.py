@@ -98,6 +98,7 @@ def test_production_accepts_a_configured_https_origin_allowlist():
                 '{"project_id":"p","private_key":"k","client_email":"e"}'
             ),
             "CORS_ALLOWED_ORIGINS": "https://stats.example.com",
+            "DFS_ENABLED_PROVIDERS": "underdog",
         }
     )
 

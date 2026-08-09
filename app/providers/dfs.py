@@ -1204,7 +1204,6 @@ class NBAMarketQuery:
         object.__setattr__(self, "league", league)
         object.__setattr__(self, "market_statuses", statuses)
 
-
 @runtime_checkable
 class ProviderSnapshotProvider(Protocol):
     """Single public adapter seam for normalized provider snapshots."""
