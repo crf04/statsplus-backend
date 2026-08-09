@@ -23,6 +23,7 @@ from app.providers.dfs import (
     DeadlineExceededError,
 )
 from app.utils import telemetry
+from app.services.dfs_board import DFSBoardService, ProviderFailureReason
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
@@ -520,6 +521,18 @@ def test_malformed_discovery_with_usable_market_is_partial_without_failure():
         ("snapshot_normalization", telemetry.OUTCOME_SUCCESS),
     ]
     assert telemetry.snapshot_metrics()["provider_failures"] == {}
+
+    board_session = Mock()
+    board_session.get.side_effect = [
+        FakeResponse(competitions),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+    board = DFSBoardService(
+        provider_registry={"dabble": DabbleAdapter(session=board_session)}
+    ).get_board(NBAMarketQuery(), _context())
+    assert board.provider_outcomes[0].reason is ProviderFailureReason.MALFORMED_RESPONSE
+    assert telemetry.get_recorded_board_events()[-1]["failure_malformed_response"] == 1
 
 
 def test_malformed_prop_is_skipped_and_makes_nonempty_snapshot_partial():

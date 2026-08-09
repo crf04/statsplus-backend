@@ -53,6 +53,7 @@ _MALFORMED_COVERAGE_CODES = frozenset(
     {
         CoverageCode.CONFLICTING_SOURCE_IDENTITY,
         CoverageCode.FIXTURE_MALFORMED,
+        CoverageCode.MISSING_COMPETITION_ID,
         CoverageCode.MALFORMED_RECORD,
         CoverageCode.PAGE_MALFORMED,
         CoverageCode.PAGE_METADATA_MISMATCH,
