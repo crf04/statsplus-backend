@@ -15,7 +15,7 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsProvider
 from app.services.event_catalog_repository import EventCatalogRepository
-from app.services.nba_stats_adapter import normalize_whole_season_schedule, validate_canonical_season
+from app.services.nba_stats_adapter import validate_canonical_season
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
 
@@ -85,7 +85,7 @@ class EventCatalogService:
         refreshed_at = _utc(now or self._clock())
         try:
             raw = self.provider.fetch_whole_season_schedule(season=canonical)
-            frame = normalize_whole_season_schedule(self._as_frame(raw), season=canonical)
+            frame = self._as_frame(raw)
             count = self.repository.publish(canonical, frame, refreshed_at)
             return EventCatalogRefreshResult(canonical, count, refreshed_at.isoformat())
         except (ProviderUnavailableError, ProviderResponseError, request_errors.RequestException) as error:
@@ -126,7 +126,7 @@ class EventCatalogService:
             return pd.DataFrame([value])
         if isinstance(value, (list, tuple)):
             return pd.DataFrame(value)
-        raise ProviderUnavailableError("The NBA schedule provider returned invalid data.")
+        raise ProviderUnavailableError("The NBA schedule provider returned invalid canonical data.")
 
 
 __all__ = ["DEFAULT_EVENT_CATALOG_MAX_AGE", "EventCatalogBatchResult", "EventCatalogRefreshResult", "EventCatalogService"]

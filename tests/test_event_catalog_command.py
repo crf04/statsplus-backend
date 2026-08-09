@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from scripts import refresh_event_catalog
 
@@ -37,7 +37,13 @@ def test_command_refreshes_writable_database_from_recorded_fixture(
     output = json.loads(capsys.readouterr().out)
     assert output["results"] == [{"event_count": 2, "refreshed_at": output["results"][0]["refreshed_at"], "season": "2025-26"}]
     assert output["failures"] == {}
-    assert inspect(create_engine(database_url)).has_table("event_catalog")
+    engine = create_engine(database_url)
+    assert inspect(engine).has_table("event_catalog")
+    with engine.connect() as connection:
+        evidence = connection.execute(text(
+            "SELECT postponement_evidence FROM event_catalog WHERE nba_game_id = '0022500002'"
+        )).scalar_one()
+    assert json.loads(evidence)["postponed_status"] == "Postponed"
 
 
 def test_command_requires_explicit_database_target_and_season(monkeypatch):

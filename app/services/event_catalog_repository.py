@@ -43,6 +43,10 @@ class EventCatalogRepository:
             for record in frame.to_dict(orient="records"):
                 game_id = str(record["nba_game_id"])
                 values = {column: record[column] for column in provider_columns}
+                if isinstance(values["postponement_evidence"], (dict, list)):
+                    values["postponement_evidence"] = json.dumps(
+                        values["postponement_evidence"], sort_keys=True
+                    )
                 values["last_seen_at"] = refreshed_at
                 exists = connection.execute(
                     select(table.c.nba_game_id).where(table.c.nba_game_id == game_id)

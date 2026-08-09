@@ -325,11 +325,12 @@ def normalize_whole_season_schedule(
             if text_value and (postponed_status or status_marker):
                 evidence[field] = text_value
         explicit_evidence = row.get("postponementEvidence")
-        if explicit_evidence is not None:
-            if isinstance(explicit_evidence, (dict, list)):
-                evidence["provider"] = explicit_evidence
-            elif _text_value(explicit_evidence):
-                evidence["provider"] = _text_value(explicit_evidence)
+        if isinstance(explicit_evidence, (dict, list)):
+            # Structured provider evidence is already canonical; retain its
+            # shape rather than wrapping it in a provider-specific envelope.
+            evidence = explicit_evidence
+        elif explicit_evidence is not None and _text_value(explicit_evidence):
+            evidence = _text_value(explicit_evidence)
 
         output.append(
             {

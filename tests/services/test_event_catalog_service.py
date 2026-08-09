@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.services.event_catalog_service import EventCatalogService
+from app.services.nba_stats_adapter import normalize_whole_season_schedule
 
 
 FIXTURE = json.loads(
@@ -42,7 +43,7 @@ class FakeScheduleProvider:
         self.calls.append(season)
         if self.error is not None:
             raise self.error
-        return self.frame.copy()
+        return normalize_whole_season_schedule(self.frame.copy(), season=season)
 
 
 def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
@@ -67,6 +68,22 @@ def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
     assert postponed["postponement_evidence"]
     assert postponed["is_postponed"] is True
     assert postponed["classification"] == "Regular Season"
+
+
+def test_service_consumes_canonical_provider_frame_and_preserves_structured_evidence(tmp_path):
+    canonical = normalize_whole_season_schedule(_frame(), season="2025-26")
+    expected = {"source": "schedule", "reason": "weather", "nested": {"code": 7}}
+    canonical.loc[canonical["nba_game_id"] == "0022500002", "postponement_evidence"] = json.dumps(expected)
+
+    class CanonicalProvider:
+        def fetch_whole_season_schedule(self, *, season):
+            assert season == "2025-26"
+            return canonical.copy()
+
+    service = EventCatalogService(_engine(tmp_path), CanonicalProvider())
+    service.refresh("2025-26")
+    postponed = next(row for row in service.get_events("2025-26") if row["nba_game_id"] == "0022500002")
+    assert postponed["postponement_evidence"] == expected
 
 
 def test_refresh_upserts_by_game_id_and_retains_omitted_rows(tmp_path):
@@ -218,7 +235,7 @@ def test_refresh_multiple_seasons_keeps_success_when_one_fails(tmp_path):
             self.calls.append(season)
             if season == "2024-25":
                 raise ProviderUnavailableError("recorded outage")
-            return self.frame.copy()
+            return normalize_whole_season_schedule(self.frame.copy(), season=season)
 
     now = datetime(2025, 10, 20, tzinfo=timezone.utc)
     service = EventCatalogService(_engine(tmp_path), MixedProvider(), clock=lambda: now)
