@@ -7,12 +7,16 @@ from .nba_stats import (
     normalize_player_game_logs,
 )
 from .pbp_stats import PBPStatsAdapter, PBPStatsProvider
+from .prizepicks import PrizePicksAdapter
+from .underdog import UnderdogAdapter
 
 __all__ = [
     "NBAStatsAdapter",
     "NBAStatsProvider",
     "PBPStatsAdapter",
     "PBPStatsProvider",
+    "PrizePicksAdapter",
+    "UnderdogAdapter",
     "normalize_archetype_game_logs",
     "normalize_player_game_logs",
 ]

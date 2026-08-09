@@ -1,0 +1,71 @@
+{
+  "players": [
+    {
+      "id": "player-1",
+      "first_name": "Nikola",
+      "last_name": "Jokic",
+      "sport_id": "NBA",
+      "team_id": "team-den",
+      "team_name": "Denver Nuggets",
+      "team_abbreviation": "DEN"
+    }
+  ],
+  "appearances": [
+    {
+      "id": "appearance-1",
+      "player_id": "player-1",
+      "match_id": 101,
+      "match_type": "Game",
+      "type": "Player",
+      "team_id": "team-den"
+    }
+  ],
+  "games": [
+    {
+      "id": 101,
+      "sport_id": "NBA",
+      "title": "DEN @ OKC",
+      "scheduled_at": "2026-08-10T01:00:00-05:00",
+      "home_team_id": "team-okc",
+      "home_team_name": "Oklahoma City Thunder",
+      "home_team_abbreviation": "OKC",
+      "away_team_id": "team-den",
+      "away_team_name": "Denver Nuggets",
+      "away_team_abbreviation": "DEN"
+    }
+  ],
+  "solo_games": [],
+  "over_under_lines": [
+    {
+      "id": "line-1",
+      "stat_value": "12.500",
+      "status": "active",
+      "updated_at": "2026-08-09T19:00:00-05:00",
+      "line_type": "balanced",
+      "over_under": {
+        "appearance_stat": {
+          "appearance_id": "appearance-1",
+          "display_stat": "Rebounds"
+        }
+      },
+      "options": [
+        {
+          "id": "selection-higher",
+          "choice": "higher",
+          "status": "active",
+          "american_price": "-112",
+          "decimal_price": "1.900",
+          "payout_multiplier": "1.000"
+        },
+        {
+          "id": "selection-lower",
+          "choice": "lower",
+          "status": "active",
+          "american_price": "+100",
+          "decimal_price": "2.000",
+          "payout_multiplier": "1.000"
+        }
+      ]
+    }
+  ]
+}
