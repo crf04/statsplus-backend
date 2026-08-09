@@ -121,6 +121,12 @@ retained in a bounded, thread-safe buffer (capacity 5000); credentials,
 authorization headers, URLs, raw bodies, and exception messages are never
 captured.
 
+The internal board collector uses a separate typed, bounded aggregate event
+collection. Its scalar schema records started-at, optional request correlation,
+latency, bounded outcome/reason counters, and coverage counts. Board events do
+not enter `recent_provider_events`, `provider_events_total`, or provider
+failure counters.
+
 Provider failures are counted once at the seam that owns the failure. The
 central error handler in `app.errors` counts only *application* failures
 (actual `AppError` codes and HTTP >= 500 responses) and skips

@@ -152,6 +152,27 @@ def test_provider_result_after_deadline_is_dropped_without_sleep() -> None:
     assert telemetry.events[0].outcome_counts == (("failed", 1),)
 
 
+def test_board_accepts_result_completed_at_exact_monotonic_boundary() -> None:
+    clock = ControlledClock()
+
+    class ExactProvider(FakeProvider):
+        def get_snapshot(self, query, context):
+            self.calls.append((query, context))
+            clock.advance(1)
+            return self.result
+
+    provider = ExactProvider("dabble")
+    context = RetrievalContext(deadline=clock.wall + timedelta(seconds=10), request_id="board-test")
+    board = DFSBoardService(
+        provider_registry={"dabble": provider},
+        deadline_seconds=1,
+        clock=clock.now,
+        monotonic=clock.monotonic,
+    ).get_board(NBAMarketQuery(), context)
+
+    assert board.snapshots == (provider.result,)
+
+
 def test_board_telemetry_records_bounded_outcomes_and_coverage() -> None:
     telemetry = FakeBoardTelemetry()
     coverage = CoverageEvidence(
@@ -180,9 +201,10 @@ def test_default_board_telemetry_uses_bounded_events_without_provider_failure_co
     try:
         service = DFSBoardService(provider_registry={"dabble": FakeProvider("dabble")})
         service.get_board(NBAMarketQuery(), _context())
-        event = telemetry.get_recorded_provider_events()[-1]
-        assert event["provider"] == "dfs_board"
-        assert event["outcome_counts"] == {"complete": 1}
+        assert telemetry.get_recorded_provider_events() == []
+        event = telemetry.get_recorded_board_events()[-1]
+        assert event["outcome_complete"] == 1
+        assert event["request_id"] == "board-test"
         assert "dfs_board" not in telemetry.snapshot_metrics()["provider_failures"]
     finally:
         telemetry.clear_recorded_provider_events()

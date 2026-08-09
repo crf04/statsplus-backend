@@ -375,10 +375,22 @@ class DFSBoardService:
             disabled_providers=self.disabled_providers,
             generated_at=generated_at,
         )
-        self._record_telemetry(self.monotonic() - start, board)
+        self._record_telemetry(
+            self.monotonic() - start,
+            board,
+            started_at=generated_at.isoformat(),
+            request_id=context.request_id,
+        )
         return board
 
-    def _record_telemetry(self, duration: float, board: DFSBoard) -> None:
+    def _record_telemetry(
+        self,
+        duration: float,
+        board: DFSBoard,
+        *,
+        started_at: str,
+        request_id: str | None,
+    ) -> None:
         outcome_counts = Counter(outcome.status.value for outcome in board.provider_outcomes)
         reason_counts = Counter(
             outcome.reason.value
@@ -401,6 +413,8 @@ class DFSBoardService:
                 eligible_count=eligible,
                 normalized_count=normalized,
                 skipped_count=skipped,
+                started_at=started_at,
+                request_id=request_id,
             )
         )
 
@@ -424,9 +438,7 @@ class DFSBoardService:
                 return
             context.ensure_active(now=self._clock_utc())
             snapshot = self.provider_registry[name].get_snapshot(query, context)
-            if self.monotonic() >= board_deadline or context.is_expired(
-                now=self._clock_utc()
-            ):
+            if self.monotonic() > board_deadline:
                 holder["outcome"] = ProviderOutcome(
                     provider=name,
                     status=ProviderOutcomeStatus.FAILED,

@@ -59,7 +59,7 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 class _RequestResult:
     """Result holder shared by one caller and its bounded daemon worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
         self.done = threading.Event()
         self.value: Any = None
         self.status_code: int | None = None
@@ -68,13 +68,14 @@ class _RequestResult:
         self._retry_lock = threading.Lock()
         self._retry_progress: list[tuple[float, int]] = []
         self.completed_at: float | None = None
+        self._monotonic = monotonic
 
     def record_retry_progress(self, count: int) -> None:
         """Record one worker retry without touching the caller's thread-local."""
 
         with self._retry_lock:
             self.retry_count = max(self.retry_count, count)
-            self._retry_progress.append((time.monotonic(), count))
+            self._retry_progress.append((self._monotonic(), count))
 
     def retry_count_at(self, deadline: float) -> int:
         """Return retries observed by the absolute monotonic deadline."""
@@ -158,7 +159,11 @@ def _run_request(
         result.done.set()
 
 
-def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
+def _run_callable(
+    result: _RequestResult,
+    call: Callable[[], _Result],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
     """Run non-transport provider work in the same bounded daemon pool."""
 
     try:
@@ -166,7 +171,7 @@ def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
     except BaseException as error:  # propagate implementation failures
         result.error = error
     finally:
-        result.completed_at = time.monotonic()
+        result.completed_at = monotonic()
         _request_slots.release()
         result.done.set()
 
@@ -214,7 +219,7 @@ def _run_bounded(
             raise DeadlineExceededError(deadline_message)
         slot_acquired = True
 
-        result = _RequestResult()
+        result = _RequestResult(monotonic=monotonic)
 
         def run_prepared(holder: _RequestResult) -> None:
             try:
@@ -259,7 +264,6 @@ def _run_bounded(
         or result.completed_at > monotonic_deadline
     ):
         raise DeadlineExceededError(deadline_message)
-    context.ensure_active(now=now())
     if result.error is not None:
         raise result.error
     return result
@@ -270,14 +274,16 @@ def run_bounded(
     context: RetrievalContext,
     now: Callable[[], datetime],
     call: Callable[[], _Result],
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> _Result:
     """Run a potentially blocking provider pipeline under an absolute deadline."""
 
     result = _run_bounded(
         context=context,
         now=now,
-        worker=lambda holder: _run_callable(holder, call),
+        worker=lambda holder: _run_callable(holder, call, monotonic=monotonic),
         worker_name="statsplus-provider-pipeline",
+        monotonic=monotonic,
     )
     return result.value
 
@@ -326,6 +332,7 @@ def request_json(
     parsing), so late pipeline work cannot block the caller or be returned.
     """
 
+    request_monotonic = monotonic or time.monotonic
     try:
         current = now()
         bounded = bounded_timeout(
@@ -379,7 +386,7 @@ def request_json(
                     # detail workers.  A retry therefore reserves a fresh
                     # lease, still bounded by the same absolute context.
                     request_lease = acquire_request(
-                        time.monotonic()
+                        request_monotonic()
                         + context.remaining_seconds(now=now())
                     )
                 return request_lease.get(url_value, **kwargs)
@@ -403,13 +410,13 @@ def request_json(
                     parse,
                     error_policy.invalid_json_message,
                     request_get=get_request,
-                    monotonic=monotonic or time.monotonic,
+                    monotonic=request_monotonic,
                 ),
                 worker_name=f"statsplus-{provider}-request",
                 deadline_message=f"{provider} retrieval deadline exceeded",
                 observe_result=observe_result,
                 prepare=prepare_request,
-                monotonic=monotonic or time.monotonic,
+                monotonic=request_monotonic,
             )
             return result.value
     except DeadlineExceededError as error:

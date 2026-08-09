@@ -319,10 +319,13 @@ def test_telemetry_route_returns_bounded_sanitized_metrics(client, monkeypatch):
         assert response.status_code == 200
         body = response.get_json()
         assert body["provider_events_total"] == 1
+        assert body["board_events_total"] == 0
+        assert body["board_buffered_events"] == 0
         assert body["cache"]["nba_stats"] == {"hit": 1}
         assert len(body["recent_provider_events"]) == 1
         assert body["recent_provider_events"][0]["provider"] == "nba_stats"
         assert body["recent_provider_events"][0]["outcome"] == "success"
+        assert body["recent_board_events"] == []
         assert "Authorization" not in str(body)
         assert "Bearer" not in str(body)
     finally:
