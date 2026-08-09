@@ -530,6 +530,43 @@ def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(
     assert reader.list_unresolved(provider="prizepicks") == []
 
 
+#: Fixed clearing timestamp for direct-insert constraint cases.
+_CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "clearing",
+    [
+        {"is_active": True, "cleared_at": _CLEARED_AT},
+        {"is_active": True, "cleared_by": "ops@example.com"},
+        {"is_active": True, "clear_reason": "identity was reinstated"},
+        {"is_active": False},
+        {"is_active": False, "cleared_at": _CLEARED_AT},
+        {"is_active": False, "cleared_by": "ops@example.com", "clear_reason": "fixed"},
+    ],
+)
+def test_rejection_clear_check_rejects_partial_evidence_on_postgres(
+    mapping_engine, clearing
+):
+    """The clearing check has to hold on the production dialect too."""
+    from sqlalchemy import insert
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.athlete_mapping import AthleteMappingRejection
+
+    with pytest.raises(IntegrityError), mapping_engine.begin() as connection:
+        connection.execute(
+            insert(AthleteMappingRejection.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-99",
+                reason="duplicate provider identity",
+                operator_id="ops@example.com",
+                created_at=_CLEARED_AT,
+                **clearing,
+            )
+        )
+
+
 def test_repeated_state_after_a_different_observation_persists_on_postgres(mapping_engine):
     """Suppression is per transition on a real database as well as SQLite."""
     from app.services.athlete_mapping_repository import AthleteMappingRepository

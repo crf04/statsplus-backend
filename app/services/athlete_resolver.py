@@ -224,6 +224,17 @@ class AthleteResolver:
                 MappingResolutionState.MANUAL_APPROVED,
                 MappingResolutionState.MANUAL_OVERRIDE,
             } and bool(existing.get("is_active", True)):
+                if self._manual_evidence_conflicts(existing, evidence):
+                    # Operator precedence protects a governed mapping from
+                    # automatic overwrite; it does not assert the identity for
+                    # evidence the operator never reviewed.
+                    return self._result(
+                        normalized_provider,
+                        evidence,
+                        canonical_season,
+                        MappingResolutionState.MAPPING_CONFLICT,
+                        reason="manual_mapping_conflict",
+                    )
                 canonical = self._canonical_from_mapping(existing, canonical_season)
                 return self._result(
                     normalized_provider,
@@ -448,6 +459,50 @@ class AthleteResolver:
             and normalize_athlete_name(previous_name)
             != normalize_athlete_name(evidence.name)
         )
+
+    @staticmethod
+    def _manual_evidence_conflicts(
+        existing: Mapping[str, Any],
+        evidence: AthleteEvidence,
+    ) -> bool:
+        """Report whether the provider identity changed under a manual mapping.
+
+        An operator approves *this provider identity* as *this canonical
+        athlete* on the evidence they reviewed.  When the provider later
+        reports a different athlete under the same ID -- a reused or reassigned
+        identity such as Nikola/DEN becoming LeBron/LAL -- the approval no
+        longer covers the evidence, so the identity fails closed rather than
+        lending the operator's decision to an athlete nobody reviewed.
+
+        Only provider-side facts are compared, and only when both sides carry
+        one, so an approval recorded without evidence is never second-guessed
+        and a deliberate override to a differently named canonical athlete is
+        not read as a conflict.
+        """
+
+        previous_name = existing.get("provider_name")
+        if (
+            previous_name
+            and evidence.name
+            and normalize_athlete_name(previous_name)
+            != normalize_athlete_name(evidence.name)
+        ):
+            return True
+        team = evidence.team
+        if team is None:
+            return False
+        previous_team_id = existing.get("provider_team_canonical_id")
+        if previous_team_id is not None and team.canonical_id is not None:
+            return int(previous_team_id) != int(team.canonical_id)
+        previous_abbreviation = existing.get("provider_team_abbreviation")
+        if previous_abbreviation and team.abbreviation:
+            return previous_abbreviation.casefold() != team.abbreviation.casefold()
+        previous_team_name = existing.get("provider_team_name")
+        if previous_team_name and team.name:
+            return normalize_athlete_name(previous_team_name) != normalize_athlete_name(
+                team.name
+            )
+        return False
 
     @staticmethod
     def _retained_identity(

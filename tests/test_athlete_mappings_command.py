@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine, insert
 
 from app.config.settings import load_settings
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
-from app.providers.dfs import AthleteEvidence
+from app.providers.dfs import AthleteEvidence, TeamEvidence
 from app.services.athlete_catalog_service import AthleteCatalogService
 from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.athlete_resolver import AthleteResolver
@@ -209,6 +210,71 @@ def test_cli_list_reports_unresolved_and_ambiguous_observations(tmp_path, capsys
     assert observations["pp-unknown"]["decision_state"] == "unmatched"
     assert observations["pp-unknown"]["candidates"] == []
     assert listed["mappings"] == []
+
+
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_cli_resolves_an_unresolved_observation_and_keeps_its_evidence(
+    tmp_path, capsys, action
+):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+
+    # An unmatched board read leaves only a durable observation to act on.
+    engine = create_engine(database_url)
+    repository = AthleteMappingRepository(engine)
+    resolver = AthleteResolver(
+        AthleteCatalogService(engine, settings=load_settings(
+            overrides={"DATABASE_URL": database_url}
+        )),
+        mapping_repository=repository,
+    )
+    repository.record_resolution(
+        resolver.resolve(
+            "prizepicks",
+            AthleteEvidence(
+                provider_id="pp-77",
+                name="King James",
+                team=TeamEvidence(
+                    provider_id="pp-den",
+                    canonical_id=1610612743,
+                    name="Denver Nuggets",
+                    abbreviation="DEN",
+                ),
+            ),
+            "2024-25",
+        )
+    )
+    engine.dispose()
+
+    resolved = _run(
+        capsys,
+        action,
+        "--database-url",
+        database_url,
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-77",
+        "--season",
+        "2024-25",
+        "--canonical-player-id",
+        "23",
+        "--operator",
+        "ops@example.com",
+        "--reason",
+        "the provider uses a nickname",
+    )
+
+    # The operator supplied no evidence, so the observed evidence is retained
+    # on both the new mapping and its decision.
+    assert resolved["mapping"]["provider_name"] == "King James"
+    assert resolved["mapping"]["provider_team_id"] == "pp-den"
+    assert resolved["mapping"]["provider_team_canonical_id"] == 1610612743
+    assert resolved["mapping"]["provider_team_abbreviation"] == "DEN"
+    assert resolved["decision"]["provider_name"] == "King James"
+    assert resolved["decision"]["provider_team_name"] == "Denver Nuggets"
+    assert _run(capsys, "list", "--database-url", database_url)["unresolved"] == []
 
 
 def test_cli_reject_blocks_then_clear_restores(tmp_path, capsys):

@@ -437,7 +437,28 @@ governed approve or override may select an inactive-only row; that choice is
 recorded explicitly in the audit as a decision candidate marked not active for
 the season. Active rejections suppress future automatic mappings until
 explicitly cleared, and a manual decision still wins over any later automatic
-read. Because the resolver reads outside the serialized identity transaction,
+read. That precedence protects a governed mapping from automatic *overwrite*,
+not from fail-closed conflict detection. When the provider later reports a
+clearly different athlete under the same identity — a changed provider name, or
+team evidence that contradicts what was approved, such as Nikola/DEN becoming
+LeBron/LAL — the resolver reports `mapping_conflict` instead of lending the
+operator's decision to an athlete nobody reviewed. Only provider-side facts are
+compared, and only when both sides carry one, so an approval recorded without
+evidence is never second-guessed and a deliberate override to a differently
+named canonical athlete is not a conflict. A promoted manual mapping keeps the
+schema's single current state: the row becomes `mapping_conflict` and inactive
+(so it is not used in comparisons) while retaining the approved
+`canonical_player_id` beside the new conflicting provider evidence, and the
+append-only log preserves the original `manual_approved`/`manual_override`
+decision with its operator, reason, and approved evidence followed by a
+`mapping_conflict` decision reasoned `manual_mapping_conflict`. An operator
+resolves it by approving or overriding again, which restores the manual state
+and clears the conflict fields. Approve and override with no supplied evidence
+fall back to the mapping row's observed evidence, or — for an identity that
+only ever produced unresolved observations — to the latest durable decision
+read inside the same identity transaction, so a queued observation resolved by
+an operator keeps its provider name and team evidence.
+Because the resolver reads outside the serialized identity transaction,
 its result may already be stale; the current mapping and rejection are re-read
 inside that transaction immediately before every automatic, unresolved, or
 conflict write, so a manual approve/override or an active rejection recorded in
@@ -453,7 +474,9 @@ test gives each worker its own engine and repository and releases them from a
 barrier — the overlap is resolved by the database, not by a shared lock.
 Migration 006 also creates a per-identity lock table and database checks for
 closed mapping states, the closed decision-state set, active-state coherence,
-and cleared-rejection coherence. Those checks compare booleans with
+and cleared-rejection coherence — an active rejection carries no `cleared_at`,
+`cleared_by`, or `clear_reason`, and a cleared one carries all three. Those
+checks compare booleans with
 `true`/`false` rather than `1`/`0`, so they are valid on PostgreSQL as well as
 SQLite. The operator CLI never runs migrations implicitly; run
 `scripts/migrate.py` explicitly first.

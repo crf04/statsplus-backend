@@ -192,11 +192,15 @@ class AthleteMappingRejection(Base):
     clear_reason = Column(Text, nullable=True)
 
     __table_args__ = (
-        # A cleared rejection must carry its clearing evidence, and the
-        # boolean literals stay valid on both PostgreSQL and SQLite.
+        # A cleared rejection must carry every part of its clearing evidence,
+        # and an active one must carry none of it, so a half-written clear can
+        # never look like a governed decision.  The boolean literals stay valid
+        # on both PostgreSQL and SQLite.
         CheckConstraint(
-            "(is_active = true AND cleared_at IS NULL) OR "
-            "(is_active = false AND cleared_at IS NOT NULL)",
+            "(is_active = true AND cleared_at IS NULL AND cleared_by IS NULL "
+            "AND clear_reason IS NULL) OR "
+            "(is_active = false AND cleared_at IS NOT NULL "
+            "AND cleared_by IS NOT NULL AND clear_reason IS NOT NULL)",
             name="ck_mapping_rejection_active",
         ),
         Index(
