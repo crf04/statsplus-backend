@@ -420,6 +420,14 @@ def deserialize_provider_snapshot(
         raw = json.loads(payload, object_pairs_hook=_unique_pairs)
     except (TypeError, json.JSONDecodeError) as error:
         raise SnapshotCacheError("snapshot payload is not valid JSON") from error
+    except RecursionError as error:
+        # A payload nested past the interpreter's recursion limit exhausts the
+        # stack inside the parser itself, so the failure arrives as a
+        # RecursionError rather than a JSONDecodeError.  It is caught only
+        # around this one recursive call -- nothing else here recurses over
+        # attacker-shaped input -- so an exhausted stack elsewhere in the module
+        # still escapes as the defect it is.
+        raise SnapshotCacheError("snapshot payload is nested too deeply") from error
     data = _mapping(raw, label="root")
     expected = {
         "schema",

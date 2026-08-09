@@ -305,6 +305,27 @@ def test_snapshot_codec_rejects_values_no_domain_constructor_can_represent(mutat
         )
 
 
+#: Nested far past any plausible interpreter recursion limit, so the parser
+#: fails the same way on every platform this runs on.
+_EXCESSIVE_NESTING_DEPTH = 100_000
+
+
+def _deeply_nested_payload() -> str:
+    return "[" * _EXCESSIVE_NESTING_DEPTH + "]" * _EXCESSIVE_NESTING_DEPTH
+
+
+def test_snapshot_codec_rejects_excessively_nested_payloads() -> None:
+    """Deep nesting exhausts the parser's stack, not the caller's error path."""
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(
+            _deeply_nested_payload(),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
@@ -1414,6 +1435,29 @@ def test_unrepresentable_cached_number_is_a_miss_and_never_reaches_the_board() -
     redis.values[key] = serialize_provider_snapshot(_market_payload_snapshot()).replace(
         '"american_price":null', '"american_price":1e309', 1
     )
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+def test_deeply_nested_cached_payload_is_a_miss_and_never_reaches_the_board() -> None:
+    """A RecursionError from the parser must not escape the cache seam."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = _deeply_nested_payload()
 
     result = cache.get_snapshot(NBAMarketQuery(), _context())
 
