@@ -45,7 +45,6 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
     normalize_market_status,
-    normalize_coverage_code,
     _RecordCoverageAccumulator,
     _build_snapshot,
 )
@@ -169,13 +168,6 @@ class _DabbleRequestFailure(Exception):
         super().__init__(reason)
 
 
-class _MalformedRecord(CoverageRecordMalformed):
-    """One Dabble player-prop record cannot be represented safely."""
-
-
-class _ExcludedRecord(CoverageRecordExcluded):
-    """A valid source record outside the shared NBA player-market scope."""
-
 @dataclass
 class _MarketAccumulator:
     market: PlayerProjectionMarket
@@ -241,13 +233,11 @@ class DabbleAdapter:
         fanout_complete = True
         malformed_seen = False
 
-        def warn(code: CoverageCode | str) -> None:
-            code = normalize_coverage_code(code)
+        def warn(code: CoverageCode) -> None:
             if code not in warning_codes:
                 warning_codes.append(code)
 
-        def skipped(reason: CoverageCode | str, *, warning: bool = False) -> None:
-            reason = normalize_coverage_code(reason)
+        def skipped(reason: CoverageCode, *, warning: bool = False) -> None:
             nonlocal skipped_count
             skipped_count += 1
             if reason not in skipped_reasons:
@@ -481,7 +471,7 @@ class DabbleAdapter:
         if market_key in conflicted_market_keys:
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise _MalformedRecord(
+            raise CoverageRecordMalformed(
                 "repeated Dabble market identity has conflicting content",
                 code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
@@ -499,7 +489,7 @@ class DabbleAdapter:
             conflicted_market_keys.add(market_key)
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise _MalformedRecord(
+            raise CoverageRecordMalformed(
                 "repeated Dabble market identity has conflicting content",
                 code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
@@ -515,7 +505,7 @@ class DabbleAdapter:
             conflicted_market_keys.add(market_key)
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise _MalformedRecord(
+            raise CoverageRecordMalformed(
                 "repeated Dabble selection identity has conflicting content",
                 code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
@@ -708,14 +698,14 @@ class DabbleAdapter:
         query: NBAMarketQuery,
     ) -> tuple[tuple[Any, ...], PlayerProjectionMarket, Selection]:
         if not isinstance(prop, Mapping):
-            raise _MalformedRecord("Dabble player prop must be an object")
+            raise CoverageRecordMalformed("Dabble player prop must be an object")
 
         kind = prop.get("marketType", prop.get("market_type", prop.get("type")))
         if isinstance(kind, str) and kind.strip().casefold() in _NON_PLAYER_KINDS:
-            raise _ExcludedRecord("non_player_market")
+            raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
         player_name = optional_text(prop.get("playerName"))
         if player_name is None:
-            raise _ExcludedRecord("non_player_market")
+            raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
 
         status_labels = tuple(
             label
@@ -732,12 +722,12 @@ class DabbleAdapter:
                 normalize_market_status(label) for label in status_labels
             )
         except ValueError as error:
-            raise _ExcludedRecord("ineligible_status") from error
+            raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS) from error
         if not normalized_statuses or any(
             status.value.value not in query.market_statuses
             for status in normalized_statuses
         ):
-            raise _ExcludedRecord("ineligible_status")
+            raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
         status = normalized_statuses[0]
 
         source_sport = (
@@ -746,24 +736,24 @@ class DabbleAdapter:
             or competition.get("sport")
         )
         if source_sport is not None and str(source_sport).strip().casefold() not in _BASKETBALL_LABELS:
-            raise _ExcludedRecord("non_nba_sport")
+            raise CoverageRecordExcluded(CoverageCode.NON_NBA_SPORT)
 
         stats = prop.get("stats")
         if not isinstance(stats, list) or not stats:
-            raise _MalformedRecord("Dabble player prop stats are malformed")
+            raise CoverageRecordMalformed("Dabble player prop stats are malformed")
         raw_stats = []
         for stat in stats:
             if not isinstance(stat, str) or not stat.strip():
-                raise _MalformedRecord("Dabble player prop stat is malformed")
+                raise CoverageRecordMalformed("Dabble player prop stat is malformed")
             raw_stats.append(stat.strip())
         normalized_stats = canonical_stat_components(raw_stats)
         if not normalized_stats:
-            raise _MalformedRecord("Dabble player prop stats are empty")
+            raise CoverageRecordMalformed("Dabble player prop stats are empty")
 
         value, source_value = self._decimal_source(prop.get("value"), "value")
         line_type = prop.get("lineType")
         if not isinstance(line_type, str) or not line_type.strip():
-            raise _MalformedRecord("Dabble lineType is malformed")
+            raise CoverageRecordMalformed("Dabble lineType is malformed")
         line_type = line_type.strip()
 
         provider_athlete_id = self._optional_id(prop.get("playerId"))
@@ -862,7 +852,7 @@ class DabbleAdapter:
                     prop.get("multiplier"), "multiplier"
                 )
                 if multiplier <= 0:
-                    raise _MalformedRecord("Dabble multiplier must be positive")
+                    raise CoverageRecordMalformed("Dabble multiplier must be positive")
                 multiplier_label = optional_text(
                     prop.get("multiplierLabel")
                     or prop.get("payoutMultiplierLabel")
@@ -886,10 +876,10 @@ class DabbleAdapter:
                 ),
                 modifiers=modifiers,
             )
-        except _MalformedRecord:
+        except CoverageRecordMalformed:
             raise
         except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
+            raise CoverageRecordMalformed(str(error)) from error
         if market_id is not None:
             market_key: tuple[Any, ...] = ("market", market_id)
         else:
@@ -1062,18 +1052,18 @@ class DabbleAdapter:
     @staticmethod
     def _decimal_source(value: Any, field: str) -> tuple[Decimal, str]:
         if isinstance(value, bool) or value is None:
-            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
+            raise CoverageRecordMalformed(f"Dabble {field} must be a finite decimal")
         if isinstance(value, float) and not math.isfinite(value):
-            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
+            raise CoverageRecordMalformed(f"Dabble {field} must be a finite decimal")
         displayed = str(value).strip()
         try:
             decimal = Decimal(displayed)
         except (InvalidOperation, TypeError, ValueError) as error:
-            raise _MalformedRecord(
+            raise CoverageRecordMalformed(
                 f"Dabble {field} must be a finite decimal"
             ) from error
         if not decimal.is_finite():
-            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
+            raise CoverageRecordMalformed(f"Dabble {field} must be a finite decimal")
         return decimal, displayed
 
 

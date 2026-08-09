@@ -71,13 +71,6 @@ class _MalformedPage(MalformedProviderResponseError):
     """The whole PrizePicks page cannot be interpreted safely."""
 
 
-class _MalformedRecord(CoverageRecordMalformed):
-    """One PrizePicks record cannot be represented safely."""
-
-
-class _ExcludedRecord(CoverageRecordExcluded):
-    """One valid upstream record is outside the requested board scope."""
-
 @dataclass(frozen=True, slots=True)
 class _PageResult:
     markets: tuple[PlayerProjectionMarket, ...]
@@ -98,7 +91,6 @@ class PrizePicksAdapter:
     """Retrieve and normalize PrizePicks' JSON:API projection board."""
 
     name = "prizepicks"
-    PROVIDER_NAME = name
     BASE_URL = "https://api.prod01.universe.prizepicks.com/projections"
     DEFAULT_TIMEOUT = (10.0, 30.0)
     _LEAGUE_IDS = {"NBA": 7}
@@ -360,46 +352,46 @@ class PrizePicksAdapter:
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
-            raise _MalformedRecord("projection must be an object")
+            raise CoverageRecordMalformed("projection must be an object")
         if row.get("type") != "projection":
-            raise _ExcludedRecord("non_projection_market")
+            raise CoverageRecordExcluded(CoverageCode.NON_PROJECTION_MARKET)
         attributes = row.get("attributes")
         relationships = row.get("relationships")
         if not isinstance(attributes, Mapping) or not isinstance(relationships, Mapping):
-            raise _MalformedRecord("projection attributes and relationships must be objects")
+            raise CoverageRecordMalformed("projection attributes and relationships must be objects")
         market_kind = cls._market_kind(attributes)
         if market_kind in {"non_player", "future"}:
-            raise _ExcludedRecord("non_player_market")
-        projection_id = cls._record_identifier(row, "id")
+            raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
+        projection_id = required_identifier(row, "id")
         player_id = cls._relationship_id(relationships, "new_player")
         league_id = cls._relationship_id(relationships, "league")
         player = resources.get(("new_player", player_id))
         league = resources.get(("league", league_id))
         if player is None or league is None:
-            raise _MalformedRecord("projection relationships could not be resolved")
+            raise CoverageRecordMalformed("projection relationships could not be resolved")
         player_attributes = player.get("attributes")
         league_attributes = league.get("attributes")
         if not isinstance(player_attributes, Mapping) or not isinstance(league_attributes, Mapping):
-            raise _MalformedRecord("related resource attributes must be objects")
+            raise CoverageRecordMalformed("related resource attributes must be objects")
 
-        league_name = cls._record_text(league_attributes, "name")
+        league_name = required_text(league_attributes, "name")
         if league_name.casefold() != expected_sport.casefold():
-            raise _ExcludedRecord("non_nba_market")
-        raw_status = cls._record_text(attributes, "status")
+            raise CoverageRecordExcluded(CoverageCode.NON_NBA_MARKET)
+        raw_status = required_text(attributes, "status")
         try:
             status = normalize_market_status(raw_status).value
         except ValueError as error:
-            raise _ExcludedRecord("ineligible_status") from error
+            raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS) from error
         if status not in allowed_statuses:
-            raise _ExcludedRecord("status_filter")
+            raise CoverageRecordExcluded(CoverageCode.STATUS_FILTER)
 
-        player_name = cls._record_text(player_attributes, "name")
-        stat_label = cls._record_text(attributes, "stat_type")
-        line_score = cls._record_number(attributes, "line_score")
+        player_name = required_text(player_attributes, "name")
+        stat_label = required_text(attributes, "stat_type")
+        line_score = required_number(attributes, "line_score")
         start_value = attributes.get("start_time")
         updated_value = attributes.get("updated_at")
-        cls._record_timestamp(start_value, "start_time")
-        cls._record_timestamp(updated_value, "updated_at")
+        validate_timestamp(start_value, "start_time")
+        validate_timestamp(updated_value, "updated_at")
 
         team = cls._team_from_mapping(player_attributes)
         sport = SportEvidence(label=league_name)
@@ -449,7 +441,7 @@ class PrizePicksAdapter:
                 selections=(),
             )
         except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
+            raise CoverageRecordMalformed(str(error)) from error
 
     @classmethod
     def _event_from_projection(
@@ -466,7 +458,7 @@ class PrizePicksAdapter:
             resource = resources.get((relation_type, provider_id))
         event_attributes = resource.get("attributes", {}) if resource else {}
         if not isinstance(event_attributes, Mapping):
-            raise _MalformedRecord("event resource attributes must be an object")
+            raise CoverageRecordMalformed("event resource attributes must be an object")
         label = optional_text(
             event_attributes.get("name", event_attributes.get("description"))
         ) or optional_text(attributes.get("description"))
@@ -476,9 +468,9 @@ class PrizePicksAdapter:
             event_attributes.get("status_label")
         )
         if status_label is not None and is_ineligible_event_status(status_label):
-            raise _ExcludedRecord("ineligible_event_status")
-        cls._record_timestamp(starts_at, "event start_time")
-        cls._record_timestamp(updated_at, "event updated_at")
+            raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_EVENT_STATUS)
+        validate_timestamp(starts_at, "event start_time")
+        validate_timestamp(updated_at, "event updated_at")
         if provider_id is None and label is None and starts_at is None and updated_at is None:
             return None
         try:
@@ -490,7 +482,7 @@ class PrizePicksAdapter:
                 updated_at=updated_at,
             )
         except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
+            raise CoverageRecordMalformed(str(error)) from error
 
     @classmethod
     def _event_relationship(
@@ -501,34 +493,6 @@ class PrizePicksAdapter:
             if name in relationships:
                 return cls._optional_relationship(relationships, name)
         return None
-
-    @staticmethod
-    def _record_identifier(value: Mapping[str, Any], key: str) -> str:
-        try:
-            return required_identifier(value, key)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
-
-    @staticmethod
-    def _record_text(value: Mapping[str, Any], key: str) -> str:
-        try:
-            return required_text(value, key)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
-
-    @staticmethod
-    def _record_number(value: Mapping[str, Any], key: str) -> str | int | float:
-        try:
-            return required_number(value, key)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
-
-    @staticmethod
-    def _record_timestamp(value: Any, field: str) -> None:
-        try:
-            validate_timestamp(value, field)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
 
     @staticmethod
     def _market_kind(attributes: Mapping[str, Any]) -> str | None:
@@ -585,12 +549,12 @@ class PrizePicksAdapter:
     def _relationship_id(cls, relationships: Mapping[str, Any], name: str) -> str:
         relation = cls._optional_relationship(relationships, name)
         if relation is None:
-            raise _MalformedRecord(f"missing {name} relationship")
+            raise CoverageRecordMalformed(f"missing {name} relationship")
         expected_type, identifier = relation
         if name == "new_player" and expected_type != "new_player":
-            raise _MalformedRecord(f"{name} relationship has an unexpected type")
+            raise CoverageRecordMalformed(f"{name} relationship has an unexpected type")
         if name == "league" and expected_type != "league":
-            raise _MalformedRecord(f"{name} relationship has an unexpected type")
+            raise CoverageRecordMalformed(f"{name} relationship has an unexpected type")
         return identifier
 
     @classmethod
@@ -603,13 +567,13 @@ class PrizePicksAdapter:
         if relationship is None:
             return None
         if not isinstance(relationship, Mapping):
-            raise _MalformedRecord(f"{name} relationship must be an object")
+            raise CoverageRecordMalformed(f"{name} relationship must be an object")
         data = relationship.get("data")
         if data is None:
             return None
         if not isinstance(data, Mapping):
-            raise _MalformedRecord(f"{name} relationship data must be an object")
-        return cls._record_text(data, "type"), cls._record_identifier(data, "id")
+            raise CoverageRecordMalformed(f"{name} relationship data must be an object")
+        return required_text(data, "type"), required_identifier(data, "id")
 
     @classmethod
     def _team_from_mapping(cls, attributes: Mapping[str, Any]) -> TeamEvidence | None:
@@ -626,11 +590,11 @@ class PrizePicksAdapter:
         if team_id is None and team_name is None and abbreviation is None:
             return None
         if team_id is not None and (isinstance(team_id, bool) or not str(team_id).strip()):
-            raise _MalformedRecord("team_id must be a non-empty identifier")
+            raise CoverageRecordMalformed("team_id must be a non-empty identifier")
         if team_name is not None and not isinstance(team_name, str):
-            raise _MalformedRecord("team name must be a string")
+            raise CoverageRecordMalformed("team name must be a string")
         if abbreviation is not None and not isinstance(abbreviation, str):
-            raise _MalformedRecord("team abbreviation must be a string")
+            raise CoverageRecordMalformed("team abbreviation must be a string")
         try:
             return TeamEvidence(
                 provider_id=str(team_id) if team_id is not None else None,
@@ -638,7 +602,7 @@ class PrizePicksAdapter:
                 abbreviation=abbreviation,
             )
         except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
+            raise CoverageRecordMalformed(str(error)) from error
 
     @classmethod
     def _positive_int(cls, value: Any, field: str) -> int:

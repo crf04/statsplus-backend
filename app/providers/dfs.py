@@ -708,8 +708,10 @@ class MalformedProviderResponseError(ValueError):
 class CoverageRecordExcluded(Exception):
     """A valid source record is outside the shared adapter scope."""
 
-    def __init__(self, code: CoverageCode | str) -> None:
-        self.code = normalize_coverage_code(code)
+    def __init__(self, code: CoverageCode) -> None:
+        if not isinstance(code, CoverageCode):
+            raise TypeError("coverage exclusion code must be a CoverageCode")
+        self.code = code
         super().__init__(self.code.value)
 
 
@@ -720,16 +722,13 @@ class CoverageRecordMalformed(MalformedProviderResponseError):
         self,
         detail: str,
         *,
-        code: CoverageCode | str | None = None,
+        code: CoverageCode = CoverageCode.MALFORMED_RECORD,
     ) -> None:
         if not isinstance(detail, str) or not detail.strip():
             raise ValueError("malformed record detail must be a non-empty string")
-        resolved_code = (
-            normalize_coverage_code(detail, default=CoverageCode.MALFORMED_RECORD)
-            if code is None
-            else normalize_coverage_code(code)
-        )
-        self.code = resolved_code
+        if not isinstance(code, CoverageCode):
+            raise TypeError("malformed record code must be a CoverageCode")
+        self.code = code
         self.detail = detail
         super().__init__(detail)
 

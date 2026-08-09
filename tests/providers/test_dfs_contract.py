@@ -20,6 +20,8 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     NBAMarketQuery,
     CoverageEvidence,
+    CoverageRecordExcluded,
+    CoverageRecordMalformed,
     MalformedProviderResponseError,
     ProviderSnapshot,
     ProviderSnapshotProvider,
@@ -403,6 +405,21 @@ def test_coverage_codes_are_closed_and_diagnostic_details_are_separate():
         CoverageEvidence(warning_codes=("duplicate_source_identitiy",))
     with pytest.raises(ValueError, match="known CoverageCode"):
         CoverageEvidence(skipped_reasons=("provider-specific detail",))
+
+
+def test_record_coverage_exceptions_require_typed_codes_and_keep_detail_separate():
+    with pytest.raises(TypeError, match="CoverageCode"):
+        CoverageRecordExcluded("non_player_market")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="CoverageCode"):
+        CoverageRecordMalformed(
+            "provider-specific detail",
+            code="malformed_record",  # type: ignore[arg-type]
+        )
+
+    malformed = CoverageRecordMalformed("missing_match_type")
+    assert malformed.code is CoverageCode.MALFORMED_RECORD
+    assert malformed.detail == "missing_match_type"
 
 
 @pytest.mark.parametrize(

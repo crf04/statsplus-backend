@@ -5,7 +5,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.providers.dfs import MarketThreshold, normalize_timestamp
+from app.providers.dfs import (
+    CoverageCode,
+    CoverageRecordMalformed,
+    MarketThreshold,
+    normalize_timestamp,
+)
+
+
+def _malformed(detail: str) -> CoverageRecordMalformed:
+    """Build typed record diagnostics at the shared provider-field seam."""
+
+    return CoverageRecordMalformed(detail, code=CoverageCode.MALFORMED_RECORD)
 
 
 def optional_text(value: Any) -> str | None:
@@ -22,7 +33,7 @@ def required_identifier(value: Mapping[str, Any], key: str) -> str:
 
     identifier = value.get(key)
     if identifier is None or isinstance(identifier, bool) or not str(identifier).strip():
-        raise ValueError(f"{key} must be present")
+        raise _malformed(f"{key} must be present")
     return str(identifier)
 
 
@@ -31,7 +42,7 @@ def required_text(value: Mapping[str, Any], key: str) -> str:
 
     text = optional_text(value.get(key))
     if text is None:
-        raise ValueError(f"{key} must be a non-empty string")
+        raise _malformed(f"{key} must be a non-empty string")
     return text
 
 
@@ -40,13 +51,13 @@ def required_number(value: Mapping[str, Any], key: str) -> str | int | float:
 
     raw = value.get(key)
     if isinstance(raw, bool) or raw is None or not isinstance(raw, (str, int, float)):
-        raise ValueError(f"{key} must be numeric")
+        raise _malformed(f"{key} must be numeric")
     try:
         decimal = MarketThreshold(raw, unit="count").value
     except ValueError as error:
-        raise ValueError(f"{key} must be numeric") from error
+        raise _malformed(f"{key} must be numeric") from error
     if not decimal.is_finite():
-        raise ValueError(f"{key} must be finite")
+        raise _malformed(f"{key} must be finite")
     return raw
 
 
@@ -54,7 +65,7 @@ def display_number(value: Any, *, field: str) -> str:
     """Return a numeric source value in its original display form."""
 
     if isinstance(value, bool) or value is None or not isinstance(value, (str, int, float)):
-        raise ValueError(f"{field} must have a displayable numeric value")
+        raise _malformed(f"{field} must have a displayable numeric value")
     return str(value)
 
 
@@ -64,11 +75,11 @@ def validate_timestamp(value: Any, field: str) -> None:
     if value is None:
         return
     if not isinstance(value, str):
-        raise ValueError(f"{field} must be an ISO-8601 string")
+        raise _malformed(f"{field} must be an ISO-8601 string")
     try:
         normalize_timestamp(value)
     except ValueError as error:
-        raise ValueError(str(error)) from error
+        raise _malformed(str(error)) from error
 
 
 def is_ineligible_event_status(label: str) -> bool:
