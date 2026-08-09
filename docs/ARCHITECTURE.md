@@ -256,11 +256,16 @@ be created or upgraded with an explicit `--database-url` argument or
 provided. Rerunning the command is idempotent because applied versions are
 recorded in `schema_migrations`. Status output masks database passwords.
 
+Migration 004 creates the writable `athlete_catalog` and
+`athlete_catalog_freshness` tables. `AthleteCatalogService` refreshes explicit
+seasons through the normalized `player_roster` provider seam and keeps
+athlete freshness independent from event freshness. The operator command
+reports per-season outcomes and never targets the read-only demo database.
+
 Migration 005 creates the writable `event_catalog` and
-`event_catalog_refreshes` tables. Version 004 is reserved for Athlete Catalog
-(#25); this branch intentionally runs with the 003 → 005 gap and should be
-ordered after 004 when the branches merge. Event refreshes upsert by NBA game
-ID in one transaction and do not replace the table, so omitted historical rows
+`event_catalog_refreshes` tables. Migrations are applied in order. Event
+refreshes upsert by NBA game ID
+in one transaction and do not replace the table, so omitted historical rows
 remain available. Mapping and audit state belong to #28. Replacement game IDs are new rows with
 no heuristic transfer. `EventCatalogService.get_freshness` reads per-season
 attempt/success/failure state independently from Athlete Catalog. The

@@ -136,6 +136,14 @@ def test_demo_database_validation_is_read_only():
     assert before == after
 
 
+def test_run_migrations_rejects_demo_database_without_mutating_it():
+    database_path = Path("nba_play_types.db")
+    before = _sqlite_schema_snapshot(database_path)
+    with pytest.raises(ValueError, match="read-only demo database"):
+        run_migrations(create_engine("sqlite:///nba_play_types.db"))
+    assert _sqlite_schema_snapshot(database_path) == before
+
+
 def test_app_factory_does_not_migrate_demo_database(monkeypatch):
     from app import create_app
 

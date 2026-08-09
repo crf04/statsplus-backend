@@ -57,7 +57,9 @@ class EventCatalogService:
         self.repository = EventCatalogRepository(engine)
         if is_demo_database_url(str(engine.url)):
             raise ValueError("The canonical event catalog requires a writable application database.")
-        configured = getattr(self.settings, "event_catalog_max_age_hours", 72.0)
+        configured = getattr(
+            getattr(self.settings, "catalog", None), "event_max_age_hours", 72.0
+        )
         self.max_age = (timedelta(hours=float(max_age_hours)) if max_age_hours is not None else
                         max_age if isinstance(max_age, timedelta) else
                         timedelta(hours=float(max_age)) if max_age is not None else

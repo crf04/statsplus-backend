@@ -158,6 +158,13 @@ def run_migrations(engine: Engine) -> MigrationResult:
     treated as a pre-migration database: the current model schema is created
     if needed and then marked as applied without touching existing rows.
     """
+    from app.utils.db import is_demo_database_url
+
+    if is_demo_database_url(str(engine.url)):
+        raise ValueError(
+            "The tracked nba_play_types.db is a read-only demo database and "
+            "cannot be an application migration target."
+        )
     _validate_migration_order()
 
     with engine.begin() as connection:

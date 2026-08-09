@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import OperationalError
 
 from app.errors import ProviderUnavailableError
+from app.config.settings import CatalogSettings, RuntimeSettings
 from app.migrations import run_migrations
 from app.services.event_catalog_service import EventCatalogService
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
@@ -68,6 +69,20 @@ def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
     assert postponed["postponement_evidence"]
     assert postponed["is_postponed"] is True
     assert postponed["classification"] == "Regular Season"
+
+
+def test_service_uses_catalog_event_max_age_setting(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    settings = RuntimeSettings(
+        environment="testing",
+        catalog=CatalogSettings(event_max_age_hours=24),
+    )
+    service = EventCatalogService(
+        _engine(tmp_path), FakeScheduleProvider(), settings=settings, clock=lambda: now
+    )
+    service.refresh("2025-26")
+    assert service.get_freshness("2025-26", now=now + timedelta(hours=24))["fresh"]
+    assert not service.get_freshness("2025-26", now=now + timedelta(hours=25))["fresh"]
 
 
 def test_service_consumes_canonical_provider_frame_and_preserves_structured_evidence(tmp_path):
