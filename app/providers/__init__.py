@@ -1,5 +1,6 @@
 """External provider adapters used by the application."""
 
+from .dabble import DabbleAdapter
 from .nba_stats import (
     NBAStatsAdapter,
     NBAStatsProvider,
@@ -11,6 +12,7 @@ from .prizepicks import PrizePicksAdapter
 from .underdog import UnderdogAdapter
 
 __all__ = [
+    "DabbleAdapter",
     "NBAStatsAdapter",
     "NBAStatsProvider",
     "PBPStatsAdapter",

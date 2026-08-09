@@ -1,0 +1,54 @@
+{
+  "sportFixtureDetail": {
+    "id": "fixture-1",
+    "name": "Los Angeles Lakers @ Chicago Bulls",
+    "competitionId": "090c2877-4d13-4f6e-8faf-886092153c58",
+    "competitionName": "NBA",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "sportName": "Basketball",
+    "advertisedStart": "2026-08-09T16:30:00.000Z",
+    "status": "Open",
+    "playerProps": [
+      {
+        "playerId": "player-1",
+        "playerName": "LeBron James",
+        "teamId": "team-1",
+        "teamName": "Los Angeles Lakers",
+        "teamAbbreviation": "LAL",
+        "position": "F",
+        "marketId": "market-1",
+        "selectionId": "selection-over",
+        "stats": ["assists", "points", "rebounds"],
+        "value": 45.5,
+        "multiplier": 1.5,
+        "lineType": "over"
+      },
+      {
+        "playerId": "player-1",
+        "playerName": "LeBron James",
+        "teamId": "team-1",
+        "teamName": "Los Angeles Lakers",
+        "teamAbbreviation": "LAL",
+        "position": "F",
+        "marketId": "market-1",
+        "selectionId": "selection-under",
+        "stats": ["rebounds", "assists", "points"],
+        "value": 45.5,
+        "lineType": "under"
+      },
+      {
+        "playerId": "player-2",
+        "playerName": "Coby White",
+        "teamId": "team-2",
+        "teamName": "Chicago Bulls",
+        "teamAbbreviation": "CHI",
+        "position": "G",
+        "marketId": "market-2",
+        "selectionId": "selection-points-over",
+        "stats": ["points"],
+        "value": 22,
+        "lineType": "over"
+      }
+    ]
+  }
+}
