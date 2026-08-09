@@ -448,6 +448,10 @@ def serialize_provider_snapshot(
         raise TypeError("snapshot must be ProviderSnapshot")
     if snapshot.status is not SnapshotStatus.COMPLETE:
         raise ValueError("only complete provider snapshots may be cached")
+    # Statistic resolution happens in the board above this seam, so a resolved
+    # market is not a value this codec ever writes.
+    if any(market.statistic_match is not None for market in snapshot.markets):
+        raise ValueError("only unresolved provider snapshots may be cached")
     query = query or NBAMarketQuery()
     if not isinstance(query, NBAMarketQuery):
         raise TypeError("query must be NBAMarketQuery")

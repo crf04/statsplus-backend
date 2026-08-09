@@ -112,9 +112,9 @@ def test_catalog_retains_provider_evidence_and_reorders_composite_components() -
     assert match.canonical_id == "pra"
     assert match.canonical is not None
     assert match.canonical.components == ("points", "rebounds", "assists")
-    assert match.provider_evidence is evidence
-    assert match.provider_evidence.provider_id == "dabble-stat-1"
-    assert match.provider_evidence.label == "assists+points+rebounds"
+    assert match.evidence is evidence
+    assert match.evidence.provider_id == "dabble-stat-1"
+    assert match.evidence.label == "assists+points+rebounds"
 
 
 def test_aliases_are_explicit_and_unknown_labels_are_not_guessed() -> None:
@@ -157,7 +157,7 @@ def test_unknown_period_specific_and_provider_fantasy_labels_are_unmapped() -> N
         )
         assert match.state is MatchState.UNMAPPED
         assert match.canonical is None
-        assert match.provider_evidence.label == label
+        assert match.evidence.label == label
 
     assert (
         resolver.resolve(
@@ -398,6 +398,110 @@ def test_definition_rejects_undocumented_comparable_alias_and_mapping_alias() ->
         StatisticCatalog.from_mapping(conflicting_mapping)
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda definition: definition["statistics"][0].__setitem__("id", " points "),
+        lambda definition: definition["statistics"][0].__setitem__("id", "Points"),
+        lambda definition: definition["statistics"][0].__setitem__("label", " Points "),
+        lambda definition: definition["statistics"][0].__setitem__("components", [" points "]),
+        lambda definition: definition["statistics"][0].__setitem__("components", ["Points"]),
+        lambda definition: definition["statistics"][0].__setitem__("unit", " count "),
+        lambda definition: definition["statistics"][0].__setitem__("unit", "Count"),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "scoring_periods", [" full_game "]
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "scoring_periods", ["Full_Game"]
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {" dabble ": ["points"]}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"Dabble": ["points"]}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": [" POINTS "]}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": [{"label": " points "}]}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": {"labels": ["points "]}}
+        ),
+        lambda definition: definition.__setitem__("component_order", [" points "]),
+        lambda definition: definition.__setitem__("component_order", ["Points"]),
+    ],
+)
+def test_definition_rejects_noncanonical_whitespace_and_casing(mutate) -> None:
+    definition = _schema_v1_definition()
+    mutate(definition)
+
+    with pytest.raises(StatisticCatalogError):
+        StatisticCatalog.from_mapping(definition)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda definition: definition["statistics"][0].__setitem__(
+            "scoring_periods", "full_game"
+        ),
+        lambda definition: definition["statistics"][0].__setitem__("components", "points"),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", ["points"]
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": "points"}
+        ),
+        lambda definition: definition["statistics"][0].__setitem__(
+            "provider_mappings", {"dabble": [["points"]]}
+        ),
+        lambda definition: definition.__setitem__("component_order", "points"),
+        lambda definition: definition.__setitem__(
+            "statistics", definition["statistics"][0]
+        ),
+    ],
+)
+def test_definition_rejects_wrong_container_shapes(mutate) -> None:
+    definition = _schema_v1_definition()
+    mutate(definition)
+
+    with pytest.raises(StatisticCatalogError):
+        StatisticCatalog.from_mapping(definition)
+
+
+def test_definition_keeps_exact_provider_label_presentation_casing() -> None:
+    definition = _schema_v1_definition()
+    definition["statistics"][0]["provider_mappings"] = {
+        "dabble": ["POINTS", {"labels": ["Pts"]}]
+    }
+
+    catalog = StatisticCatalog.from_mapping(definition)
+
+    assert catalog.by_id["points"].provider_mappings["dabble"] == ("POINTS", "Pts")
+    assert (
+        catalog.resolve("dabble", "points", scoring_period=ScoringPeriod.FULL_GAME).state
+        is MatchState.CANONICAL
+    )
+
+
+def test_provider_evidence_stays_tolerant_while_definitions_stay_exact() -> None:
+    resolver = StatisticCatalog.load_default().resolver
+
+    match = resolver.resolve(
+        " PrizePicks ",
+        " points ",
+        scoring_period="full game",
+        unit=" Count ",
+        components=(" Points ",),
+    )
+
+    assert match.state is MatchState.CANONICAL
+    assert match.canonical is not None
+    assert match.canonical.id == "points"
+
+
 def test_typed_catalog_construction_requires_schema_version_one() -> None:
     statistic = CanonicalStatistic(
         id="points",
@@ -510,6 +614,52 @@ def test_statistic_match_is_typed_immutable_and_validates_state_coherence() -> N
             scoring_period=ScoringPeriod.FULL_GAME,
             reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
         )
+
+
+def test_statistic_match_rejects_attribute_deletion_and_addition() -> None:
+    match = StatisticMatch(
+        state=MatchState.UNMAPPED,
+        evidence=StatisticEvidence(label="Points"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+        reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
+    )
+
+    with pytest.raises(AttributeError):
+        del match.state
+    with pytest.raises(AttributeError):
+        del match.reason
+    with pytest.raises(AttributeError):
+        match.reason = MatchReason.UNIT_MISMATCH
+    # A frozen slotted value refuses an undeclared attribute too; CPython 3.11
+    # reports that one as a TypeError rather than an AttributeError.
+    with pytest.raises((AttributeError, TypeError)):
+        match.canonical_id = "points"
+
+    assert match.state is MatchState.UNMAPPED
+    assert match.reason is MatchReason.UNKNOWN_PROVIDER_LABEL
+
+
+def test_statistic_values_expose_one_name_for_each_reviewed_fact() -> None:
+    catalog = StatisticCatalog.load_default()
+    match = catalog.resolve(
+        "prizepicks", "Points", scoring_period=ScoringPeriod.FULL_GAME
+    )
+
+    for duplicate in ("canonical_id", "name", "ordered_components", "period"):
+        assert not hasattr(catalog.by_id["points"], duplicate)
+    for duplicate in (
+        "match_state",
+        "status",
+        "canonical_statistic",
+        "statistic",
+        "provider_evidence",
+        "provider_label",
+        "original_label",
+    ):
+        assert not hasattr(match, duplicate)
+
+    assert match.canonical_id == "points"
+    assert match.is_comparable
 
 
 def test_statistic_match_closes_period_unit_and_reason_vocabularies() -> None:
@@ -641,7 +791,7 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
     unmapped = board.unmapped_markets[0]
     assert unmapped.statistic.label == "Fantasy Points"
     assert unmapped.statistic_match.state is MatchState.UNMAPPED
-    assert unmapped.statistic_match.provider_evidence.provider_id == "underdog-stat"
+    assert unmapped.statistic_match.evidence.provider_id == "underdog-stat"
 
 
 def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:

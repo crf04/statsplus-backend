@@ -72,24 +72,31 @@ _IDENTIFIER_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
 
 
 def _identifier(value: Any, *, field_name: str) -> str:
+    """Read one definition identifier exactly; a variant spelling is a defect."""
+
     if not isinstance(value, str):
         raise StatisticCatalogSchemaError(f"{field_name} must be a string")
-    normalized = value.strip().casefold()
-    if not normalized or normalized[0] not in "abcdefghijklmnopqrstuvwxyz":
+    if not value or value[0] not in "abcdefghijklmnopqrstuvwxyz":
         raise StatisticCatalogSchemaError(
             f"{field_name} must start with a lowercase alphabetic character"
         )
-    if any(character not in _IDENTIFIER_CHARS for character in normalized):
+    if any(character not in _IDENTIFIER_CHARS for character in value):
         raise StatisticCatalogSchemaError(
             f"{field_name} must contain only lowercase letters, numbers, and underscores"
         )
-    return normalized
+    return value
 
 
 def _label(value: Any, *, field_name: str) -> str:
+    """Read one definition label exactly, retaining its reviewed presentation."""
+
     if not isinstance(value, str) or not value.strip():
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty string")
-    return value.strip()
+    if value != value.strip():
+        raise StatisticCatalogSchemaError(
+            f"{field_name} must not have leading or trailing whitespace"
+        )
+    return value
 
 
 def _label_key(value: str) -> str:
@@ -107,14 +114,15 @@ def _component_key(value: Any) -> str:
 
 
 def _provider(value: Any, *, field_name: str = "provider") -> str:
+    """Read one definition provider from the exact supported vocabulary."""
+
     if not isinstance(value, str) or not value.strip():
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty string")
-    normalized = value.strip().casefold()
-    if normalized not in SUPPORTED_STATISTIC_PROVIDERS:
+    if value not in SUPPORTED_STATISTIC_PROVIDERS:
         raise StatisticCatalogSchemaError(
             f"{field_name} {value!r} is not one of the supported DFS providers"
         )
-    return normalized
+    return value
 
 
 def _period(value: Any, *, field_name: str) -> ScoringPeriod:
@@ -124,7 +132,7 @@ def _period(value: Any, *, field_name: str) -> ScoringPeriod:
         normalized = value
     elif isinstance(value, str):
         try:
-            normalized = ScoringPeriod(value.strip().casefold())
+            normalized = ScoringPeriod(value)
         except ValueError:
             normalized = ScoringPeriod.UNKNOWN
     else:
@@ -137,12 +145,14 @@ def _period(value: Any, *, field_name: str) -> ScoringPeriod:
 
 
 def _unit(value: Any, *, field_name: str) -> StatisticUnit:
+    """Read one definition unit from the exact closed vocabulary."""
+
     if isinstance(value, StatisticUnit):
         return value
     if not isinstance(value, str):
         raise StatisticCatalogSchemaError(f"{field_name} must be a string unit")
     try:
-        return StatisticUnit(value.strip().casefold().replace(" ", "_"))
+        return StatisticUnit(value)
     except ValueError as error:
         raise StatisticCatalogSchemaError(
             f"{field_name} contains an invalid statistic unit {value!r}"
@@ -155,37 +165,46 @@ def _as_nonempty_list(value: Any, *, field_name: str) -> tuple[Any, ...]:
     return tuple(value)
 
 
-def _mapping_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
-    """Read one provider mapping in compact or explicit object form."""
+def _label_object(value: Mapping[str, Any], *, field_name: str) -> tuple[str, ...]:
+    """Read one explicit ``label``/``labels`` object."""
 
-    if isinstance(value, str):
-        return (_label(value, field_name=field_name),)
+    unknown = set(value) - {"label", "labels"}
+    if unknown:
+        raise StatisticCatalogSchemaError(
+            f"{field_name} contains unsupported mapping fields: {sorted(unknown)}"
+        )
+    if len(value) != 1:
+        raise StatisticCatalogSchemaError(
+            f"{field_name} must contain exactly one of label or labels"
+        )
+    if "label" in value:
+        return (_label(value["label"], field_name=f"{field_name}.label"),)
+    return tuple(
+        _label(candidate, field_name=f"{field_name}.labels")
+        for candidate in _as_nonempty_list(
+            value["labels"], field_name=f"{field_name}.labels"
+        )
+    )
+
+
+def _mapping_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
+    """Read one provider mapping as a label list or one explicit label object."""
+
     if isinstance(value, Mapping):
-        unknown = set(value) - {"label", "labels"}
-        if unknown:
-            raise StatisticCatalogSchemaError(
-                f"{field_name} contains unsupported mapping fields: {sorted(unknown)}"
-            )
-        if len(value) != 1:
-            raise StatisticCatalogSchemaError(
-                f"{field_name} must contain exactly one of label or labels"
-            )
-        if "label" in value:
-            values: list[Any] = [value["label"]]
-        else:
-            values = list(
-                _as_nonempty_list(value["labels"], field_name=f"{field_name}.labels")
-            )
-        return tuple(_label(candidate, field_name=field_name) for candidate in values)
+        return _label_object(value, field_name=field_name)
     if isinstance(value, (list, tuple)):
-        if not value:
-            raise StatisticCatalogSchemaError(f"{field_name} must contain labels")
         labels: list[str] = []
-        for index, item in enumerate(value):
-            labels.extend(_mapping_labels(item, field_name=f"{field_name}[{index}]"))
+        for index, item in enumerate(
+            _as_nonempty_list(value, field_name=field_name)
+        ):
+            item_field = f"{field_name}[{index}]"
+            if isinstance(item, Mapping):
+                labels.extend(_label_object(item, field_name=item_field))
+            else:
+                labels.append(_label(item, field_name=item_field))
         return tuple(labels)
     raise StatisticCatalogSchemaError(
-        f"{field_name} must be a label, list of labels, or explicit mapping"
+        f"{field_name} must be a list of labels or an explicit label object"
     )
 
 
@@ -276,22 +295,6 @@ class CanonicalStatistic:
         object.__setattr__(self, "scoring_periods", periods)
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "provider_mappings", MappingProxyType(mappings))
-
-    @property
-    def canonical_id(self) -> str:
-        return self.id
-
-    @property
-    def name(self) -> str:
-        return self.label
-
-    @property
-    def ordered_components(self) -> tuple[str, ...]:
-        return self.components
-
-    @property
-    def period(self) -> ScoringPeriod | None:
-        return self.scoring_periods[0] if len(self.scoring_periods) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,9 +632,13 @@ def _runtime_period(value: ScoringPeriod | str | None) -> ScoringPeriod:
 
 
 def _runtime_unit(value: str) -> StatisticUnit | None:
+    """Normalize provider unit evidence; definition units stay exact."""
+
+    if not isinstance(value, str):
+        return None
     try:
-        return _unit(value, field_name="provider statistic unit")
-    except StatisticCatalogError:
+        return StatisticUnit(value.strip().casefold().replace(" ", "_"))
+    except ValueError:
         return None
 
 
@@ -688,7 +695,6 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
         raw_components = _as_nonempty_list(
             components, field_name=f"statistics[{index}].components"
         )
-        raw_periods = (periods,) if isinstance(periods, str) else periods
         parsed.append(
             CanonicalStatistic(
                 id=_identifier(statistic_id, field_name=f"statistics[{index}].id"),
@@ -703,7 +709,7 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
                         field_name=f"statistics[{index}].scoring_periods",
                     )
                     for value in _as_nonempty_list(
-                        raw_periods,
+                        periods,
                         field_name=f"statistics[{index}].scoring_periods",
                     )
                 ),

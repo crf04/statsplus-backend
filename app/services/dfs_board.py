@@ -330,7 +330,6 @@ class DFSBoard:
             market
             for market in self.resolved_markets
             if market.statistic_match_state is MatchState.UNMAPPED
-            or market.statistic_match_state == MatchState.UNMAPPED
         )
 
     @property

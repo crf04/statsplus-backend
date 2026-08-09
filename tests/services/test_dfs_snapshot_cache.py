@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Event, Lock, Thread
 
 import pytest
 
+from app.domain.statistics import (
+    MatchReason,
+    MatchState,
+    ScoringPeriod,
+    StatisticMatch,
+)
 from app.providers.dfs import (
     CoverageEvidence,
     MarketStatus,
@@ -219,6 +226,27 @@ def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) ->
             expected_provider="dabble",
             expected_query=NBAMarketQuery(),
         )
+
+
+def test_snapshot_codec_refuses_to_write_a_resolved_market() -> None:
+    snapshot = _market_payload_snapshot()
+    resolved = replace(
+        snapshot,
+        markets=(
+            replace(
+                snapshot.markets[0],
+                statistic_match=StatisticMatch(
+                    state=MatchState.UNMAPPED,
+                    evidence=StatisticEvidence(label="Points"),
+                    scoring_period=ScoringPeriod.UNKNOWN,
+                    reason=MatchReason.UNKNOWN_SCORING_PERIOD,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unresolved"):
+        serialize_provider_snapshot(resolved)
 
 
 def test_snapshot_codec_rejects_noncanonical_contract_version_whitespace() -> None:

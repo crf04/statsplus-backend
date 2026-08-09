@@ -94,8 +94,8 @@ without guessing missing facts; they expose no provider-specific public routes.
 only complete normalized snapshots in Redis under a provider/query key that
 includes the adapter-contract version; it never serializes a `DFSBoard`. The
 cache sits below Statistic Catalog resolution, so a cached market carries
-provider evidence only: a wire value with a `statistic_match` is rejected as
-corrupt rather than decoded.
+provider evidence only: a resolved market is refused on the way in, and a wire
+value with a `statistic_match` is rejected as corrupt rather than decoded.
 Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a
@@ -175,8 +175,13 @@ resolution. Schema v1's field vocabulary is exact and closed: a document has
 aliases — `version`, `canonical_statistics`, `canonical_id`, `display_name`,
 `name`, `period`, `periods`, `ordered_components`, `mappings`,
 `provider_labels`, `comparison_allowed`, and mapping `alias`/`aliases` are all
-rejected, so two spellings of one reviewed fact can never disagree. Directly
-constructed `StatisticCatalog` values are held to the same version.
+rejected, so two spellings of one reviewed fact can never disagree. The
+document's values are read exactly rather than normalized: identifiers, units,
+scoring periods, and provider names must already be the canonical value, labels
+must carry no surrounding whitespace, and list fields must be lists (a scalar
+`scoring_periods: full_game` or `provider_mappings: {dabble: points}` is a
+defect, not a shorthand). Directly constructed `StatisticCatalog` values are
+held to the same version.
 `StatisticCatalog.load`
 validates the document before constructing immutable `CanonicalStatistic`,
 `StatisticMapping`, and `StatisticMatch` objects. Application dependency
@@ -193,8 +198,9 @@ The initial catalog maps full-game points, rebounds, assists, three-pointers
 made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, and Underdog labels are accepted
-only when explicitly listed in the definition; case normalization preserves
-presentation evidence but does not infer meaning. Omitted period evidence
+only when explicitly listed in the definition; provider evidence is matched
+case-insensitively and preserves presentation evidence but does not infer
+meaning. Omitted period evidence
 stays `ScoringPeriod.UNKNOWN` rather than being guessed as full game, so a
 canonical identity always requires explicit full-game evidence. Unknown labels,
 unknown or period-specific scoring periods, unit mismatches, and provider
