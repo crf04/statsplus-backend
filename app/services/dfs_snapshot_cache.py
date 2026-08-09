@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import atexit
 import json
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import fields, is_dataclass
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,6 +54,12 @@ SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 SNAPSHOT_SCHEMA_VERSION = 1
 DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
+
+#: Delete one key only while it still holds the exact value this worker knows.
+COMPARE_AND_DELETE_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) end return 0"
+)
 
 
 class SnapshotCacheError(ValueError):
@@ -397,7 +403,14 @@ def deserialize_provider_snapshot(
         "query",
     }
     _keys(data, expected, label="root")
-    if data["schema"] != SNAPSHOT_SCHEMA or data["schema_version"] != SNAPSHOT_SCHEMA_VERSION:
+    if data["schema"] != SNAPSHOT_SCHEMA:
+        raise SnapshotCacheError("snapshot schema is incompatible")
+    schema_version = data["schema_version"]
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != SNAPSHOT_SCHEMA_VERSION
+    ):
         raise SnapshotCacheError("snapshot schema version is incompatible")
     contract_version = data["contract_version"]
     if not isinstance(contract_version, str) or not contract_version.strip():
@@ -405,16 +418,22 @@ def deserialize_provider_snapshot(
     if expected_contract_version is not None and contract_version != expected_contract_version:
         raise SnapshotCacheError("snapshot contract version is incompatible")
     provider = data["provider"]
-    if not isinstance(provider, str) or not provider.strip():
+    # The wire value must already be the canonical provider name;  decoding a
+    # near-miss spelling would silently normalize it into a matching snapshot.
+    if not isinstance(provider, str) or not provider or provider != provider.strip().casefold():
         raise SnapshotCacheError("snapshot provider is invalid")
-    if expected_provider is not None and provider.casefold() != expected_provider.casefold():
+    if expected_provider is not None and provider != expected_provider:
         raise SnapshotCacheError("snapshot provider is incompatible")
     query_data = _mapping(data["query"], label="query")
     _keys(query_data, {"sport", "league", "market_statuses", "pregame_only"}, label="query")
+    if query_data["pregame_only"] is not True:
+        raise SnapshotCacheError("snapshot query is not canonical")
     try:
         encoded_query = NBAMarketQuery(**query_data)
     except (TypeError, ValueError) as error:
         raise SnapshotCacheError("snapshot query is invalid") from error
+    if query_data != _query_payload(encoded_query):
+        raise SnapshotCacheError("snapshot query is not canonical")
     if expected_query is not None and _query_payload(encoded_query) != _query_payload(expected_query):
         raise SnapshotCacheError("snapshot query is incompatible")
     if data["status"] != SnapshotStatus.COMPLETE.value:
@@ -467,29 +486,21 @@ class SnapshotCacheResult:
 
         return self.snapshot.retrieved_at
 
-    @property
-    def age(self) -> float:
-        """Short alias useful to callers rendering cache age."""
-
-        return self.age_seconds
-
-    @property
-    def failure_reason(self) -> str | None:
-        """Short alias for the sanitized refresh failure reason."""
-
-        return self.refresh_failure_reason
-
-    @property
-    def failure_at(self) -> datetime | None:
-        """Short alias for the controlled time of a failed refresh."""
-
-        return self.refresh_failed_at
-
 
 @dataclass(slots=True)
 class _Flight:
     upstream: _FutureLike
-    result: Future[ProviderSnapshot]
+    #: The complete cache decision shared with every follower of this refresh.
+    result: Future[SnapshotCacheResult]
+    #: Set when the owner left before an uncancellable refresh finished.
+    detached: bool = False
+
+
+@dataclass(slots=True)
+class _CacheDecision:
+    """The single cache decision one snapshot request finally recorded."""
+
+    status: str = "error"
 
 
 class ProviderSnapshotCacheCoordinator:
@@ -550,8 +561,6 @@ class ProviderSnapshotCacheCoordinator:
         values.update(overrides)
         return ProviderSnapshotCache(provider, provider_name=provider_name, **values)
 
-    wrap = decorate
-
     def submit(
         self,
         key: str,
@@ -605,7 +614,6 @@ class ProviderSnapshotCache:
         clock: Callable[[], datetime] | None = None,
         coordinator: ProviderSnapshotCacheCoordinator | None = None,
         executor: _Executor | None = None,
-        operation: str = "get_snapshot",
     ) -> None:
         if not callable(getattr(provider, "get_snapshot", None)):
             raise TypeError("provider must implement get_snapshot")
@@ -636,8 +644,6 @@ class ProviderSnapshotCache:
         )
         if not isinstance(contract, str) or not contract.strip():
             raise ValueError("contract_version must be a non-empty string")
-        if not isinstance(operation, str) or not operation.strip():
-            raise ValueError("operation must be a non-empty string")
 
         self.provider = provider
         self.provider_name = name
@@ -652,7 +658,6 @@ class ProviderSnapshotCache:
         self.contract_version = contract.strip()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.coordinator = coordinator or ProviderSnapshotCacheCoordinator(executor=executor)
-        self.operation = operation.strip()
         self._last_result = local()
 
     @property
@@ -669,12 +674,6 @@ class ProviderSnapshotCache:
 
         result = getattr(self._last_result, "value", None)
         return result if isinstance(result, SnapshotCacheResult) else None
-
-    @property
-    def cache_info(self) -> SnapshotCacheResult:
-        """Alias for ``last_result`` used by board integrations."""
-
-        return self.last_result
 
     def cache_key(self, query: NBAMarketQuery) -> str:
         """Build a semantic provider/query key with the adapter contract version."""
@@ -707,18 +706,44 @@ class ProviderSnapshotCache:
             raise TypeError("context must be RetrievalContext")
         # Provenance is per call/thread, not a fallback data store.
         self._last_result.__dict__.pop("value", None)
-        now = self._clock_utc()
+        decision = _CacheDecision()
+        try:
+            return self._retrieve(query, context, decision)
+        finally:
+            # Exactly one bounded cache decision per snapshot request, on every
+            # path, and never a fabricated provider-operation event.
+            self._record_cache_status(decision.status)
+
+    def _retrieve(
+        self,
+        query: NBAMarketQuery,
+        context: RetrievalContext,
+        decision: _CacheDecision,
+    ) -> ProviderSnapshot:
         if not self.enabled:
-            self._record_cache_status("disabled")
-            return self._direct_refresh(query, context, stale=None, now=now, cache_status="disabled")
+            decision.status = "disabled"
+            return self._direct_refresh(
+                query,
+                context,
+                stale=None,
+                cache_status="disabled",
+                decision=decision,
+            )
 
         key = self.cache_key(query)
         cached: ProviderSnapshot | None = None
-        read_status = "miss"
         try:
             raw = self.redis_client.get(key)
         except Exception:
-            return self._direct_refresh(query, context, stale=None, now=now, cache_status="error")
+            decision.status = "error"
+            return self._direct_refresh(
+                query,
+                context,
+                stale=None,
+                cache_status="error",
+                decision=decision,
+            )
+        decision.status = "miss"
         if raw is not None:
             try:
                 cached = deserialize_provider_snapshot(
@@ -728,36 +753,39 @@ class ProviderSnapshotCache:
                     expected_query=query,
                 )
             except SnapshotCacheError:
-                read_status = "miss"
-                delete = getattr(self.redis_client, "delete", None)
-                if callable(delete):
-                    try:
-                        delete(key)
-                    except Exception:
-                        pass
+                self._delete_if_unchanged(key, raw)
+
+        # A slow Redis read can consume the whole budget;  the caller's
+        # absolute deadline outranks any value it produced.
+        now = self._clock_utc()
+        if now >= context.deadline:
+            raise DeadlineExceededError("provider retrieval deadline exceeded")
 
         if cached is not None:
             age = self._age_seconds(cached, now)
             if age < self.fresh_seconds:
-                self._set_result(cached, "hit", age)
-                self._record_cache_hit()
+                self._last_result.value = SnapshotCacheResult(
+                    snapshot=cached,
+                    cache_status="hit",
+                    age_seconds=max(0.0, age),
+                )
+                decision.status = "hit"
                 return cached
             if age <= self.stale_if_error_seconds:
-                read_status = "stale_candidate"
                 return self._direct_refresh(
                     query,
                     context,
                     stale=(cached, age),
-                    now=now,
-                    cache_status=read_status,
+                    cache_status="stale_candidate",
+                    decision=decision,
                 )
 
         return self._direct_refresh(
             query,
             context,
             stale=None,
-            now=now,
-            cache_status=read_status,
+            cache_status="miss",
+            decision=decision,
         )
 
     def get_snapshot_with_metadata(
@@ -771,16 +799,14 @@ class ProviderSnapshotCache:
         del snapshot
         return self.last_result
 
-    get_snapshot_with_cache_info = get_snapshot_with_metadata
-
     def _direct_refresh(
         self,
         query: NBAMarketQuery,
         context: RetrievalContext,
         *,
         stale: tuple[ProviderSnapshot, float] | None,
-        now: datetime,
         cache_status: str,
+        decision: _CacheDecision,
     ) -> ProviderSnapshot:
         key = self.cache_key(query)
         flight, owner = self.coordinator.submit(
@@ -789,108 +815,121 @@ class ProviderSnapshotCache:
                 query, context.with_cache_status("stale" if stale is not None else cache_status)
             ),
         )
-        future = flight.upstream if owner else flight.result
         try:
-            snapshot = self._await(future, context, owner=owner)
-        except _EXPECTED_REFRESH_ERRORS as error:
-            if stale is not None and self._clock_utc() < context.deadline:
-                cached, _initial_age = stale
-                failure_at = self._clock_utc()
-                age = self._age_seconds(cached, failure_at)
-                if age <= self.stale_if_error_seconds:
-                    self._set_result(
-                        cached,
-                        "stale",
-                        age,
-                        refresh_failure_reason=self._failure_reason(error),
-                        refresh_failed_at=failure_at,
-                    )
-                    if owner:
-                        flight.result.set_result(cached)
-                        self.coordinator.finish(key, flight)
-                    self._record_cache_status("stale")
-                    return cached
             if owner:
-                flight.result.set_exception(error)
-                self.coordinator.finish(key, flight)
-            self._record_cache_status("error" if cache_status == "error" else cache_status)
-            raise
+                result = self._publish(
+                    key,
+                    query,
+                    context,
+                    self._await(key, flight, context, owner=True),
+                    cache_status=cache_status,
+                )
+            else:
+                # Followers adopt the owner's complete cache decision, so stale
+                # provenance is never lost on the way through the flight.
+                result = self._await(key, flight, context, owner=False)
+        except _EXPECTED_REFRESH_ERRORS as error:
+            fallback = self._stale_fallback(stale, context, error)
+            if fallback is None:
+                self._resolve_flight(key, flight, owner=owner, error=error)
+                raise
+            self._resolve_flight(key, flight, owner=owner, value=fallback)
+            result = fallback
         except BaseException as error:
             # Preserve implementation defects.  The board contract deliberately
-            # distinguishes expected upstream failures from programming bugs.
-            if owner:
-                flight.result.set_exception(error)
-                self.coordinator.finish(key, flight)
+            # distinguishes expected upstream failures from programming bugs,
+            # but either way the flight must resolve and retire its key.
+            self._resolve_flight(key, flight, owner=owner, error=error)
             raise
+        else:
+            self._resolve_flight(key, flight, owner=owner, value=result)
+        self._last_result.value = result
+        decision.status = result.cache_status
+        return result.snapshot
 
-        if not owner and stale is not None and snapshot is stale[0]:
-            age = self._age_seconds(snapshot, self._clock_utc())
-            self._set_result(snapshot, "stale", age)
-            self._record_cache_status("stale")
-            return snapshot
+    def _publish(
+        self,
+        key: str,
+        query: NBAMarketQuery,
+        context: RetrievalContext,
+        snapshot: Any,
+        *,
+        cache_status: str,
+    ) -> SnapshotCacheResult:
+        """Validate one refresh result, publish it when useful, and describe it."""
 
         if not isinstance(snapshot, ProviderSnapshot):
             raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
         if snapshot.provider != self.provider_name:
             raise ValueError("DFS provider snapshot provider does not match cache provider")
-        age = self._age_seconds(snapshot, self._clock_utc())
-        refresh_late = self._clock_utc() >= context.deadline
-        if snapshot.status is SnapshotStatus.COMPLETE:
-            if (
-                self.enabled
-                and owner
-                and not refresh_late
-                and snapshot.contract_version == self.contract_version
-            ):
-                try:
-                    self._write_redis(
-                        key,
-                        serialize_provider_snapshot(snapshot, query),
-                        max(1, int(self.stale_if_error_seconds)),
-                        context.deadline,
-                    )
-                except Exception:
-                    if self._clock_utc() >= context.deadline:
-                        error = DeadlineExceededError("provider refresh completed at deadline")
-                        if owner:
-                            flight.result.set_exception(error)
-                            self.coordinator.finish(key, flight)
-                        raise error
-                    self._set_result(snapshot, "error", age)
-                    if owner:
-                        flight.result.set_result(snapshot)
-                        self.coordinator.finish(key, flight)
-                    self._record_cache_status("error")
-                    return snapshot
-            self._set_result(
-                snapshot,
-                cache_status if cache_status != "stale_candidate" else "miss",
-                age,
-            )
-        else:
-            # Partial observations are useful to this caller, but are never
-            # written over the last complete Redis value.
-            self._set_result(snapshot, cache_status if cache_status != "stale_candidate" else "miss", age)
-        if owner:
-            flight.result.set_result(snapshot)
-            self.coordinator.finish(key, flight)
-        self._record_cache_status(self.last_result.cache_status)
-        return snapshot
+        if snapshot.contract_version != self.contract_version:
+            raise ValueError("DFS provider snapshot contract version does not match cache")
+        status = "miss" if cache_status == "stale_candidate" else cache_status
+        # Partial observations are useful to this caller, but are never written
+        # over the last complete Redis value.
+        if (
+            self.enabled
+            and snapshot.status is SnapshotStatus.COMPLETE
+            and self._clock_utc() < context.deadline
+        ):
+            try:
+                self._write_redis(
+                    key,
+                    serialize_provider_snapshot(snapshot, query),
+                    max(1, int(self.stale_if_error_seconds)),
+                    context.deadline,
+                )
+            except Exception:
+                if self._clock_utc() >= context.deadline:
+                    raise DeadlineExceededError("provider refresh completed at deadline")
+                status = "error"
+        if self._clock_utc() >= context.deadline:
+            raise DeadlineExceededError("provider refresh completed at deadline")
+        return SnapshotCacheResult(
+            snapshot=snapshot,
+            cache_status=status,
+            age_seconds=max(0.0, self._age_seconds(snapshot, self._clock_utc())),
+        )
+
+    def _stale_fallback(
+        self,
+        stale: tuple[ProviderSnapshot, float] | None,
+        context: RetrievalContext,
+        error: BaseException,
+    ) -> SnapshotCacheResult | None:
+        if stale is None:
+            return None
+        failure_at = self._clock_utc()
+        if failure_at >= context.deadline:
+            return None
+        cached, _initial_age = stale
+        age = self._age_seconds(cached, failure_at)
+        if age > self.stale_if_error_seconds:
+            return None
+        return SnapshotCacheResult(
+            snapshot=cached,
+            cache_status="stale",
+            age_seconds=max(0.0, age),
+            refresh_failure_reason=self._failure_reason(error),
+            refresh_failed_at=failure_at,
+        )
 
     def _await(
         self,
-        future: _FutureLike,
+        key: str,
+        flight: _Flight,
         context: RetrievalContext,
         *,
         owner: bool,
-    ) -> ProviderSnapshot:
+    ) -> Any:
         """Wait while preserving the absolute board deadline and cancellation."""
 
+        future: _FutureLike = flight.upstream if owner else flight.result
         while not future.done():
             now = self._clock_utc()
             if now >= context.deadline:
                 if owner:
-                    future.cancel()
+                    self._abandon(key, flight)
                 raise DeadlineExceededError("provider retrieval deadline exceeded")
             remaining = max(0.0, (context.deadline - now).total_seconds())
             try:
@@ -901,7 +940,7 @@ class ProviderSnapshotCache:
                 raise DeadlineExceededError("provider retrieval deadline exceeded") from error
             if self._clock_utc() >= context.deadline:
                 if owner:
-                    future.cancel()
+                    self._abandon(key, flight)
                 raise DeadlineExceededError("provider retrieval deadline exceeded")
             return result
         try:
@@ -914,22 +953,80 @@ class ProviderSnapshotCache:
         except CancelledError as error:
             raise DeadlineExceededError("provider retrieval deadline exceeded") from error
 
-    def _set_result(
-        self,
-        snapshot: ProviderSnapshot,
-        cache_status: str,
-        age: float,
-        *,
-        refresh_failure_reason: str | None = None,
-        refresh_failed_at: datetime | None = None,
-    ) -> None:
-        self._last_result.value = SnapshotCacheResult(
-            snapshot=snapshot,
-            cache_status=cache_status,
-            age_seconds=max(0.0, float(age)),
-            refresh_failure_reason=refresh_failure_reason,
-            refresh_failed_at=refresh_failed_at,
+    def _abandon(self, key: str, flight: _Flight) -> None:
+        """Leave a refresh the owner can no longer wait for.
+
+        Cancellation can fail because the upstream call is already running.
+        Retiring the key then would let a second caller start duplicate work,
+        so the flight stays active and its late result resolves it instead.
+        """
+
+        if flight.upstream.cancel():
+            return
+        flight.detached = True
+        add_done_callback = getattr(flight.upstream, "add_done_callback", None)
+        if not callable(add_done_callback):
+            # Nothing can observe the late result, so the key must not stay
+            # pending for callers that would wait on it forever.
+            self._resolve_flight(
+                key,
+                flight,
+                owner=True,
+                detached=True,
+                error=DeadlineExceededError("provider retrieval deadline exceeded"),
+            )
+            return
+        add_done_callback(lambda future: self._resolve_late(key, flight, future))
+
+    def _resolve_late(self, key: str, flight: _Flight, future: _FutureLike) -> None:
+        """Resolve an abandoned flight from its late result, publishing nothing."""
+
+        try:
+            snapshot = future.result(timeout=0)
+            if not isinstance(snapshot, ProviderSnapshot):
+                raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
+            if snapshot.provider != self.provider_name:
+                raise ValueError("DFS provider snapshot provider does not match cache provider")
+            if snapshot.contract_version != self.contract_version:
+                raise ValueError("DFS provider snapshot contract version does not match cache")
+        except BaseException as error:
+            self._resolve_flight(key, flight, owner=True, detached=True, error=error)
+            return
+        self._resolve_flight(
+            key,
+            flight,
+            owner=True,
+            detached=True,
+            value=SnapshotCacheResult(
+                snapshot=snapshot,
+                cache_status="miss",
+                age_seconds=max(0.0, self._age_seconds(snapshot, self._clock_utc())),
+            ),
         )
+
+    def _resolve_flight(
+        self,
+        key: str,
+        flight: _Flight,
+        *,
+        owner: bool,
+        detached: bool = False,
+        value: SnapshotCacheResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Hand one outcome to every follower and retire the single-flight key."""
+
+        if not owner or (flight.detached and not detached):
+            return
+        if not flight.result.done():
+            try:
+                if error is not None:
+                    flight.result.set_exception(error)
+                else:
+                    flight.result.set_result(value)
+            except InvalidStateError:  # pragma: no cover - concurrent resolution
+                pass
+        self.coordinator.finish(key, flight)
 
     def _write_redis(self, key: str, payload: str, ttl: int, deadline: datetime) -> None:
         if self._clock_utc() >= deadline:
@@ -937,26 +1034,30 @@ class ProviderSnapshotCache:
         setex = getattr(self.redis_client, "setex", None)
         if callable(setex):
             setex(key, ttl, payload)
-            if self._clock_utc() >= deadline:
-                delete = getattr(self.redis_client, "delete", None)
-                if callable(delete):
-                    delete(key)
-                raise DeadlineExceededError("provider refresh publication exceeded deadline")
-            return
-        setter = getattr(self.redis_client, "set", None)
-        if not callable(setter):
-            raise AttributeError("Redis client does not support setex or set")
-        setter(key, payload, ex=ttl)
+        else:
+            setter = getattr(self.redis_client, "set", None)
+            if not callable(setter):
+                raise AttributeError("Redis client does not support setex or set")
+            setter(key, payload, ex=ttl)
         if self._clock_utc() >= deadline:
-            delete = getattr(self.redis_client, "delete", None)
-            if callable(delete):
-                delete(key)
+            self._delete_if_unchanged(key, payload)
             raise DeadlineExceededError("provider refresh publication exceeded deadline")
 
-    def _record_cache_hit(self) -> None:
-        from app.utils.telemetry import CACHE_HIT, record_cached_provider_event
+    def _delete_if_unchanged(self, key: str, payload: Any) -> None:
+        """Remove only the exact value this worker wrote or read.
 
-        record_cached_provider_event(self.provider_name, self.operation, CACHE_HIT)
+        A blind delete would drop a newer value another worker published in the
+        meantime, so cleanup compares and deletes in one atomic step and
+        otherwise leaves the key alone.
+        """
+
+        evaluate = getattr(self.redis_client, "eval", None)
+        if not callable(evaluate):
+            return
+        try:
+            evaluate(COMPARE_AND_DELETE_SCRIPT, 1, key, payload)
+        except Exception:
+            pass
 
     def _record_cache_status(self, status: str) -> None:
         from app.utils.telemetry import record_cache_status
@@ -1013,18 +1114,8 @@ _EXPECTED_REFRESH_ERRORS = (
 )
 
 
-def decorate_provider(
-    provider: ProviderSnapshotProvider,
-    *,
-    provider_name: str,
-    **kwargs: Any,
-) -> ProviderSnapshotCache:
-    """Build a cache decorator using the shared public provider seam."""
-
-    return ProviderSnapshotCache(provider, provider_name=provider_name, **kwargs)
-
-
 __all__ = [
+    "COMPARE_AND_DELETE_SCRIPT",
     "DEFAULT_FRESH_SECONDS",
     "DEFAULT_STALE_IF_ERROR_SECONDS",
     "SNAPSHOT_SCHEMA",
@@ -1035,5 +1126,4 @@ __all__ = [
     "ProviderSnapshotCache",
     "ProviderSnapshotCacheCoordinator",
     "SnapshotCacheResult",
-    "decorate_provider",
 ]

@@ -208,15 +208,6 @@ class ProviderSettings(BaseModel):
             default=1800.0,
         )
 
-    # Descriptive aliases for integrations that call this a snapshot cache.
-    @property
-    def dfs_snapshot_cache_fresh_seconds(self) -> float | dict[str, float]:
-        return self.dfs_cache_fresh_seconds
-
-    @property
-    def dfs_snapshot_cache_stale_if_error_seconds(self) -> float | dict[str, float]:
-        return self.dfs_cache_stale_if_error_seconds
-
 
 class LLMSettings(BaseModel):
     """Optional OpenAI fallback settings."""
@@ -440,28 +431,13 @@ def _build_settings(
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
 
     dfs_cache_fresh = reader.decimal("DFS_CACHE_FRESH_SECONDS", 300.0)
-    dfs_cache_stale = reader.decimal(
-        "DFS_CACHE_STALE_IF_ERROR_SECONDS",
-        1800.0,
-        "DFS_CACHE_MAX_STALE_SECONDS",
-    )
+    dfs_cache_stale = reader.decimal("DFS_CACHE_STALE_IF_ERROR_SECONDS", 1800.0)
     fresh_overrides: dict[str, float] = {}
     stale_overrides: dict[str, float] = {}
     for provider_name in DFS_PROVIDER_NAME_SET:
         env_name = provider_name.upper()
-        fresh_value = reader.raw(
-            f"DFS_{env_name}_CACHE_FRESH_SECONDS",
-            None,
-            f"DFS_CACHE_{env_name}_FRESH_SECONDS",
-            f"DFS_{env_name}_SNAPSHOT_CACHE_FRESH_SECONDS",
-        )
-        stale_value = reader.raw(
-            f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS",
-            None,
-            f"DFS_CACHE_{env_name}_STALE_IF_ERROR_SECONDS",
-            f"DFS_{env_name}_CACHE_MAX_STALE_SECONDS",
-            f"DFS_{env_name}_SNAPSHOT_CACHE_STALE_IF_ERROR_SECONDS",
-        )
+        fresh_value = reader.raw(f"DFS_{env_name}_CACHE_FRESH_SECONDS")
+        stale_value = reader.raw(f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS")
         if fresh_value is not None:
             try:
                 fresh_overrides[provider_name] = float(fresh_value)

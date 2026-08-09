@@ -27,7 +27,9 @@ from app.services.dfs_board import DFSBoardService, ProviderFailureReason
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
-DEADLINE = "2026-08-09T17:00:00Z"
+# Ordinary fixture tests must not become wall-clock dependent.  Deadline
+# semantics are covered explicitly below with injected clocks and timestamps.
+DEADLINE = "2099-01-01T00:00:00Z"
 
 
 def _payload(name: str):

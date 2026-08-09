@@ -99,7 +99,15 @@ complete value. A complete value past its fresh window is used only as a
 stale-if-error fallback after a later expected total refresh failure. Redis
 failure bypasses the cache without an in-process stale copy, and
 `ProviderSnapshotCacheCoordinator` suppresses duplicate refreshes only within
-one worker (there is no distributed lock).
+one worker (there is no distributed lock). One flight shares the whole cache
+decision, so a follower keeps the owner's cache status, age, and sanitized
+refresh-failure provenance. When the owner's deadline elapses before an
+uncancellable refresh finishes, the flight stays active and its late result
+retires the key without publishing anything. The absolute deadline is enforced
+after the Redis read and before any value is returned, and cleanup of a late
+publication or an unusable payload compares and deletes atomically so a newer
+concurrent value survives. Cache decisions are recorded once per request as
+bounded cache counters only; the cache never emits a provider-operation event.
 
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
