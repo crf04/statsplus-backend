@@ -281,6 +281,25 @@ def test_malformed_prop_is_skipped_and_makes_nonempty_snapshot_partial():
     assert "malformed_record" in snapshot.coverage.warning_codes
 
 
+def test_dabble_does_not_hide_implementation_value_errors(monkeypatch):
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+    adapter = DabbleAdapter(session=session)
+
+    def broken_normalizer(*args, **kwargs):
+        del args, kwargs
+        raise ValueError("adapter bug")
+
+    monkeypatch.setattr(adapter, "_normalize_prop", broken_normalizer)
+
+    with pytest.raises(ValueError, match="adapter bug"):
+        adapter.get_snapshot(NBAMarketQuery(), _context())
+
+
 def test_failed_fixture_detail_yields_partial_snapshot_when_another_succeeds():
     fixtures = _payload("fixtures.valid.json")
     fixtures["data"].append(

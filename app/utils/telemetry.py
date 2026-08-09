@@ -1,4 +1,4 @@
-"""Structured provider telemetry for NBA Stats and PBP Stats.
+"""Structured provider telemetry for NBA Stats, PBP Stats, and DFS providers.
 
 One :class:`ProviderEvent` is emitted per upstream invocation.  The event is
 written to the application log as a single structured line and retained in an
@@ -101,6 +101,17 @@ _cache_counts: dict[str, dict[str, int]] = {}
 
 #: Injectable monotonic and wall-clock functions for deterministic tests.
 _monotonic = time.monotonic
+
+
+def _is_deadline_exceeded(error: BaseException) -> bool:
+    """Recognize the shared deadline type without importing providers early."""
+
+    # ``app.errors`` imports this module, while ``app.providers`` re-exports
+    # adapters that import ``app.errors``.  Keep this import lazy to avoid
+    # creating that package-initialization cycle at module import time.
+    from app.providers.dfs import DeadlineExceededError
+
+    return isinstance(error, DeadlineExceededError)
 
 
 def _now_iso() -> str:
@@ -348,6 +359,8 @@ class ProviderTracker:
         if exc is not None:
             if isinstance(exc, ProviderResponseError):
                 outcome = OUTCOME_MALFORMED
+            elif _is_deadline_exceeded(exc):
+                outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.Timeout):
                 outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.RequestException):

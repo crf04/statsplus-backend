@@ -369,6 +369,7 @@ def test_underdog_rejects_response_returned_after_absolute_deadline() -> None:
     assert session.calls[0][1] == pytest.approx((1.0, 1.0))
     event = telemetry.get_recorded_provider_events()[0]
     assert event["request_id"] == "late-underdog"
+    assert event["outcome"] == telemetry.OUTCOME_TIMEOUT
 
 
 def test_underdog_does_not_start_after_absolute_deadline() -> None:

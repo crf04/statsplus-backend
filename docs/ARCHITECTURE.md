@@ -64,7 +64,7 @@ otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
 ID flows into provider telemetry events, so a log, a provider event, and a
 response header share one correlation key.
 
-Provider calls at the two external seams are wrapped in one structured event
+Provider calls at the five external provider seams are wrapped in one structured event
 (`app.utils.telemetry.ProviderEvent`):
 
 | Provider | Seam | Operations |

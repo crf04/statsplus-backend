@@ -15,6 +15,7 @@ import pytest
 import requests
 from flask import Flask
 
+from app.providers.dfs import DeadlineExceededError
 import app.utils.telemetry as telemetry
 
 
@@ -103,6 +104,19 @@ def test_event_outcome_distinguishes_timeout_http_and_malformed():
     assert events["timeout_op"]["outcome"] == telemetry.OUTCOME_TIMEOUT
     assert events["http_op"]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
     assert events["bad_op"]["outcome"] == telemetry.OUTCOME_MALFORMED
+
+
+def test_deadline_timeout_is_distinct_from_unrelated_builtin_timeout():
+    with pytest.raises(DeadlineExceededError):
+        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
+            raise DeadlineExceededError("retrieval deadline exceeded")
+    with pytest.raises(TimeoutError):
+        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
+            raise TimeoutError("unrelated implementation timeout")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[0]["outcome"] == telemetry.OUTCOME_TIMEOUT
+    assert events[1]["outcome"] == telemetry.OUTCOME_ERROR
 
 
 def test_retry_count_is_read_from_the_thread_counter():

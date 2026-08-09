@@ -171,6 +171,10 @@ class _DabbleRequestFailure(Exception):
         super().__init__(reason)
 
 
+class _MalformedRecord(MalformedProviderResponseError):
+    """One Dabble player-prop record cannot be represented safely."""
+
+
 class _ExcludedRecord(Exception):
     """A valid source record outside the shared NBA player-market scope."""
 
@@ -407,7 +411,7 @@ class DabbleAdapter:
                 except _ExcludedRecord as error:
                     skipped(error.reason)
                     continue
-                except (ProviderResponseError, ValueError) as error:
+                except (ProviderResponseError, _MalformedRecord) as error:
                     eligible_count += 1
                     skipped(CoverageCode.MALFORMED_RECORD, warning=True)
                     diagnostic_details.append(str(error))
@@ -731,7 +735,7 @@ class DabbleAdapter:
         query: NBAMarketQuery,
     ) -> tuple[tuple[Any, ...], PlayerProjectionMarket, Selection]:
         if not isinstance(prop, Mapping):
-            raise ProviderResponseError("Dabble player prop must be an object")
+            raise _MalformedRecord("Dabble player prop must be an object")
 
         kind = prop.get("marketType", prop.get("market_type", prop.get("type")))
         if isinstance(kind, str) and kind.strip().casefold() in _NON_PLAYER_KINDS:
@@ -773,20 +777,20 @@ class DabbleAdapter:
 
         stats = prop.get("stats")
         if not isinstance(stats, list) or not stats:
-            raise ProviderResponseError("Dabble player prop stats are malformed")
+            raise _MalformedRecord("Dabble player prop stats are malformed")
         raw_stats = []
         for stat in stats:
             if not isinstance(stat, str) or not stat.strip():
-                raise ProviderResponseError("Dabble player prop stat is malformed")
+                raise _MalformedRecord("Dabble player prop stat is malformed")
             raw_stats.append(stat.strip())
         normalized_stats = canonical_stat_components(raw_stats)
         if not normalized_stats:
-            raise ProviderResponseError("Dabble player prop stats are empty")
+            raise _MalformedRecord("Dabble player prop stats are empty")
 
         value, displayed_value = self._decimal_source(prop.get("value"), "value")
         line_type = prop.get("lineType")
         if not isinstance(line_type, str) or not line_type.strip():
-            raise ProviderResponseError("Dabble lineType is malformed")
+            raise _MalformedRecord("Dabble lineType is malformed")
         line_type = line_type.strip()
 
         provider_athlete_id = self._optional_id(prop.get("playerId"))
@@ -824,83 +828,95 @@ class DabbleAdapter:
         variant_label = optional_text(
             prop.get("variant") or prop.get("marketVariant")
         )
-        team = TeamEvidence(
-            provider_id=self._optional_id(prop.get("teamId")),
-            name=optional_text(prop.get("teamName")),
-            abbreviation=optional_text(prop.get("teamAbbreviation")),
-        )
-        athlete = AthleteEvidence(
-            provider_id=provider_athlete_id,
-            name=player_name,
-            team=team,
-        )
-        sport = SportEvidence(provider_id=sport_id, label=sport_label)
-        competition_evidence = CompetitionEvidence(
-            provider_id=competition_id,
-            label=competition_label,
-            sport=sport,
-        )
-        market = PlayerProjectionMarket(
-            provider=self.PROVIDER_ID,
-            market_id=market_id,
-            athlete=athlete,
-            event=EventEvidence(
-                provider_id=fixture_id,
-                label=event_label,
+        try:
+            team = TeamEvidence(
+                provider_id=self._optional_id(prop.get("teamId")),
+                name=optional_text(prop.get("teamName")),
+                abbreviation=optional_text(prop.get("teamAbbreviation")),
+            )
+            athlete = AthleteEvidence(
+                provider_id=provider_athlete_id,
+                name=player_name,
+                team=team,
+            )
+            sport = SportEvidence(provider_id=sport_id, label=sport_label)
+            competition_evidence = CompetitionEvidence(
+                provider_id=competition_id,
+                label=competition_label,
+                sport=sport,
+            )
+            market = PlayerProjectionMarket(
+                provider=self.PROVIDER_ID,
+                market_id=market_id,
+                athlete=athlete,
+                event=EventEvidence(
+                    provider_id=fixture_id,
+                    label=event_label,
+                    starts_at=starts_at,
+                    updated_at=updated_at,
+                ),
+                team=team,
+                league=LeagueEvidence(
+                    provider_id=competition_id,
+                    label=competition_label,
+                ),
+                competition=competition_evidence,
+                sport=sport,
+                statistic=StatisticEvidence(
+                    label=statistic_label,
+                    components=tuple(components),
+                ),
+                threshold=MarketThreshold(
+                    value=value,
+                    unit="count",
+                    original_value=displayed_value,
+                ),
+                status=status.value,
+                status_label=(
+                    str(status_label).strip() if status_label is not None else None
+                ),
+                variant=variant_label,
+                variant_label=variant_label,
+                scoring_period=scoring_period,
+                scoring_period_label=period_label,
                 starts_at=starts_at,
                 updated_at=updated_at,
-            ),
-            team=team,
-            league=LeagueEvidence(provider_id=competition_id, label=competition_label),
-            competition=competition_evidence,
-            sport=sport,
-            statistic=StatisticEvidence(
-                label=statistic_label,
-                components=tuple(components),
-            ),
-            threshold=MarketThreshold(
-                value=value,
-                unit="count",
-                original_value=displayed_value,
-            ),
-            status=status.value,
-            status_label=str(status_label).strip() if status_label is not None else None,
-            variant=variant_label,
-            variant_label=variant_label,
-            scoring_period=scoring_period,
-            scoring_period_label=period_label,
-            starts_at=starts_at,
-            updated_at=updated_at,
-        )
+            )
 
-        modifiers: tuple[SelectionModifier, ...] = ()
-        if "multiplier" in prop and prop.get("multiplier") is not None:
-            multiplier, _ = self._decimal_source(
-                prop.get("multiplier"), "multiplier"
-            )
-            if multiplier <= 0:
-                raise ProviderResponseError("Dabble multiplier must be positive")
-            multiplier_label = optional_text(
-                prop.get("multiplierLabel")
-                or prop.get("payoutMultiplierLabel")
-                or prop.get("modifierLabel")
-            )
-            modifiers = (
-                SelectionModifier(
-                    value=multiplier,
-                    kind="multiplier",
-                    scope="selection",
-                    label=multiplier_label,
+            modifiers: tuple[SelectionModifier, ...] = ()
+            if "multiplier" in prop and prop.get("multiplier") is not None:
+                multiplier, _ = self._decimal_source(
+                    prop.get("multiplier"), "multiplier"
+                )
+                if multiplier <= 0:
+                    raise _MalformedRecord("Dabble multiplier must be positive")
+                multiplier_label = optional_text(
+                    prop.get("multiplierLabel")
+                    or prop.get("payoutMultiplierLabel")
+                    or prop.get("modifierLabel")
+                )
+                modifiers = (
+                    SelectionModifier(
+                        value=multiplier,
+                        kind="multiplier",
+                        scope="selection",
+                        label=multiplier_label,
+                    ),
+                )
+            selection = Selection(
+                selection_id=selection_id,
+                label=line_type,
+                direction=line_type,
+                direction_label=line_type,
+                status=(
+                    str(status_label).strip() if status_label is not None else None
                 ),
+                modifiers=modifiers,
             )
-        selection = Selection(
-            selection_id=selection_id,
-            label=line_type,
-            direction=line_type,
-            direction_label=line_type,
-            status=str(status_label).strip() if status_label is not None else None,
-            modifiers=modifiers,
-        )
+        except _MalformedRecord:
+            raise
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
         if market_id is not None:
             market_key: tuple[Any, ...] = ("market", market_id)
         else:
@@ -1090,18 +1106,18 @@ class DabbleAdapter:
     @staticmethod
     def _decimal_source(value: Any, field: str) -> tuple[Decimal, str]:
         if isinstance(value, bool) or value is None:
-            raise ProviderResponseError(f"Dabble {field} must be a finite decimal")
+            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
         if isinstance(value, float) and not math.isfinite(value):
-            raise ProviderResponseError(f"Dabble {field} must be a finite decimal")
+            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
         displayed = str(value).strip()
         try:
             decimal = Decimal(displayed)
         except (InvalidOperation, TypeError, ValueError) as error:
-            raise ProviderResponseError(
+            raise _MalformedRecord(
                 f"Dabble {field} must be a finite decimal"
             ) from error
         if not decimal.is_finite():
-            raise ProviderResponseError(f"Dabble {field} must be a finite decimal")
+            raise _MalformedRecord(f"Dabble {field} must be a finite decimal")
         return decimal, displayed
 
 
