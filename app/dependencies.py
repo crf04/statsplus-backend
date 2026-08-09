@@ -25,6 +25,7 @@ class ApplicationDependencies:
     team_service: Any
     data_service: Any
     data_refresh_jobs_service: Any
+    athlete_catalog_service: Any | None
     provider_health_service: Any
     nl_service: Any
     user_service: Any
@@ -41,6 +42,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.user_service import UserService
     from app.services.job_service import build_data_refresh_job_service
     from app.services.provider_health_service import ProviderHealthService
+    from app.services.athlete_catalog_service import AthleteCatalogService
     from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.utils.cache_config import get_redis_client
@@ -85,6 +87,15 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         data_service=data_service,
         player_service=player_service,
     )
+    athlete_catalog_service = None
+    from app.utils.db import is_demo_database_url
+
+    if not is_demo_database_url(settings.database.url):
+        athlete_catalog_service = AthleteCatalogService(
+            engine,
+            settings=settings,
+            nba_stats_provider=nba_stats_provider,
+        )
 
     return ApplicationDependencies(
         settings=settings,
@@ -97,6 +108,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         team_service=team_service,
         data_service=data_service,
         data_refresh_jobs_service=data_refresh_jobs_service,
+        athlete_catalog_service=athlete_catalog_service,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),

@@ -1,0 +1,69 @@
+{
+  "resource": "commonallplayers",
+  "parameters": {
+    "IsOnlyCurrentSeason": 0,
+    "LeagueID": "00",
+    "Season": "2024-25"
+  },
+  "resultSets": [
+    {
+      "name": "CommonAllPlayers",
+      "headers": [
+        "PERSON_ID",
+        "DISPLAY_LAST_COMMA_FIRST",
+        "DISPLAY_FIRST_LAST",
+        "ROSTERSTATUS",
+        "FROM_YEAR",
+        "TO_YEAR",
+        "PLAYERCODE",
+        "PLAYER_SLUG",
+        "TEAM_ID",
+        "TEAM_CITY",
+        "TEAM_NAME",
+        "TEAM_ABBREVIATION",
+        "TEAM_CODE",
+        "TEAM_SLUG",
+        "GAMES_PLAYED_FLAG",
+        "OTHERLEAGUE_EXPERIENCE_CH"
+      ],
+      "rowSet": [
+        [
+          23,
+          "James, LeBron",
+          "LeBron James",
+          1,
+          2003,
+          2025,
+          "lebron_james",
+          "lebron-james",
+          1610612747,
+          "Los Angeles",
+          "Lakers",
+          "LAL",
+          "lakers",
+          "lakers",
+          1,
+          "00"
+        ],
+        [
+          999,
+          "Retired, Player",
+          "Retired Player",
+          0,
+          1999,
+          2004,
+          "retired_player",
+          "retired-player",
+          1610612738,
+          "Boston",
+          "Celtics",
+          "BOS",
+          "celtics",
+          "celtics",
+          0,
+          "00"
+        ]
+      ]
+    }
+  ]
+}

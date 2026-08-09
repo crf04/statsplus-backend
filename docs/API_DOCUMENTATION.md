@@ -357,6 +357,25 @@ credentials, URLs, bodies, or exception text. Example shape:
 }
 ```
 
+## Canonical athlete catalog operations
+
+The canonical athlete catalog is an application-owned, persisted read model,
+not an HTTP board or Event Catalog route. Operators refresh it with explicit
+seasons using:
+
+```bash
+python scripts/refresh_athlete_catalog.py \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --season 2024-25
+```
+
+The command uses the instrumented NBA Stats `player_roster` seam, requires a
+writable database, and has no wall-clock season default or background timer.
+`AthleteCatalogService.get_catalog(season, active_only=...)` and
+`get_freshness(season)` read the persisted catalog and independent success /
+failure timestamps. `ATHLETE_CATALOG_FRESHNESS_DAYS` controls the default
+seven-day freshness window.
+
 Example start response (`202 Accepted`):
 
 ```json
