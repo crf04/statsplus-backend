@@ -173,6 +173,38 @@ def test_board_accepts_result_completed_at_exact_monotonic_boundary() -> None:
     assert board.snapshots == (provider.result,)
 
 
+def test_late_outcome_construction_is_not_harvested() -> None:
+    clock = ControlledClock()
+
+    class NearDeadlineProvider(FakeProvider):
+        def get_snapshot(self, query, context):
+            self.calls.append((query, context))
+            clock.advance(0.9)
+            return self.result
+
+    provider = NearDeadlineProvider("dabble")
+    service = DFSBoardService(
+        provider_registry={"dabble": provider},
+        deadline_seconds=1,
+        clock=clock.now,
+        monotonic=clock.monotonic,
+    )
+    original = DFSBoardService._outcome_from_snapshot
+
+    def normalize_late(name, snapshot):
+        outcome = original(name, snapshot)
+        clock.advance(0.2)
+        return outcome
+
+    service._outcome_from_snapshot = normalize_late
+    provider.result = _snapshot("dabble")
+    parent = RetrievalContext(deadline=clock.wall + timedelta(seconds=10), request_id="board-test")
+    board = service.get_board(NBAMarketQuery(), parent)
+
+    assert board.snapshots == ()
+    assert board.provider_outcomes[0].reason is ProviderFailureReason.DEADLINE_EXCEEDED
+
+
 def test_board_telemetry_records_bounded_outcomes_and_coverage() -> None:
     telemetry = FakeBoardTelemetry()
     coverage = CoverageEvidence(

@@ -330,7 +330,7 @@ class DFSBoardService:
                 for name in completed:
                     thread, holder = active.pop(name)
                     thread.join(timeout=0)
-                    self._harvest(name, holder, outcomes)
+                    self._harvest(name, holder, outcomes, board_deadline)
                 continue
 
             if self._deadline_reached(context, board_deadline):
@@ -352,7 +352,7 @@ class DFSBoardService:
             if completed_at is not None and completed_at <= board_deadline:
                 active.pop(name)
                 thread.join(timeout=0)
-                self._harvest(name, holder, outcomes)
+                self._harvest(name, holder, outcomes, board_deadline)
 
         if pending or active or self._deadline_reached(context, board_deadline):
             for name in pending:
@@ -478,7 +478,16 @@ class DFSBoardService:
         name: str,
         holder: Mapping[str, Any],
         outcomes: dict[str, ProviderOutcome],
+        board_deadline: float,
     ) -> None:
+        completed_at = holder.get("completed_at")
+        if not isinstance(completed_at, (int, float)) or completed_at > board_deadline:
+            outcomes[name] = ProviderOutcome(
+                provider=name,
+                status=ProviderOutcomeStatus.FAILED,
+                reason=ProviderFailureReason.DEADLINE_EXCEEDED,
+            )
+            return
         error = holder.get("exception")
         if error is not None:
             raise error

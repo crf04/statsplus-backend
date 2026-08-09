@@ -133,9 +133,15 @@ class _SerializedSession:
     doubles can safely be injected as one session.
     """
 
-    def __init__(self, session: requests.Session | Any) -> None:
+    def __init__(
+        self,
+        session: requests.Session | Any,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._session = session
         self._get_lock = threading.Lock()
+        self._monotonic = monotonic
 
     def acquire_request(self, deadline: float) -> "_SerializedSessionLease":
         """Reserve serialized access until the transport request completes.
@@ -146,10 +152,10 @@ class _SerializedSession:
         they reserve a transport slot or begin upstream work.
         """
 
-        remaining = deadline - time.monotonic()
+        remaining = deadline - self._monotonic()
         if remaining <= 0 or not self._get_lock.acquire(timeout=remaining):
             raise DeadlineExceededError("provider retrieval deadline exceeded")
-        if time.monotonic() >= deadline:
+        if self._monotonic() >= deadline:
             self._get_lock.release()
             raise DeadlineExceededError("provider retrieval deadline exceeded")
         return _SerializedSessionLease(self, deadline)
@@ -170,7 +176,7 @@ class _SerializedSessionLease:
     def get(self, url: str, **kwargs: Any) -> Any:
         if self._released:
             raise RuntimeError("serialized session lease is released")
-        if time.monotonic() >= self._deadline:
+        if self._owner._monotonic() >= self._deadline:
             self.release()
             raise DeadlineExceededError("provider retrieval deadline exceeded")
         try:
@@ -387,6 +393,7 @@ class DabbleAdapter:
         read_timeout_seconds: float = READ_TIMEOUT_SECONDS,
         timeout: tuple[float, float] | None = None,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
@@ -398,6 +405,7 @@ class DabbleAdapter:
             connect_timeout_seconds, read_timeout_seconds = timeout
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
             raise ValueError("provider timeouts must be positive")
+        self.monotonic = monotonic or time.monotonic
         if session_factory is not None:
             self.session = _ThreadLocalSession(session_factory)
             self._request_session = self.session
@@ -405,7 +413,7 @@ class DabbleAdapter:
             # Keep the injected object visible for existing test seams while
             # routing actual calls through its concurrency-safe adapter.
             self.session = session
-            self._request_session = _SerializedSession(session)
+            self._request_session = _SerializedSession(session, monotonic=self.monotonic)
         else:
             self.session = _ThreadLocalSession(_build_session)
             self._request_session = self.session
@@ -1676,6 +1684,7 @@ class DabbleAdapter:
             operation=operation,
             parse=parser,
             error_policy=self._transport_error_policy,
+            monotonic=self.monotonic,
         )
 
     @staticmethod
