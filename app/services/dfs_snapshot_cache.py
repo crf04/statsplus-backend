@@ -93,6 +93,17 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return decoded
 
 
+def _reject_constant(name: str) -> Any:
+    """Reject Python's non-standard JSON constants at the wire boundary.
+
+    ``json.loads`` accepts ``NaN``/``Infinity``/``-Infinity`` and ``json.dumps``
+    writes them straight back, so such a token would survive the canonical
+    round-trip check inside any field a constructor keeps verbatim.
+    """
+
+    raise SnapshotCacheError(f"snapshot payload has a non-standard constant: {name}")
+
+
 def _encoded(value: Any) -> Any:
     """Encode the immutable model tree into JSON-safe primitive values."""
 
@@ -126,17 +137,34 @@ def _keys(value: dict[str, Any], expected: set[str], *, label: str) -> None:
         raise SnapshotCacheError(f"snapshot {label} schema is invalid")
 
 
+def _text(data: dict[str, Any], keys: tuple[str, ...], *, label: str) -> None:
+    """Require each optional text field to be a JSON string or null.
+
+    Most constructors coerce a non-string label to None, which the canonical
+    round-trip check then rejects.  The market label fields are stored exactly
+    as given, so a number -- ``NaN`` included -- would otherwise be re-serialized
+    unchanged and pass as a canonical document.
+    """
+
+    for key in keys:
+        value = data[key]
+        if value is not None and not isinstance(value, str):
+            raise SnapshotCacheError(f"snapshot {label} {key} must be a string or null")
+
+
 def _nested(
     value: Any,
     constructor: type[Any],
     expected: set[str],
     *,
     label: str,
+    text: tuple[str, ...] = (),
 ) -> Any:
     if value is None:
         return None
     data = _mapping(value, label=label)
     _keys(data, expected, label=label)
+    _text(data, text, label=label)
     try:
         return constructor(**data)
     except _CORRUPT_VALUE_ERRORS as error:
@@ -149,6 +177,7 @@ def _team(value: Any, *, label: str) -> TeamEvidence | None:
         TeamEvidence,
         {"provider_id", "canonical_id", "name", "abbreviation"},
         label=label,
+        text=("name", "abbreviation"),
     )
 
 
@@ -164,6 +193,7 @@ def _athlete(value: Any) -> AthleteEvidence | None:
         AthleteEvidence,
         {"provider_id", "canonical_id", "name", "team"},
         label="athlete",
+        text=("name",),
     )
 
 
@@ -173,6 +203,7 @@ def _appearance(value: Any) -> AppearanceEvidence | None:
         AppearanceEvidence,
         {"provider_id", "appearance_type", "label"},
         label="appearance",
+        text=("appearance_type", "label"),
     )
 
 
@@ -195,7 +226,13 @@ def _event(value: Any) -> EventEvidence | None:
     data = dict(data)
     data["home_team"] = _team(data["home_team"], label="event.home_team")
     data["away_team"] = _team(data["away_team"], label="event.away_team")
-    return _nested(data, EventEvidence, expected, label="event")
+    return _nested(
+        data,
+        EventEvidence,
+        expected,
+        label="event",
+        text=("label", "status_label"),
+    )
 
 
 def _statistic(value: Any) -> StatisticEvidence | None:
@@ -208,11 +245,14 @@ def _statistic(value: Any) -> StatisticEvidence | None:
         )
         if not isinstance(data["components"], list):
             raise SnapshotCacheError("snapshot statistic components schema is invalid")
+        if any(not isinstance(component, str) for component in data["components"]):
+            raise SnapshotCacheError("snapshot statistic components must be strings")
     return _nested(
         value,
         StatisticEvidence,
         {"provider_id", "canonical_id", "label", "components"},
         label="statistic",
+        text=("label",),
     )
 
 
@@ -222,6 +262,7 @@ def _league(value: Any) -> LeagueEvidence | None:
         LeagueEvidence,
         {"provider_id", "canonical_id", "label"},
         label="league",
+        text=("label",),
     )
 
 
@@ -231,6 +272,7 @@ def _sport(value: Any) -> SportEvidence | None:
         SportEvidence,
         {"provider_id", "canonical_id", "label"},
         label="sport",
+        text=("label",),
     )
 
 
@@ -242,7 +284,9 @@ def _competition(value: Any) -> CompetitionEvidence | None:
     _keys(data, expected, label="competition")
     data = dict(data)
     data["sport"] = _sport(data["sport"])
-    return _nested(data, CompetitionEvidence, expected, label="competition")
+    return _nested(
+        data, CompetitionEvidence, expected, label="competition", text=("label",)
+    )
 
 
 def _threshold(value: Any) -> MarketThreshold | None:
@@ -251,6 +295,7 @@ def _threshold(value: Any) -> MarketThreshold | None:
         MarketThreshold,
         {"value", "unit", "original_value"},
         label="threshold",
+        text=("original_value",),
     )
 
 
@@ -258,7 +303,9 @@ def _modifier(value: Any) -> SelectionModifier:
     data = _mapping(value, label="selection modifier")
     expected = {"value", "kind", "scope", "label"}
     _keys(data, expected, label="selection modifier")
-    result = _nested(data, SelectionModifier, expected, label="selection modifier")
+    result = _nested(
+        data, SelectionModifier, expected, label="selection modifier", text=("label",)
+    )
     assert result is not None  # the input is an object, not null
     return result
 
@@ -281,7 +328,13 @@ def _selection(value: Any) -> Selection:
         raise SnapshotCacheError("snapshot selection modifiers schema is invalid")
     decoded = dict(data)
     decoded["modifiers"] = tuple(_modifier(item) for item in modifiers)
-    result = _nested(decoded, Selection, expected, label="selection")
+    result = _nested(
+        decoded,
+        Selection,
+        expected,
+        label="selection",
+        text=("label", "direction_label", "status"),
+    )
     assert result is not None
     return result
 
@@ -332,7 +385,13 @@ def _market(value: Any) -> PlayerProjectionMarket:
         raise SnapshotCacheError("snapshot market selections schema is invalid")
     decoded["selections"] = tuple(_selection(item) for item in selections)
     decoded["appearance"] = _appearance(data["appearance"])
-    result = _nested(decoded, PlayerProjectionMarket, expected, label="market")
+    result = _nested(
+        decoded,
+        PlayerProjectionMarket,
+        expected,
+        label="market",
+        text=("status_label", "variant_label", "scoring_period_label"),
+    )
     assert result is not None
     return result
 
@@ -397,7 +456,9 @@ def serialize_provider_snapshot(
         "retrieved_at": _encoded(snapshot.retrieved_at),
         "query": _query_payload(query),
     }
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    # ``allow_nan`` would emit NaN/Infinity, which no standard JSON reader
+    # accepts and which this codec refuses to read back.
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True, allow_nan=False)
 
 
 def deserialize_provider_snapshot(
@@ -417,10 +478,15 @@ def deserialize_provider_snapshot(
     if not isinstance(payload, str):
         raise SnapshotCacheError("snapshot payload must be JSON text")
     try:
-        raw = json.loads(payload, object_pairs_hook=_unique_pairs)
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_unique_pairs,
+            parse_constant=_reject_constant,
+        )
     except SnapshotCacheError:
-        # The duplicate-key hook already decided;  it must not be reworded into
-        # a generic parse failure by the broader ValueError clause below.
+        # The duplicate-key and non-standard-constant hooks already decided;
+        # neither must be reworded into a generic parse failure by the broader
+        # ValueError clause below.
         raise
     except (TypeError, ValueError) as error:
         # Not every parser rejection is a JSONDecodeError: an integer token past
@@ -510,7 +576,14 @@ def deserialize_provider_snapshot(
     # whitespace, reordered keys, and alternate escapes are all rejected.  So is
     # anything a constructor normalized, dropped, canonicalized from an alias, or
     # deduplicated -- that is corrupt data, not a usable cache value.
-    if serialize_provider_snapshot(snapshot, encoded_query) != payload:
+    try:
+        canonical = serialize_provider_snapshot(snapshot, encoded_query)
+    except ValueError as error:
+        # A decoded value the canonical encoder refuses -- a nonfinite float
+        # reached by numeric overflow rather than by a NaN token -- is corrupt
+        # wire data, so it must not escape this seam as a bare ValueError.
+        raise SnapshotCacheError("snapshot payload is not canonical") from error
+    if canonical != payload:
         raise SnapshotCacheError("snapshot payload is not canonical")
     return snapshot
 

@@ -349,6 +349,80 @@ def test_snapshot_codec_rejects_oversized_integer_tokens() -> None:
         )
 
 
+#: The label fields a market keeps exactly as given.  Every other label is
+#: normalized, so a non-string there already fails the canonical comparison.
+_MARKET_LABEL_FIELDS = ("status_label", "variant_label", "scoring_period_label")
+
+#: ``json.dumps`` writes these back unchanged, so a payload carrying one would
+#: round-trip as canonical unless the codec refuses the token outright.
+_NONSTANDARD_CONSTANTS = (float("nan"), float("inf"), float("-inf"))
+
+
+def _payload_with_market_label(field: str, value: object) -> str:
+    """Write a market label field with Python's permissive JSON encoder."""
+
+    payload = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
+    payload["markets"][0][field] = value
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+@pytest.mark.parametrize("field", _MARKET_LABEL_FIELDS)
+@pytest.mark.parametrize("value", [*_NONSTANDARD_CONSTANTS, 5, 5.5, True, ["over"]])
+def test_snapshot_codec_rejects_nonstring_market_labels(field, value) -> None:
+    """A market keeps these labels verbatim, so the wire type must be exact."""
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(
+            _payload_with_market_label(field, value),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+@pytest.mark.parametrize("value", [*_NONSTANDARD_CONSTANTS, 7])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda market, value: market["event"].__setitem__("status_label", value),
+        lambda market, value: market["event"].__setitem__("label", value),
+        lambda market, value: market["athlete"]["team"].__setitem__("name", value),
+        lambda market, value: market["statistic"].__setitem__("label", value),
+        lambda market, value: market["selections"][0].__setitem__("label", value),
+        lambda market, value: market["threshold"].__setitem__("original_value", value),
+    ],
+)
+def test_snapshot_codec_rejects_nonstring_nested_text_fields(mutate, value) -> None:
+    """Every optional text field on the wire is a string or null, nothing else."""
+
+    payload = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
+    mutate(payload["markets"][0], value)
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+@pytest.mark.parametrize("value", _NONSTANDARD_CONSTANTS)
+def test_snapshot_codec_never_writes_a_nonstandard_constant(value) -> None:
+    """The encoder must not emit a token no standard JSON reader accepts."""
+
+    snapshot = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(PlayerProjectionMarket(provider="dabble", status_label=value),),
+        coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
+        retrieved_at=_RETRIEVED_AT,
+    )
+
+    with pytest.raises(ValueError):
+        serialize_provider_snapshot(snapshot)
+
+
 def test_snapshot_codec_keeps_the_duplicate_key_failure_distinct() -> None:
     """Mapping parser failures must not swallow the duplicate-key decision."""
 
@@ -1470,6 +1544,33 @@ def test_unrepresentable_cached_number_is_a_miss_and_never_reaches_the_board() -
     redis.values[key] = serialize_provider_snapshot(_market_payload_snapshot()).replace(
         '"american_price":null', '"american_price":1e309', 1
     )
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+@pytest.mark.parametrize("field", _MARKET_LABEL_FIELDS)
+@pytest.mark.parametrize("value", [*_NONSTANDARD_CONSTANTS, 5])
+def test_nonstring_cached_market_label_is_a_miss_and_the_key_is_replaced(
+    field, value
+) -> None:
+    """A corrupt label must be deleted and refetched, not served to the board."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = _payload_with_market_label(field, value)
 
     result = cache.get_snapshot(NBAMarketQuery(), _context())
 
