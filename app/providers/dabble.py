@@ -66,18 +66,6 @@ _STAT_ORDER = {
     "blocks": 5,
     "turnovers": 6,
 }
-_STAT_ALIASES = {
-    "pts": "points",
-    "reb": "rebounds",
-    "ast": "assists",
-    "pra": "points+rebounds+assists",
-    "pa": "points+assists",
-    "pr": "points+rebounds",
-    "ra": "rebounds+assists",
-    "stl": "steals",
-    "blk": "blocks",
-    "tov": "turnovers",
-}
 _BASKETBALL_LABELS = {"basketball", "nba"}
 _NON_PLAYER_KINDS = {
     "team",
@@ -110,15 +98,6 @@ def canonical_stat_components(stats: Sequence[str]) -> list[str]:
         return prefix, _STAT_ORDER.get(base, len(_STAT_ORDER)), base
 
     return sorted(normalized, key=sort_key)
-
-
-def canonical_stat_filter(value: str) -> str:
-    """Normalize the small set of reviewed Dabble statistic aliases."""
-
-    normalized = value.strip().casefold().replace(" ", "-").replace("_", "-")
-    if normalized in _STAT_ALIASES:
-        return _STAT_ALIASES[normalized]
-    return "+".join(canonical_stat_components(normalized.split("+")))
 
 
 class _DabbleRetry(Retry):
@@ -330,7 +309,7 @@ class DabbleAdapter:
                 warn("malformed_record")
                 malformed_seen = True
             for fixture in fixtures_result.rows:
-                if not self._fixture_matches_query(fixture, query):
+                if not self._fixture_matches_query(fixture):
                     skipped("non_nba_sport")
                     continue
                 try:
@@ -752,22 +731,7 @@ class DabbleAdapter:
             raise ProviderResponseError("Dabble lineType is malformed")
         line_type = line_type.strip()
 
-        requested_stat = query.statistic
-        if requested_stat is not None:
-            if canonical_stat_filter("+".join(normalized_stats)) != canonical_stat_filter(
-                requested_stat
-            ):
-                raise _ExcludedRecord("statistic_filter")
-
         provider_athlete_id = self._optional_id(prop.get("playerId"))
-        if query.athlete_id is not None and provider_athlete_id is not None:
-            try:
-                if int(provider_athlete_id) != query.athlete_id:
-                    raise _ExcludedRecord("athlete_filter")
-            except ValueError:
-                # Dabble's opaque player IDs cannot establish a canonical NBA
-                # identity.  Leave them visible for the central resolver.
-                pass
 
         fixture_id = str(detail.get("id") or fixture.get("id"))
         market_id = self._optional_id(prop.get("marketId"))
@@ -973,10 +937,7 @@ class DabbleAdapter:
     @staticmethod
     def _fixture_matches_query(
         fixture: Mapping[str, Any],
-        query: NBAMarketQuery,
     ) -> bool:
-        if query.event_id is not None and str(fixture.get("id")) != query.event_id:
-            return False
         sport = fixture.get("sportName")
         return sport is None or str(sport).strip().casefold() in _BASKETBALL_LABELS
 
@@ -995,6 +956,7 @@ class DabbleAdapter:
                 PROVIDER_DABBLE,
                 operation,
                 cache_status=CACHE_DISABLED,
+                request_id=context.request_id,
             ) as tracker:
                 response = self.session.get(
                     f"{self.BASE_URL}{path}",
@@ -1089,5 +1051,4 @@ class DabbleAdapter:
 __all__ = [
     "DabbleAdapter",
     "canonical_stat_components",
-    "canonical_stat_filter",
 ]

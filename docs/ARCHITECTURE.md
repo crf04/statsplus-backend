@@ -72,14 +72,18 @@ Provider calls at the two external seams are wrapped in one structured event
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details remain inside the adapter; the closed telemetry operations are `competition_lookup`, `competition_fixtures`, and `fixture_details` |
+| PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot` |
+| Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot` |
 
 The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
-context)`. Dabble, PrizePicks, and Underdog accept the same semantic NBA query
-and absolute retrieval deadline and return immutable, market-centric provider
-snapshots. The shared model retains nullable provider identity and typed source
-evidence, exact decimal thresholds and modifiers, original labels, coverage,
-and complete/partial status. Adapters exclude ineligible offerings without
-guessing missing facts; they expose no provider-specific public routes.
+context)`. Dabble, PrizePicks, and Underdog accept the same pregame NBA query,
+eligible market statuses, and absolute retrieval deadline and return immutable,
+market-centric provider snapshots. Canonical athlete, event, and statistic
+filters remain central because provider IDs are only evidence until later
+resolution. The shared model retains nullable provider identity and typed
+source evidence, exact decimal thresholds and modifiers, original labels,
+coverage, and complete/partial status. Adapters exclude ineligible offerings
+without guessing missing facts; they expose no provider-specific public routes.
 
 An event records provider, operation, outcome (success/timeout/http_error/
 malformed/error), duration, retry count (thread-safe counter incremented by

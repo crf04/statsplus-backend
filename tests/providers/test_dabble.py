@@ -20,6 +20,7 @@ from app.providers.dfs import (
     RetrievalContext,
     SnapshotStatus,
 )
+from app.utils import telemetry
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
@@ -401,3 +402,20 @@ def test_top_level_malformed_detail_with_other_valid_detail_is_partial():
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert "fixture_malformed" in snapshot.coverage.warning_codes
+
+
+def test_dabble_telemetry_uses_retrieval_context_request_id():
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+
+    DabbleAdapter(session=session).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
+
+    events = telemetry.get_recorded_provider_events()
+    assert events
+    assert {event["request_id"] for event in events} == {"dabble-test"}

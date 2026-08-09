@@ -901,11 +901,6 @@ class NBAMarketQuery:
 
     sport: str = "NBA"
     league: str = "NBA"
-    athlete_id: int | None = None
-    event_id: str | None = None
-    statistic_id: str | None = None
-    statistic: str | None = None
-    scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME
     market_statuses: tuple[MarketStatus | str, ...] = (
         MarketStatus.AVAILABLE,
         MarketStatus.SUSPENDED,
@@ -917,42 +912,14 @@ class NBAMarketQuery:
         league = self.league.strip().upper() if isinstance(self.league, str) else ""
         if sport != "NBA" or league != "NBA":
             raise ValueError("the shared provider query supports NBA only")
-        if self.athlete_id is not None and (
-            isinstance(self.athlete_id, bool)
-            or not isinstance(self.athlete_id, int)
-            or self.athlete_id < 1
-        ):
-            raise ValueError("query athlete_id must be a positive integer or None")
-        event_id = _optional_identifier(self.event_id, field="query event_id")
-        statistic_id = _optional_identifier(
-            self.statistic_id, field="query statistic_id"
-        )
-        statistic = self.statistic.strip() if isinstance(self.statistic, str) else None
-        period = normalize_scoring_period(self.scoring_period)
         statuses = tuple(normalize_market_status(status).value for status in self.market_statuses)
         if not statuses:
             raise ValueError("query market_statuses must not be empty")
-        if not isinstance(self.pregame_only, bool):
-            raise ValueError("query pregame_only must be boolean")
+        if self.pregame_only is not True:
+            raise ValueError("the shared provider query supports pregame markets only")
         object.__setattr__(self, "sport", sport)
         object.__setattr__(self, "league", league)
-        object.__setattr__(self, "event_id", event_id)
-        object.__setattr__(self, "statistic_id", statistic_id)
-        object.__setattr__(self, "statistic", statistic or None)
-        object.__setattr__(self, "scoring_period", period.value)
         object.__setattr__(self, "market_statuses", statuses)
-
-    @property
-    def canonical_athlete_id(self) -> int | None:
-        return self.athlete_id
-
-    @property
-    def canonical_event_id(self) -> str | None:
-        return self.event_id
-
-    @property
-    def canonical_statistic_id(self) -> str | None:
-        return self.statistic_id
 
 
 @runtime_checkable

@@ -299,13 +299,9 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
     query = NBAMarketQuery(
         sport="nba",
         league="NBA",
-        athlete_id=2544,
-        event_id="0022600001",
-        statistic_id="points",
         market_statuses=("available", "suspended"),
     )
     assert query.sport == "NBA"
-    assert query.canonical_athlete_id == 2544
     assert query.market_statuses == (MarketStatus.AVAILABLE, MarketStatus.SUSPENDED)
 
     context = RetrievalContext(
@@ -324,6 +320,9 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
 
     with pytest.raises(ValueError, match="NBA"):
         NBAMarketQuery(sport="NFL")
+
+    with pytest.raises(ValueError, match="pregame"):
+        NBAMarketQuery(pregame_only=False)
 
 
 def test_provider_snapshot_protocol_is_the_single_adapter_seam():
