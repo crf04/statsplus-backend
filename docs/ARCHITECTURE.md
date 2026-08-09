@@ -71,9 +71,9 @@ Provider calls at the five external provider seams are wrapped in one structured
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
-| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details remain inside the adapter; the closed telemetry operations are `competition_lookup`, `competition_fixtures`, and `fixture_details`. Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. |
-| PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot` |
-| Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot` |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details remain inside the adapter; the closed telemetry operations are `competition_lookup`, `competition_fixtures`, and `fixture_details`. Production requests use a thread-local session factory with `_DabbleRetry`; explicitly injected sessions serialize only their `get` call. |
+| PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
+| Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 
 The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
 context)`. Dabble, PrizePicks, and Underdog accept the same pregame NBA query,
@@ -86,11 +86,12 @@ coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
 
 An event records provider, operation, outcome (success/timeout/http_error/
-malformed/error), duration, retry count (thread-safe counter incremented by
-`RetryWithLogging`), cache status (hit/miss/disabled), HTTP status, and the
-request ID. Events are written as one structured log line and retained in a
-bounded, thread-safe buffer (capacity 5000); credentials, authorization
-headers, URLs, raw bodies, and exception messages are never captured.
+malformed/error), duration, retry count (updated only when a configured
+provider retry hook reports a retry), cache status (hit/miss/disabled), HTTP
+status, and the request ID. Events are written as one structured log line and
+retained in a bounded, thread-safe buffer (capacity 5000); credentials,
+authorization headers, URLs, raw bodies, and exception messages are never
+captured.
 
 Provider failures are counted at the provider seam. The central error handler
 in `app.errors` counts only *application* failures (actual `AppError` codes and

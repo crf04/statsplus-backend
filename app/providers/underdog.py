@@ -203,11 +203,14 @@ class UnderdogAdapter:
             on_success=collection.add,
         )
 
-        return _NormalizedBatch.from_accumulator(
+        batch = _NormalizedBatch.from_accumulator(
             records,
             markets=collection.markets,
             warning_codes=collection.warning_codes,
         )
+        if batch.malformed_count and not batch.markets:
+            raise _MalformedPayload("no usable Underdog player markets")
+        return batch
 
     @classmethod
     def _normalize_line(

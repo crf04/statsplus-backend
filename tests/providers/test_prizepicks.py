@@ -276,6 +276,30 @@ def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error()
         ).get_snapshot(_query(), _context())
 
 
+def test_all_malformed_prizepicks_records_emit_one_malformed_event() -> None:
+    payload = _payload("projections.page1.valid.json")
+    row = payload["data"][0]
+    row["relationships"]["new_player"]["data"]["id"] = "missing"
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        PrizePicksAdapter(
+            session=FakeSession([FakeResponse(payload)])
+        ).get_snapshot(_query(), _context("all-malformed-prizepicks"))
+
+    assert raised.value.code == "provider_unavailable"
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 1
+    assert events[0]["provider"] == telemetry.PROVIDER_PRIZEPICKS
+    assert events[0]["operation"] == "get_snapshot"
+    assert events[0]["request_id"] == "all-malformed-prizepicks"
+    assert events[0]["outcome"] == telemetry.OUTCOME_MALFORMED
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["provider_failures"][telemetry.PROVIDER_PRIZEPICKS][
+        telemetry.OUTCOME_MALFORMED
+    ] == 1
+
+
 def test_empty_incomplete_prizepicks_pagination_is_provider_error() -> None:
     payload = _payload("projections.page1.valid.json")
     payload["data"] = []
@@ -288,7 +312,12 @@ def test_empty_incomplete_prizepicks_pagination_is_provider_error() -> None:
     with pytest.raises(ProviderUnavailableError, match="invalid response"):
         PrizePicksAdapter(
             session=FakeSession([FakeResponse(payload)])
-        ).get_snapshot(_query(), _context())
+        ).get_snapshot(_query(), _context("empty-prizepicks"))
+
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 1
+    assert events[0]["request_id"] == "empty-prizepicks"
+    assert events[0]["outcome"] == telemetry.OUTCOME_MALFORMED
 
 
 def test_prizepicks_excludes_closed_rows_and_preserves_unknown_variant_label() -> None:

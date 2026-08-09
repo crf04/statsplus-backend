@@ -317,8 +317,20 @@ class PrizePicksAdapter:
             ),
         )
 
+        batch = _NormalizedBatch.from_accumulator(records)
+        if batch.malformed_count and not batch.markets:
+            raise _MalformedPage("no usable PrizePicks projection records")
+        if (
+            not batch.markets
+            and expected_total is not None
+            and batch.fetched_count < expected_total
+        ):
+            raise _MalformedPage(
+                "pagination returned no PrizePicks projection records"
+            )
+
         return _PageResult(
-            batch=_NormalizedBatch.from_accumulator(records),
+            batch=batch,
             current_page=current_page,
             total_pages=total_pages,
             expected_total=expected_total,

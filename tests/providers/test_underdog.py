@@ -348,6 +348,29 @@ def test_malformed_underdog_row_is_partial_when_another_row_is_valid() -> None:
     assert "line appearance could not be resolved" in snapshot.coverage.diagnostic_details
 
 
+def test_all_malformed_underdog_records_emit_one_malformed_event() -> None:
+    payload = _payload()
+    row = payload["over_under_lines"][0]
+    row["over_under"]["appearance_stat"]["appearance_id"] = "missing"
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        UnderdogAdapter(
+            session=FakeSession(FakeResponse(payload))
+        ).get_snapshot(_query(), _context("all-malformed-underdog"))
+
+    assert raised.value.code == "provider_unavailable"
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 1
+    assert events[0]["provider"] == telemetry.PROVIDER_UNDERDOG
+    assert events[0]["operation"] == "get_snapshot"
+    assert events[0]["request_id"] == "all-malformed-underdog"
+    assert events[0]["outcome"] == telemetry.OUTCOME_MALFORMED
+    metrics = telemetry.snapshot_metrics()
+    assert metrics["provider_failures"][telemetry.PROVIDER_UNDERDOG][
+        telemetry.OUTCOME_MALFORMED
+    ] == 1
+
+
 def test_underdog_conflicting_duplicate_identity_is_malformed() -> None:
     first = _payload()
     conflict = copy.deepcopy(first)
