@@ -89,6 +89,9 @@ resolution. The shared model retains nullable provider identity and typed
 source evidence, exact decimal thresholds and modifiers, original labels,
 coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
+`NBAMarketQuery` rejects a non-canonical season before any provider call: the
+two-digit end year must be the calendar year after the four-digit start year,
+so `2024-99` fails at construction rather than reaching an adapter.
 
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
@@ -360,6 +363,281 @@ seasons. `get_catalog()` and
 `ATHLETE_CATALOG_FRESHNESS_DAYS` (default seven days). The tracked demo
 database is rejected as a migration or catalog target.
 
+### Provider athlete mappings
+
+`AthleteResolver.resolve(provider, evidence, season)` accepts one typed
+provider `AthleteEvidence` value and an explicit requested season;
+`resolve_market(market, season)` is the board-facing spelling that lifts a
+market's athlete and team evidence. There is no other call shape. Resolution
+compares only the accent/case/punctuation-normalized official name among
+active `is_active_for_season` catalog rows. Normalization strips combining
+marks and folds the documented non-decomposing Latin letters (`ø`→`o`,
+`œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`, `ŧ`→`t`,
+`ı`→`i`) to ASCII; it applies no aliases, nicknames, or fuzzy similarity.
+Exactly one candidate with non-conflicting canonical team evidence is
+automatically qualifying; missing team evidence is allowed. Duplicate names,
+inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
+non-matches. `AthleteMappingRepository` persists one current
+`provider_athlete_mappings` row per provider identity, an append-only
+`athlete_mapping_decisions` audit log, and durable
+`athlete_mapping_rejections` suppressions. Provider names, provider team IDs,
+canonical team IDs, names, and abbreviations are retained as typed evidence, so
+an ID-only team conflict keeps both the provider and the candidate side.
+
+Ambiguous, inactive-only, unmatched, and team-conflict evidence never
+establishes a canonical identity — it only ever withdraws or promotes a claim
+an earlier decision established — but each is retained as one durable typed observation
+in the decision log under an idempotency key, so repeated board reads
+add nothing and `scripts/athlete_mappings.py list` can show what an operator
+still has to decide. Suppression is per transition, not for the lifetime of an
+identity: the key is compared only with the latest decision for that identity,
+so an `auto` → `ambiguous` → `auto` sequence records all three, and an
+identity that is unmatched, rejected, cleared, and then unmatched again
+reappears in the queue. Only a repeated equivalent consecutive observation is
+dropped, and the log stays append-only. The canonical athletes such an
+observation could not choose between are stored as typed
+`athlete_mapping_decision_candidates` rows keyed by decision, not as an opaque
+blob, and changed candidate evidence — a different player, name, team ID, team
+name, abbreviation, or season-active flag — is a new observation rather than a
+suppressed repeat. A `mapping_conflict` decision keeps its candidates the same
+way: its canonical side is exactly what is disputed, so the athletes the
+conflicting evidence named stay actionable in `history` and in the conflict
+review queue instead of being dropped as a decided identity's would be.
+
+Inactive-only, ambiguous, and claim-withdrawing unmatched evidence do change an
+existing mapping, because the identity cannot stay comparable while the board
+cannot say which canonical athlete it is: the catalog lists its athlete as
+inactive for the requested season, it names two equally exact athletes and the
+observation chose neither, or it no longer lists the claimed athlete at all.
+The row becomes `inactive_only`, `ambiguous`, or `unmatched` and inactive, so
+no board comparison can reach it, while keeping the `canonical_player_id` it
+was mapped to: the claim is withdrawn, not retracted, and the observation with
+its candidates stays in the unresolved queue for the operator. Withdrawal is a
+state machine rather than a one-way latch: an already withdrawn row moves to
+the state the current evidence names — `auto` → `inactive_only` → `ambiguous`
+leaves the row `ambiguous`, the inverse leaves it `inactive_only`, and a
+claimed athlete disappearing from the catalog leaves it `unmatched` — because
+an operator reads the current row to decide why the identity is out of
+comparisons *now*. The canonical claim, the provider evidence that established
+it, and the conflict-free columns are preserved through every step, the queue
+always shows the latest observation, and repeating the state a row already
+holds writes nothing beyond the identity's observation clock. A later
+unambiguous observation of the same athlete maps the identity again with no
+conflict fields left behind; one naming a *different* athlete under the same
+provider ID is still a `mapping_conflict`, because a suspended claim is still a
+claim. A `mapping_conflict` row is not withdrawn onto another state: it already
+awaits an operator. Catalog inactivity, ambiguity, or absence alone never
+withdraws a manual mapping —
+an operator's decision is unseated only by the fail-closed conflict detection
+below, and approving or overriding the identity resolves the withdrawal and
+empties the queue.
+
+Identity is the canonical player ID, not a label. When an established
+automatic mapping's canonical player is still active for the season, an
+official display-name change on either the catalog or the provider side keeps
+that mapping (the canonical facts are re-read from the catalog row); a
+relabeled player never becomes unmatched or conflicting on the strength of the
+label alone. When no active catalog row matches the incoming label, an
+established claim is therefore resolved in one order: an incoming label that
+exactly matches a *different* canonical athlete is a `mapping_conflict` naming
+that candidate, however inactive it is; a provider name that no longer agrees
+with the one observed under this identity is a `mapping_conflict` too, so
+retention covers catalog renames only while the provider still reports the
+athlete we saw; otherwise the claimed row is looked up by canonical player ID
+and either retained (active for the season), withdrawn as `inactive_only`
+(listed but inactive), or withdrawn as `unmatched` (no longer listed at all),
+whatever the catalog now calls it. A claim withdrawn as `unmatched` records the
+athlete that disappeared as the observation's candidate, marked as not active
+for the season, so the operator's queue distinguishes a withdrawn claim from an
+identity that simply matched nothing. Only an identity with
+no claim at all falls back to judging the label alone, and its unmatched
+observation names no candidate. A retained identity still
+validates team evidence: provider team
+evidence that disagrees with the requested season's canonical row is a
+`mapping_conflict` that deactivates the mapping, not an automatic one. Team
+evidence is always compared with the candidate for the *requested* season
+rather than the team an earlier season's mapping recorded, so a player who
+legitimately changes teams between seasons keeps an active mapping for the new
+season while genuinely inconsistent current evidence still conflicts.
+`list` reports the latest decision per provider identity and includes
+it only while that decision is still unresolved, so a later automatic, manual,
+or rejection decision removes the identity from the queue. A `mapping_conflict`
+is neither of those: it is inactive, so it is absent from the active-only
+mapping listing, and it is not an unresolved observation state, so it is absent
+from that queue — yet it is the one state that always needs an operator. It
+therefore has its own review queue (`AthleteMappingRepository.list_conflicts`,
+reported as `conflicts`), pairing the current conflicting row with the
+`mapping_conflict` decision that recorded it. The row names the provider
+identity, its observed evidence, the established or approved canonical side,
+and the conflicting candidate; the decision adds the reason and time. The queue
+elaborates the conflicting row rather than repeating it as a mapping, and the
+default listing stays active-only. `--all` widens the listing to inactive
+history without naming a conflicting identity twice: `list_mappings` omits
+current `mapping_conflict` rows at every visibility, while every other inactive
+row stays visible. Approving or overriding the identity is what empties the
+queue. Repository reads and
+operator writes (approve, override, reject, and clear) translate
+`SQLAlchemyError` to `AthleteMappingPersistenceError` (defined in
+`app.services.athlete_mapping_errors`), and the resolver translates the same
+failure from a catalog read. That single type is what the DFS Board isolates;
+it never catches broad exceptions and still returns usable markets.
+
+An injected DFS board read may transactionally record the first qualifying
+automatic decision. The repository is idempotent under repeated and concurrent
+reads, never replaces manual approvals or overrides, and isolates persistence
+failures from the normalized market result. One board read resolves every
+market before it writes anything, because a snapshot is temporally coherent:
+markets sharing one `(provider, provider_athlete_id)` are one observation of
+one athlete, not a sequence of observations that supersede each other. When
+they disagree about the athlete's name, canonical ID, or team evidence — after
+the same accent/case/punctuation normalization resolution uses, so equivalent
+spellings are not a disagreement — the identity fails closed on the
+contradiction itself as one `mapping_conflict` reasoned
+`contradictory_provider_evidence`, carrying every athlete the markets named as
+a candidate and every typed evidence they named it on. Disagreement is judged
+by comparing the observations themselves — every market against every other
+market for that identity, fact by fact and at the same team tiers resolution
+compares: a market that omits the canonical ID or the team, or names the team
+at a weaker tier than another does, describes the same athlete more sparsely
+rather than a different one, so only a fact whose value changed contradicts.
+Comparing each market against a running merge instead would answer for evidence
+no market reported and let a weaker fact overwrite a stronger one, so with
+three or more markets the provider's listing order would decide whether a
+disagreement stayed visible. Which evidence the conflict is *recorded on*, and
+the order of its candidates and retained evidence, come from sorting the
+observations rather than from the provider's listing order, and the whole
+contradicting set is rechecked against a governing manual decision — one market
+reporting exactly the approved athlete cannot answer for a read that also
+reports another. Markets that do agree about the athlete are combined into one
+durable observation carrying every provider and canonical ID, name, and
+abbreviation any of them reported, so the row keeps the whole read rather than
+whichever market was written last. That combined evidence is then resolved as a
+whole rather than inheriting any one market's own pre-merge result: a market
+that reported no name said less than its sibling, it did not object to the
+athlete the sibling named, so reusing its `unmatched` result would leave the
+identity unmapped while the durable row recorded the name that maps it.
+Resolving the merged evidence re-raises every objection the catalog or an
+operator genuinely holds against evidence that only grew — a rejection, a
+manual decision the merged evidence falls outside of, a team the catalog
+contradicts, a conflicting established claim — so where the markets disagree
+about whether the identity may be claimed — one reporting no team where another
+reports one the catalog contradicts — the objection is what the combined
+evidence supports and what stands, and the identity is never claimed and
+disputed by one read. The answer depends on the combined evidence alone, so it
+is the same in every order the provider could have listed the markets in.
+Persisting those markets in turn would instead let their arrival order decide
+the identity, because each was judged against what the previous one stored, and
+would append one observation per market, so an unchanged repeat kept growing
+the audit. Contradicted evidence therefore never enters a canonical comparison
+in any market order, and repeated markets, repeated board reads, and a repeat
+that lists the same markets in another order all append no further decision and
+leave the same durable row. Later evidence that disagrees with
+an active automatic mapping deactivates it as `mapping_conflict` while keeping
+the conflicting evidence in the current row and audit history. Operator
+approve/override/reject/clear actions require an identity and reason; approve
+and override also accept and retain provider name and team evidence, keeping
+the previously observed evidence when none is supplied. Repeating a conflict
+read an identity already records changes nothing: the retained conflict
+candidate and evidence stay, and no duplicate decision is appended. Automatic
+mapping still requires a catalog row that is active for the season, while a
+governed approve or override may select an inactive-only row; that choice is
+recorded explicitly in the audit as a decision candidate marked not active for
+the season. Active rejections suppress future automatic mappings until
+explicitly cleared, and a manual decision still wins over any later automatic
+read. That precedence protects a governed mapping from automatic *overwrite*,
+not from fail-closed conflict detection. When the provider later reports a
+clearly different athlete under the same identity — a changed provider name, or
+team evidence that contradicts what was approved, such as Nikola/DEN becoming
+LeBron/LAL — the resolver reports `mapping_conflict` instead of lending the
+operator's decision to an athlete nobody reviewed. Only provider-side facts are
+compared, and only when both sides carry one, so an approval recorded without
+evidence is never second-guessed and a deliberate override to a differently
+named canonical athlete is not a conflict. A promoted manual mapping keeps the
+schema's single current state: the row becomes `mapping_conflict` and inactive
+(so it is not used in comparisons) while retaining the approved
+`canonical_player_id` beside the new conflicting provider evidence, and the
+append-only log preserves the original `manual_approved`/`manual_override`
+decision with its operator, reason, and approved evidence followed by a
+`mapping_conflict` decision reasoned `manual_mapping_conflict`. An operator
+resolves it by approving or overriding again, which restores the manual state
+and clears the conflict fields. Approve and override with no supplied evidence
+fall back to the mapping row's observed evidence, or — for an identity that
+only ever produced unresolved observations — to the latest durable decision
+read inside the same identity transaction, so a queued observation resolved by
+an operator keeps its provider name and team evidence.
+Because the resolver reads outside the serialized identity transaction,
+its result may already be stale; the current mapping and rejection are re-read
+inside that transaction immediately before every automatic, unresolved, or
+conflict write, so a manual approve/override or an active rejection recorded in
+between wins: a stale unmatched observation cannot requeue a decided identity
+and a stale conflict cannot replace a rejection. Whether a stale conflict is
+still live is decided by the provider-side evidence alone, compared with the
+governing manual decision read inside that transaction. The canonical choice is
+not compared: an operator who accepts the provider's observation may still keep
+or pick a canonical athlete the automatic side would not have chosen — that
+disagreement is the decision — so a stale automatic candidate cannot undo it.
+Observation order cannot stand in for the comparison either: a read taken after
+a decision may still carry evidence the operator never reviewed. Evidence the
+governed decision does contradict is evidence nobody reviewed, and still
+promotes a conflict — and a conflict asserts every evidence it contradicts, so
+all of it is compared and any single uncovered market unseats the approval.
+Ordering fences the other case — a read from *before* the governing decision.
+Each `ProviderSnapshot` is temporally coherent, so the board carries its
+`retrieved_at` through the resolver onto the typed resolution and into the
+`observed_at` column of the decision it appends. That is when the provider was
+observed, never when the observation was persisted; the persistence-time
+override is named `recorded_at` so the two cannot be confused. Inside the
+identity transaction an automatic, unresolved, or conflict write is compared
+against the newest governing instant for that identity — an operator
+decision's `created_at`, and the identity's observation clock, all UTC. A read
+the operator's own mapping already covers runs through that transaction too: it
+appends no duplicate audit row and changes no mapping, but the provider did
+report the approved identity at that instant, so it raises the clock and a
+conflicting read taken earlier is fenced instead of unseating the mapping. That
+clock is a durable high-water mark on the identity's lock row, raised inside
+the same transaction whenever a read passes the fence. It cannot be derived
+from the decision log, because the log suppresses a repeated equivalent
+observation on purpose: two identical reads append one row, and a mark taken
+from that row would leave a read from between them looking like news. The lock
+row is already selected for update by every mutation, so the mark only ever
+moves forward and concurrent repeats raise it exactly once.
+A strictly earlier read changes nothing, so a slow read
+retrieved before a reject/clear cannot deactivate the mapping a newer read
+established or queue a conflict between two canonical athletes that were never
+claimed at the same time. A read contemporaneous with the governing instant is
+not from before it, so replaying one stays idempotent, and a caller that
+reports no observation instant is never fenced.
+The per-identity lock row is inserted inside a savepoint that is always left
+before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
+failed savepoint instead of leaving the surrounding transaction aborted;
+`tests/integration/test_postgres.py` covers that concurrency path against a
+real database when `TEST_DATABASE_URL` is set. The process-local identity lock
+is per engine and only orders writers inside one process, so the concurrency
+test gives each worker its own engine and repository and releases them from a
+barrier — the overlap is resolved by the database, not by a shared lock.
+Migration 006 also creates a per-identity lock table — which carries that
+identity's observation clock — and database checks for
+closed mapping states (`ambiguous`, `auto`, `inactive_only`, `manual_approved`,
+`manual_override`, `mapping_conflict`, `rejected`, `unmatched`), the closed
+decision-state set, active-state coherence — only `auto`, `manual_approved`, and
+`manual_override` may be active, and `ambiguous`, `inactive_only`,
+`mapping_conflict`, `rejected`, and `unmatched` may not —
+cleared-rejection coherence — an active rejection carries no `cleared_at`,
+`cleared_by`, or `clear_reason`, and a cleared one carries all three — and
+conflict-column coherence: only a current `mapping_conflict` row may name a
+`conflict_canonical_player_id`/`conflict_canonical_name`, so an identity that
+is reactivated automatically, remapped by an operator, or rejected keeps no
+conflict an operator has already left behind. Those
+checks compare booleans with
+`true`/`false` rather than `1`/`0`, so they are valid on PostgreSQL as well as
+SQLite. Migration 006 remains the single definition of those checks rather than
+being followed by a constraint-rebuilding migration, because it is unreleased:
+no deployed database carries an earlier version of the mapping schema, so
+widening the closed state set (as `unmatched` did) is a change to 006 itself
+and `scripts/migrate.py` creates the current checks on any target. The operator
+CLI never runs migrations implicitly; run `scripts/migrate.py` explicitly
+first.
+
 PBP Stats:
 
 ```text
@@ -389,11 +667,39 @@ Migration 005 creates the writable `event_catalog` and
 `event_catalog_refreshes` tables. Migrations are applied in order. Event
 refreshes upsert by NBA game ID in one transaction without replacing the
 table; omitted historical rows remain available and replacement IDs remain
-distinct. Mapping and audit state belong to #28. Event freshness is
+distinct. Event/competition mapping state belongs to #28; provider-athlete
+mapping state is owned by migration 006 below. Event freshness is
 independent from Athlete Catalog freshness and defaults to 72 hours through
 `EVENT_CATALOG_MAX_AGE_HOURS`. Operators use
 `scripts/refresh_event_catalog.py` with one or more explicit seasons; each
 season is independent and the command exits nonzero if any season fails.
+
+Migration 006 creates the provider athlete mapping, append-only decision,
+decision candidate, and durable rejection tables. Migration 007 adds
+`athlete_mapping_decision_contradictions`, the typed evidence a fail-closed
+observation contradicted itself over, keyed by decision and ordered by the same
+deterministic evidence order the conflict was recorded in; the decision itself
+carries only the representative evidence, so without those rows the rest of the
+contradiction would be missing from history and the conflict queue. Those rows
+are `ON DELETE CASCADE` children of the decision, and SQLite ignores declared
+foreign keys unless `PRAGMA foreign_keys` is set per connection, so
+`app.utils.db` registers one SQLAlchemy `connect` listener on the `Engine`
+class that sets the pragma on every SQLite DBAPI connection in the process —
+including engines scripts and tests build directly, because referential
+integrity is a property of the schema rather than of one caller's engine. The
+listener recognizes the SQLite driver connection by type and does nothing for
+PostgreSQL, which enforces its own constraints. Operators
+use
+`scripts/athlete_mappings.py` for
+read-only listing, dry runs, audited approve/override/reject/clear actions,
+and history. `list` reports current mappings, active rejections, every
+identity whose latest decision is still unresolved, with the candidates an
+operator has to choose between, and the `conflicts` review queue of identities
+whose current state is a mapping conflict. `history` and the conflict queue
+report each decision's `contradictory_evidence` alongside its candidates, so an
+operator reviews everything the markets asserted rather than the one evidence
+the conflict happened to be recorded on. These commands require an
+explicit writable database URL and never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

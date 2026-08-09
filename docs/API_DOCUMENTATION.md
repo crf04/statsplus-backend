@@ -401,6 +401,27 @@ writable database, and has no wall-clock season default or background timer.
 failure timestamps. `ATHLETE_CATALOG_FRESHNESS_DAYS` controls the default
 seven-day freshness window.
 
+Provider athlete mappings are an internal, persisted read-side seam rather
+than new HTTP mutation routes. `AthleteResolver` accepts typed provider
+evidence plus an explicit season and only auto-qualifies one exact normalized
+official-name match among active season rows with non-conflicting team
+evidence. Use the offline operator CLI for list/dry-run/history and audited
+approve, override, reject, and clear actions:
+
+```bash
+python scripts/athlete_mappings.py dry-run \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --provider prizepicks --provider-athlete-id pp-123 \
+  --season 2024-25 --name "Nikola Jokic"
+python scripts/athlete_mappings.py history \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --provider prizepicks --provider-athlete-id pp-123
+```
+
+Manual commands require an operator identity and reason. Active rejections
+suppress automatic mapping until cleared. The CLI never contacts an upstream
+provider and rejects the bundled demo database.
+
 Example start response (`202 Accepted`):
 
 ```json

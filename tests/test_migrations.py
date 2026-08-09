@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
         "005_create_event_catalog",
+        "006_create_athlete_mappings",
+        "007_create_athlete_mapping_contradictions",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -54,6 +57,12 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
+            "provider_athlete_mappings",
+            "athlete_mapping_decisions",
+            "athlete_mapping_decision_candidates",
+            "athlete_mapping_decision_contradictions",
+            "athlete_mapping_rejections",
+            "athlete_mapping_locks",
         ]
     )
     assert {
@@ -95,6 +104,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (3, "003_durable_data_refresh_queue"),
             (4, "004_create_athlete_catalog"),
             (5, "005_create_event_catalog"),
+            (6, "006_create_athlete_mappings"),
+            (7, "007_create_athlete_mapping_contradictions"),
         ]
 
 
@@ -114,6 +125,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
         "005_create_event_catalog",
+        "006_create_athlete_mappings",
+        "007_create_athlete_mapping_contradictions",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -183,9 +196,16 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
+            "provider_athlete_mappings",
+            "athlete_mapping_decisions",
+            "athlete_mapping_decision_candidates",
+            "athlete_mapping_decision_contradictions",
+            "athlete_mapping_rejections",
+            "athlete_mapping_locks",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
+    assert application.extensions["dependencies"].athlete_mapping_repository is not None
     assert "athlete_catalog" not in application.extensions["request_services"]
 
 
@@ -259,3 +279,39 @@ def test_migration_cli_redacts_database_password(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "super-secret" not in output
     assert "postgresql://migration_user:***@example.invalid/stats" in output
+
+
+def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
+    """An existing mapping database gains the table without losing decisions."""
+    from app.migrations import MIGRATIONS
+    from app.models.athlete_mapping import AthleteMappingDecision
+    from sqlalchemy import insert as sql_insert, select as sql_select
+
+    database_path = tmp_path / "at-006.sqlite3"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 6),
+        )
+        assert run_migrations(engine).current_version == 6
+    with engine.begin() as connection:
+        connection.execute(
+            sql_insert(AthleteMappingDecision.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-15",
+                decision_state="auto",
+                created_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+            )
+        )
+
+    first = run_migrations(engine)
+    second = run_migrations(engine)
+
+    assert first.applied == ("007_create_athlete_mapping_contradictions",)
+    assert second.applied == ()
+    assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
+    with engine.connect() as connection:
+        assert connection.execute(
+            sql_select(AthleteMappingDecision.provider_athlete_id)
+        ).scalars().all() == ["pp-15"]

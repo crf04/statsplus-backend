@@ -7,11 +7,12 @@ without code changes elsewhere.
 
 from __future__ import annotations
 
+import sqlite3
 from functools import lru_cache
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 
@@ -20,6 +21,32 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
 DEMO_DATABASE_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "nba_play_types.db"
+
+
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+    """Enforce declared foreign keys on every SQLite connection.
+
+    SQLite parses ``REFERENCES`` clauses but ignores them unless the pragma is
+    set, and the pragma is per connection rather than per database file, so a
+    schema that declares ``ON DELETE CASCADE`` -- migration 007's contradiction
+    rows beside a decision -- silently keeps orphans without this.  Referential
+    integrity is a property of the schema rather than of one caller's engine,
+    so the listener is registered on the ``Engine`` class: every engine in the
+    process gets it, including the ones tests and scripts build directly.
+
+    PostgreSQL enforces its own constraints and needs no pragma, so the
+    listener recognizes the SQLite driver connection by type and does nothing
+    at all for any other backend.
+    """
+
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 
 def _normalize_database_url(database_url: str) -> str:

@@ -70,6 +70,54 @@ def test_routes_use_injected_dependencies_without_global_patching():
     dependencies.team_service.get_all_teams.assert_called_once_with()
 
 
+def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monkeypatch):
+    """The one board service must carry all three reviewed features at once.
+
+    Issue #24's cache seam, issue #26's governed mappings, and issue #29's
+    statistic catalog all assemble the same board service, so a wiring change
+    that keeps only some of them still leaves every focused unit test green.
+    Pin the combination here: the board reads through the snapshot caches that
+    carry cache telemetry, holds the governed mapping collaborators, and
+    resolves statistics against the catalog the factory loaded.
+    """
+
+    from sqlalchemy import create_engine
+
+    from app.config.settings import RuntimeSettings
+    from app.dependencies import build_dependencies
+    from app.services.dfs_snapshot_cache import ProviderSnapshotCache
+    from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        providers={"dfs_enabled_providers": ("dabble", "prizepicks")},
+    )
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+
+    dependencies = build_dependencies(settings)
+    board = dependencies.dfs_board_service
+
+    assert set(board.provider_registry) == {"dabble", "prizepicks"}
+    for provider in board.provider_registry.values():
+        assert isinstance(provider, ProviderSnapshotCache)
+        assert callable(getattr(provider, "get_last_result", None))
+    assert dependencies.dfs_snapshot_cache is not None
+
+    assert board.athlete_resolver is dependencies.athlete_resolver
+    assert board.athlete_mapping_repository is dependencies.athlete_mapping_repository
+    assert dependencies.athlete_resolver is not None
+    assert dependencies.athlete_mapping_repository is not None
+
+    assert isinstance(dependencies.statistic_catalog, StatisticCatalog)
+    assert board.statistic_catalog is dependencies.statistic_catalog
+    assert isinstance(board.statistic_resolver, StatisticResolver)
+    assert board.statistic_resolver.catalog is dependencies.statistic_catalog
+
+
 def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):
     import importlib
 

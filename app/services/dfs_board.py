@@ -24,7 +24,13 @@ import requests
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
+from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+from app.services.athlete_resolver import (
+    MappingResolutionState,
+    normalize_athlete_name,
+)
 from app.providers.dfs import (
+    AthleteEvidence,
     CoverageCode,
     DeadlineExceededError,
     MalformedProviderResponseError,
@@ -35,6 +41,7 @@ from app.providers.dfs import (
     RetrievalContext,
     SnapshotStatus,
     StatisticEvidence,
+    TeamEvidence,
 )
 from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
@@ -121,6 +128,280 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
             names.append(name)
             seen.add(name)
     return tuple(names)
+
+
+def _identity_key(resolution: Any) -> tuple[str, str] | None:
+    """The provider identity one resolution describes, if it names one."""
+
+    provider_athlete_id = getattr(resolution, "provider_athlete_id", None)
+    if not isinstance(provider_athlete_id, str) or not provider_athlete_id.strip():
+        return None
+    return resolution.provider, provider_athlete_id.strip()
+
+
+#: The athlete facts two observations of one identity must agree on.
+_ATHLETE_FACTS = ("name", "canonical_id")
+
+#: The team facts, strongest identifying tier first.  Only the strongest tier
+#: both observations carry decides, exactly as the resolver judges provider
+#: team evidence: agreeing identities make a differing label a presentation
+#: difference rather than a different team.
+_TEAM_FACT_TIERS = (
+    ("team_canonical_id", "team_provider_id"),
+    ("team_abbreviation",),
+    ("team_name",),
+)
+
+
+def _evidence_facts(resolution: Any) -> dict[str, Any]:
+    """The identity facts one observation asserts, normalized for comparison.
+
+    Only what could name a different athlete is read: the athlete's name and
+    canonical ID, and the team evidence at every tier the provider reported.
+    Presentation differences the resolver already ignores -- accents, case,
+    punctuation -- are ignored here too, so equivalent spellings of one athlete
+    are one assertion rather than a contradiction.  A fact the provider did not
+    report is ``None``, which asserts nothing at all about the identity.
+    """
+
+    evidence = resolution.provider_evidence
+    team = evidence.team
+    return {
+        "name": normalize_athlete_name(evidence.name) or None,
+        "canonical_id": evidence.canonical_id,
+        "team_canonical_id": None if team is None else team.canonical_id,
+        "team_provider_id": (
+            None if team is None else (team.provider_id or "").strip() or None
+        ),
+        "team_abbreviation": (
+            None if team is None else (team.abbreviation or "").strip().casefold() or None
+        ),
+        "team_name": (None if team is None else normalize_athlete_name(team.name) or None),
+    }
+
+
+def _evidence_order(resolution: Any) -> tuple[str, ...]:
+    """A total order over observations that depends only on their evidence."""
+
+    facts = _evidence_facts(resolution)
+    return tuple("" if facts[fact] is None else str(facts[fact]) for fact in sorted(facts))
+
+
+def _contradicts(facts: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """Report whether two observations of one identity name different athletes.
+
+    Only facts both sides actually assert are comparable.  Evidence that adds a
+    canonical ID, a team, or a stronger team identifier to what a sparser
+    market reported is the same athlete described more completely, so it agrees
+    rather than contradicting; a fact whose value changed names someone else.
+    """
+
+    for fact in _ATHLETE_FACTS:
+        known, current = facts[fact], other[fact]
+        if known is not None and current is not None and known != current:
+            return True
+    for tier in _TEAM_FACT_TIERS:
+        comparable = [
+            (facts[fact], other[fact])
+            for fact in tier
+            if facts[fact] is not None and other[fact] is not None
+        ]
+        if comparable:
+            return any(known != current for known, current in comparable)
+    return False
+
+
+def _contradictory_identities(
+    observed: Iterable[tuple[tuple[str, str] | None, Any]],
+) -> set[tuple[str, str]]:
+    """Identities one board read observed asserting more than one athlete.
+
+    Every observation of an identity is compared with every other one, rather
+    than with a running merge of the facts observed so far.  A merge answers
+    for evidence no single market reported -- a team named by canonical ID in
+    one market and by an abbreviation in another becomes one team that a third
+    market is then judged against -- and a weaker fact overwrites a stronger
+    one, so which disagreements stay visible depends on the order the markets
+    arrived in.  Comparing the observations themselves makes the answer a
+    property of the whole set: an identity is contradictory exactly when two of
+    its markets disagree, in every order the provider could list them in.
+    """
+
+    observations: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for key, resolution in observed:
+        if key is None:
+            continue
+        facts = _evidence_facts(resolution)
+        asserted = observations.setdefault(key, [])
+        # Markets that assert exactly the same facts are one assertion, and
+        # comparing a repeat with itself can never find a disagreement.
+        if facts not in asserted:
+            asserted.append(facts)
+    return {
+        key
+        for key, asserted in observations.items()
+        if any(
+            _contradicts(facts, other)
+            for position, facts in enumerate(asserted)
+            for other in asserted[position + 1 :]
+        )
+    }
+
+
+def _fail_closed_conflict(resolutions: Iterable[Any]) -> Any:
+    """One governed conflict for an identity its own board read contradicts.
+
+    Every snapshot is temporally coherent, so one provider identity carrying
+    two different athletes across its markets is not a sequence of observations
+    that supersede each other -- it is one observation that cannot say who the
+    identity is.  Resolving the markets in turn would let their arrival order
+    decide, because each market is judged against whatever the previous one
+    stored: an unmatched name followed by an exact one maps the identity
+    automatically, while the reverse promotes a conflict.  The identity
+    therefore fails closed on the contradiction itself, whatever the order, and
+    never enters a canonical comparison on evidence that disagrees with itself.
+
+    The contradiction is the whole set of evidence, so the result carries all
+    of it: governance is rechecked against every athlete the markets named, and
+    an operator keeps each one as a candidate to review.  What the conflict is
+    recorded *on* -- the representative evidence, the candidate order -- is
+    chosen by sorting the observations rather than by taking the first, so the
+    same markets in any order produce the same durable observation and a
+    reordered repeat of one snapshot recognizes itself instead of appending a
+    second conflict.
+    """
+
+    resolutions = sorted(resolutions, key=_evidence_order)
+    candidates: list[Any] = []
+    evidence: list[Any] = []
+    seen_evidence: set[tuple[str, ...]] = set()
+    for resolution in resolutions:
+        canonical = resolution.canonical_athlete
+        if canonical is not None and canonical not in candidates:
+            candidates.append(canonical)
+        key = _evidence_order(resolution)
+        if key not in seen_evidence:
+            seen_evidence.add(key)
+            evidence.append(resolution.provider_evidence)
+    candidates.sort(key=lambda candidate: candidate.player_id)
+    return replace(
+        resolutions[0],
+        state=MappingResolutionState.MAPPING_CONFLICT,
+        # One athlete the markets disagreed over is the candidate an operator
+        # weighs; several equally named ones name none of them.
+        canonical_athlete=(candidates[0] if len(candidates) == 1 else None),
+        candidates=tuple(candidates),
+        contradictory_evidence=tuple(evidence),
+        reason="contradictory_provider_evidence",
+    )
+
+
+def _identity_groups(
+    observed: Iterable[tuple[tuple[str, str] | None, Any]],
+) -> tuple[tuple[tuple[str, str] | None, tuple[Any, ...]], ...]:
+    """Each identity's observations, grouped where the identity first appears.
+
+    A snapshot can carry several markets for the same provider athlete, and
+    together they are one observation of it rather than a sequence that
+    supersedes itself.  Grouping them keeps every write for one identity
+    together and leaves one outcome to report, at the position the board first
+    named it.  Evidence that names no provider ID names no identity to group,
+    and stands alone where it was observed.
+    """
+
+    groups: list[tuple[tuple[str, str] | None, list[Any]]] = []
+    positions: dict[tuple[str, str], int] = {}
+    for key, resolution in observed:
+        if key is None:
+            groups.append((None, [resolution]))
+            continue
+        position = positions.get(key)
+        if position is None:
+            positions[key] = len(groups)
+            groups.append((key, [resolution]))
+        else:
+            groups[position][1].append(resolution)
+    return tuple((key, tuple(group)) for key, group in groups)
+
+
+def _first_reported(values: Iterable[Any]) -> Any:
+    """The first value a market actually reported, or ``None`` if none did."""
+
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _merged_evidence(resolutions: Iterable[Any]) -> AthleteEvidence:
+    """Everything one identity's compatible markets reported about it.
+
+    The markets agree about who the identity is, so a fact one of them omits
+    is a fact about the same athlete rather than about a different one: one
+    market may name the team only by provider ID and another only by
+    abbreviation.  Combining them keeps every typed fact the read observed,
+    where writing the markets one at a time would leave the durable row
+    reporting whichever of them happened to be written last.  Facts are taken
+    in evidence order, so the group yields the same combined evidence -- and
+    therefore the same idempotency fingerprint -- however the provider listed
+    the markets.
+    """
+
+    evidence = [
+        resolution.provider_evidence
+        for resolution in sorted(resolutions, key=_evidence_order)
+    ]
+    teams = [item.team for item in evidence if item.team is not None]
+    return AthleteEvidence(
+        provider_id=_first_reported(item.provider_id for item in evidence),
+        canonical_id=_first_reported(item.canonical_id for item in evidence),
+        name=_first_reported(item.name for item in evidence),
+        team=(
+            None
+            if not teams
+            else TeamEvidence(
+                provider_id=_first_reported(team.provider_id for team in teams),
+                canonical_id=_first_reported(team.canonical_id for team in teams),
+                name=_first_reported(team.name for team in teams),
+                abbreviation=_first_reported(team.abbreviation for team in teams),
+            )
+        ),
+    )
+
+
+def _merged_observation(resolutions: Iterable[Any], resolve: Any) -> Any:
+    """One identity's compatible markets as a single durable observation.
+
+    A snapshot's markets for one provider athlete are one observation of it,
+    not a sequence that supersedes itself, so they are recorded once with the
+    combined evidence they reported.  Persisting them one at a time made the
+    provider's listing order the decider -- an objection only promoted a claim
+    that was already stored, while a claim made after an objection simply
+    mapped the identity -- and appended one durable observation per market, so
+    an unchanged repeat of the same snapshot kept growing the audit.
+
+    The combined evidence is then resolved as a whole rather than being carried
+    onto the least-claiming market's own result.  A market that reported no
+    name did not object to the athlete its sibling named, it simply said less,
+    and reusing its result left the identity unmapped while the durable row
+    recorded the name that would have mapped it.  Resolving the merged evidence
+    asks the catalog what the group actually observed, so an objection an
+    operator or the catalog genuinely raises -- a rejection, a manual decision,
+    a team the catalog contradicts, a conflicting established claim -- is raised
+    again against evidence that only grew, while evidence that merely completes
+    a sparse market is allowed to claim the identity.  The answer depends on
+    the combined evidence alone, so it is the same in every order the provider
+    could have listed the markets in.
+    """
+
+    ordered = sorted(resolutions, key=_evidence_order)
+    merged = _merged_evidence(ordered)
+    return resolve(
+        ordered[0].provider,
+        merged,
+        ordered[0].season,
+        observed_at=ordered[0].observed_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +540,7 @@ class DFSBoard:
         default_factory=lambda: datetime.now(timezone.utc)
     )
     contract_version: str = "1"
+    mapping_outcomes: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, NBAMarketQuery):
@@ -282,10 +564,12 @@ class DFSBoard:
             raise ValueError("DFS board generated_at must be timezone-aware")
         if not isinstance(self.contract_version, str) or not self.contract_version.strip():
             raise ValueError("DFS board contract_version must be non-empty")
+        mapping_outcomes = tuple(self.mapping_outcomes)
         object.__setattr__(self, "provider_outcomes", outcomes)
         object.__setattr__(self, "disabled_providers", disabled)
         object.__setattr__(self, "generated_at", generated.astimezone(timezone.utc))
         object.__setattr__(self, "contract_version", self.contract_version.strip())
+        object.__setattr__(self, "mapping_outcomes", mapping_outcomes)
 
     @property
     def snapshots(self) -> tuple[ProviderSnapshot, ...]:
@@ -375,6 +659,8 @@ class DFSBoardService:
         | None = None,
         statistic_catalog: StatisticCatalog | None = None,
         statistic_resolver: StatisticResolver | None = None,
+        athlete_resolver: Any | None = None,
+        athlete_mapping_repository: Any | None = None,
     ) -> None:
         registry = self._build_registry(provider_registry)
         decorator = snapshot_cache
@@ -430,6 +716,8 @@ class DFSBoardService:
         )
         self.statistic_catalog = catalog
         self.statistic_resolver = statistic_resolver or StatisticResolver(catalog)
+        self.athlete_resolver = athlete_resolver
+        self.athlete_mapping_repository = athlete_mapping_repository
 
     @staticmethod
     def _build_registry(
@@ -556,6 +844,7 @@ class DFSBoardService:
             disabled_providers=self.disabled_providers,
             generated_at=generated_at,
         )
+        board = self._resolve_athlete_mappings(board)
         self._record_telemetry(
             self.monotonic() - start,
             board,
@@ -599,6 +888,92 @@ class DFSBoardService:
         if tuple(resolved_markets) == snapshot.markets:
             return snapshot
         return replace(snapshot, markets=tuple(resolved_markets))
+
+    def _resolve_athlete_mappings(self, board: DFSBoard) -> DFSBoard:
+        """Observe typed market evidence without making board reads fragile.
+
+        Mapping persistence is opt-in through the injected resolver and
+        repository.  Both the mapping-state read and the write translate their
+        storage failures to ``AthleteMappingPersistenceError`` at the
+        repository/service boundary, so this seam isolates exactly that type
+        and never catches broad exceptions.
+        """
+
+        if (
+            self.athlete_resolver is None
+            or self.athlete_mapping_repository is None
+            or board.query.season is None
+        ):
+            return board
+        resolved: list[tuple[tuple[str, str] | None, Any]] = []
+        for snapshot in board.snapshots:
+            for market in snapshot.markets:
+                if market.athlete is None:
+                    continue
+                try:
+                    resolution = self.athlete_resolver.resolve_market(
+                        market,
+                        board.query.season,
+                        # The snapshot is temporally coherent, so its retrieval
+                        # instant is when every market in it was observed.  A
+                        # slow provider read must be ordered by when it saw the
+                        # provider, not by when the board got around to it.
+                        observed_at=snapshot.retrieved_at,
+                    )
+                except AthleteMappingPersistenceError:
+                    # Board retrieval is a normalized read; mapping storage is
+                    # an audit side effect and must never remove a market.
+                    logger.warning("Could not observe one athlete mapping")
+                    continue
+                resolved.append((_identity_key(resolution), resolution))
+        # Every market is resolved before anything is written, so what one
+        # identity's markets assert is known before any of them is acted on.
+        contradictory = _contradictory_identities(resolved)
+        groups: list[tuple[Any, ...]] = []
+        for key, group in _identity_groups(resolved):
+            if key in contradictory:
+                # The contradiction is one observation of the identity, so the
+                # markets it disagreed across are written once, together.
+                group = (_fail_closed_conflict(group),)
+            elif key is not None and len(group) > 1:
+                # The markets agree about the identity, so together they are
+                # one observation of it and are written once, resolved from
+                # everything they reported about it.
+                try:
+                    group = (
+                        _merged_observation(group, self.athlete_resolver.resolve),
+                    )
+                except AthleteMappingPersistenceError:
+                    logger.warning("Could not observe one athlete mapping")
+                    continue
+            groups.append(group)
+        observed: list[Any] = []
+        for group in groups:
+            governed = None
+            for resolution in group:
+                try:
+                    result = self.athlete_mapping_repository.record_resolution(resolution)
+                except AthleteMappingPersistenceError:
+                    logger.warning("Could not observe one athlete mapping")
+                    continue
+                # The resolver read before the write's transaction opened, so
+                # what it computed is only what this observation proposed.  The
+                # write returns the state governance reached for the identity,
+                # and the board reports that -- converted from the value in
+                # hand, never re-read, so the report cannot race the write.
+                governed = result.board_outcome(resolution)
+            # The identity's last write is what is durable when the board is
+            # returned, so it stands for every market that named the identity.
+            if governed is not None:
+                observed.append(governed)
+        return DFSBoard(
+            query=board.query,
+            provider_outcomes=board.provider_outcomes,
+            disabled_providers=board.disabled_providers,
+            generated_at=board.generated_at,
+            contract_version=board.contract_version,
+            mapping_outcomes=tuple(observed),
+        )
 
     def _record_telemetry(
         self,
