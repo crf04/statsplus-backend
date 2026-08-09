@@ -13,12 +13,15 @@ public route, request, response, error, or authorization contract.
 
 ## Cross-repository coordination
 
-Keep backend-only work in this repository. When an outcome changes a
-frontend-visible API, authentication flow, or error contract, work through the
-`crf04/statsplus` coordination repository first. Read its agent guide,
-architecture map, and workflow; agree on the boundary contract before
-implementation, then keep the backend branch, issue, commits, tests, and pull
-request here.
+Start every observable product outcome in the `crf04/statsplus` coordination
+repository, including backend-only outcomes. Keep the focused backend
+implementation issue, branch, commits, tests, and pull request here. Internal
+maintenance without an observable product outcome may start in this repository.
+
+Before implementing a linked product outcome, read its parent issue and the
+coordination repository's agent guide, architecture map, and workflow. Agree on
+the boundary contract there before changing a frontend-visible API,
+authentication flow, or error contract.
 
 ## Change loop
 
@@ -40,3 +43,16 @@ request here.
 - Exercise data-replacement services with mocks or a temporary database.
 - Treat authentication and data-update routes as security boundaries; verify
   their behavior against the authoritative architecture and API documents.
+
+## Agent skills
+
+### Issue tracker
+
+Use this repository for backend implementation packets and internal maintenance.
+See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md) before creating,
+picking up, linking, or closing an issue or pull request.
+
+### Triage labels
+
+Use the five mutually exclusive canonical triage labels. See
+[docs/agents/triage-labels.md](docs/agents/triage-labels.md).

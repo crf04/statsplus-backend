@@ -1,0 +1,60 @@
+name: Backend implementation
+description: Define a pickable backend implementation packet or internal maintenance task.
+title: "[Implementation]: "
+labels:
+  - needs-triage
+body:
+  - type: dropdown
+    id: source
+    attributes:
+      label: Work source
+      options:
+        - Parent product outcome
+        - Internal repository maintenance
+    validations:
+      required: true
+  - type: input
+    id: parent
+    attributes:
+      label: Parent product issue
+      description: Required for product work. Use a fully qualified reference such as crf04/statsplus#40.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Backend objective and evidence
+      description: State the repository-local result and evidence for the current behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: entry_points
+    attributes:
+      label: Entry points
+      description: Name the routes, services, models, tests, or other likely starting paths.
+    validations:
+      required: true
+  - type: textarea
+    id: contract_slice
+    attributes:
+      label: Contract slice
+      description: Quote only the parent contract details this repository implements, or state that no boundary changes.
+    validations:
+      required: true
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done when
+      description: List repository-bound, testable completion conditions.
+    validations:
+      required: true
+  - type: textarea
+    id: completion_gate
+    attributes:
+      label: Completion gate
+      value: "- [ ] `./scripts/check.sh` passes"
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Start blockers and merge ordering
+      description: Separate Blocked by references from Merge after references and use fully qualified links.
