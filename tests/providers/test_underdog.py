@@ -130,7 +130,7 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert higher.modifiers[0].value == higher.modifiers[0].value.__class__("1.000")
     assert higher.modifiers[0].kind == "payout_multiplier"
     assert higher.modifiers[0].scope == "selection"
-    assert higher.modifiers[0].label == "1.000"
+    assert higher.modifiers[0].label is None
     assert lower.direction is SelectionDirection.LOWER
     assert snapshot.coverage.fanout_complete is True
     assert session.calls
@@ -409,4 +409,18 @@ def test_underdog_does_not_hide_implementation_defects(monkeypatch) -> None:
     monkeypatch.setattr(adapter, "_normalize_payload", broken_parser)
 
     with pytest.raises(RuntimeError, match="adapter bug"):
+        adapter.get_snapshot(_query(), _context())
+
+
+def test_underdog_does_not_hide_value_error_implementation_defects(monkeypatch) -> None:
+    session = FakeSession(FakeResponse(_payload()))
+    adapter = UnderdogAdapter(session=session)
+
+    def broken_line(*args, **kwargs):
+        del args, kwargs
+        raise ValueError("adapter bug")
+
+    monkeypatch.setattr(UnderdogAdapter, "_normalize_line", broken_line)
+
+    with pytest.raises(ValueError, match="adapter bug"):
         adapter.get_snapshot(_query(), _context())

@@ -240,7 +240,7 @@ class UnderdogAdapter:
             except _ExcludedRecord as error:
                 skipped_count += 1
                 skipped_reasons.append(CoverageCode(error.reason))
-            except ValueError as error:
+            except _MalformedRecord as error:
                 skipped_count += 1
                 malformed_count += 1
                 warning_codes.append(CoverageCode.MALFORMED_RECORD)
@@ -282,14 +282,14 @@ class UnderdogAdapter:
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise _MalformedRecord("line must be an object")
-        line_id = required_identifier(row, "id")
+        line_id = cls._required_identifier(row, "id")
         over_under = row.get("over_under")
         if not isinstance(over_under, Mapping):
             raise _MalformedRecord("line.over_under must be an object")
         appearance_stat = over_under.get("appearance_stat")
         if not isinstance(appearance_stat, Mapping):
             raise _MalformedRecord("line appearance_stat must be an object")
-        appearance_id = required_identifier(appearance_stat, "appearance_id")
+        appearance_id = cls._required_identifier(appearance_stat, "appearance_id")
         appearance = appearances.get(appearance_id)
         if appearance is None:
             raise _MalformedRecord("line appearance could not be resolved")
@@ -309,14 +309,14 @@ class UnderdogAdapter:
             label=appearance_label,
         )
 
-        player_id = required_identifier(appearance, "player_id")
+        player_id = cls._required_identifier(appearance, "player_id")
         player = players.get(player_id)
         if player is None:
             raise _MalformedRecord("line player could not be resolved")
-        player_sport = required_text(player, "sport_id")
+        player_sport = cls._required_text(player, "sport_id")
         if player_sport.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
-        raw_status = required_text(row, "status")
+        raw_status = cls._required_text(row, "status")
         status = normalize_status(raw_status)
         if status is None:
             raise _ExcludedRecord("ineligible_status")
@@ -333,7 +333,7 @@ class UnderdogAdapter:
             raise _ExcludedRecord("non_game_market")
         if match_id is None or match is None:
             raise _MalformedRecord("missing_match_relationship")
-        match_sport = required_text(match, "sport_id")
+        match_sport = cls._required_text(match, "sport_id")
         if match_sport.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
 
@@ -341,15 +341,15 @@ class UnderdogAdapter:
         if not isinstance(options_value, list):
             raise _MalformedRecord("line.options must be a list")
         options = tuple(cls._normalize_option(option) for option in options_value)
-        stat_value = required_number(row, "stat_value")
-        stat_label = required_text(appearance_stat, "display_stat")
+        stat_value = cls._required_number(row, "stat_value")
+        stat_label = cls._required_text(appearance_stat, "display_stat")
         player_name = cls._player_name(player)
         team = cls._team_from_mapping(player, fallback_id=appearance.get("team_id"))
         event = cls._event_from_match(match_id, match)
         variant_label = optional_text(row.get("line_type"))
         variant = normalize_market_variant(variant_label)
         updated_at = row.get("updated_at")
-        validate_timestamp(updated_at, "updated_at")
+        cls._validate_timestamp(updated_at, "updated_at")
         starts_at = event.starts_at if event is not None else None
         period_label = optional_text(
             appearance_stat.get("scoring_period", appearance_stat.get("period"))
@@ -376,7 +376,7 @@ class UnderdogAdapter:
                 threshold=MarketThreshold(
                     stat_value,
                     unit="count",
-                    original_value=display_number(row["stat_value"], field="stat_value"),
+                    original_value=cls._display_number(row["stat_value"], field="stat_value"),
                 ),
                 status=status,
                 status_label=raw_status,
@@ -404,7 +404,7 @@ class UnderdogAdapter:
         if multiplier is not None and multiplier != "":
             modifier_kind = optional_text(option.get("modifier_kind")) or "payout_multiplier"
             modifier_scope = optional_text(option.get("modifier_scope")) or "selection"
-            modifier_label = optional_text(option.get("payout_multiplier_label")) or str(multiplier)
+            modifier_label = optional_text(option.get("payout_multiplier_label"))
             try:
                 modifiers = (
                     SelectionModifier(
@@ -451,8 +451,8 @@ class UnderdogAdapter:
         )
         if status_label is not None and is_ineligible_event_status(status_label):
             raise _ExcludedRecord("ineligible_event_status")
-        validate_timestamp(starts_at, "scheduled_at")
-        validate_timestamp(updated_at, "match updated_at")
+        cls._validate_timestamp(starts_at, "scheduled_at")
+        cls._validate_timestamp(updated_at, "match updated_at")
         try:
             return EventEvidence(
                 provider_id=match_id,
@@ -540,8 +540,8 @@ class UnderdogAdapter:
             if not isinstance(resource, Mapping):
                 raise _MalformedPayload(f"{name} entries must be objects")
             try:
-                identifier = required_identifier(resource, "id")
-            except ValueError as error:
+                identifier = cls._required_identifier(resource, "id")
+            except _MalformedRecord as error:
                 raise _MalformedPayload(str(error)) from error
             previous = indexed.get(identifier)
             if previous is not None and previous != resource:
@@ -555,6 +555,41 @@ class UnderdogAdapter:
         if not isinstance(value, list):
             raise _MalformedPayload(f"{key} must be a list")
         return value
+
+    @staticmethod
+    def _required_identifier(value: Mapping[str, Any], key: str) -> str:
+        try:
+            return required_identifier(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _required_text(value: Mapping[str, Any], key: str) -> str:
+        try:
+            return required_text(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _required_number(value: Mapping[str, Any], key: str) -> str | int | float:
+        try:
+            return required_number(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _display_number(value: Any, *, field: str) -> str:
+        try:
+            return display_number(value, field=field)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _validate_timestamp(value: Any, field: str) -> None:
+        try:
+            validate_timestamp(value, field)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
 
     @staticmethod
     def _optional_identifier(value: Any) -> str | None:
