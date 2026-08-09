@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -625,7 +625,7 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
     board = service.get_board(
         NBAMarketQuery(),
         RetrievalContext(
-            deadline=datetime(2026, 8, 9, 20, 0, 5, tzinfo=timezone.utc),
+            deadline=datetime.now(timezone.utc) + timedelta(seconds=5),
             request_id="statistic-board",
         ),
     )
@@ -665,7 +665,7 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
         provider_registry={"dabble": Provider()}, deadline_seconds=5
     ).get_board(
         NBAMarketQuery(),
-        RetrievalContext(deadline=datetime(2026, 8, 9, 20, 0, 5, tzinfo=timezone.utc)),
+        RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
     )
     market = board.unmapped_markets[0]
     assert market.statistic is None
@@ -708,7 +708,7 @@ def _board_for(market: PlayerProjectionMarket):
         provider_registry={market.provider: Provider()}, deadline_seconds=5
     ).get_board(
         NBAMarketQuery(),
-        RetrievalContext(deadline=datetime(2026, 8, 9, 20, 0, 5, tzinfo=timezone.utc)),
+        RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
     )
 
 

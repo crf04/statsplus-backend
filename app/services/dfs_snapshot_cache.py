@@ -363,8 +363,14 @@ def _market(value: Any) -> PlayerProjectionMarket:
         "updated_at",
         "selections",
         "appearance",
+        "statistic_match",
     }
     _keys(data, expected, label="market")
+    # The cache stores provider evidence as retrieved;  statistic resolution
+    # happens in the board above this seam, so a wire value carrying a match is
+    # not something this codec ever wrote.
+    if data["statistic_match"] is not None:
+        raise SnapshotCacheError("snapshot market statistic_match schema is invalid")
     decoded = dict(data)
     decoded["athlete"] = _athlete(data["athlete"])
     decoded["event"] = _event(data["event"])

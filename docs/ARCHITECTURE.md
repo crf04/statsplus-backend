@@ -92,7 +92,10 @@ without guessing missing facts; they expose no provider-specific public routes.
 
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
-includes the adapter-contract version; it never serializes a `DFSBoard`.
+includes the adapter-contract version; it never serializes a `DFSBoard`. The
+cache sits below Statistic Catalog resolution, so a cached market carries
+provider evidence only: a wire value with a `statistic_match` is rejected as
+corrupt rather than decoded.
 Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a

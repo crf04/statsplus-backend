@@ -203,6 +203,9 @@ def _market_payload_snapshot() -> ProviderSnapshot:
         lambda market: market["selections"][0].__setitem__("direction", "over"),
         lambda market: market["statistic"].__setitem__("components", [" points "]),
         lambda market: market["threshold"].__setitem__("value", 25.5),
+        # Statistic resolution happens above the cache, so a match on the wire
+        # is not a value this codec wrote.
+        lambda market: market.__setitem__("statistic_match", {}),
     ],
 )
 def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) -> None:
