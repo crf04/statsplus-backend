@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from typing import Any, NoReturn
 from urllib.parse import quote
 
@@ -243,16 +244,50 @@ class _DetailResult:
     fixture: dict[str, Any]
     competition: dict[str, Any]
     detail: dict[str, Any] | None = None
-    error: Exception | None = None
-    malformed: bool = False
+    failure: "_DabbleTerminalFailure | None" = None
+
+
+class _DabbleFailureSource(str, Enum):
+    """Closed set of Dabble seams that can own a terminal failure."""
+
+    COMPETITION_DISCOVERY = "competition_discovery"
+    FIXTURE_DISCOVERY = "fixture_discovery"
+    FIXTURE_DETAILS = "fixture_details"
+    SNAPSHOT_NORMALIZATION = "snapshot_normalization"
+
+
+class _DabbleFailureOwner(str, Enum):
+    """The seam responsible for recording a terminal provider failure."""
+
+    UPSTREAM = "upstream"
+    LOCAL = "local"
+
+
+class _DabbleFailureStatus(str, Enum):
+    """Closed status vocabulary used for sanitized Dabble failure details."""
+
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    TIMEOUT = "timeout"
+    RATE_LIMITED = "rate_limited"
+    ACCESS_DENIED = "access_denied"
+    HTTP_ERROR = "http_error"
+    UPSTREAM_ERROR = "upstream_error"
+    MALFORMED = "malformed"
 
 
 @dataclass(frozen=True, slots=True)
-class _DabbleRetrievalOutcome:
-    """Explicit terminal state used to avoid duplicate failure signals."""
+class _DabbleTerminalFailure:
+    """Typed failure ownership carried across Dabble's private seams.
 
-    total_failure: bool = False
-    upstream_failure_recorded: bool = False
+    ``error`` is retained only for local translation inside the adapter.  It
+    is never copied into telemetry or public error details; callers use the
+    closed ``status`` and the exception type when they need diagnostics.
+    """
+
+    source: _DabbleFailureSource
+    owner: _DabbleFailureOwner
+    status: _DabbleFailureStatus
+    error: Exception | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +300,7 @@ class _DabbleDiscovery:
     skipped_reasons: tuple[CoverageCode, ...] = ()
     diagnostic_details: tuple[str, ...] = ()
     fanout_complete: bool = True
-    malformed_seen: bool = False
-    fixture_fetch_failed: bool = False
-    outcome: _DabbleRetrievalOutcome = _DabbleRetrievalOutcome()
+    failures: tuple[_DabbleTerminalFailure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,18 +313,22 @@ class _DabbleNormalization:
     skipped_reasons: tuple[CoverageCode, ...] = ()
     diagnostic_details: tuple[str, ...] = ()
     fanout_complete: bool = True
-    malformed_seen: bool = False
-    deadline_error: bool = False
-    outcome: _DabbleRetrievalOutcome = _DabbleRetrievalOutcome()
+    failures: tuple[_DabbleTerminalFailure, ...] = ()
 
 
 class _DabbleRequestFailure(Exception):
     """Expected failure while fetching one Dabble resource."""
 
-    def __init__(self, reason: str, detail: Any = None) -> None:
-        self.reason = reason
+    def __init__(self, status: _DabbleFailureStatus, detail: Any = None) -> None:
+        if not isinstance(status, _DabbleFailureStatus):
+            raise TypeError("Dabble request failure status must be typed")
+        self.status = status
         self.detail = detail
-        super().__init__(reason)
+        super().__init__(status.value)
+
+
+class _DabbleLocalValidationError(ProviderResponseError):
+    """A post-parse Dabble validation failure with no upstream event."""
 
 
 @dataclass
@@ -426,15 +463,18 @@ class DabbleAdapter:
         retrieved_at = self._now_utc()
         discovery = self._discover_fixtures(query, context)
         if not discovery.fixtures:
-            if discovery.fixture_fetch_failed:
-                raise self._unavailable(
-                    _DabbleRequestFailure("upstream_error", "fixture list")
-                )
-            if discovery.outcome.total_failure:
-                return self._normalization_failure(
-                    context,
-                    ProviderResponseError("Dabble returned no usable fixture data"),
-                )
+            upstream_failure = self._first_failure(
+                discovery.failures,
+                owner=_DabbleFailureOwner.UPSTREAM,
+            )
+            if upstream_failure is not None:
+                raise self._unavailable(upstream_failure)
+            local_failure = self._first_failure(
+                discovery.failures,
+                owner=_DabbleFailureOwner.LOCAL,
+            )
+            if local_failure is not None:
+                return self._normalization_failure(context, local_failure)
             return _build_snapshot(
                 provider=self.PROVIDER_ID,
                 markets=(),
@@ -448,11 +488,23 @@ class DabbleAdapter:
             )
 
         detail_results = self._fetch_details(discovery.fixtures, context)
-        if detail_results and all(result.error is not None for result in detail_results):
+        if detail_results and all(result.failure is not None for result in detail_results):
+            local_failure = self._first_failure(
+                tuple(result.failure for result in detail_results if result.failure),
+                owner=_DabbleFailureOwner.LOCAL,
+            )
+            if local_failure is not None:
+                return self._normalization_failure(context, local_failure)
             raise self._unavailable(self._first_detail_failure(detail_results))
         if context.is_expired(now=self._now_utc()):
-            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
-        normalization_failure_already_recorded = False
+            raise self._unavailable(
+                _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
+            )
+
+        normalization: _DabbleNormalization | None = None
+        local_failure: _DabbleTerminalFailure | None = None
+        upstream_failure: _DabbleTerminalFailure | None = None
+        snapshot: ProviderSnapshot | None = None
         try:
             with provider_normalization_call(
                 PROVIDER_DABBLE,
@@ -465,9 +517,10 @@ class DabbleAdapter:
                     now=self._now_utc,
                     call=lambda: self._normalize_detail_results(detail_results, query),
                 )
-                if normalization.deadline_error or context.is_expired(
-                    now=self._now_utc()
-                ):
+                if any(
+                    failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED
+                    for failure in normalization.failures
+                ) or context.is_expired(now=self._now_utc()):
                     raise DeadlineExceededError(
                         "Dabble snapshot normalization deadline exceeded"
                     )
@@ -493,31 +546,45 @@ class DabbleAdapter:
                     + normalization.skipped_count
                     + batch.skipped_count
                 )
-                malformed_seen = (
-                    discovery.malformed_seen
-                    or normalization.malformed_seen
-                    or batch.malformed_count > 0
-                )
                 fanout_complete = (
                     discovery.fanout_complete
                     and normalization.fanout_complete
-                    and not malformed_seen
+                    and batch.malformed_count == 0
+                    and not any(
+                        failure.status is _DabbleFailureStatus.MALFORMED
+                        for failure in (*discovery.failures, *normalization.failures)
+                    )
                 )
 
+                detail_local_failure = self._first_failure(
+                    normalization.failures,
+                    owner=_DabbleFailureOwner.LOCAL,
+                    source=_DabbleFailureSource.FIXTURE_DETAILS,
+                )
+                upstream_failure = self._first_failure(
+                    (*discovery.failures, *normalization.failures),
+                    owner=_DabbleFailureOwner.UPSTREAM,
+                )
+                if detail_local_failure is not None:
+                    # A local post-parse validation failure has no upstream
+                    # event.  Raise it through this local seam exactly once;
+                    # the catch below can still return usable partial markets.
+                    local_failure = detail_local_failure
+                    raise self._failure_response(detail_local_failure)
+
                 if not batch.markets:
-                    if normalization.outcome.total_failure:
-                        if normalization.outcome.upstream_failure_recorded:
-                            normalization_failure_already_recorded = True
-                        else:
-                            raise ProviderResponseError(
-                                "Dabble produced no usable markets"
-                            )
-                    elif not normalization.fanout_complete:
+                    local_failure = self._first_failure(
+                        (*normalization.failures, *discovery.failures),
+                        owner=_DabbleFailureOwner.LOCAL,
+                    )
+                    if local_failure is not None:
+                        raise self._failure_response(local_failure)
+                    if upstream_failure is None and not normalization.fanout_complete:
                         raise ProviderResponseError(
                             "Dabble produced no usable markets"
                         )
-                    else:
-                        return _build_snapshot(
+                    if upstream_failure is None:
+                        snapshot = _build_snapshot(
                             provider=self.PROVIDER_ID,
                             markets=(),
                             retrieved_at=retrieved_at,
@@ -531,9 +598,8 @@ class DabbleAdapter:
                             skipped_reasons=skipped_reasons,
                             diagnostic_details=diagnostic_details,
                         )
-
-                if not normalization_failure_already_recorded:
-                    return _build_snapshot(
+                else:
+                    snapshot = _build_snapshot(
                         provider=self.PROVIDER_ID,
                         markets=batch.markets,
                         retrieved_at=retrieved_at,
@@ -549,14 +615,57 @@ class DabbleAdapter:
                     )
         except DeadlineExceededError as error:
             raise self._unavailable(
-                _DabbleRequestFailure("deadline_exceeded", error)
+                _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED, error)
             ) from error
         except ProviderResponseError as error:
+            if (
+                normalization is not None
+                and normalization.batch.markets
+                and local_failure is not None
+                and local_failure.source is _DabbleFailureSource.FIXTURE_DETAILS
+            ):
+                return _build_snapshot(
+                    provider=self.PROVIDER_ID,
+                    markets=normalization.batch.markets,
+                    retrieved_at=retrieved_at,
+                    fetched_count=normalization.batch.fetched_count,
+                    eligible_count=normalization.batch.eligible_count,
+                    normalized_count=normalization.batch.normalized_count,
+                    skipped_count=(
+                        discovery.skipped_count
+                        + normalization.skipped_count
+                        + normalization.batch.skipped_count
+                    ),
+                    pagination_complete=True,
+                    fanout_complete=(
+                        discovery.fanout_complete
+                        and normalization.fanout_complete
+                        and not (
+                            discovery.failures
+                            or normalization.batch.malformed_count > 0
+                        )
+                    ),
+                    warning_codes=(
+                        *discovery.warning_codes,
+                        *normalization.warning_codes,
+                        *normalization.batch.warning_codes,
+                    ),
+                    skipped_reasons=(
+                        *discovery.skipped_reasons,
+                        *normalization.skipped_reasons,
+                        *normalization.batch.skipped_reasons,
+                    ),
+                    diagnostic_details=(
+                        *discovery.diagnostic_details,
+                        *normalization.diagnostic_details,
+                        *normalization.batch.diagnostic_details,
+                    ),
+                )
             raise self._unavailable(error) from error
-        if normalization_failure_already_recorded:
-            raise self._unavailable(
-                ProviderResponseError("Dabble produced no usable markets")
-            )
+        if upstream_failure is not None and snapshot is None:
+            raise self._unavailable(upstream_failure)
+        assert snapshot is not None
+        return snapshot
 
     def _discover_fixtures(
         self,
@@ -568,12 +677,8 @@ class DabbleAdapter:
         warning_codes: list[CoverageCode] = []
         skipped_reasons: list[CoverageCode] = []
         skipped_count = 0
-        malformed_seen = False
         fanout_complete = True
-        fixture_fetch_failed = False
-        malformed_discovery = False
-        malformed_fixture_list = False
-        nba_competition_seen = False
+        failures: list[_DabbleTerminalFailure] = []
 
         def warn(code: CoverageCode) -> None:
             if code not in warning_codes:
@@ -603,30 +708,37 @@ class DabbleAdapter:
             warn(CoverageCode.MALFORMED_RECORD)
             for _ in range(competitions_result.skipped_count):
                 skip(CoverageCode.MALFORMED_RECORD)
-            malformed_seen = True
-        if not competitions and competitions_result.skipped_count:
-            malformed_discovery = True
+            fanout_complete = False
+            failures.append(
+                self._local_failure(
+                    _DabbleFailureSource.COMPETITION_DISCOVERY,
+                    "Dabble competition records were malformed",
+                )
+            )
 
         nba_competitions: list[dict[str, Any]] = []
         for competition in competitions:
             if not self._is_nba_competition(competition, query):
                 skip(CoverageCode.NON_NBA_COMPETITION)
                 continue
-            nba_competition_seen = True
             if not competition.get("id"):
                 skip(CoverageCode.MISSING_COMPETITION_ID, warning=True)
-                malformed_seen = True
+                fanout_complete = False
+                failures.append(
+                    self._local_failure(
+                        _DabbleFailureSource.COMPETITION_DISCOVERY,
+                        "Dabble competition id was missing",
+                    )
+                )
                 continue
             nba_competitions.append(competition)
-
-        malformed_discovery = malformed_seen and (
-            not competitions or nba_competition_seen and not nba_competitions
-        )
 
         fixtures: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for competition in nba_competitions:
             if context.is_expired(now=self._now_utc()):
-                raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+                raise self._unavailable(
+                    _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
+                )
             try:
                 fixtures_result = self._request_json(
                     context,
@@ -637,9 +749,14 @@ class DabbleAdapter:
                     parser=self._parse_fixtures,
                 )
             except (_DabbleRequestFailure, ProviderResponseError) as error:
-                if getattr(error, "reason", None) == "deadline_exceeded":
-                    raise self._unavailable(error) from error
-                fixture_fetch_failed = True
+                failure = self._failure_from_exception(
+                    error,
+                    source=_DabbleFailureSource.FIXTURE_DISCOVERY,
+                    owner=_DabbleFailureOwner.UPSTREAM,
+                )
+                if failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED:
+                    raise self._unavailable(failure) from error
+                failures.append(failure)
                 fanout_complete = False
                 warn(CoverageCode.FIXTURE_LIST_FAILED)
                 skip(CoverageCode.FIXTURE_LIST_FAILED)
@@ -649,9 +766,13 @@ class DabbleAdapter:
                 warn(CoverageCode.MALFORMED_RECORD)
                 for _ in range(fixtures_result.skipped_count):
                     skip(CoverageCode.MALFORMED_RECORD)
-                malformed_seen = True
-                if not fixtures_result.rows:
-                    malformed_fixture_list = True
+                fanout_complete = False
+                failures.append(
+                    self._local_failure(
+                        _DabbleFailureSource.FIXTURE_DISCOVERY,
+                        "Dabble fixture records were malformed",
+                    )
+                )
             for fixture in fixtures_result.rows:
                 if not self._fixture_matches_query(fixture):
                     skip(CoverageCode.NON_NBA_SPORT)
@@ -667,21 +788,16 @@ class DabbleAdapter:
                 fixtures.append((fixture, competition))
 
         if context.is_expired(now=self._now_utc()):
-            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+            raise self._unavailable(
+                _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
+            )
         return _DabbleDiscovery(
             fixtures=tuple(fixtures),
             skipped_count=skipped_count,
             warning_codes=tuple(warning_codes),
             skipped_reasons=tuple(skipped_reasons),
             fanout_complete=fanout_complete,
-            malformed_seen=malformed_seen,
-            fixture_fetch_failed=fixture_fetch_failed,
-            outcome=_DabbleRetrievalOutcome(
-                total_failure=(
-                    not fixtures and (malformed_discovery or malformed_fixture_list)
-                ),
-                upstream_failure_recorded=fixture_fetch_failed,
-            ),
+            failures=tuple(failures),
         )
 
     def _normalize_detail_results(
@@ -699,9 +815,7 @@ class DabbleAdapter:
         record_coverage = _RecordCoverageAccumulator()
         skipped_count = 0
         fanout_complete = True
-        malformed_seen = False
-        deadline_error = False
-        upstream_failure_recorded = False
+        failures: list[_DabbleTerminalFailure] = []
 
         def merge(
             normalized: tuple[tuple[Any, ...], PlayerProjectionMarket, Selection],
@@ -714,13 +828,11 @@ class DabbleAdapter:
             )
 
         for result in detail_results:
-            if result.error is not None:
-                upstream_failure_recorded = True
-                if getattr(result.error, "reason", None) == "deadline_exceeded":
-                    deadline_error = True
+            if result.failure is not None:
+                failure = result.failure
+                failures.append(failure)
                 fanout_complete = False
-                if result.malformed:
-                    malformed_seen = True
+                if failure.status is _DabbleFailureStatus.MALFORMED:
                     warning_codes.append(CoverageCode.FIXTURE_MALFORMED)
                     skipped_reasons.append(CoverageCode.FIXTURE_MALFORMED)
                 else:
@@ -733,10 +845,15 @@ class DabbleAdapter:
             props = detail.get("playerProps")
             if not isinstance(props, list):
                 fanout_complete = False
-                malformed_seen = True
                 warning_codes.append(CoverageCode.FIXTURE_MALFORMED)
                 skipped_reasons.append(CoverageCode.FIXTURE_MALFORMED)
                 skipped_count += 1
+                failures.append(
+                    self._local_failure(
+                        _DabbleFailureSource.FIXTURE_DETAILS,
+                        "Dabble fixture details were malformed after parsing",
+                    )
+                )
                 continue
             record_coverage.extend(
                 props,
@@ -750,7 +867,6 @@ class DabbleAdapter:
                 on_success=merge,
             )
             if record_coverage.malformed_count:
-                malformed_seen = True
                 fanout_complete = False
 
         batch = _NormalizedBatch.from_accumulator(
@@ -758,6 +874,13 @@ class DabbleAdapter:
             markets=self._assemble_markets(merged_markets),
             warning_codes=warning_codes,
         )
+        if not batch.markets and batch.malformed_count:
+            failures.append(
+                self._local_failure(
+                    _DabbleFailureSource.SNAPSHOT_NORMALIZATION,
+                    "Dabble produced no usable markets",
+                )
+            )
         return _DabbleNormalization(
             batch=batch,
             skipped_count=skipped_count,
@@ -765,14 +888,7 @@ class DabbleAdapter:
             skipped_reasons=tuple(skipped_reasons),
             diagnostic_details=tuple(diagnostic_details),
             fanout_complete=fanout_complete,
-            malformed_seen=malformed_seen,
-            deadline_error=deadline_error,
-            outcome=_DabbleRetrievalOutcome(
-                total_failure=(
-                    not batch.markets and (malformed_seen or not fanout_complete)
-                ),
-                upstream_failure_recorded=upstream_failure_recorded,
-            ),
+            failures=tuple(failures),
         )
 
     def _assemble_markets(
@@ -855,7 +971,7 @@ class DabbleAdapter:
     def _normalization_failure(
         self,
         context: RetrievalContext,
-        error: ProviderResponseError,
+        failure: _DabbleTerminalFailure,
     ) -> NoReturn:
         """Record a local terminal failure exactly once before translating it."""
 
@@ -866,19 +982,84 @@ class DabbleAdapter:
                 cache_status=CACHE_DISABLED,
                 request_id=context.request_id,
             ):
-                raise error
-        except ProviderResponseError as failure:
-            raise self._unavailable(failure) from failure
+                raise self._failure_response(failure)
+        except ProviderResponseError as error:
+            raise self._unavailable(error) from error
+
+    @staticmethod
+    def _failure_response(failure: _DabbleTerminalFailure) -> ProviderResponseError:
+        """Translate a typed local failure without exposing source details."""
+
+        del failure
+        return ProviderResponseError("Dabble produced no usable markets")
+
+    @staticmethod
+    def _local_failure(
+        source: _DabbleFailureSource,
+        detail: str,
+    ) -> _DabbleTerminalFailure:
+        return _DabbleTerminalFailure(
+            source=source,
+            owner=_DabbleFailureOwner.LOCAL,
+            status=_DabbleFailureStatus.MALFORMED,
+            error=_DabbleLocalValidationError(detail),
+        )
+
+    @staticmethod
+    def _failure_from_exception(
+        error: Exception,
+        *,
+        source: _DabbleFailureSource,
+        owner: _DabbleFailureOwner,
+    ) -> _DabbleTerminalFailure:
+        if isinstance(error, _DabbleRequestFailure):
+            status = error.status
+        elif isinstance(error, ProviderResponseError):
+            status = _DabbleFailureStatus.MALFORMED
+        elif isinstance(error, DeadlineExceededError):
+            status = _DabbleFailureStatus.DEADLINE_EXCEEDED
+        elif isinstance(error, requests.exceptions.Timeout):
+            status = _DabbleFailureStatus.TIMEOUT
+        elif isinstance(error, requests.exceptions.HTTPError):
+            status = _DabbleFailureStatus.HTTP_ERROR
+        else:
+            status = _DabbleFailureStatus.UPSTREAM_ERROR
+        return _DabbleTerminalFailure(
+            source=source,
+            owner=owner,
+            status=status,
+            error=error,
+        )
+
+    @staticmethod
+    def _first_failure(
+        failures: Sequence[_DabbleTerminalFailure],
+        *,
+        owner: _DabbleFailureOwner | None = None,
+        source: _DabbleFailureSource | None = None,
+    ) -> _DabbleTerminalFailure | None:
+        candidates = [
+            failure
+            for failure in failures
+            if (owner is None or failure.owner is owner)
+            and (source is None or failure.source is source)
+        ]
+        for failure in candidates:
+            if failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED:
+                return failure
+        return candidates[0] if candidates else None
 
     @staticmethod
     def _first_detail_failure(
         detail_results: Sequence[_DetailResult],
-    ) -> Exception:
+    ) -> _DabbleTerminalFailure:
         """Return an upstream detail failure for an all-failed fan-out."""
 
-        failures = [result.error for result in detail_results if result.error is not None]
+        failures = [
+            result.failure for result in detail_results if result.failure is not None
+        ]
         for failure in failures:
-            if getattr(failure, "reason", None) == "deadline_exceeded":
+            if failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED:
                 return failure
         assert failures
         return failures[0]
@@ -950,17 +1131,29 @@ class DabbleAdapter:
                             detail=detail,
                         )
                     except ProviderResponseError as error:
+                        owner = (
+                            _DabbleFailureOwner.LOCAL
+                            if isinstance(error, _DabbleLocalValidationError)
+                            else _DabbleFailureOwner.UPSTREAM
+                        )
                         results[index] = _DetailResult(
                             fixture=fixture,
                             competition=competition,
-                            error=error,
-                            malformed=True,
+                            failure=self._failure_from_exception(
+                                error,
+                                source=_DabbleFailureSource.FIXTURE_DETAILS,
+                                owner=owner,
+                            ),
                         )
                     except _DabbleRequestFailure as error:
                         results[index] = _DetailResult(
                             fixture=fixture,
                             competition=competition,
-                            error=error,
+                            failure=self._failure_from_exception(
+                                error,
+                                source=_DabbleFailureSource.FIXTURE_DETAILS,
+                                owner=_DabbleFailureOwner.UPSTREAM,
+                            ),
                         )
                     except Exception:  # implementation defects stay visible
                         executor.shutdown(wait=False, cancel_futures=True)
@@ -975,7 +1168,11 @@ class DabbleAdapter:
                 results[index] = _DetailResult(
                     fixture=fixture,
                     competition=competition,
-                    error=_DabbleRequestFailure("deadline_exceeded"),
+                    failure=self._failure_from_exception(
+                        _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED),
+                        source=_DabbleFailureSource.FIXTURE_DETAILS,
+                        owner=_DabbleFailureOwner.UPSTREAM,
+                    ),
                 )
         return [results[index] for index in range(len(fixtures))]
 
@@ -995,7 +1192,9 @@ class DabbleAdapter:
         )
         detail_id = detail.get("id")
         if detail_id is not None and str(detail_id) != fixture_id:
-            raise ProviderResponseError("Dabble fixture detail id conflicts with fixture")
+            raise _DabbleLocalValidationError(
+                "Dabble fixture detail id conflicts with fixture"
+            )
         detail["id"] = fixture_id
         detail.setdefault("competitionId", competition.get("id"))
         detail.setdefault("competitionName", competition.get("name"))
@@ -1506,27 +1705,51 @@ class DabbleAdapter:
 
     @staticmethod
     def _request_failure(reason: str, error: Exception) -> Exception:
-        if reason == "deadline_exceeded":
-            return _DabbleRequestFailure("deadline_exceeded", error)
-        if reason == "timeout":
-            return _DabbleRequestFailure("timeout", error)
         if reason == "http_error":
             status_code = getattr(getattr(error, "response", None), "status_code", None)
-            dabble_reason = (
-                "rate_limited"
+            status = (
+                _DabbleFailureStatus.RATE_LIMITED
                 if status_code == 429
-                else "access_denied"
+                else _DabbleFailureStatus.ACCESS_DENIED
                 if status_code in {401, 403}
-                else "upstream_error"
+                else _DabbleFailureStatus.UPSTREAM_ERROR
             )
-            return _DabbleRequestFailure(dabble_reason, error)
-        return _DabbleRequestFailure("upstream_error", error)
+            return _DabbleRequestFailure(status, error)
+        status_by_reason = {
+            "deadline_exceeded": _DabbleFailureStatus.DEADLINE_EXCEEDED,
+            "timeout": _DabbleFailureStatus.TIMEOUT,
+            "request_error": _DabbleFailureStatus.HTTP_ERROR,
+        }
+        return _DabbleRequestFailure(
+            status_by_reason.get(reason, _DabbleFailureStatus.UPSTREAM_ERROR),
+            error,
+        )
 
-    def _unavailable(self, error: Exception) -> ProviderUnavailableError:
-        reason = getattr(error, "reason", "malformed_response")
+    def _unavailable(
+        self,
+        error: Exception | _DabbleTerminalFailure,
+    ) -> ProviderUnavailableError:
+        if isinstance(error, _DabbleTerminalFailure):
+            status = error.status
+            diagnostic_error = error.error or error
+        elif isinstance(error, _DabbleRequestFailure):
+            status = error.status
+            diagnostic_error = error
+        elif isinstance(error, ProviderResponseError):
+            status = _DabbleFailureStatus.MALFORMED
+            diagnostic_error = error
+        elif isinstance(error, DeadlineExceededError):
+            status = _DabbleFailureStatus.DEADLINE_EXCEEDED
+            diagnostic_error = error
+        elif isinstance(error, requests.exceptions.Timeout):
+            status = _DabbleFailureStatus.TIMEOUT
+            diagnostic_error = error
+        else:
+            status = _DabbleFailureStatus.UPSTREAM_ERROR
+            diagnostic_error = error
         return ProviderUnavailableError(
             "Dabble snapshot is currently unavailable.",
-            detail=f"{reason}: {type(error).__name__}",
+            detail=f"{status.value}: {type(diagnostic_error).__name__}",
         )
 
     def _now_utc(self) -> datetime:
