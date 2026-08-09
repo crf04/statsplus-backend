@@ -51,12 +51,15 @@ class TransportErrorPolicy:
 # interpreter alive during shutdown.
 _MAX_IN_FLIGHT_REQUESTS = 32
 _request_slots = threading.BoundedSemaphore(_MAX_IN_FLIGHT_REQUESTS)
+_MAX_CONNECT_TIMEOUT_SECONDS = 3.0
+_MAX_READ_TIMEOUT_SECONDS = 8.0
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class _RequestResult:
     """Result holder shared by one caller and its bounded daemon worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
         self.done = threading.Event()
         self.value: Any = None
         self.status_code: int | None = None
@@ -65,13 +68,14 @@ class _RequestResult:
         self._retry_lock = threading.Lock()
         self._retry_progress: list[tuple[float, int]] = []
         self.completed_at: float | None = None
+        self._monotonic = monotonic
 
     def record_retry_progress(self, count: int) -> None:
         """Record one worker retry without touching the caller's thread-local."""
 
         with self._retry_lock:
             self.retry_count = max(self.retry_count, count)
-            self._retry_progress.append((time.monotonic(), count))
+            self._retry_progress.append((self._monotonic(), count))
 
     def retry_count_at(self, deadline: float) -> int:
         """Return retries observed by the absolute monotonic deadline."""
@@ -94,6 +98,7 @@ def _run_request(
     parse: Callable[[Any], _Result],
     invalid_json_message: str,
     request_get: Callable[..., Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Run the complete potentially blocking response pipeline in a daemon."""
 
@@ -103,11 +108,37 @@ def _run_request(
         # reaches its deadline can report progress before this worker finishes.
         set_retry_progress_callback(result.record_retry_progress)
         get = request_get or session.get
-        if params is None:
-            response = get(url, timeout=timeout)
-        else:
-            response = get(url, params=params, timeout=timeout)
-        result.status_code = getattr(response, "status_code", None)
+        response: Any | None = None
+        # The adapter contract permits one and only one safe GET retry.  Do
+        # this in the bounded worker so retry time is charged to the same
+        # absolute RetrievalContext deadline as the initial request.
+        for attempt in range(2):
+            context.ensure_active(now=now())
+            remaining = context.remaining_seconds(now=now())
+            if remaining <= 0:
+                raise DeadlineExceededError("provider retrieval deadline exceeded")
+            attempt_timeout = (
+                min(float(timeout[0]), remaining),
+                min(float(timeout[1]), remaining),
+            )
+            try:
+                if params is None:
+                    response = get(url, timeout=attempt_timeout)
+                else:
+                    response = get(url, params=params, timeout=attempt_timeout)
+            except requests.exceptions.Timeout:
+                if attempt == 0:
+                    increment_retry_count()
+                    continue
+                raise
+            result.status_code = getattr(response, "status_code", None)
+            status_code = result.status_code
+            if attempt == 0 and status_code in _RETRYABLE_STATUS_CODES:
+                increment_retry_count()
+                continue
+            break
+        if response is None:  # pragma: no cover - every loop branch returns/raises
+            raise requests.exceptions.RequestException("provider returned no response")
         context.ensure_active(now=now())
         response.raise_for_status()
         try:
@@ -123,12 +154,16 @@ def _run_request(
         result.error = error
     finally:
         clear_retry_progress_callback()
-        result.completed_at = time.monotonic()
+        result.completed_at = monotonic()
         _request_slots.release()
         result.done.set()
 
 
-def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
+def _run_callable(
+    result: _RequestResult,
+    call: Callable[[], _Result],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
     """Run non-transport provider work in the same bounded daemon pool."""
 
     try:
@@ -136,7 +171,7 @@ def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
     except BaseException as error:  # propagate implementation failures
         result.error = error
     finally:
-        result.completed_at = time.monotonic()
+        result.completed_at = monotonic()
         _request_slots.release()
         result.done.set()
 
@@ -150,6 +185,7 @@ def _run_bounded(
     deadline_message: str = "provider retrieval deadline exceeded",
     observe_result: _ResultObserver | None = None,
     prepare: _Preparation | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> _RequestResult:
     """Own one bounded worker lifecycle for every provider pipeline.
 
@@ -161,7 +197,7 @@ def _run_bounded(
     growing separate slot, thread, and deadline implementations.
     """
 
-    monotonic_start = time.monotonic()
+    monotonic_start = monotonic()
     current = now()
     context.ensure_active(now=current)
     remaining = context.remaining_seconds(now=current)
@@ -176,19 +212,21 @@ def _run_bounded(
             # The absolute monotonic deadline is intentionally separate from
             # Requests' (connect, read) timeout tuple.
             prepared_release = prepare(monotonic_deadline)
-        if time.monotonic() >= monotonic_deadline:
+        if monotonic() >= monotonic_deadline:
             raise DeadlineExceededError(deadline_message)
-        slot_wait = max(0.0, monotonic_deadline - time.monotonic())
+        slot_wait = max(0.0, monotonic_deadline - monotonic())
         if not _request_slots.acquire(timeout=slot_wait):
             raise DeadlineExceededError(deadline_message)
         slot_acquired = True
 
-        result = _RequestResult()
+        result = _RequestResult(monotonic=monotonic)
 
         def run_prepared(holder: _RequestResult) -> None:
             try:
                 worker(holder)
             finally:
+                if holder.completed_at is None:
+                    holder.completed_at = monotonic()
                 if prepared_release is not None:
                     prepared_release()
 
@@ -215,7 +253,7 @@ def _run_bounded(
         if observe_result is not None:
             observe_result(result, monotonic_deadline)
 
-    remaining = max(0.0, monotonic_deadline - time.monotonic())
+    remaining = max(0.0, monotonic_deadline - monotonic())
     if not result.done.wait(timeout=remaining):
         observe()
         raise DeadlineExceededError(deadline_message)
@@ -224,10 +262,8 @@ def _run_bounded(
     if (
         result.completed_at is None
         or result.completed_at > monotonic_deadline
-        or time.monotonic() >= monotonic_deadline
     ):
         raise DeadlineExceededError(deadline_message)
-    context.ensure_active(now=now())
     if result.error is not None:
         raise result.error
     return result
@@ -238,14 +274,16 @@ def run_bounded(
     context: RetrievalContext,
     now: Callable[[], datetime],
     call: Callable[[], _Result],
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> _Result:
     """Run a potentially blocking provider pipeline under an absolute deadline."""
 
     result = _run_bounded(
         context=context,
         now=now,
-        worker=lambda holder: _run_callable(holder, call),
+        worker=lambda holder: _run_callable(holder, call, monotonic=monotonic),
         worker_name="statsplus-provider-pipeline",
+        monotonic=monotonic,
     )
     return result.value
 
@@ -264,7 +302,10 @@ def bounded_timeout(
     if remaining <= 0:
         raise DeadlineExceededError(f"{provider} retrieval deadline exceeded")
     connect, read = timeout
-    return min(float(connect), remaining), min(float(read), remaining)
+    return (
+        min(float(connect), _MAX_CONNECT_TIMEOUT_SECONDS, remaining),
+        min(float(read), _MAX_READ_TIMEOUT_SECONDS, remaining),
+    )
 
 
 def request_json(
@@ -279,6 +320,7 @@ def request_json(
     operation: str,
     parse: Callable[[Any], _Result],
     error_policy: TransportErrorPolicy,
+    monotonic: Callable[[], float] | None = None,
 ) -> _Result:
     """Execute one instrumented JSON request under an absolute deadline.
 
@@ -290,6 +332,7 @@ def request_json(
     parsing), so late pipeline work cannot block the caller or be returned.
     """
 
+    request_monotonic = monotonic or time.monotonic
     try:
         current = now()
         bounded = bounded_timeout(
@@ -321,13 +364,31 @@ def request_json(
                     if callable(release):
                         release()
                     raise TypeError("request lease must expose get() and release()")
-                return release
+
+                def release_request() -> None:
+                    current_lease = request_lease
+                    if current_lease is not None:
+                        current_release = getattr(current_lease, "release", None)
+                        if callable(current_release):
+                            current_release()
+
+                return release_request
 
             def get_request(url_value: str, **kwargs: Any) -> Any:
                 """Use the lease when a session supplies the safe contract."""
 
+                nonlocal request_lease
                 if request_lease is None:
                     return session.get(url_value, **kwargs)
+                if getattr(request_lease, "_released", False):
+                    # Serialized sessions release their lock immediately after
+                    # each response so response decoding does not block other
+                    # detail workers.  A retry therefore reserves a fresh
+                    # lease, still bounded by the same absolute context.
+                    request_lease = acquire_request(
+                        request_monotonic()
+                        + context.remaining_seconds(now=now())
+                    )
                 return request_lease.get(url_value, **kwargs)
 
             def observe_result(result: _RequestResult, _deadline: float) -> None:
@@ -349,11 +410,13 @@ def request_json(
                     parse,
                     error_policy.invalid_json_message,
                     request_get=get_request,
+                    monotonic=request_monotonic,
                 ),
                 worker_name=f"statsplus-{provider}-request",
                 deadline_message=f"{provider} retrieval deadline exceeded",
                 observe_result=observe_result,
                 prepare=prepare_request,
+                monotonic=request_monotonic,
             )
             return result.value
     except DeadlineExceededError as error:

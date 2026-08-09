@@ -327,15 +327,20 @@ GET /api/data/fetch_playtypes
 GET /api/data/telemetry
 ```
 
-`GET /api/data/telemetry` returns bounded, sanitized provider and application
-telemetry counters on the documented provider seams, with the most recent 50
-provider events. Provider failures are counted at the provider seams and
+`GET /api/data/telemetry` returns bounded, sanitized provider, board, and
+application telemetry counters on the documented seams, with the most recent
+50 provider and board events. Board aggregates are kept in a separate bounded
+scalar collection and do not increment provider event or provider-failure
+counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries
 credentials, URLs, bodies, or exception text. Example shape:
 
 ```json
 {
   "provider_events_total": 1,
+  "board_events_total": 0,
+  "board_buffered_events": 0,
+  "board_buffered_capacity": 5000,
   "provider_failures": { "nba_stats": { "timeout": 1 } },
   "application_failures": { "internal_error": 2 },
   "cache": { "nba_stats": { "hit": 3, "miss": 1 } },
@@ -352,6 +357,26 @@ credentials, URLs, bodies, or exception text. Example shape:
       "cache_status": "miss",
       "request_id": "a1b2…",
       "status_code": 200
+    }
+  ],
+  "recent_board_events": [
+    {
+      "started_at": "2026-08-09T20:00:00+00:00",
+      "duration_ms": 12.4,
+      "request_id": "a1b2…",
+      "outcome_complete": 2,
+      "outcome_partial": 1,
+      "outcome_failed": 0,
+      "failure_timeout": 0,
+      "failure_deadline_exceeded": 0,
+      "failure_rate_limited": 0,
+      "failure_access_denied": 0,
+      "failure_upstream_error": 0,
+      "failure_malformed_response": 0,
+      "fetched_count": 20,
+      "eligible_count": 12,
+      "normalized_count": 12,
+      "skipped_count": 8
     }
   ]
 }

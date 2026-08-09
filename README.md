@@ -76,6 +76,9 @@ the most important variables:
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
+| `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
+| `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
+| `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |

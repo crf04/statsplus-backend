@@ -71,7 +71,9 @@ class UnderdogAdapter:
 
     name = "underdog"
     BASE_URL = "https://api.underdogfantasy.com/beta/v3/over_under_lines"
-    DEFAULT_TIMEOUT = (10.0, 30.0)
+    # The central DFS board caps each safe GET at three seconds to connect
+    # and eight seconds to read (or the remaining board budget).
+    DEFAULT_TIMEOUT = (3.0, 8.0)
 
     def __init__(
         self,
@@ -522,7 +524,9 @@ class UnderdogAdapter:
     @staticmethod
     def _invalid_response(detail: Any) -> ProviderUnavailableError:
         return ProviderUnavailableError(
-            "Underdog returned an invalid response.", detail=detail
+            "Underdog returned an invalid response.",
+            detail=detail,
+            provider_reason="malformed_response",
         )
 
 

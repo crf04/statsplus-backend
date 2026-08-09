@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
 from ..utils.auth import require_admin
-from ..utils.telemetry import snapshot_metrics, snapshot_recent_events
+from ..utils.telemetry import snapshot_metrics, snapshot_recent_board_events, snapshot_recent_events
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -64,4 +64,5 @@ def provider_telemetry():
     """
     body = snapshot_metrics()
     body["recent_provider_events"] = snapshot_recent_events(limit=50)
+    body["recent_board_events"] = snapshot_recent_board_events(limit=50)
     return jsonify(body)

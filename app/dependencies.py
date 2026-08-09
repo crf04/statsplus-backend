@@ -9,6 +9,7 @@ from flask import current_app
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings
+from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,8 @@ class ApplicationDependencies:
     redis_client: Any
     nba_stats_provider: Any
     pbp_stats_provider: Any
+    dfs_providers: dict[str, Any]
+    dfs_board_service: Any
     game_service: Any
     player_service: Any
     team_service: Any
@@ -43,8 +46,12 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.job_service import build_data_refresh_job_service
     from app.services.provider_health_service import ProviderHealthService
     from app.services.athlete_catalog_service import AthleteCatalogService
+    from app.services.dfs_board import DFSBoardService
     from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
+    from app.providers.dabble import DabbleAdapter
+    from app.providers.prizepicks import PrizePicksAdapter
+    from app.providers.underdog import UnderdogAdapter
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
 
@@ -52,6 +59,32 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
+
+    dfs_providers: dict[str, Any] = {}
+    dfs_timeout = (
+        settings.providers.dfs_provider_connect_timeout_seconds,
+        settings.providers.dfs_provider_read_timeout_seconds,
+    )
+    for provider_name in settings.providers.dfs_enabled_providers:
+        if provider_name == DFS_DABBLE:
+            dfs_providers[provider_name] = DabbleAdapter(
+                connect_timeout_seconds=dfs_timeout[0],
+                read_timeout_seconds=dfs_timeout[1],
+                detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
+            )
+        elif provider_name == DFS_PRIZEPICKS:
+            dfs_providers[provider_name] = PrizePicksAdapter(timeout=dfs_timeout)
+        elif provider_name == DFS_UNDERDOG:
+            dfs_providers[provider_name] = UnderdogAdapter(timeout=dfs_timeout)
+        else:  # settings validation normally makes this unreachable
+            raise ValueError(f"unsupported DFS provider {provider_name}")
+
+    dfs_board_service = DFSBoardService(
+        provider_registry=dfs_providers,
+        max_concurrency=3,
+        deadline_seconds=settings.providers.dfs_board_deadline_seconds,
+        settings=settings,
+    )
 
     game_service = GameService(
         engine,
@@ -103,6 +136,8 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         redis_client=redis_client,
         nba_stats_provider=nba_stats_provider,
         pbp_stats_provider=pbp_stats_provider,
+        dfs_providers=dfs_providers,
+        dfs_board_service=dfs_board_service,
         game_service=game_service,
         player_service=player_service,
         team_service=team_service,

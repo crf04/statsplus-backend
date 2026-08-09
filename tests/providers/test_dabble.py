@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -15,14 +14,16 @@ import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
-from app.providers.dabble import DabbleAdapter
+from app.providers.dabble import DabbleAdapter, _SerializedSession
 from app.providers.dfs import (
     CoverageEvidence,
     NBAMarketQuery,
     RetrievalContext,
     SnapshotStatus,
+    DeadlineExceededError,
 )
 from app.utils import telemetry
+from app.services.dfs_board import DFSBoardService, ProviderFailureReason
 
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
@@ -521,6 +522,18 @@ def test_malformed_discovery_with_usable_market_is_partial_without_failure():
     ]
     assert telemetry.snapshot_metrics()["provider_failures"] == {}
 
+    board_session = Mock()
+    board_session.get.side_effect = [
+        FakeResponse(competitions),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+    board = DFSBoardService(
+        provider_registry={"dabble": DabbleAdapter(session=board_session)}
+    ).get_board(NBAMarketQuery(), _context())
+    assert board.provider_outcomes[0].reason is ProviderFailureReason.MALFORMED_RESPONSE
+    assert telemetry.get_recorded_board_events()[-1]["failure_malformed_response"] == 1
+
 
 def test_malformed_prop_is_skipped_and_makes_nonempty_snapshot_partial():
     detail = _payload("fixture_details.valid.json")
@@ -880,52 +893,22 @@ def test_conflicting_repeated_market_identity_is_malformed_and_partial():
     assert snapshot.coverage.skipped_count == 1
 
 
-def test_blocking_normalizer_cannot_extend_dabble_deadline(monkeypatch):
+def test_serialized_lease_uses_injected_monotonic_domain() -> None:
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = FakeClock()
     session = Mock()
-    session.get.side_effect = [
-        FakeResponse(_payload("competitions.valid.json")),
-        FakeResponse(_payload("fixtures.valid.json")),
-        FakeResponse(_payload("fixture_details.valid.json")),
-    ]
-    started = threading.Event()
-    release = threading.Event()
+    serialized = _SerializedSession(session, monotonic=clock)
+    lease = serialized.acquire_request(deadline=1.0)
+    clock.value = 2.0
 
-    def blocking_normalizer(*args, **kwargs):
-        del args, kwargs
-        started.set()
-        release.wait()
-        raise AssertionError("normalizer must not finish after the deadline")
-
-    adapter = DabbleAdapter(session=session)
-    monkeypatch.setattr(adapter, "_normalize_prop", blocking_normalizer)
-    deadline = datetime.now(timezone.utc).timestamp() + 0.05
-    deadline_at = datetime.fromtimestamp(deadline, tz=timezone.utc)
-    started_at = time.monotonic()
-
-    try:
-        with pytest.raises(ProviderUnavailableError):
-            adapter.get_snapshot(
-                NBAMarketQuery(),
-                RetrievalContext(deadline=deadline_at),
-            )
-    finally:
-        release.set()
-
-    assert started.is_set()
-    assert time.monotonic() - started_at < 0.5
-
-    events = telemetry.get_recorded_provider_events()
-    assert [(event["operation"], event["outcome"]) for event in events] == [
-        ("competition_lookup", telemetry.OUTCOME_SUCCESS),
-        ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
-        ("fixture_details", telemetry.OUTCOME_SUCCESS),
-        ("snapshot_normalization", telemetry.OUTCOME_TIMEOUT),
-    ]
-    metrics = telemetry.snapshot_metrics()
-    assert metrics["provider_failures"] == {
-        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_TIMEOUT: 1}
-    }
-    assert metrics["application_failures"] == {}
+    with pytest.raises(DeadlineExceededError):
+        lease.get("https://example.test/late")
+    session.get.assert_not_called()
 
 
 def test_invalid_json_and_http_errors_are_provider_unavailable():

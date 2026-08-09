@@ -24,7 +24,6 @@ from typing import Any, NoReturn
 from urllib.parse import quote
 
 import requests
-from urllib3.util.retry import Retry
 
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
@@ -64,7 +63,6 @@ from app.utils.telemetry import (
     CACHE_DISABLED,
     PROVIDER_DABBLE,
     ProviderResponseError,
-    increment_retry_count,
     provider_normalization_call,
 )
 
@@ -113,43 +111,13 @@ def canonical_stat_components(stats: Sequence[str]) -> list[str]:
     return sorted(normalized, key=sort_key)
 
 
-class _DabbleRetry(Retry):
-    """Count safe HTTP retries in the provider telemetry event."""
-
-    def increment(
-        self,
-        method=None,
-        url=None,
-        response=None,
-        error=None,
-        _pool=None,
-        _stacktrace=None,
-    ):
-        next_retry = super().increment(
-            method, url, response, error, _pool, _stacktrace
-        )
-        increment_retry_count()
-        logger.warning(
-            "Dabble retry after status=%s",
-            getattr(response, "status", "error"),
-        )
-        return next_retry
-
-
 def _build_session() -> requests.Session:
     session = requests.Session()
-    retry = _DabbleRetry(
-        total=1,
-        backoff_factor=0.1,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET", "HEAD", "OPTIONS"),
-    )
     session.mount(
         "https://",
         requests.adapters.HTTPAdapter(
             pool_connections=5,
             pool_maxsize=10,
-            max_retries=retry,
         ),
     )
     session.headers.update(DabbleAdapter.DEFAULT_HEADERS)
@@ -165,9 +133,15 @@ class _SerializedSession:
     doubles can safely be injected as one session.
     """
 
-    def __init__(self, session: requests.Session | Any) -> None:
+    def __init__(
+        self,
+        session: requests.Session | Any,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._session = session
         self._get_lock = threading.Lock()
+        self._monotonic = monotonic
 
     def acquire_request(self, deadline: float) -> "_SerializedSessionLease":
         """Reserve serialized access until the transport request completes.
@@ -178,10 +152,10 @@ class _SerializedSession:
         they reserve a transport slot or begin upstream work.
         """
 
-        remaining = deadline - time.monotonic()
+        remaining = deadline - self._monotonic()
         if remaining <= 0 or not self._get_lock.acquire(timeout=remaining):
             raise DeadlineExceededError("provider retrieval deadline exceeded")
-        if time.monotonic() >= deadline:
+        if self._monotonic() >= deadline:
             self._get_lock.release()
             raise DeadlineExceededError("provider retrieval deadline exceeded")
         return _SerializedSessionLease(self, deadline)
@@ -202,7 +176,7 @@ class _SerializedSessionLease:
     def get(self, url: str, **kwargs: Any) -> Any:
         if self._released:
             raise RuntimeError("serialized session lease is released")
-        if time.monotonic() >= self._deadline:
+        if self._owner._monotonic() >= self._deadline:
             self.release()
             raise DeadlineExceededError("provider retrieval deadline exceeded")
         try:
@@ -417,14 +391,21 @@ class DabbleAdapter:
         detail_concurrency: int = DETAIL_CONCURRENCY,
         connect_timeout_seconds: float = CONNECT_TIMEOUT_SECONDS,
         read_timeout_seconds: float = READ_TIMEOUT_SECONDS,
+        timeout: tuple[float, float] | None = None,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
-        if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
-            raise ValueError("provider timeouts must be positive")
         if session is not None and session_factory is not None:
             raise ValueError("provide session or session_factory, not both")
+        if timeout is not None:
+            if len(timeout) != 2:
+                raise ValueError("timeout must contain connect and read seconds")
+            connect_timeout_seconds, read_timeout_seconds = timeout
+        if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
+            raise ValueError("provider timeouts must be positive")
+        self.monotonic = monotonic or time.monotonic
         if session_factory is not None:
             self.session = _ThreadLocalSession(session_factory)
             self._request_session = self.session
@@ -432,11 +413,13 @@ class DabbleAdapter:
             # Keep the injected object visible for existing test seams while
             # routing actual calls through its concurrency-safe adapter.
             self.session = session
-            self._request_session = _SerializedSession(session)
+            self._request_session = _SerializedSession(session, monotonic=self.monotonic)
         else:
             self.session = _ThreadLocalSession(_build_session)
             self._request_session = self.session
-        self.detail_concurrency = detail_concurrency
+        # The board contract caps Dabble fixture-detail fan-out at three even
+        # when a caller supplies a larger experimental value.
+        self.detail_concurrency = min(detail_concurrency, self.DETAIL_CONCURRENCY)
         self.connect_timeout_seconds = float(connect_timeout_seconds)
         self.read_timeout_seconds = float(read_timeout_seconds)
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -1701,6 +1684,7 @@ class DabbleAdapter:
             operation=operation,
             parse=parser,
             error_policy=self._transport_error_policy,
+            monotonic=self.monotonic,
         )
 
     @staticmethod
@@ -1750,6 +1734,7 @@ class DabbleAdapter:
         return ProviderUnavailableError(
             "Dabble snapshot is currently unavailable.",
             detail=f"{status.value}: {type(diagnostic_error).__name__}",
+            provider_reason=status.value,
         )
 
     def _now_utc(self) -> datetime:

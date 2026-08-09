@@ -13,7 +13,7 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `ProviderSettings` | NBA Stats timeout, PBP timeouts, retries, and pool sizes | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE` |
+| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, and Dabble fan-out bound | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY` |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -29,6 +29,20 @@ and `LOG_LEVEL`.
 is not a cross-process lock, so the maximum simultaneous calls the whole
 application can make is
 `workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
+
+The internal DFS collector receives an explicit injected provider registry. In
+development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
+adapters. Tests and local experiments may explicitly configure the recorded
+provider adapters (`dabble`, `prizepicks`, and `underdog`). Production must
+provide a non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list.
+
+The board deadline defaults to 15 seconds. Each DFS GET defaults to a 3-second
+connect cap and an 8-second read cap, both reduced to the remaining absolute
+budget. A safe GET receives at most one retry for a timeout or HTTP 429, 500,
+502, 503, or 504; access-denied, ordinary 4xx, and malformed responses
+are not retried. Dabble fixture-detail concurrency defaults to 3. These
+settings apply only to the internal collector and do not change NBA Stats or
+PBP Stats timeout/health signals.
 
 ## Defaults and validation
 
