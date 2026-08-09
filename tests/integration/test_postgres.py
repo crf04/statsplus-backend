@@ -683,3 +683,104 @@ def test_a_delayed_observation_cannot_undo_a_clearance_on_postgres(mapping_engin
         item.decision_state
         for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "rejected", "rejection_cleared", "auto"]
+
+
+def test_a_repeated_observation_fences_a_delayed_read_on_postgres(mapping_engine):
+    """The observation clock has to round-trip through a real timestamptz."""
+    from sqlalchemy import and_, select
+
+    from app.models.athlete_mapping import AthleteMappingLock
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    observed_before = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
+    observed_between = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    observed_after = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+    reused_rows = [
+        {
+            "season": "2024-25",
+            "player_id": 23,
+            "display_name": "LeBron James",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+    ]
+    repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
+
+    assert repository.record_resolution(
+        _mapping_resolution(observed_at=observed_before)
+    ).persisted is True
+    # The same evidence again: one durable decision, a newer observation clock.
+    assert repository.record_resolution(
+        _mapping_resolution(observed_at=observed_after)
+    ).persisted is False
+    with mapping_engine.connect() as connection:
+        stored = connection.execute(
+            select(AthleteMappingLock.last_observed_at).where(
+                and_(
+                    AthleteMappingLock.provider == "prizepicks",
+                    AthleteMappingLock.provider_athlete_id == "pp-15",
+                )
+            )
+        ).scalar()
+    assert stored == observed_after
+
+    delayed = repository.record_resolution(
+        _mapping_resolution(
+            name="LeBron James", rows=reused_rows, observed_at=observed_between
+        )
+    )
+
+    assert delayed.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    assert repository.list_conflicts() == []
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto"]
+
+
+def test_an_inactive_only_observation_withdraws_the_mapping_on_postgres(mapping_engine):
+    """The withdrawn state has to satisfy the Postgres check constraints."""
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    inactive_rows = [
+        {
+            "season": "2024-25",
+            "player_id": 15,
+            "display_name": "Nikola Jokic",
+            "roster_status": "inactive",
+            "is_active": False,
+            "is_active_for_season": False,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+    ]
+    repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
+    assert repository.record_resolution(_mapping_resolution()).state == "auto"
+
+    withdrawn = repository.record_resolution(_mapping_resolution(rows=inactive_rows))
+
+    assert withdrawn.state == "inactive_only"
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "inactive_only"
+    assert mapping.canonical_player_id == 15
+    assert [
+        item.decision_state for item in repository.list_unresolved(provider="prizepicks")
+    ] == ["inactive_only"]
+
+    assert repository.record_resolution(_mapping_resolution()).state == "auto"
+
+    remapped = repository.get_active_mapping("prizepicks", "pp-15")
+    assert remapped is not None
+    assert remapped.mapping_state == "auto"
+    assert remapped.conflict_canonical_player_id is None
+    assert repository.list_unresolved(provider="prizepicks") == []

@@ -462,7 +462,29 @@ class AthleteResolver:
         return False
 
     @staticmethod
+    def _asserts_automatic_claim(existing: Mapping[str, Any] | None) -> bool:
+        """Report whether a mapping row still asserts an automatic claim.
+
+        An active automatic mapping does.  So does one withdrawn from
+        comparisons because the catalog only lists its athlete as inactive for
+        the requested season: that withdrawal suspends the claim rather than
+        retracting it, so the identity still belongs to the canonical athlete it
+        was mapped to, and a later observation naming a different athlete under
+        the same provider ID is still a conflict rather than a silent remap.
+        """
+
+        if not existing:
+            return False
+        state = str(existing.get("mapping_state", ""))
+        if state == MappingResolutionState.INACTIVE_ONLY.value:
+            return True
+        return state == MappingResolutionState.AUTO.value and bool(
+            existing.get("is_active", False)
+        )
+
+    @classmethod
     def _existing_auto_conflicts(
+        cls,
         existing: Mapping[str, Any] | None,
         evidence: AthleteEvidence,
         candidate: CanonicalAthlete,
@@ -475,9 +497,7 @@ class AthleteResolver:
         between seasons is not read as conflicting evidence.
         """
 
-        if not existing or not bool(existing.get("is_active", False)):
-            return False
-        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
+        if not cls._asserts_automatic_claim(existing):
             return False
         previous_player_id = existing.get("canonical_player_id")
         if previous_player_id is not None:
@@ -551,8 +571,9 @@ class AthleteResolver:
             )
         return False
 
-    @staticmethod
+    @classmethod
     def _retained_identity(
+        cls,
         existing: Mapping[str, Any] | None,
         rows: Sequence[Mapping[str, Any]],
         season: str,
@@ -567,9 +588,7 @@ class AthleteResolver:
         from the catalog row so the current official name is retained.
         """
 
-        if not existing or not bool(existing.get("is_active", False)):
-            return None
-        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
+        if not cls._asserts_automatic_claim(existing):
             return None
         player_id = existing.get("canonical_player_id")
         if player_id is None:
@@ -581,14 +600,13 @@ class AthleteResolver:
             return athlete if athlete.is_active_for_season else None
         return None
 
-    @staticmethod
+    @classmethod
     def _existing_name_conflicts(
+        cls,
         existing: Mapping[str, Any] | None,
         evidence: AthleteEvidence,
     ) -> bool:
-        if not existing or not bool(existing.get("is_active", False)):
-            return False
-        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
+        if not cls._asserts_automatic_claim(existing):
             return False
         previous_name = existing.get("provider_name")
         return bool(

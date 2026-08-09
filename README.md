@@ -176,7 +176,11 @@ Automatic decisions are idempotent and retain provider name/team evidence.
 ambiguous, inactive-only, unmatched, or team-conflict, together with the
 canonical candidates that observation could not choose between, so unresolved
 evidence is visible instead of silently dropped. A later automatic or operator
-decision removes the identity from that list. Because a mapping conflict is
+decision removes the identity from that list. An identity whose canonical
+athlete the catalog no longer lists as active for the requested season is also
+withdrawn from board comparisons: its mapping becomes `inactive_only` and
+inactive while keeping the canonical player it was mapped to, and a later
+observation of the same athlete, once active again, maps it back. Because a mapping conflict is
 inactive and is not one of those observations, `list` reports it in a separate
 `conflicts` review queue that names the provider identity and its evidence, the
 approved or established canonical side, the conflicting candidate, and the

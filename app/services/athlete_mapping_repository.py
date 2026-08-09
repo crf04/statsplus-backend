@@ -627,6 +627,7 @@ class AthleteMappingRepository:
             stale = self._stale_observation(connection, provider, provider_id, resolution)
             if stale is not None:
                 return stale
+            self._advance_observation_clock(connection, provider, provider_id, resolution)
 
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if existing is not None:
@@ -638,14 +639,13 @@ class AthleteMappingRepository:
                         mapping=self._mapping_record(existing),
                     )
                 previous_id = existing["canonical_player_id"]
-                # Only an *active automatic* mapping asserts a canonical
-                # identity this observation can disagree with.  A row left
-                # behind by a cleared rejection is a decided-and-undecided
-                # history, not a live claim, so the canonical ID it still
-                # carries must not queue a conflict against fresh evidence.
+                # Only a mapping that still asserts an automatic canonical
+                # claim can disagree with this observation.  A row left behind
+                # by a cleared rejection is a decided-and-undecided history,
+                # not a live claim, so the canonical ID it still carries must
+                # not queue a conflict against fresh evidence.
                 if (
-                    bool(existing["is_active"])
-                    and state == MappingResolutionState.AUTO.value
+                    AthleteResolver._asserts_automatic_claim(existing)
                     and previous_id is not None
                     and int(previous_id) != resolution.canonical_player_id
                 ):
@@ -726,10 +726,13 @@ class AthleteMappingRepository:
 
         No current mapping row is written because no canonical identity was
         established; the idempotency key keeps repeated board reads to one
-        durable observation per distinct evidence shape.  Team-conflict
-        evidence is the exception: an identity that is already mapped
-        automatically cannot stay mapped while its team evidence disagrees, so
-        the mapping is promoted to a conflict for an operator to review.
+        durable observation per distinct evidence shape.  Two states do change
+        an existing automatic mapping, because an identity cannot stay mapped
+        while the board says it should not be compared: team-conflict evidence
+        promotes it to a conflict for an operator to review, and inactive-only
+        evidence withdraws it from comparisons.  The candidates and evidence
+        stay on the appended observation either way, so the operator's
+        unresolved queue keeps everything the decision was made on.
         """
 
         provider, provider_id = self._resolution_key(resolution)
@@ -741,6 +744,9 @@ class AthleteMappingRepository:
             stale = self._stale_observation(connection, provider, provider_id, resolution)
             if stale is not None:
                 return stale
+            self._advance_observation_clock(connection, provider, provider_id, resolution)
+            if resolution.state is MappingResolutionState.INACTIVE_ONLY:
+                self._withdraw_inactive_mapping(connection, provider, provider_id, now=now)
             if resolution.state is MappingResolutionState.TEAM_CONFLICT:
                 # The active mapping has to be read inside this serialized
                 # transaction.  A lookup taken before the lock can miss an
@@ -761,6 +767,52 @@ class AthleteMappingRepository:
                 decision is not None,
                 decision=self._decision_result(connection, decision),
             )
+
+    def _withdraw_inactive_mapping(
+        self,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+        *,
+        now: datetime,
+    ) -> None:
+        """Withdraw an automatic mapping the catalog no longer lists as active.
+
+        The resolver found the athlete only as inactive for the requested
+        season, so the mapping must not reach a board comparison.  The row is
+        kept -- it is still the durable record of which canonical athlete this
+        provider identity was mapped to -- but it is deactivated, and its state
+        records why, so a later active observation can simply map it again.
+
+        Only an automatic mapping is withdrawn.  An operator's decision is
+        governed elsewhere and catalog inactivity alone is not the conflict
+        that may unseat it.  A row already withdrawn is left untouched, so a
+        repeated observation writes nothing.
+        """
+
+        existing = self._select_mapping(connection, provider, provider_id, lock=True)
+        if existing is None or not bool(existing["is_active"]):
+            return
+        if str(existing["mapping_state"]) != MappingResolutionState.AUTO.value:
+            return
+        connection.execute(
+            update(ProviderAthleteMapping.__table__)
+            .where(
+                and_(
+                    ProviderAthleteMapping.provider == provider,
+                    ProviderAthleteMapping.provider_athlete_id == provider_id,
+                )
+            )
+            .values(
+                mapping_state=MappingResolutionState.INACTIVE_ONLY.value,
+                is_active=False,
+                # A withdrawal is not a disagreement between two canonical
+                # athletes, so the row names no conflict for an operator.
+                conflict_canonical_player_id=None,
+                conflict_canonical_name=None,
+                last_seen_at=now,
+            )
+        )
 
     def record_resolution(
         self,
@@ -796,6 +848,7 @@ class AthleteMappingRepository:
             stale = self._stale_observation(connection, provider, provider_id, resolution)
             if stale is not None:
                 return stale
+            self._advance_observation_clock(connection, provider, provider_id, resolution)
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if self._is_repeated_conflict(existing, resolution):
                 # The resolver read the conflict this row already records, so
@@ -1259,12 +1312,12 @@ class AthleteMappingRepository:
 
         The read is therefore ordered by when the provider was observed
         against the newest governing instant for the identity -- an operator
-        decision's ``created_at``, and the ``observed_at`` of every durable
-        board observation.  Both are UTC instants of the event itself, never a
-        persistence time.  An observation contemporaneous with the governing
-        instant is not from before it, so only a strictly earlier read is
-        fenced and replaying the same read stays idempotent.  A caller that
-        reports no observation instant cannot be ordered and is left alone.
+        decision's ``created_at``, and the identity's observation clock.  Both
+        are UTC instants of the event itself, never a persistence time.  An
+        observation contemporaneous with the governing instant is not from
+        before it, so only a strictly earlier read is fenced and replaying the
+        same read stays idempotent.  A caller that reports no observation
+        instant cannot be ordered and is left alone.
         """
 
         observed_at = resolution.observed_at
@@ -1281,37 +1334,84 @@ class AthleteMappingRepository:
         )
         return MappingPersistenceResult(state, False, mapping=cls._mapping_record(mapping))
 
-    @staticmethod
+    @classmethod
     def _governing_observation_instant(
+        cls,
         connection: Connection,
         provider: str,
         provider_id: str,
     ) -> datetime | None:
         """Return the newest instant this identity was decided or observed."""
 
-        identity = and_(
-            AthleteMappingDecision.provider == provider,
-            AthleteMappingDecision.provider_athlete_id == provider_id,
-        )
         decided_at = connection.execute(
             select(AthleteMappingDecision.created_at)
             .where(
                 and_(
-                    identity,
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
                     AthleteMappingDecision.decision_state.in_(_OPERATOR_DECISION_STATES),
                 )
             )
             .order_by(AthleteMappingDecision.created_at.desc())
             .limit(1)
         ).scalar()
-        observed_at = connection.execute(
-            select(AthleteMappingDecision.observed_at)
-            .where(and_(identity, AthleteMappingDecision.observed_at.isnot(None)))
-            .order_by(AthleteMappingDecision.observed_at.desc())
-            .limit(1)
-        ).scalar()
+        observed_at = cls._observation_clock(connection, provider, provider_id)
         instants = [_utc(value) for value in (decided_at, observed_at) if value is not None]
         return max(instants) if instants else None
+
+    @staticmethod
+    def _observation_clock(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> datetime | None:
+        """Read the durable high-water mark of this identity's provider reads."""
+
+        return connection.execute(
+            select(AthleteMappingLock.last_observed_at).where(
+                and_(
+                    AthleteMappingLock.provider == provider,
+                    AthleteMappingLock.provider_athlete_id == provider_id,
+                )
+            )
+        ).scalar()
+
+    @classmethod
+    def _advance_observation_clock(
+        cls,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+        resolution: AthleteResolution,
+    ) -> None:
+        """Raise the identity's observation clock to this accepted read.
+
+        The clock is kept on the identity's lock row rather than derived from
+        the decision log, because the log suppresses a repeated observation on
+        purpose: a second, equivalent read appends nothing and would otherwise
+        leave the mark at the first read's instant, so a read taken between the
+        two would still look like news.  The lock row is already selected for
+        update in this transaction, so the comparison cannot straddle a
+        concurrent write, and the mark only ever moves forward.
+        """
+
+        observed_at = resolution.observed_at
+        if observed_at is None:
+            return
+        observed_at = _utc(observed_at)
+        current = cls._observation_clock(connection, provider, provider_id)
+        if current is not None and _utc(current) >= observed_at:
+            return
+        connection.execute(
+            update(AthleteMappingLock.__table__)
+            .where(
+                and_(
+                    AthleteMappingLock.provider == provider,
+                    AthleteMappingLock.provider_athlete_id == provider_id,
+                )
+            )
+            .values(last_observed_at=observed_at)
+        )
 
     @classmethod
     def _conflict_still_applies(

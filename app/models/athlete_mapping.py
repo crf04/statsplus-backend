@@ -24,8 +24,12 @@ from . import Base
 
 
 #: Closed set of mapping states one row may hold as current state.
+#: ``inactive_only`` is a decision state that also became current state: the
+#: catalog lists the mapped athlete as inactive for the requested season, so
+#: the claim is withdrawn from comparisons without being retracted.
 MAPPING_STATES = (
     "auto",
+    "inactive_only",
     "manual_approved",
     "manual_override",
     "mapping_conflict",
@@ -39,7 +43,6 @@ MAPPING_DECISION_STATES = frozenset(
     MAPPING_STATES
     + (
         "ambiguous",
-        "inactive_only",
         "team_conflict",
         "unmatched",
         "missing_identity",
@@ -92,7 +95,8 @@ class ProviderAthleteMapping(Base):
         CheckConstraint(
             "(is_active = true AND mapping_state IN "
             "('auto', 'manual_approved', 'manual_override')) OR "
-            "(is_active = false AND mapping_state IN ('mapping_conflict', 'rejected'))",
+            "(is_active = false AND mapping_state IN "
+            "('inactive_only', 'mapping_conflict', 'rejected'))",
             name="ck_provider_mapping_active_state",
         ),
         # The conflicting canonical athlete is evidence for one state only.  A
@@ -226,12 +230,20 @@ class AthleteMappingRejection(Base):
 
 
 class AthleteMappingLock(Base):
-    """Stable row used to serialize mutations for an identity."""
+    """Stable row used to serialize mutations for an identity.
+
+    It also carries that identity's observation clock: the newest instant the
+    provider was read for it.  The mark cannot be derived from the decision log
+    because the log deliberately suppresses a repeated observation, which would
+    lose the instant the repeat was taken at.  The row is already locked by
+    every mutation, so raising the mark is part of the same transaction.
+    """
 
     __tablename__ = "athlete_mapping_locks"
 
     provider = Column(String(32), primary_key=True)
     provider_athlete_id = Column(String(128), primary_key=True)
+    last_observed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 __all__ = [
