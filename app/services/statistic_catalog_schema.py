@@ -31,6 +31,14 @@ def _construct_unique_mapping(
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as error:
+            # A sequence or mapping key is a document defect, not a bug here:
+            # keep it inside the YAML error vocabulary the loader converts.
+            raise yaml.YAMLError(
+                f"unhashable definition key at {key_node.start_mark}"
+            ) from error
         if key in mapping:
             raise yaml.YAMLError(f"duplicate definition key {key!r}")
         mapping[key] = loader.construct_object(value_node, deep=deep)

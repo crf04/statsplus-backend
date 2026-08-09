@@ -28,6 +28,7 @@ from app.services.statistic_catalog import (
     StatisticCatalogError,
     StatisticResolver,
 )
+from app.services.statistic_catalog_schema import StatisticDefinitionError, load_definition
 
 
 def test_default_catalog_is_immutable_and_contains_initial_full_game_statistics() -> None:
@@ -267,6 +268,25 @@ def test_catalog_file_load_failure_is_explicit(tmp_path) -> None:
 
     with pytest.raises(StatisticCatalogError, match="could not be loaded"):
         StatisticCatalog.load(definition_path)
+
+
+def test_loader_reports_unhashable_mapping_keys_as_definition_errors(tmp_path) -> None:
+    definition_path = tmp_path / "unhashable-key-statistics.yaml"
+    definition_path.write_text("schema_version: 1\n? [points, assists]\n: value\n", encoding="utf-8")
+
+    with pytest.raises(StatisticDefinitionError, match="could not be loaded"):
+        load_definition(definition_path)
+
+    with pytest.raises(StatisticCatalogError, match="could not be loaded"):
+        StatisticCatalog.load(definition_path)
+
+
+def test_loader_still_rejects_duplicate_definition_keys(tmp_path) -> None:
+    definition_path = tmp_path / "duplicate-key-statistics.yaml"
+    definition_path.write_text("schema_version: 1\nstatistics: []\nstatistics: []\n", encoding="utf-8")
+
+    with pytest.raises(StatisticDefinitionError, match="could not be loaded"):
+        load_definition(definition_path)
 
 
 @pytest.mark.parametrize("schema_version", [2, 999, 0])
