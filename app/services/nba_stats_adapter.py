@@ -987,15 +987,6 @@ class NBAStatsAdapter:
                 "The NBA Stats provider is unavailable.", detail=error
             ) from error
 
-    # Public aliases keep the provider seam discoverable for service callers
-    # while retaining one telemetry operation and one implementation.
-    get_whole_season_schedule = fetch_whole_season_schedule
-    fetch_schedule = fetch_whole_season_schedule
-    get_schedule = fetch_whole_season_schedule
-    fetch_season_schedule = fetch_whole_season_schedule
-    get_season_schedule = fetch_whole_season_schedule
-
-
 __all__ = [
     "GAME_LOG_REQUIRED_COLUMNS",
     "SCHEDULE_REQUIRED_COLUMNS",

@@ -1,17 +1,14 @@
 """Application-owned canonical NBA event catalog tables.
 
 The event catalog is deliberately separate from bundled NBA demo tables and
-from any athlete catalog.  ``EventCatalogEntry`` stores the provider's stable
-NBA game identity and the facts needed by later event mapping work.  Audit
-fields are owned by the catalog and are never overwritten by a schedule
-refresh, so a replacement schedule cannot silently erase a mapping-needed
-review.
+from any athlete catalog. ``EventCatalogEntry`` stores provider-owned facts
+keyed by the stable NBA game identity. Mapping and audit state belongs to the
+event-mapping work that consumes this catalog.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, DateTime, Index, Integer, String, Text
-from sqlalchemy.orm import synonym
+from sqlalchemy import Column, DateTime, Index, Integer, String, Text
 
 from . import Base
 
@@ -38,12 +35,6 @@ class EventCatalogEntry(Base):
     postponement_evidence = Column(Text, nullable=True)
     classification = Column(String(128), nullable=False)
 
-    # These columns are local audit state.  A schedule refresh may update the
-    # provider-owned facts above, but never these fields.
-    mapping_needed = Column(Boolean, nullable=False, default=False, server_default="0")
-    audit_status = Column(String(32), nullable=False, default="unreviewed")
-    audit_note = Column(Text, nullable=True)
-
     first_seen_at = Column(DateTime(timezone=True), nullable=False)
     last_seen_at = Column(DateTime(timezone=True), nullable=False)
 
@@ -51,33 +42,6 @@ class EventCatalogEntry(Base):
         Index("ix_event_catalog_season_scheduled_at", "season", "scheduled_at"),
     )
 
-    game_id = synonym("nba_game_id")
-
-    @property
-    def event_classification(self) -> str:
-        """Compatibility spelling for the canonical classification."""
-
-        return self.classification
-
-    @property
-    def scheduled_time_utc(self):
-        """Compatibility spelling for the UTC schedule timestamp."""
-
-        return self.scheduled_at
-
-    @property
-    def game_status_text(self) -> str:
-        """Compatibility spelling for the provider status text."""
-
-        return self.status_text
-
-    @property
-    def home_team_abbreviation(self) -> str:
-        return self.home_team_tricode
-
-    @property
-    def away_team_abbreviation(self) -> str:
-        return self.away_team_tricode
 
 
 class EventCatalogRefresh(Base):
@@ -92,14 +56,5 @@ class EventCatalogRefresh(Base):
     failure_summary = Column(Text, nullable=True)
     event_count = Column(Integer, nullable=False, default=0, server_default="0")
 
-    @property
-    def last_refresh_at(self):
-        """Compatibility spelling for the last successful publication."""
-
-        return self.last_success_at
-
-    @property
-    def last_error(self):
-        return self.failure_summary
 
 __all__ = ["EventCatalogEntry", "EventCatalogRefresh"]

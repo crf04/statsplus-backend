@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
+from sqlalchemy.exc import OperationalError
 
 from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
-from app.models.event_catalog import EventCatalogEntry
 from app.services.event_catalog_service import EventCatalogService
 
 
@@ -69,30 +69,19 @@ def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
     assert postponed["classification"] == "Regular Season"
 
 
-def test_refresh_upserts_by_game_id_and_retains_audit_rows(tmp_path):
+def test_refresh_upserts_by_game_id_and_retains_omitted_rows(tmp_path):
     engine = _engine(tmp_path)
     now = datetime(2025, 10, 20, tzinfo=timezone.utc)
     provider = FakeScheduleProvider()
     service = EventCatalogService(engine, provider, clock=lambda: now)
     service.refresh("2025-26")
 
-    with engine.begin() as connection:
-        connection.execute(
-            EventCatalogEntry.__table__.update()
-            .where(EventCatalogEntry.nba_game_id == "0022500002")
-            .values(
-                mapping_needed=True,
-                audit_status="needs_review",
-                audit_note="keep",
-                classification="mapping_needed",
-            )
-        )
-
     updated = _frame()
     updated.loc[updated["gameId"] == "0022500001", "gameDateTimeUTC"] = (
         "2025-10-23T01:00:00Z"
     )
     updated.loc[updated["gameId"] == "0022500001", "gameStatusText"] = "8:00 pm ET"
+    updated.loc[updated["gameId"] == "0022500001", "gameLabel"] = "Playoffs"
     updated = updated[updated["gameId"] != "0022500002"]
     provider.frame = updated
     service.refresh("2025-26")
@@ -102,10 +91,8 @@ def test_refresh_upserts_by_game_id_and_retains_audit_rows(tmp_path):
     changed = next(row for row in rows if row["nba_game_id"] == "0022500001")
     assert changed["scheduled_at"] == "2025-10-23T01:00:00+00:00"
     retained = next(row for row in rows if row["nba_game_id"] == "0022500002")
-    assert retained["mapping_needed"] is True
-    assert retained["audit_status"] == "needs_review"
-    assert retained["audit_note"] == "keep"
-    assert retained["classification"] == "mapping_needed"
+    assert retained["status_text"] == "Postponed"
+    assert changed["classification"] == "Playoffs"
 
 
 def test_replacement_game_id_is_a_new_event_without_heuristic_transfer(tmp_path):
@@ -156,7 +143,7 @@ def test_freshness_is_configurable_and_success_failure_are_independent(tmp_path)
     service.refresh("2025-26")
     assert service.get_freshness("2025-26")["fresh"] is True
 
-    provider.error = RuntimeError("provider unavailable")
+    provider.error = ProviderUnavailableError("provider unavailable")
     service._clock = lambda: now + timedelta(hours=73)
     with pytest.raises(ProviderUnavailableError):
         service.refresh("2025-26")
@@ -165,6 +152,35 @@ def test_freshness_is_configurable_and_success_failure_are_independent(tmp_path)
     assert status["fresh"] is False
     assert status["last_success_at"] == "2025-10-20T00:00:00+00:00"
     assert status["last_failure_at"] == "2025-10-23T01:00:00+00:00"
+
+
+def test_persistence_failure_rolls_back_rows_and_does_not_become_provider_error(tmp_path):
+    engine = _engine(tmp_path)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(engine, provider)
+    service.refresh("2025-26")
+    before = service.get_events("2025-26")
+    before_success = service.get_freshness("2025-26")["last_success_at"]
+    state = {"updates": 0}
+
+    def fail_second_insert(conn, cursor, statement, parameters, context, executemany):
+        if "UPDATE event_catalog " in statement:
+            state["updates"] += 1
+            if state["updates"] == 2:
+                raise OperationalError("forced catalog failure", {}, RuntimeError("test"))
+
+    event.listen(engine, "before_cursor_execute", fail_second_insert)
+    try:
+        with pytest.raises(OperationalError):
+            service.refresh("2025-26")
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_second_insert)
+
+    assert state["updates"] == 2
+    assert service.get_events("2025-26") == before
+    status = service.get_freshness("2025-26")
+    assert status["last_success_at"] == before_success
+    assert status["fresh"] is True
 
 
 @pytest.mark.parametrize("season", ["2025", "2025-2026", "current", "2025-27"])
@@ -178,4 +194,6 @@ def test_migration_creates_event_tables_in_writable_database_only(tmp_path):
     engine = _engine(tmp_path)
     names = set(inspect(engine).get_table_names())
     assert {"event_catalog", "event_catalog_refreshes"}.issubset(names)
+    columns = {column["name"] for column in inspect(engine).get_columns("event_catalog")}
+    assert not {"mapping_needed", "audit_status", "audit_note"} & columns
     assert engine.url.database != "nba_play_types.db"
