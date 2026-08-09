@@ -41,7 +41,7 @@ The app reads from three distinct sources:
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
-| DFS lines | `app.providers.dfs.DFSLineProvider` → `DabbleAdapter` → `api.dabble.com.au` | Provider-neutral competition discovery and normalized player lines; read-only, bounded by `DABBLE_MAX_FIXTURES_PER_REQUEST` |
+| Dabble lines | `DabbleService` → `DabbleAdapter` → `api.dabble.com.au` | Dabble competition discovery and normalized player lines; read-only, bounded by `DABBLE_MAX_FIXTURES_PER_REQUEST` |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
@@ -133,15 +133,15 @@ POST /api/nl-query
   → frontend-compatible structured filters
 ```
 
-DFS lines:
+Dabble lines:
 
 ```text
-GET /api/dfs/competitions?provider=dabble&sport=Basketball
+GET /api/dabble/competitions?sport=Basketball
   → Firebase auth (or explicit local-only bypass)
-  → DFSLineService provider registry
+  → DabbleService
   → DabbleAdapter sport + active-competition discovery
 
-GET /api/dfs/lines?provider=dabble&competition=NBA&limit=3
+GET /api/dabble/lines?competition=NBA&limit=3
   → Firebase auth (or explicit local-only bypass)
   → bounded competition fixture lookup
   → one fixture-details request per selected fixture
@@ -151,8 +151,8 @@ GET /api/dfs/lines?provider=dabble&competition=NBA&limit=3
 `DabbleAdapter` is intentionally read-only and implements no account, entry,
 or payment operations. Dabble does not publish a supported developer API; its
 mobile read feed can be geo/bot gated and can change without notice. The
-provider-neutral `DFSLineProvider` and recorded-payload parser keep that
-instability outside routes and services. A direct `fixture_id` request makes
+Dabble-specific service, adapter, and recorded-payload parser keep that
+instability contained within the module. A direct `fixture_id` request makes
 one upstream details call. Competition requests default to three fixtures and
 cannot exceed `DABBLE_MAX_FIXTURES_PER_REQUEST` (default five).
 

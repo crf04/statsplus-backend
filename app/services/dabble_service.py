@@ -1,40 +1,37 @@
-"""Provider-neutral orchestration for daily-fantasy lines."""
+"""Application service for Dabble competition and line data."""
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
 
 from app.errors import InvalidInputError
-from app.providers.dfs import DFSLineProvider, canonical_stat_filter
+from app.providers.dabble import DabbleAdapter, canonical_stat_filter
 
 
-class DFSLineService:
-    """Select a DFS provider, bound fan-out, and apply normalized filters."""
+class DabbleService:
+    """Bound Dabble fixture fan-out and apply line filters."""
 
     def __init__(
         self,
-        providers: Mapping[str, DFSLineProvider],
+        provider: DabbleAdapter,
         *,
         max_fixtures_per_request: int,
     ) -> None:
-        self.providers = {name.casefold(): provider for name, provider in providers.items()}
+        self.provider = provider
         self.max_fixtures_per_request = max_fixtures_per_request
 
     def list_competitions(
         self,
         *,
-        provider: str = "dabble",
         sport: str | None = None,
         sport_id: str | None = None,
     ) -> dict[str, Any]:
-        provider_name, adapter = self._provider(provider)
-        rows = adapter.list_competitions(sport=sport, sport_id=sport_id)
-        return {"provider": provider_name, "count": len(rows), "competitions": rows}
+        rows = self.provider.list_competitions(sport=sport, sport_id=sport_id)
+        return {"provider": "dabble", "count": len(rows), "competitions": rows}
 
     def get_lines(
         self,
         *,
-        provider: str = "dabble",
         competition: str | None = None,
         competition_id: str | None = None,
         fixture_id: str | None = None,
@@ -43,7 +40,6 @@ class DFSLineService:
         fixture_limit: int = 3,
         include_in_play: bool = False,
     ) -> dict[str, Any]:
-        provider_name, adapter = self._provider(provider)
         selectors = [competition, competition_id, fixture_id]
         if sum(bool(value and str(value).strip()) for value in selectors) != 1:
             raise InvalidInputError(
@@ -54,7 +50,7 @@ class DFSLineService:
                 f"limit must be between 1 and {self.max_fixtures_per_request}."
             )
 
-        lines = adapter.fetch_lines(
+        lines = self.provider.fetch_lines(
             competition=competition,
             competition_id=competition_id,
             fixture_id=fixture_id,
@@ -75,17 +71,7 @@ class DFSLineService:
                 for line in lines
                 if stat_filter == canonical_stat_filter(str(line.get("stat", "")))
             ]
-        return {"provider": provider_name, "count": len(lines), "lines": lines}
-
-    def _provider(self, provider: str) -> tuple[str, DFSLineProvider]:
-        name = str(provider or "").strip().casefold()
-        adapter = self.providers.get(name)
-        if adapter is None:
-            supported = ", ".join(sorted(self.providers))
-            raise InvalidInputError(
-                f"Unsupported DFS provider {provider!r}. Supported providers: {supported}."
-            )
-        return name, adapter
+        return {"provider": "dabble", "count": len(lines), "lines": lines}
 
 
-__all__ = ["DFSLineService"]
+__all__ = ["DabbleService"]

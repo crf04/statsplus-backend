@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/game_logs`, both `/api/dfs/*` routes,
+- Required: `GET /api/games/game_logs`, both `/api/dabble/*` routes,
   `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
@@ -172,22 +172,22 @@ Common query types:
 - Dates: "Curry games since January 1"
 - Stat thresholds: "25+ points and 10+ assists"
 
-## DFS Line Endpoints
+## Dabble Line Endpoints
 
-DFS data is normalized behind a provider-neutral contract. `dabble` is the
-first supported provider. Its read feed is unofficial and can be geo/bot
-gated, so upstream failures return the standard `503 provider_unavailable`
-response. These endpoints never place entries or access a Dabble account.
+Dabble data is exposed by a dedicated provider module. Its read feed is
+unofficial and can be geo/bot gated, so upstream failures return the standard
+`503 provider_unavailable` response. These endpoints never place entries or
+access a Dabble account. A future general DFS module can compose this module
+with other provider-specific integrations.
 
 ### Discover Competitions
 
 ```http
-GET /api/dfs/competitions?provider=dabble&sport=Basketball
+GET /api/dabble/competitions?sport=Basketball
 ```
 
-`provider` defaults to `dabble`. Use either the case-insensitive `sport` name
-or a provider `sport_id`, but not both. Omitting both lists all active
-competitions.
+Use either the case-insensitive `sport` name or a Dabble `sport_id`, but not
+both. Omitting both lists all active competitions.
 
 ```json
 {
@@ -209,7 +209,7 @@ competitions.
 ### Fetch Lines
 
 ```http
-GET /api/dfs/lines?provider=dabble&competition=NBA&limit=3
+GET /api/dabble/lines?competition=NBA&limit=3
 ```
 
 Provide exactly one selector:

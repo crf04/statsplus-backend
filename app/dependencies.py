@@ -20,12 +20,12 @@ class ApplicationDependencies:
     redis_client: Any
     nba_stats_provider: Any
     pbp_stats_provider: Any
-    dfs_line_providers: Any
+    dabble_provider: Any
     game_service: Any
     player_service: Any
     team_service: Any
     data_service: Any
-    dfs_line_service: Any
+    dabble_service: Any
     data_refresh_jobs_service: Any
     provider_health_service: Any
     nl_service: Any
@@ -37,7 +37,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
 
     from app.services.data_service import DataService
     from app.services.game_service import GameService
-    from app.services.dfs_line_service import DFSLineService
+    from app.services.dabble_service import DabbleService
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
     from app.services.team_service import TeamService
@@ -54,7 +54,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
-    dfs_line_providers = {"dabble": DabbleAdapter(settings=settings)}
+    dabble_provider = DabbleAdapter(settings=settings)
 
     game_service = GameService(
         engine,
@@ -78,8 +78,8 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         pbp_provider=pbp_stats_provider,
         nba_stats_provider=nba_stats_provider,
     )
-    dfs_line_service = DFSLineService(
-        dfs_line_providers,
+    dabble_service = DabbleService(
+        dabble_provider,
         max_fixtures_per_request=(
             settings.providers.dabble_max_fixtures_per_request
         ),
@@ -103,12 +103,12 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         redis_client=redis_client,
         nba_stats_provider=nba_stats_provider,
         pbp_stats_provider=pbp_stats_provider,
-        dfs_line_providers=dfs_line_providers,
+        dabble_provider=dabble_provider,
         game_service=game_service,
         player_service=player_service,
         team_service=team_service,
         data_service=data_service,
-        dfs_line_service=dfs_line_service,
+        dabble_service=dabble_service,
         data_refresh_jobs_service=data_refresh_jobs_service,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),

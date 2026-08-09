@@ -134,7 +134,7 @@ Useful smoke checks:
 curl http://localhost:5000/api/health/db
 curl http://localhost:5000/api/players
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
-curl "http://localhost:5000/api/dfs/lines?competition=NBA&player=LeBron" \
+curl "http://localhost:5000/api/dabble/lines?competition=NBA&player=LeBron" \
   -H "Authorization: Bearer <firebase-id-token>"
 ```
 
@@ -181,7 +181,7 @@ returned to clients.
 The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
-- Protected routes include `GET /api/games/game_logs`, both `/api/dfs/*` routes, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Protected routes include `GET /api/games/game_logs`, both `/api/dabble/*` routes, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
 - For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.

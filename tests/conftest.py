@@ -92,7 +92,7 @@ def dependencies(runtime_settings, mock_db_engine):
     """Replaceable application dependency graph for route tests."""
     services = {
         name: Mock(name=f"{name}_service")
-        for name in ("game", "player", "team", "data", "dfs_line", "nl", "user")
+        for name in ("game", "player", "team", "data", "dabble", "nl", "user")
     }
     services["data_refresh_jobs"] = Mock(name="data_refresh_jobs_service")
     services["provider_health"] = Mock(name="provider_health_service")
@@ -128,7 +128,7 @@ def dependencies(runtime_settings, mock_db_engine):
         redis_client=None,
         nba_stats_provider=Mock(name="nba_stats_provider"),
         pbp_stats_provider=Mock(name="pbp_stats_provider"),
-        dfs_line_providers={"dabble": Mock(name="dabble_provider")},
+        dabble_provider=Mock(name="dabble_provider"),
         **{f"{name}_service": service for name, service in services.items()},
     )
 

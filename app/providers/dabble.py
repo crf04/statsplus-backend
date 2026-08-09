@@ -1,10 +1,10 @@
 """Read-only adapter for Dabble daily-fantasy player lines.
 
-Dabble does not publish a supported developer API.  This adapter isolates its
-current public mobile read surface behind :class:`DFSLineProvider`, validates
-recorded payloads before exposing them, and never implements account or entry
-placement operations.  The upstream feed is geo/bot gated, so callers receive
-the standard provider-unavailable error when it cannot be reached.
+Dabble does not publish a supported developer API. This adapter isolates its
+current public mobile read surface, validates recorded payloads before exposing
+them, and never implements account or entry placement operations. The upstream
+feed is geo/bot gated, so callers receive the standard provider-unavailable
+error when it cannot be reached.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeVar
 from urllib.parse import quote
 
@@ -21,7 +21,6 @@ from urllib3.util.retry import Retry
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import InvalidInputError, ProviderUnavailableError
-from app.providers.dfs import canonical_stat_components
 from app.utils.telemetry import (
     CACHE_DISABLED,
     PROVIDER_DABBLE,
@@ -34,6 +33,55 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+_STAT_ORDER = {
+    "points": 0,
+    "rebounds": 1,
+    "assists": 2,
+    "three-pointers-made": 3,
+    "steals": 4,
+    "blocks": 5,
+    "turnovers": 6,
+}
+STAT_ALIASES = {
+    "pts": "points",
+    "reb": "rebounds",
+    "ast": "assists",
+    "pra": "points+rebounds+assists",
+    "pa": "points+assists",
+    "pr": "points+rebounds",
+    "ra": "rebounds+assists",
+    "stl": "steals",
+    "blk": "blocks",
+    "tov": "turnovers",
+}
+
+
+def canonical_stat_components(stats: Sequence[str]) -> list[str]:
+    """Normalize Dabble components into one deterministic display order."""
+
+    normalized = [stat.strip().casefold().replace("_", "-") for stat in stats]
+
+    def sort_key(stat: str) -> tuple[str, int, str]:
+        prefix = ""
+        base = stat
+        for period in ("first-half-", "second-half-", "first-quarter-"):
+            if stat.startswith(period):
+                prefix = period
+                base = stat.removeprefix(period)
+                break
+        return prefix, _STAT_ORDER.get(base, len(_STAT_ORDER)), base
+
+    return sorted(normalized, key=sort_key)
+
+
+def canonical_stat_filter(value: str) -> str:
+    """Accept common StatsPlus abbreviations for Dabble stat combinations."""
+
+    normalized = value.strip().casefold().replace(" ", "-").replace("_", "-")
+    alias = STAT_ALIASES.get(normalized)
+    if alias:
+        return alias
+    return "+".join(canonical_stat_components(normalized.split("+")))
 
 
 class _DabbleRetry(Retry):
@@ -395,4 +443,9 @@ class DabbleAdapter:
         return normalized
 
 
-__all__ = ["DabbleAdapter"]
+__all__ = [
+    "DabbleAdapter",
+    "STAT_ALIASES",
+    "canonical_stat_components",
+    "canonical_stat_filter",
+]

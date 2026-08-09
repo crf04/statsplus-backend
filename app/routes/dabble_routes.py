@@ -1,4 +1,4 @@
-"""HTTP routes for provider-neutral daily-fantasy lines."""
+"""HTTP routes for Dabble competitions and player lines."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from app.errors import InvalidInputError
 from app.routes._service_proxy import CurrentAppService
 from app.utils.auth import require_auth
 
-dfs_bp = Blueprint("dfs", __name__)
-dfs_line_service = CurrentAppService("dfs_line")
+dabble_bp = Blueprint("dabble", __name__)
+dabble_service = CurrentAppService("dabble")
 
 
 def _optional_text(name: str) -> str | None:
@@ -45,28 +45,26 @@ def _boolean(name: str, default: bool) -> bool:
     raise InvalidInputError(f"{name} must be true or false.")
 
 
-@dfs_bp.get("/competitions")
+@dabble_bp.get("/competitions")
 @require_auth
 def list_competitions():
-    """List active competitions available from one DFS provider."""
+    """List active Dabble competitions."""
 
     return jsonify(
-        dfs_line_service.list_competitions(
-            provider=request.args.get("provider", "dabble"),
+        dabble_service.list_competitions(
             sport=_optional_text("sport"),
             sport_id=_optional_text("sport_id"),
         )
     )
 
 
-@dfs_bp.get("/lines")
+@dabble_bp.get("/lines")
 @require_auth
 def get_lines():
-    """Fetch normalized player lines for a competition or fixture."""
+    """Fetch normalized Dabble player lines for a competition or fixture."""
 
     return jsonify(
-        dfs_line_service.get_lines(
-            provider=request.args.get("provider", "dabble"),
+        dabble_service.get_lines(
             competition=_optional_text("competition"),
             competition_id=_optional_text("competition_id"),
             fixture_id=_optional_text("fixture_id"),
@@ -78,4 +76,4 @@ def get_lines():
     )
 
 
-__all__ = ["dfs_bp"]
+__all__ = ["dabble_bp"]
