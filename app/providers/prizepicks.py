@@ -14,8 +14,7 @@ from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     CompetitionEvidence,
-    CoverageEvidence,
-    DeadlineExceededError,
+    CoverageCode,
     EventEvidence,
     LeagueEvidence,
     MarketStatus,
@@ -26,18 +25,28 @@ from app.providers.dfs import (
     ProviderSnapshot,
     RetrievalContext,
     ScoringPeriod,
-    SnapshotStatus,
+    _SnapshotMarketCollector,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    _build_snapshot,
     normalize_market_variant,
-    normalize_timestamp,
+    normalize_coverage_code,
+)
+from app.providers.dfs_transport import request_json
+from app.providers.dfs_normalization import (
+    display_number,
+    is_ineligible_event_status,
+    normalize_status,
+    optional_text,
+    required_identifier,
+    required_number,
+    required_text,
+    validate_timestamp,
 )
 from app.utils.telemetry import (
-    CACHE_DISABLED,
     PROVIDER_PRIZEPICKS,
     ProviderResponseError,
-    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,8 +88,9 @@ class _PageResult:
     eligible_count: int
     normalized_count: int
     skipped_count: int
-    warning_codes: tuple[str, ...]
-    skipped_reasons: tuple[str, ...]
+    warning_codes: tuple[CoverageCode, ...]
+    skipped_reasons: tuple[CoverageCode, ...]
+    diagnostic_details: tuple[str, ...]
     malformed_count: int
     current_page: int
     total_pages: int
@@ -127,16 +137,15 @@ class PrizePicksAdapter:
         page = 1
         total_pages = 1
         expected_total: int | None = None
-        markets: list[PlayerProjectionMarket] = []
-        seen: dict[tuple[str, str], PlayerProjectionMarket] = {}
-        conflicting: set[tuple[str, str]] = set()
+        collection = _SnapshotMarketCollector()
         fetched_count = 0
         eligible_count = 0
         normalized_count = 0
         skipped_count = 0
         malformed_count = 0
-        warning_codes: list[str] = []
-        skipped_reasons: list[str] = []
+        warning_codes: list[CoverageCode] = []
+        skipped_reasons: list[CoverageCode] = []
+        diagnostic_details: list[str] = []
         pagination_complete = True
         fanout_complete = True
         expected_total_seen = False
@@ -151,54 +160,55 @@ class PrizePicksAdapter:
                     allowed_statuses=query.market_statuses,
                 )
             except ProviderUnavailableError as error:
-                if not markets:
+                if not collection.markets:
                     raise
                 pagination_complete = False
                 fanout_complete = False
-                warning_codes.append("page_fetch_failed")
+                warning_codes.append(CoverageCode.PAGE_FETCH_FAILED)
                 logger.warning("PrizePicks page %s failed after usable data: %s", page, error)
                 break
             except _MalformedPage as error:
-                if not markets:
+                if not collection.markets:
                     raise self._invalid_response(error) from error
                 pagination_complete = False
                 fanout_complete = False
-                warning_codes.append("page_malformed")
+                warning_codes.append(CoverageCode.PAGE_MALFORMED)
                 if "meta." in str(error):
-                    warning_codes.append("page_metadata_mismatch")
-                    skipped_reasons.append("pagination_metadata_malformed")
+                    warning_codes.append(CoverageCode.PAGE_METADATA_MISMATCH)
+                    skipped_reasons.append(CoverageCode.PAGINATION_METADATA_MALFORMED)
+                    diagnostic_details.append(str(error))
                 logger.warning("PrizePicks page %s was malformed after usable data", page)
                 break
 
             if result.current_page != page:
-                if not markets:
+                if not collection.markets:
                     raise self._invalid_response(
                         f"requested page {page}, received page {result.current_page}"
                     )
                 pagination_complete = False
                 fanout_complete = False
-                warning_codes.append("page_metadata_mismatch")
-                skipped_reasons.append("pagination_page_mismatch")
+                warning_codes.append(CoverageCode.PAGE_METADATA_MISMATCH)
+                skipped_reasons.append(CoverageCode.PAGINATION_PAGE_MISMATCH)
                 break
             if result.total_pages < total_pages:
-                if not markets:
+                if not collection.markets:
                     raise self._invalid_response("pagination total_pages shrank")
                 pagination_complete = False
                 fanout_complete = False
-                warning_codes.append("page_metadata_mismatch")
-                skipped_reasons.append("pagination_total_pages_changed")
+                warning_codes.append(CoverageCode.PAGE_METADATA_MISMATCH)
+                skipped_reasons.append(CoverageCode.PAGINATION_TOTAL_PAGES_CHANGED)
                 break
             total_pages = max(total_pages, result.total_pages)
             if not expected_total_seen:
                 expected_total = result.expected_total
                 expected_total_seen = True
             elif result.expected_total != expected_total:
-                if not markets:
+                if not collection.markets:
                     raise self._invalid_response("pagination expected total changed")
                 pagination_complete = False
                 fanout_complete = False
-                warning_codes.append("page_metadata_mismatch")
-                skipped_reasons.append("pagination_expected_total_changed")
+                warning_codes.append(CoverageCode.PAGE_METADATA_MISMATCH)
+                skipped_reasons.append(CoverageCode.PAGINATION_EXPECTED_TOTAL_CHANGED)
                 break
             fetched_count += result.fetched_count
             eligible_count += result.eligible_count
@@ -207,36 +217,31 @@ class PrizePicksAdapter:
             malformed_count += result.malformed_count
             warning_codes.extend(result.warning_codes)
             skipped_reasons.extend(result.skipped_reasons)
+            diagnostic_details.extend(result.diagnostic_details)
             if result.malformed_count:
                 fanout_complete = False
 
-            for market in result.markets:
-                identity = market.source_identity
-                if identity is None:
-                    markets.append(market)
-                    continue
-                previous = seen.get(identity)
-                if previous is None:
-                    seen[identity] = market
-                    markets.append(market)
-                elif previous == market:
-                    warning_codes.append("duplicate_source_identity")
-                else:
-                    conflicting.add(identity)
-                    skipped_count += 1
-                    malformed_count += 1
-                    fanout_complete = False
-                    warning_codes.append("conflicting_source_identity")
-                    skipped_reasons.append("conflicting_source_identity")
+            collection.extend(result.markets)
 
             page += 1
 
-        if conflicting:
-            markets = [market for market in markets if market.source_identity not in conflicting]
+        markets = collection.markets
+        skipped_count += collection.skipped_count
+        malformed_count += collection.malformed_count
+        warning_codes.extend(collection.warning_codes)
+        skipped_reasons.extend(collection.skipped_reasons)
+        diagnostic_details.extend(collection.diagnostic_details)
+        if collection.malformed_count:
+            fanout_complete = False
         if malformed_count:
             fanout_complete = False
 
-        coverage = CoverageEvidence(
+        if malformed_count and not markets:
+            raise self._invalid_response("no usable PrizePicks projection records")
+        snapshot = _build_snapshot(
+            provider=self.name,
+            markets=markets,
+            retrieved_at=retrieved_at,
             fetched_count=fetched_count,
             eligible_count=eligible_count,
             normalized_count=normalized_count,
@@ -244,19 +249,11 @@ class PrizePicksAdapter:
             pagination_complete=pagination_complete,
             fanout_complete=fanout_complete,
             expected_total=expected_total,
-            warning_codes=tuple(dict.fromkeys(warning_codes)),
-            skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
+            warning_codes=warning_codes,
+            skipped_reasons=skipped_reasons,
+            diagnostic_details=diagnostic_details,
         )
-        if malformed_count and not markets:
-            raise self._invalid_response("no usable PrizePicks projection records")
-        status = SnapshotStatus.PARTIAL if not coverage.is_complete else SnapshotStatus.COMPLETE
-        return ProviderSnapshot(
-            provider=self.name,
-            status=status,
-            markets=tuple(markets),
-            coverage=coverage,
-            retrieved_at=retrieved_at,
-        )
+        return snapshot
 
     def _request_page(
         self,
@@ -268,69 +265,32 @@ class PrizePicksAdapter:
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> _PageResult:
         try:
-            self._ensure_active(context)
-            timeout = self._bounded_timeout(context)
-            with provider_call(
-                PROVIDER_PRIZEPICKS,
-                "get_snapshot",
-                cache_status=CACHE_DISABLED,
-                request_id=context.request_id,
-            ) as tracker:
-                response = self.session.get(
-                    self.BASE_URL,
-                    params={
-                        "league_id": league_id,
-                        "page": page,
-                        "per_page": 250,
-                        "single_stat": "true",
-                    },
-                    timeout=timeout,
-                )
-                self._ensure_active(context)
-                tracker.status_code = getattr(response, "status_code", None)
-                response.raise_for_status()
-                self._ensure_active(context)
-                try:
-                    payload = response.json()
-                except (TypeError, ValueError) as error:
-                    raise ProviderResponseError(
-                        "PrizePicks returned invalid JSON"
-                    ) from error
-                self._ensure_active(context)
-                try:
-                    result = self._parse_page(
-                        payload,
-                        expected_sport=expected_sport,
-                        allowed_statuses=allowed_statuses,
-                    )
-                except _MalformedPage as error:
-                    raise ProviderResponseError(str(error)) from error
-                self._ensure_active(context)
-                return result
-        except DeadlineExceededError as error:
-            raise ProviderUnavailableError(
-                "PrizePicks retrieval deadline exceeded.", detail=error
-            ) from error
-        except requests.exceptions.Timeout as error:
-            raise ProviderUnavailableError(
-                "PrizePicks timed out while fetching lines.", detail=error
-            ) from error
-        except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "PrizePicks could not be reached.", detail=error
-            ) from error
+            return request_json(
+                context=context,
+                session=self.session,
+                url=self.BASE_URL,
+                params={
+                    "league_id": league_id,
+                    "page": page,
+                    "per_page": 250,
+                    "single_stat": "true",
+                },
+                timeout=self.timeout,
+                now=self._now_utc,
+                provider=PROVIDER_PRIZEPICKS,
+                operation="get_snapshot",
+                parse=lambda payload: self._parse_page(
+                    payload,
+                    expected_sport=expected_sport,
+                    allowed_statuses=allowed_statuses,
+                ),
+                deadline_message="PrizePicks retrieval deadline exceeded.",
+                timeout_message="PrizePicks timed out while fetching lines.",
+                unavailable_message="PrizePicks could not be reached.",
+                invalid_json_message="PrizePicks returned invalid JSON",
+            )
         except ProviderResponseError as error:
             raise _MalformedPage(str(error)) from error
-
-    def _bounded_timeout(self, context: RetrievalContext) -> tuple[float, float]:
-        remaining = context.remaining_seconds(now=self._now_utc())
-        if remaining <= 0:
-            raise DeadlineExceededError("PrizePicks retrieval deadline exceeded")
-        connect, read = self.timeout
-        return min(float(connect), remaining), min(float(read), remaining)
-
-    def _ensure_active(self, context: RetrievalContext) -> None:
-        context.ensure_active(now=self._now_utc())
 
     def _now_utc(self) -> datetime:
         value = self.now()
@@ -368,8 +328,9 @@ class PrizePicksAdapter:
         )
 
         markets: list[PlayerProjectionMarket] = []
-        warning_codes: list[str] = []
-        skipped_reasons: list[str] = []
+        warning_codes: list[CoverageCode] = []
+        skipped_reasons: list[CoverageCode] = []
+        diagnostic_details: list[str] = []
         skipped_count = 0
         malformed_count = 0
         eligible_count = 0
@@ -384,12 +345,19 @@ class PrizePicksAdapter:
                 )
             except _ExcludedRecord as error:
                 skipped_count += 1
-                skipped_reasons.append(error.reason)
-            except _MalformedRecord as error:
+                skipped_reasons.append(CoverageCode(error.reason))
+            except ValueError as error:
                 skipped_count += 1
                 malformed_count += 1
-                warning_codes.append("malformed_record")
-                skipped_reasons.append(str(error) or "malformed_record")
+                warning_codes.append(CoverageCode.MALFORMED_RECORD)
+                detail = str(error) or CoverageCode.MALFORMED_RECORD.value
+                skipped_reasons.append(
+                    normalize_coverage_code(
+                        detail,
+                        default=CoverageCode.MALFORMED_RECORD,
+                    )
+                )
+                diagnostic_details.append(detail)
             else:
                 eligible_count += 1
                 normalized_count += 1
@@ -403,6 +371,7 @@ class PrizePicksAdapter:
             skipped_count=skipped_count,
             warning_codes=tuple(dict.fromkeys(warning_codes)),
             skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
+            diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
             malformed_count=malformed_count,
             current_page=current_page,
             total_pages=total_pages,
@@ -430,7 +399,7 @@ class PrizePicksAdapter:
         if market_kind == "non_player":
             raise _ExcludedRecord("non_player_market")
         is_future = market_kind == "future"
-        projection_id = cls._required_identifier(row, "id")
+        projection_id = required_identifier(row, "id")
         player_relation = cls._optional_relationship(relationships, "new_player")
         if player_relation is None and is_future:
             raise _ExcludedRecord("non_player_market")
@@ -445,23 +414,23 @@ class PrizePicksAdapter:
         if not isinstance(player_attributes, Mapping) or not isinstance(league_attributes, Mapping):
             raise _MalformedRecord("related resource attributes must be objects")
 
-        league_name = cls._required_text(league_attributes, "name")
+        league_name = required_text(league_attributes, "name")
         if league_name.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
-        raw_status = cls._required_text(attributes, "status")
-        status = cls._normalize_status(raw_status)
+        raw_status = required_text(attributes, "status")
+        status = normalize_status(raw_status)
         if status is None:
             raise _ExcludedRecord("ineligible_status")
         if status not in allowed_statuses:
             raise _ExcludedRecord("status_filter")
 
-        player_name = cls._required_text(player_attributes, "name")
-        stat_label = cls._required_text(attributes, "stat_type")
-        line_score = cls._required_number(attributes, "line_score")
+        player_name = required_text(player_attributes, "name")
+        stat_label = required_text(attributes, "stat_type")
+        line_score = required_number(attributes, "line_score")
         start_value = attributes.get("start_time")
         updated_value = attributes.get("updated_at")
-        cls._validate_timestamp(start_value, "start_time")
-        cls._validate_timestamp(updated_value, "updated_at")
+        validate_timestamp(start_value, "start_time")
+        validate_timestamp(updated_value, "updated_at")
 
         team = cls._team_from_mapping(player_attributes)
         sport = SportEvidence(label=league_name)
@@ -476,9 +445,9 @@ class PrizePicksAdapter:
         event = cls._event_from_projection(attributes, relationships, resources)
         if is_future and event is None:
             raise _ExcludedRecord("missing_event_relationship")
-        variant_label = cls._optional_text(attributes.get("odds_type"))
+        variant_label = optional_text(attributes.get("odds_type"))
         variant = normalize_market_variant(variant_label)
-        period_label = cls._optional_text(
+        period_label = optional_text(
             attributes.get("scoring_period", attributes.get("period"))
         )
         scoring_period = (
@@ -503,7 +472,7 @@ class PrizePicksAdapter:
                 threshold=MarketThreshold(
                     line_score,
                     unit="count",
-                    original_value=cls._display_number(attributes["line_score"]),
+                    original_value=display_number(attributes["line_score"], field="line_score"),
                 ),
                 status=status,
                 status_label=raw_status,
@@ -534,18 +503,18 @@ class PrizePicksAdapter:
         event_attributes = resource.get("attributes", {}) if resource else {}
         if not isinstance(event_attributes, Mapping):
             raise _MalformedRecord("event resource attributes must be an object")
-        label = cls._optional_text(
+        label = optional_text(
             event_attributes.get("name", event_attributes.get("description"))
-        ) or cls._optional_text(attributes.get("description"))
+        ) or optional_text(attributes.get("description"))
         starts_at = event_attributes.get("start_time", attributes.get("start_time"))
         updated_at = event_attributes.get("updated_at", attributes.get("updated_at"))
-        status_label = cls._optional_text(event_attributes.get("status")) or cls._optional_text(
+        status_label = optional_text(event_attributes.get("status")) or optional_text(
             event_attributes.get("status_label")
         )
-        if status_label is not None and cls._is_ineligible_event_status(status_label):
+        if status_label is not None and is_ineligible_event_status(status_label):
             raise _ExcludedRecord("ineligible_event_status")
-        cls._validate_timestamp(starts_at, "event start_time")
-        cls._validate_timestamp(updated_at, "event updated_at")
+        validate_timestamp(starts_at, "event start_time")
+        validate_timestamp(updated_at, "event updated_at")
         if provider_id is None and label is None and starts_at is None and updated_at is None:
             return None
         try:
@@ -609,9 +578,9 @@ class PrizePicksAdapter:
             if not isinstance(resource, Mapping):
                 raise _MalformedPage("included resources must be objects")
             try:
-                resource_type = cls._required_text(resource, "type")
-                resource_id = cls._required_identifier(resource, "id")
-            except _MalformedRecord as error:
+                resource_type = required_text(resource, "type")
+                resource_id = required_identifier(resource, "id")
+            except ValueError as error:
                 raise _MalformedPage(str(error)) from error
             key = (resource_type, resource_id)
             previous = resources.get(key)
@@ -648,74 +617,7 @@ class PrizePicksAdapter:
             return None
         if not isinstance(data, Mapping):
             raise _MalformedRecord(f"{name} relationship data must be an object")
-        return cls._required_text(data, "type"), cls._required_identifier(data, "id")
-
-    @staticmethod
-    def _normalize_status(label: str) -> MarketStatus | None:
-        normalized = label.strip().casefold().replace("-", "_")
-        if normalized in {"pre_game", "pregame", "active", "open", "available"}:
-            return MarketStatus.AVAILABLE
-        if normalized in {"suspended", "paused"}:
-            return MarketStatus.SUSPENDED
-        return None
-
-    @staticmethod
-    def _is_ineligible_event_status(label: str) -> bool:
-        normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
-        return normalized in {"live", "closed", "settled", "final", "in_play", "inplay"}
-
-    @staticmethod
-    def _required_identifier(value: Mapping[str, Any], key: str) -> str:
-        identifier = value.get(key)
-        if identifier is None or isinstance(identifier, bool) or not str(identifier).strip():
-            raise _MalformedRecord(f"{key} must be present")
-        return str(identifier)
-
-    @classmethod
-    def _required_text(cls, value: Mapping[str, Any], key: str) -> str:
-        text = cls._optional_text(value.get(key))
-        if text is None:
-            raise _MalformedRecord(f"{key} must be a non-empty string")
-        return text
-
-    @staticmethod
-    def _optional_text(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        text = value.strip()
-        return text or None
-
-    @classmethod
-    def _required_number(cls, value: Mapping[str, Any], key: str) -> str | int | float:
-        raw = value.get(key)
-        if isinstance(raw, bool) or raw is None or not isinstance(raw, (str, int, float)):
-            raise _MalformedRecord(f"{key} must be numeric")
-        try:
-            decimal = MarketThreshold(raw, unit="count").value
-        except ValueError as error:
-            raise _MalformedRecord(f"{key} must be numeric") from error
-        return raw if decimal.is_finite() else cls._raise_number(key)
-
-    @staticmethod
-    def _raise_number(key: str) -> str:
-        raise _MalformedRecord(f"{key} must be finite")
-
-    @staticmethod
-    def _display_number(value: Any) -> str:
-        if isinstance(value, bool) or value is None or not isinstance(value, (str, int, float)):
-            raise _MalformedRecord("line_score must have a displayable numeric value")
-        return str(value)
-
-    @staticmethod
-    def _validate_timestamp(value: Any, field: str) -> None:
-        if value is None:
-            return
-        if not isinstance(value, str):
-            raise _MalformedRecord(f"{field} must be an ISO-8601 string")
-        try:
-            normalize_timestamp(value)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
+        return required_text(data, "type"), required_identifier(data, "id")
 
     @classmethod
     def _team_from_mapping(cls, attributes: Mapping[str, Any]) -> TeamEvidence | None:

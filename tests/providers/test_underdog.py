@@ -14,6 +14,7 @@ from app.errors import ProviderUnavailableError
 from app.utils import telemetry
 from app.providers.dfs import (
     AppearanceEvidence,
+    CoverageCode,
     MalformedProviderResponseError,
     NBAMarketQuery,
     RetrievalContext,
@@ -327,6 +328,8 @@ def test_malformed_underdog_row_is_partial_when_another_row_is_valid() -> None:
     assert len(snapshot.markets) == 1
     assert snapshot.coverage.skipped_count == 1
     assert snapshot.coverage.fanout_complete is False
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
+    assert "line appearance could not be resolved" in snapshot.coverage.diagnostic_details
 
 
 def test_underdog_conflicting_duplicate_identity_is_malformed() -> None:

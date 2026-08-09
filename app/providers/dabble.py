@@ -27,6 +27,7 @@ from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     CompetitionEvidence,
+    CoverageCode,
     CoverageEvidence,
     DeadlineExceededError,
     EventEvidence,
@@ -46,7 +47,10 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
     normalize_market_status,
+    normalize_coverage_code,
 )
+from app.providers.dfs_normalization import optional_text
+from app.providers.dfs_transport import bounded_timeout
 from app.utils.telemetry import (
     CACHE_DISABLED,
     PROVIDER_DABBLE,
@@ -170,9 +174,9 @@ class _DabbleRequestFailure(Exception):
 class _ExcludedRecord(Exception):
     """A valid source record outside the shared NBA player-market scope."""
 
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-        super().__init__(reason)
+    def __init__(self, reason: CoverageCode | str) -> None:
+        self.reason = normalize_coverage_code(reason)
+        super().__init__(self.reason.value)
 
 
 @dataclass
@@ -232,8 +236,9 @@ class DabbleAdapter:
         retrieved_at = self._now_utc()
         merged_markets: dict[tuple[Any, ...], _MarketAccumulator] = {}
         conflicted_market_keys: set[tuple[Any, ...]] = set()
-        warning_codes: list[str] = []
-        skipped_reasons: list[str] = []
+        warning_codes: list[CoverageCode] = []
+        skipped_reasons: list[CoverageCode] = []
+        diagnostic_details: list[str] = []
         fetched_count = 0
         eligible_count = 0
         normalized_count = 0
@@ -241,11 +246,13 @@ class DabbleAdapter:
         fanout_complete = True
         malformed_seen = False
 
-        def warn(code: str) -> None:
+        def warn(code: CoverageCode | str) -> None:
+            code = normalize_coverage_code(code)
             if code not in warning_codes:
                 warning_codes.append(code)
 
-        def skipped(reason: str, *, warning: bool = False) -> None:
+        def skipped(reason: CoverageCode | str, *, warning: bool = False) -> None:
+            reason = normalize_coverage_code(reason)
             nonlocal skipped_count
             skipped_count += 1
             if reason not in skipped_reasons:
@@ -267,7 +274,7 @@ class DabbleAdapter:
         competitions = competitions_result.rows
         skipped_count += competitions_result.skipped_count
         if competitions_result.skipped_count:
-            warn("malformed_record")
+            warn(CoverageCode.MALFORMED_RECORD)
             malformed_seen = True
         if not competitions and competitions_result.skipped_count:
             raise self._unavailable(
@@ -277,10 +284,10 @@ class DabbleAdapter:
         nba_competitions: list[dict[str, Any]] = []
         for competition in competitions:
             if not self._is_nba_competition(competition, query):
-                skipped("non_nba_competition")
+                skipped(CoverageCode.NON_NBA_COMPETITION)
                 continue
             if not competition.get("id"):
-                skipped("missing_competition_id", warning=True)
+                skipped(CoverageCode.MISSING_COMPETITION_ID, warning=True)
                 malformed_seen = True
                 continue
             nba_competitions.append(competition)
@@ -306,27 +313,27 @@ class DabbleAdapter:
                     raise self._unavailable(error) from error
                 fixture_fetch_failed = True
                 fanout_complete = False
-                warn("fixture_list_failed")
-                skipped("fixture_list_failed", warning=False)
+                warn(CoverageCode.FIXTURE_LIST_FAILED)
+                skipped(CoverageCode.FIXTURE_LIST_FAILED, warning=False)
                 logger.warning("Dabble fixture list failed: %s", type(error).__name__)
                 continue
             skipped_count += fixtures_result.skipped_count
             if fixtures_result.skipped_count:
-                warn("malformed_record")
+                warn(CoverageCode.MALFORMED_RECORD)
                 malformed_seen = True
             for fixture in fixtures_result.rows:
                 if not self._fixture_matches_query(fixture):
-                    skipped("non_nba_sport")
+                    skipped(CoverageCode.NON_NBA_SPORT)
                     continue
                 try:
                     status = normalize_market_status(
                         fixture.get("status")
                     ).value
                 except ValueError:
-                    skipped("ineligible_status")
+                    skipped(CoverageCode.INELIGIBLE_STATUS)
                     continue
                 if status.value not in query.market_statuses:
-                    skipped("ineligible_status")
+                    skipped(CoverageCode.INELIGIBLE_STATUS)
                     continue
                 fixtures.append((fixture, competition))
 
@@ -347,6 +354,7 @@ class DabbleAdapter:
                 fanout_complete=not malformed_seen,
                 warning_codes=tuple(warning_codes),
                 skipped_reasons=tuple(skipped_reasons),
+                diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
             )
             if malformed_seen:
                 raise self._unavailable(
@@ -371,11 +379,11 @@ class DabbleAdapter:
                 fanout_complete = False
                 if result.malformed:
                     malformed_seen = True
-                    warn("fixture_malformed")
-                    skipped("fixture_malformed", warning=False)
+                    warn(CoverageCode.FIXTURE_MALFORMED)
+                    skipped(CoverageCode.FIXTURE_MALFORMED, warning=False)
                 else:
-                    warn("fixture_failed")
-                    skipped("fixture_failed", warning=False)
+                    warn(CoverageCode.FIXTURE_FAILED)
+                    skipped(CoverageCode.FIXTURE_FAILED, warning=False)
                 continue
             assert result.detail is not None
             detail = result.detail
@@ -383,8 +391,8 @@ class DabbleAdapter:
             if not isinstance(props, list):
                 fanout_complete = False
                 malformed_seen = True
-                warn("fixture_malformed")
-                skipped("fixture_malformed", warning=False)
+                warn(CoverageCode.FIXTURE_MALFORMED)
+                skipped(CoverageCode.FIXTURE_MALFORMED, warning=False)
                 continue
             fetched_count += len(props)
             for prop in props:
@@ -401,7 +409,8 @@ class DabbleAdapter:
                     continue
                 except (ProviderResponseError, ValueError) as error:
                     eligible_count += 1
-                    skipped("malformed_record", warning=True)
+                    skipped(CoverageCode.MALFORMED_RECORD, warning=True)
+                    diagnostic_details.append(str(error))
                     malformed_seen = True
                     fanout_complete = False
                     logger.warning(
@@ -419,7 +428,10 @@ class DabbleAdapter:
                         conflicted_market_keys,
                     )
                 except MalformedProviderResponseError:
-                    skipped("conflicting_source_identity", warning=True)
+                    skipped(CoverageCode.CONFLICTING_SOURCE_IDENTITY, warning=True)
+                    diagnostic_details.append(
+                        "repeated Dabble market identity has conflicting content"
+                    )
                     malformed_seen = True
                     fanout_complete = False
 
@@ -442,6 +454,7 @@ class DabbleAdapter:
                 fanout_complete=True,
                 warning_codes=tuple(warning_codes),
                 skipped_reasons=tuple(skipped_reasons),
+                diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
             )
             return ProviderSnapshot(
                 provider=self.PROVIDER_ID,
@@ -478,6 +491,7 @@ class DabbleAdapter:
             fanout_complete=fanout_complete and not malformed_seen,
             warning_codes=tuple(warning_codes),
             skipped_reasons=tuple(skipped_reasons),
+            diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
         )
         status = SnapshotStatus.PARTIAL if not coverage.is_complete else SnapshotStatus.COMPLETE
         return ProviderSnapshot(
@@ -491,7 +505,7 @@ class DabbleAdapter:
     def _merge_normalized_prop(
         self,
         normalized: tuple[tuple[Any, ...], PlayerProjectionMarket, Selection],
-        warning_codes: list[str],
+        warning_codes: list[CoverageCode],
         merged_markets: dict[tuple[Any, ...], _MarketAccumulator],
         conflicted_market_keys: set[tuple[Any, ...]],
     ) -> None:
@@ -528,8 +542,8 @@ class DabbleAdapter:
             raise MalformedProviderResponseError(
                 "repeated Dabble selection identity has conflicting content"
             )
-        if "duplicate_source_identity" not in warning_codes:
-            warning_codes.append("duplicate_source_identity")
+        if CoverageCode.DUPLICATE_SOURCE_IDENTITY not in warning_codes:
+            warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
 
     def _fetch_details(
         self,
@@ -722,7 +736,7 @@ class DabbleAdapter:
         kind = prop.get("marketType", prop.get("market_type", prop.get("type")))
         if isinstance(kind, str) and kind.strip().casefold() in _NON_PLAYER_KINDS:
             raise _ExcludedRecord("non_player_market")
-        player_name = self._optional_text(prop.get("playerName"))
+        player_name = optional_text(prop.get("playerName"))
         if player_name is None:
             raise _ExcludedRecord("non_player_market")
 
@@ -790,30 +804,30 @@ class DabbleAdapter:
             or fixture.get("sportId")
             or competition.get("sport_id")
         )
-        sport_label = self._optional_text(
+        sport_label = optional_text(
             detail.get("sportName")
             or fixture.get("sportName")
             or competition.get("sport")
         )
-        competition_label = self._optional_text(
+        competition_label = optional_text(
             detail.get("competitionName")
             or fixture.get("competitionName")
             or competition.get("name")
         )
-        event_label = self._optional_text(
+        event_label = optional_text(
             detail.get("name") or fixture.get("name")
         )
         starts_at = detail.get("advertisedStart") or fixture.get("advertisedStart")
         updated_at = detail.get("updatedAt") or detail.get("updated_at")
         statistic_label = "+".join(raw_stats)
         components, scoring_period, period_label = self._statistic_period(normalized_stats)
-        variant_label = self._optional_text(
+        variant_label = optional_text(
             prop.get("variant") or prop.get("marketVariant")
         )
         team = TeamEvidence(
             provider_id=self._optional_id(prop.get("teamId")),
-            name=self._optional_text(prop.get("teamName")),
-            abbreviation=self._optional_text(prop.get("teamAbbreviation")),
+            name=optional_text(prop.get("teamName")),
+            abbreviation=optional_text(prop.get("teamAbbreviation")),
         )
         athlete = AthleteEvidence(
             provider_id=provider_athlete_id,
@@ -866,7 +880,7 @@ class DabbleAdapter:
             )
             if multiplier <= 0:
                 raise ProviderResponseError("Dabble multiplier must be positive")
-            multiplier_label = self._optional_text(
+            multiplier_label = optional_text(
                 prop.get("multiplierLabel")
                 or prop.get("payoutMultiplierLabel")
                 or prop.get("modifierLabel")
@@ -1044,14 +1058,11 @@ class DabbleAdapter:
             raise _DabbleRequestFailure("upstream_error", error) from error
 
     def _timeout_for(self, context: RetrievalContext) -> tuple[float, float]:
-        current = self._now_utc()
-        context.ensure_active(now=current)
-        remaining = context.remaining_seconds(now=current)
-        if remaining <= 0:
-            raise DeadlineExceededError("provider retrieval deadline exceeded")
-        return (
-            min(self.connect_timeout_seconds, remaining),
-            min(self.read_timeout_seconds, remaining),
+        return bounded_timeout(
+            context,
+            (self.connect_timeout_seconds, self.read_timeout_seconds),
+            now=self._now_utc(),
+            provider=self.PROVIDER_ID,
         )
 
     def _unavailable(self, error: Exception) -> ProviderUnavailableError:
@@ -1066,13 +1077,6 @@ class DabbleAdapter:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Dabble clock must return an aware datetime")
         return value.astimezone(timezone.utc)
-
-    @staticmethod
-    def _optional_text(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        text = value.strip()
-        return text or None
 
     @staticmethod
     def _optional_id(value: Any) -> str | None:

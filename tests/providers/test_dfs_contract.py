@@ -11,6 +11,7 @@ from app.providers.dfs import (
     AthleteEvidence,
     AppearanceEvidence,
     CompetitionEvidence,
+    CoverageCode,
     EventEvidence,
     LeagueEvidence,
     MarketThreshold,
@@ -321,10 +322,8 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
     context = RetrievalContext(
         deadline="2026-08-09T16:30:10-05:00",
         request_id="request-1",
-        telemetry={"operation": "snapshot"},
     )
     assert context.deadline_at == datetime(2026, 8, 9, 21, 30, 10, tzinfo=timezone.utc)
-    assert context.telemetry["operation"] == "snapshot"
     assert context.remaining_seconds(
         now=datetime(2026, 8, 9, 16, 30, 5, tzinfo=timezone(timedelta(hours=-5)))
     ) == 5
@@ -353,3 +352,60 @@ def test_provider_snapshot_protocol_is_the_single_adapter_seam():
             return "snapshot"
 
     assert isinstance(FakeProvider(), ProviderSnapshotProvider)
+
+
+def test_coverage_codes_are_closed_and_diagnostic_details_are_separate():
+    coverage = CoverageEvidence(
+        warning_codes=("duplicate_source_identity",),
+        skipped_reasons=(CoverageCode.MALFORMED_RECORD,),
+        diagnostic_details=("line_score had an invalid decimal",),
+    )
+
+    assert coverage.warning_codes == (CoverageCode.DUPLICATE_SOURCE_IDENTITY,)
+    assert coverage.skipped_reasons == (CoverageCode.MALFORMED_RECORD,)
+    assert coverage.diagnostic_details == ("line_score had an invalid decimal",)
+    assert CoverageCode.DUPLICATE_SOURCE_IDENTITY == "duplicate_source_identity"
+
+    with pytest.raises(ValueError, match="known CoverageCode"):
+        CoverageEvidence(warning_codes=("duplicate_source_identitiy",))
+    with pytest.raises(ValueError, match="known CoverageCode"):
+        CoverageEvidence(skipped_reasons=("provider-specific detail",))
+
+
+def test_dfs_module_exports_only_contract_symbols():
+    import app.providers.dfs as dfs
+
+    assert set(dfs.__all__) == {
+        "AthleteEvidence",
+        "AppearanceEvidence",
+        "CompetitionEvidence",
+        "CoverageCode",
+        "CoverageEvidence",
+        "DeadlineExceededError",
+        "EventEvidence",
+        "LeagueEvidence",
+        "MalformedProviderResponseError",
+        "MarketStatus",
+        "MarketThreshold",
+        "MarketVariant",
+        "NBAMarketQuery",
+        "NormalizedLabel",
+        "PlayerProjectionMarket",
+        "ProviderSnapshot",
+        "ProviderSnapshotProvider",
+        "RetrievalContext",
+        "ScoringPeriod",
+        "Selection",
+        "SelectionDirection",
+        "SelectionModifier",
+        "SnapshotStatus",
+        "SportEvidence",
+        "StatisticEvidence",
+        "TeamEvidence",
+        "normalize_coverage_code",
+        "normalize_market_status",
+        "normalize_market_variant",
+        "normalize_scoring_period",
+        "normalize_selection_direction",
+        "normalize_timestamp",
+    }

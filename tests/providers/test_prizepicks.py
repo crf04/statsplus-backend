@@ -13,6 +13,7 @@ import requests
 from app.errors import ProviderUnavailableError
 from app.utils import telemetry
 from app.providers.dfs import (
+    CoverageCode,
     MarketVariant,
     MalformedProviderResponseError,
     NBAMarketQuery,
@@ -214,6 +215,8 @@ def test_missing_prizepicks_relationship_is_partial_when_another_row_is_valid() 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.skipped_count == 1
     assert snapshot.coverage.fanout_complete is False
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
+    assert "projection relationships could not be resolved" in snapshot.coverage.diagnostic_details
 
 
 def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error() -> None:

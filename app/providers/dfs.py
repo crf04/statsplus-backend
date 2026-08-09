@@ -7,13 +7,12 @@ the immutable snapshot models returned by adapters.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from decimal import Decimal, InvalidOperation
 from math import isfinite
-from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from app.utils.request_id import is_valid_request_id
@@ -701,6 +700,71 @@ class SnapshotStatus(str, Enum):
     PARTIAL = "partial"
 
 
+class CoverageCode(str, Enum):
+    """Closed warning and exclusion vocabulary for provider coverage."""
+
+    CONFLICTING_SOURCE_IDENTITY = "conflicting_source_identity"
+    DUPLICATE_SOURCE_IDENTITY = "duplicate_source_identity"
+    FIXTURE_FAILED = "fixture_failed"
+    FIXTURE_LIST_FAILED = "fixture_list_failed"
+    FIXTURE_MALFORMED = "fixture_malformed"
+    INELIGIBLE_EVENT_STATUS = "ineligible_event_status"
+    INELIGIBLE_STATUS = "ineligible_status"
+    MALFORMED_RECORD = "malformed_record"
+    MISSING_COMPETITION_ID = "missing_competition_id"
+    MISSING_EVENT_RELATIONSHIP = "missing_event_relationship"
+    MISSING_MATCH_RELATIONSHIP = "missing_match_relationship"
+    MISSING_MATCH_TYPE = "missing_match_type"
+    NON_GAME_MARKET = "non_game_market"
+    NON_NBA_COMPETITION = "non_nba_competition"
+    NON_NBA_MARKET = "non_nba_market"
+    NON_NBA_SPORT = "non_nba_sport"
+    NON_PLAYER_MARKET = "non_player_market"
+    NON_PROJECTION_MARKET = "non_projection_market"
+    PAGE_FETCH_FAILED = "page_fetch_failed"
+    PAGE_MALFORMED = "page_malformed"
+    PAGE_METADATA_MISMATCH = "page_metadata_mismatch"
+    PAGINATION_EXPECTED_TOTAL_CHANGED = "pagination_expected_total_changed"
+    PAGINATION_METADATA_MALFORMED = "pagination_metadata_malformed"
+    PAGINATION_PAGE_MISMATCH = "pagination_page_mismatch"
+    PAGINATION_TOTAL_PAGES_CHANGED = "pagination_total_pages_changed"
+    STATUS_FILTER = "status_filter"
+
+
+def normalize_coverage_code(
+    value: CoverageCode | str,
+    *,
+    default: CoverageCode | None = None,
+) -> CoverageCode:
+    """Normalize a reviewed coverage code, optionally falling back for detail."""
+
+    if isinstance(value, CoverageCode):
+        return value
+    try:
+        return CoverageCode(value)
+    except (TypeError, ValueError) as error:
+        if default is not None:
+            return default
+        raise ValueError("coverage code must be a known CoverageCode value") from error
+
+
+def _normalize_coverage_codes(
+    values: tuple[CoverageCode | str, ...],
+    *,
+    field: str,
+) -> tuple[CoverageCode, ...]:
+    normalized: list[CoverageCode] = []
+    for value in tuple(values):
+        try:
+            code = normalize_coverage_code(value)
+        except ValueError as error:
+            raise ValueError(
+                f"coverage {field} must contain known CoverageCode values"
+            ) from error
+        normalized.append(code)
+    return tuple(normalized)
+
+
 class MalformedProviderResponseError(ValueError):
     """A provider payload cannot be represented without losing facts."""
 
@@ -716,8 +780,9 @@ class CoverageEvidence:
     pagination_complete: bool | None = None
     fanout_complete: bool | None = None
     expected_total: int | None = None
-    warning_codes: tuple[str, ...] = ()
-    skipped_reasons: tuple[str, ...] = ()
+    warning_codes: tuple[CoverageCode | str, ...] = ()
+    skipped_reasons: tuple[CoverageCode | str, ...] = ()
+    diagnostic_details: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -740,10 +805,15 @@ class CoverageEvidence:
             if value is not None and not isinstance(value, bool):
                 raise ValueError(f"coverage {name} must be true, false, or None")
         for name in ("warning_codes", "skipped_reasons"):
-            values = tuple(getattr(self, name))
-            if any(not isinstance(value, str) or not value.strip() for value in values):
-                raise ValueError(f"coverage {name} must contain non-empty strings")
+            values = _normalize_coverage_codes(
+                getattr(self, name),
+                field=name,
+            )
             object.__setattr__(self, name, values)
+        details = tuple(self.diagnostic_details)
+        if any(not isinstance(value, str) or not value.strip() for value in details):
+            raise ValueError("coverage diagnostic_details must contain non-empty strings")
+        object.__setattr__(self, "diagnostic_details", details)
 
     @property
     def is_complete(self) -> bool:
@@ -842,6 +912,113 @@ class ProviderSnapshot:
         return self.status is SnapshotStatus.PARTIAL
 
 
+class _SnapshotMarketCollector:
+    """Collect normalized markets with exact source-identity semantics."""
+
+    def __init__(self) -> None:
+        self._markets: list[PlayerProjectionMarket] = []
+        self._seen: dict[tuple[str, str], PlayerProjectionMarket] = {}
+        self._conflicting: set[tuple[str, str]] = set()
+        self._warning_codes: list[CoverageCode] = []
+        self._skipped_reasons: list[CoverageCode] = []
+        self._diagnostic_details: list[str] = []
+        self.skipped_count = 0
+        self.malformed_count = 0
+
+    def add(self, market: PlayerProjectionMarket) -> None:
+        """Add one normalized market, recording exact duplicates or conflicts."""
+
+        identity = market.source_identity
+        if identity is None:
+            self._markets.append(market)
+            return
+        previous = self._seen.get(identity)
+        if previous is None:
+            self._seen[identity] = market
+            self._markets.append(market)
+            return
+        if previous == market:
+            self._warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
+            return
+        self._conflicting.add(identity)
+        self.skipped_count += 1
+        self.malformed_count += 1
+        self._warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
+        self._skipped_reasons.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
+        self._diagnostic_details.append(
+            "repeated provider market identity has conflicting normalized content"
+        )
+
+    def extend(self, markets: Iterable[PlayerProjectionMarket]) -> None:
+        """Add normalized markets in source order."""
+
+        for market in markets:
+            self.add(market)
+
+    @property
+    def markets(self) -> tuple[PlayerProjectionMarket, ...]:
+        """Return usable markets, excluding every conflicting source identity."""
+
+        if not self._conflicting:
+            return tuple(self._markets)
+        return tuple(
+            market
+            for market in self._markets
+            if market.source_identity not in self._conflicting
+        )
+
+    @property
+    def warning_codes(self) -> tuple[CoverageCode, ...]:
+        return tuple(dict.fromkeys(self._warning_codes))
+
+    @property
+    def skipped_reasons(self) -> tuple[CoverageCode, ...]:
+        return tuple(dict.fromkeys(self._skipped_reasons))
+
+    @property
+    def diagnostic_details(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(self._diagnostic_details))
+
+
+def _build_snapshot(
+    *,
+    provider: str,
+    markets: Iterable[PlayerProjectionMarket],
+    retrieved_at: datetime | str,
+    fetched_count: int = 0,
+    eligible_count: int = 0,
+    normalized_count: int = 0,
+    skipped_count: int = 0,
+    pagination_complete: bool | None = None,
+    fanout_complete: bool | None = None,
+    expected_total: int | None = None,
+    warning_codes: Iterable[CoverageCode | str] = (),
+    skipped_reasons: Iterable[CoverageCode | str] = (),
+    diagnostic_details: Iterable[str] = (),
+) -> ProviderSnapshot:
+    """Build the immutable snapshot and derive status from coverage evidence."""
+
+    coverage = CoverageEvidence(
+        fetched_count=fetched_count,
+        eligible_count=eligible_count,
+        normalized_count=normalized_count,
+        skipped_count=skipped_count,
+        pagination_complete=pagination_complete,
+        fanout_complete=fanout_complete,
+        expected_total=expected_total,
+        warning_codes=tuple(warning_codes),
+        skipped_reasons=tuple(skipped_reasons),
+        diagnostic_details=tuple(diagnostic_details),
+    )
+    return ProviderSnapshot(
+        provider=provider,
+        status=SnapshotStatus.PARTIAL if not coverage.is_complete else SnapshotStatus.COMPLETE,
+        markets=tuple(markets),
+        coverage=coverage,
+        retrieved_at=retrieved_at,
+    )
+
+
 class DeadlineExceededError(TimeoutError):
     """The shared retrieval deadline has elapsed."""
 
@@ -852,7 +1029,6 @@ class RetrievalContext:
 
     deadline: datetime | str
     request_id: str | None = None
-    telemetry: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         deadline = normalize_timestamp(self.deadline)
@@ -862,16 +1038,8 @@ class RetrievalContext:
         if request_id is not None:
             if not is_valid_request_id(request_id):
                 raise ValueError("retrieval request_id is invalid")
-        if not isinstance(self.telemetry, Mapping):
-            raise ValueError("retrieval telemetry must be a mapping")
-        telemetry = {
-            str(key): str(value)
-            for key, value in self.telemetry.items()
-            if str(key).strip()
-        }
         object.__setattr__(self, "deadline", deadline)
         object.__setattr__(self, "request_id", request_id)
-        object.__setattr__(self, "telemetry", MappingProxyType(telemetry))
 
     @property
     def deadline_at(self) -> datetime:
@@ -939,14 +1107,6 @@ class ProviderSnapshotProvider(Protocol):
         """Retrieve one complete or partial snapshot for the semantic query."""
 
 
-# Names used by different orchestration layers should point to one contract,
-# not introduce compatibility protocols with subtly different methods.
-MarketQuery = NBAMarketQuery
-SemanticMarketQuery = NBAMarketQuery
-DFSProvider = ProviderSnapshotProvider
-ProviderAdapter = ProviderSnapshotProvider
-
-
 __all__ = [
     "AthleteEvidence",
     "AppearanceEvidence",
@@ -957,21 +1117,18 @@ __all__ = [
     "MarketVariant",
     "MarketThreshold",
     "CoverageEvidence",
+    "CoverageCode",
     "DeadlineExceededError",
-    "DFSProvider",
     "MalformedProviderResponseError",
-    "MarketQuery",
     "NormalizedLabel",
     "PlayerProjectionMarket",
     "NBAMarketQuery",
-    "ProviderAdapter",
     "ProviderSnapshot",
     "ProviderSnapshotProvider",
     "RetrievalContext",
     "Selection",
     "SelectionModifier",
     "SelectionDirection",
-    "SemanticMarketQuery",
     "ScoringPeriod",
     "SnapshotStatus",
     "SportEvidence",
@@ -979,6 +1136,7 @@ __all__ = [
     "TeamEvidence",
     "normalize_market_variant",
     "normalize_market_status",
+    "normalize_coverage_code",
     "normalize_selection_direction",
     "normalize_scoring_period",
     "normalize_timestamp",

@@ -14,8 +14,7 @@ from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     AppearanceEvidence,
-    CoverageEvidence,
-    DeadlineExceededError,
+    CoverageCode,
     EventEvidence,
     MarketStatus,
     MarketThreshold,
@@ -27,18 +26,28 @@ from app.providers.dfs import (
     ScoringPeriod,
     Selection,
     SelectionModifier,
-    SnapshotStatus,
+    _SnapshotMarketCollector,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    _build_snapshot,
     normalize_market_variant,
-    normalize_timestamp,
+    normalize_coverage_code,
+)
+from app.providers.dfs_transport import request_json
+from app.providers.dfs_normalization import (
+    display_number,
+    is_ineligible_event_status,
+    normalize_status,
+    optional_text,
+    required_identifier,
+    required_number,
+    required_text,
+    validate_timestamp,
 )
 from app.utils.telemetry import (
-    CACHE_DISABLED,
     PROVIDER_UNDERDOG,
     ProviderResponseError,
-    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,8 +76,9 @@ class _PayloadResult:
     eligible_count: int
     normalized_count: int
     skipped_count: int
-    warning_codes: tuple[str, ...]
-    skipped_reasons: tuple[str, ...]
+    warning_codes: tuple[CoverageCode, ...]
+    skipped_reasons: tuple[CoverageCode, ...]
+    diagnostic_details: tuple[str, ...]
     malformed_count: int
 
 
@@ -116,34 +126,25 @@ class UnderdogAdapter:
         except _MalformedPayload as error:
             raise self._invalid_response(error) from error
 
-        markets: list[PlayerProjectionMarket] = []
-        seen: dict[tuple[str, str], PlayerProjectionMarket] = {}
-        conflicting: set[tuple[str, str]] = set()
+        collection = _SnapshotMarketCollector()
         warning_codes = list(result.warning_codes)
         skipped_reasons = list(result.skipped_reasons)
+        diagnostic_details = list(result.diagnostic_details)
         skipped_count = result.skipped_count
         malformed_count = result.malformed_count
-        for market in result.markets:
-            identity = market.source_identity
-            if identity is None:
-                markets.append(market)
-                continue
-            previous = seen.get(identity)
-            if previous is None:
-                seen[identity] = market
-                markets.append(market)
-            elif previous == market:
-                warning_codes.append("duplicate_source_identity")
-            else:
-                conflicting.add(identity)
-                skipped_count += 1
-                malformed_count += 1
-                warning_codes.append("conflicting_source_identity")
-                skipped_reasons.append("conflicting_source_identity")
-
-        if conflicting:
-            markets = [market for market in markets if market.source_identity not in conflicting]
-        coverage = CoverageEvidence(
+        collection.extend(result.markets)
+        markets = collection.markets
+        skipped_count += collection.skipped_count
+        malformed_count += collection.malformed_count
+        warning_codes.extend(collection.warning_codes)
+        skipped_reasons.extend(collection.skipped_reasons)
+        diagnostic_details.extend(collection.diagnostic_details)
+        if malformed_count and not markets:
+            raise self._invalid_response("no usable Underdog player markets")
+        snapshot = _build_snapshot(
+            provider=self.name,
+            markets=markets,
+            retrieved_at=retrieved_at,
             fetched_count=result.fetched_count,
             eligible_count=result.eligible_count,
             normalized_count=result.normalized_count,
@@ -151,19 +152,11 @@ class UnderdogAdapter:
             pagination_complete=True,
             fanout_complete=not malformed_count,
             expected_total=None,
-            warning_codes=tuple(dict.fromkeys(warning_codes)),
-            skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
+            warning_codes=warning_codes,
+            skipped_reasons=skipped_reasons,
+            diagnostic_details=diagnostic_details,
         )
-        if malformed_count and not markets:
-            raise self._invalid_response("no usable Underdog player markets")
-        status = SnapshotStatus.PARTIAL if not coverage.is_complete else SnapshotStatus.COMPLETE
-        return ProviderSnapshot(
-            provider=self.name,
-            status=status,
-            markets=tuple(markets),
-            coverage=coverage,
-            retrieved_at=retrieved_at,
-        )
+        return snapshot
 
     def _request_payload(
         self,
@@ -173,63 +166,27 @@ class UnderdogAdapter:
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> _PayloadResult:
         try:
-            now = self._now_utc()
-            context.ensure_active(now=now)
-            timeout = self._bounded_timeout(context, now=now)
-            with provider_call(
-                PROVIDER_UNDERDOG,
-                "get_snapshot",
-                cache_status=CACHE_DISABLED,
-                request_id=context.request_id,
-            ) as tracker:
-                response = self.session.get(self.BASE_URL, timeout=timeout)
-                tracker.status_code = getattr(response, "status_code", None)
-                context.ensure_active(now=self._now_utc())
-                response.raise_for_status()
-                try:
-                    payload = response.json()
-                except (TypeError, ValueError) as error:
-                    raise ProviderResponseError(
-                        "Underdog returned invalid JSON"
-                    ) from error
-                try:
-                    result = self._normalize_payload(
-                        payload,
-                        expected_sport=expected_sport,
-                        allowed_statuses=allowed_statuses,
-                    )
-                except _MalformedPayload as error:
-                    raise ProviderResponseError(str(error)) from error
-                context.ensure_active(now=self._now_utc())
-                return result
-        except DeadlineExceededError as error:
-            raise ProviderUnavailableError(
-                "Underdog retrieval deadline exceeded.", detail=error
-            ) from error
-        except requests.exceptions.Timeout as error:
-            raise ProviderUnavailableError(
-                "Underdog timed out while fetching lines.", detail=error
-            ) from error
-        except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "Underdog could not be reached.", detail=error
-            ) from error
+            return request_json(
+                context=context,
+                session=self.session,
+                url=self.BASE_URL,
+                params=None,
+                timeout=self.timeout,
+                now=self._now_utc,
+                provider=PROVIDER_UNDERDOG,
+                operation="get_snapshot",
+                parse=lambda payload: self._normalize_payload(
+                    payload,
+                    expected_sport=expected_sport,
+                    allowed_statuses=allowed_statuses,
+                ),
+                deadline_message="Underdog retrieval deadline exceeded.",
+                timeout_message="Underdog timed out while fetching lines.",
+                unavailable_message="Underdog could not be reached.",
+                invalid_json_message="Underdog returned invalid JSON",
+            )
         except ProviderResponseError as error:
             raise _MalformedPayload(str(error)) from error
-
-    def _bounded_timeout(
-        self,
-        context: RetrievalContext,
-        *,
-        now: datetime | None = None,
-    ) -> tuple[float, float]:
-        current = now if now is not None else self._now_utc()
-        context.ensure_active(now=current)
-        remaining = context.remaining_seconds(now=current)
-        if remaining <= 0:
-            raise DeadlineExceededError("Underdog retrieval deadline exceeded")
-        connect, read = self.timeout
-        return min(float(connect), remaining), min(float(read), remaining)
 
     def _now_utc(self) -> datetime:
         value = self.now()
@@ -263,8 +220,9 @@ class UnderdogAdapter:
             games.setdefault(match_id, match)
 
         markets: list[PlayerProjectionMarket] = []
-        warning_codes: list[str] = []
-        skipped_reasons: list[str] = []
+        warning_codes: list[CoverageCode] = []
+        skipped_reasons: list[CoverageCode] = []
+        diagnostic_details: list[str] = []
         skipped_count = 0
         malformed_count = 0
         eligible_count = 0
@@ -281,12 +239,19 @@ class UnderdogAdapter:
                 )
             except _ExcludedRecord as error:
                 skipped_count += 1
-                skipped_reasons.append(error.reason)
-            except _MalformedRecord as error:
+                skipped_reasons.append(CoverageCode(error.reason))
+            except ValueError as error:
                 skipped_count += 1
                 malformed_count += 1
-                warning_codes.append("malformed_record")
-                skipped_reasons.append(str(error) or "malformed_record")
+                warning_codes.append(CoverageCode.MALFORMED_RECORD)
+                detail = str(error) or CoverageCode.MALFORMED_RECORD.value
+                skipped_reasons.append(
+                    normalize_coverage_code(
+                        detail,
+                        default=CoverageCode.MALFORMED_RECORD,
+                    )
+                )
+                diagnostic_details.append(detail)
             else:
                 eligible_count += 1
                 normalized_count += 1
@@ -300,6 +265,7 @@ class UnderdogAdapter:
             skipped_count=skipped_count,
             warning_codes=tuple(dict.fromkeys(warning_codes)),
             skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
+            diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
             malformed_count=malformed_count,
         )
 
@@ -316,26 +282,26 @@ class UnderdogAdapter:
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise _MalformedRecord("line must be an object")
-        line_id = cls._required_identifier(row, "id")
+        line_id = required_identifier(row, "id")
         over_under = row.get("over_under")
         if not isinstance(over_under, Mapping):
             raise _MalformedRecord("line.over_under must be an object")
         appearance_stat = over_under.get("appearance_stat")
         if not isinstance(appearance_stat, Mapping):
             raise _MalformedRecord("line appearance_stat must be an object")
-        appearance_id = cls._required_identifier(appearance_stat, "appearance_id")
+        appearance_id = required_identifier(appearance_stat, "appearance_id")
         appearance = appearances.get(appearance_id)
         if appearance is None:
             raise _MalformedRecord("line appearance could not be resolved")
-        appearance_type = cls._optional_text(appearance.get("type"))
+        appearance_type = optional_text(appearance.get("type"))
         if appearance_type is None:
             raise _MalformedRecord("appearance type must be present")
         if appearance_type.casefold() != "player":
             raise _ExcludedRecord("non_player_market")
         appearance_label = (
-            cls._optional_text(appearance.get("label"))
-            or cls._optional_text(appearance.get("display_name"))
-            or cls._optional_text(appearance.get("name"))
+            optional_text(appearance.get("label"))
+            or optional_text(appearance.get("display_name"))
+            or optional_text(appearance.get("name"))
         )
         appearance_evidence = AppearanceEvidence(
             provider_id=appearance_id,
@@ -343,15 +309,15 @@ class UnderdogAdapter:
             label=appearance_label,
         )
 
-        player_id = cls._required_identifier(appearance, "player_id")
+        player_id = required_identifier(appearance, "player_id")
         player = players.get(player_id)
         if player is None:
             raise _MalformedRecord("line player could not be resolved")
-        player_sport = cls._required_text(player, "sport_id")
+        player_sport = required_text(player, "sport_id")
         if player_sport.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
-        raw_status = cls._required_text(row, "status")
-        status = cls._normalize_status(raw_status)
+        raw_status = required_text(row, "status")
+        status = normalize_status(raw_status)
         if status is None:
             raise _ExcludedRecord("ineligible_status")
         if status not in allowed_statuses:
@@ -359,7 +325,7 @@ class UnderdogAdapter:
 
         match_id = cls._optional_identifier(appearance.get("match_id"))
         match = games.get(match_id) if match_id is not None else None
-        match_type = cls._optional_text(appearance.get("match_type"))
+        match_type = optional_text(appearance.get("match_type"))
         if match_type is None:
             raise _MalformedRecord("missing_match_type")
         normalized_match_type = match_type.casefold().replace("-", "_").replace(" ", "_")
@@ -367,7 +333,7 @@ class UnderdogAdapter:
             raise _ExcludedRecord("non_game_market")
         if match_id is None or match is None:
             raise _MalformedRecord("missing_match_relationship")
-        match_sport = cls._required_text(match, "sport_id")
+        match_sport = required_text(match, "sport_id")
         if match_sport.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
 
@@ -375,17 +341,17 @@ class UnderdogAdapter:
         if not isinstance(options_value, list):
             raise _MalformedRecord("line.options must be a list")
         options = tuple(cls._normalize_option(option) for option in options_value)
-        stat_value = cls._required_number(row, "stat_value")
-        stat_label = cls._required_text(appearance_stat, "display_stat")
+        stat_value = required_number(row, "stat_value")
+        stat_label = required_text(appearance_stat, "display_stat")
         player_name = cls._player_name(player)
         team = cls._team_from_mapping(player, fallback_id=appearance.get("team_id"))
         event = cls._event_from_match(match_id, match)
-        variant_label = cls._optional_text(row.get("line_type"))
+        variant_label = optional_text(row.get("line_type"))
         variant = normalize_market_variant(variant_label)
         updated_at = row.get("updated_at")
-        cls._validate_timestamp(updated_at, "updated_at")
+        validate_timestamp(updated_at, "updated_at")
         starts_at = event.starts_at if event is not None else None
-        period_label = cls._optional_text(
+        period_label = optional_text(
             appearance_stat.get("scoring_period", appearance_stat.get("period"))
         )
         scoring_period = (
@@ -410,7 +376,7 @@ class UnderdogAdapter:
                 threshold=MarketThreshold(
                     stat_value,
                     unit="count",
-                    original_value=cls._display_number(row["stat_value"]),
+                    original_value=display_number(row["stat_value"], field="stat_value"),
                 ),
                 status=status,
                 status_label=raw_status,
@@ -429,16 +395,16 @@ class UnderdogAdapter:
     def _normalize_option(cls, option: Any) -> Selection:
         if not isinstance(option, Mapping):
             raise _MalformedRecord("line option must be an object")
-        choice = cls._optional_text(option.get("choice"))
+        choice = optional_text(option.get("choice"))
         selection_id = cls._optional_identifier(
             option.get("id", option.get("selection_id"))
         )
         modifiers: tuple[SelectionModifier, ...] = ()
         multiplier = option.get("payout_multiplier")
         if multiplier is not None and multiplier != "":
-            modifier_kind = cls._optional_text(option.get("modifier_kind")) or "payout_multiplier"
-            modifier_scope = cls._optional_text(option.get("modifier_scope")) or "selection"
-            modifier_label = cls._optional_text(option.get("payout_multiplier_label")) or str(multiplier)
+            modifier_kind = optional_text(option.get("modifier_kind")) or "payout_multiplier"
+            modifier_scope = optional_text(option.get("modifier_scope")) or "selection"
+            modifier_label = optional_text(option.get("payout_multiplier_label")) or str(multiplier)
             try:
                 modifiers = (
                     SelectionModifier(
@@ -456,7 +422,7 @@ class UnderdogAdapter:
                 label=choice,
                 direction=choice,
                 direction_label=choice,
-                status=cls._optional_text(option.get("status")),
+                status=optional_text(option.get("status")),
                 modifiers=modifiers,
                 american_price=option.get("american_price"),
                 decimal_price=option.get("decimal_price"),
@@ -472,21 +438,21 @@ class UnderdogAdapter:
     ) -> EventEvidence | None:
         if match_id is None and match is None:
             return None
-        label = cls._optional_text(match.get("title")) if match else None
+        label = optional_text(match.get("title")) if match else None
         if label is None and match is not None:
-            label = cls._optional_text(match.get("name"))
+            label = optional_text(match.get("name"))
         starts_at = match.get("scheduled_at") if match else None
         updated_at = match.get("updated_at") if match else None
         status_label = (
-            cls._optional_text(match.get("status"))
-            or cls._optional_text(match.get("status_label"))
+            optional_text(match.get("status"))
+            or optional_text(match.get("status_label"))
             if match
             else None
         )
-        if status_label is not None and cls._is_ineligible_event_status(status_label):
+        if status_label is not None and is_ineligible_event_status(status_label):
             raise _ExcludedRecord("ineligible_event_status")
-        cls._validate_timestamp(starts_at, "scheduled_at")
-        cls._validate_timestamp(updated_at, "match updated_at")
+        validate_timestamp(starts_at, "scheduled_at")
+        validate_timestamp(updated_at, "match updated_at")
         try:
             return EventEvidence(
                 provider_id=match_id,
@@ -554,11 +520,11 @@ class UnderdogAdapter:
 
     @classmethod
     def _player_name(cls, player: Mapping[str, Any]) -> str:
-        first = cls._optional_text(player.get("first_name"))
-        last = cls._optional_text(player.get("last_name"))
+        first = optional_text(player.get("first_name"))
+        last = optional_text(player.get("last_name"))
         name = " ".join(part for part in (first, last) if part)
         if not name:
-            name = cls._optional_text(player.get("name")) or cls._optional_text(player.get("display_name"))
+            name = optional_text(player.get("name")) or optional_text(player.get("display_name"))
         if not name:
             raise _MalformedRecord("player name must be present")
         return name
@@ -574,8 +540,8 @@ class UnderdogAdapter:
             if not isinstance(resource, Mapping):
                 raise _MalformedPayload(f"{name} entries must be objects")
             try:
-                identifier = cls._required_identifier(resource, "id")
-            except _MalformedRecord as error:
+                identifier = required_identifier(resource, "id")
+            except ValueError as error:
                 raise _MalformedPayload(str(error)) from error
             previous = indexed.get(identifier)
             if previous is not None and previous != resource:
@@ -590,13 +556,6 @@ class UnderdogAdapter:
             raise _MalformedPayload(f"{key} must be a list")
         return value
 
-    @classmethod
-    def _required_identifier(cls, value: Mapping[str, Any], key: str) -> str:
-        identifier = value.get(key)
-        if identifier is None or isinstance(identifier, bool) or not str(identifier).strip():
-            raise _MalformedRecord(f"{key} must be present")
-        return str(identifier)
-
     @staticmethod
     def _optional_identifier(value: Any) -> str | None:
         if value is None or value == "":
@@ -605,64 +564,6 @@ class UnderdogAdapter:
             raise _MalformedRecord("identifier must be a string, integer, or None")
         identifier = str(value).strip()
         return identifier or None
-
-    @classmethod
-    def _required_text(cls, value: Mapping[str, Any], key: str) -> str:
-        text = cls._optional_text(value.get(key))
-        if text is None:
-            raise _MalformedRecord(f"{key} must be a non-empty string")
-        return text
-
-    @staticmethod
-    def _optional_text(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        text = value.strip()
-        return text or None
-
-    @classmethod
-    def _required_number(cls, value: Mapping[str, Any], key: str) -> str | int | float:
-        raw = value.get(key)
-        if isinstance(raw, bool) or raw is None or not isinstance(raw, (str, int, float)):
-            raise _MalformedRecord(f"{key} must be numeric")
-        try:
-            decimal = MarketThreshold(raw, unit="count").value
-        except ValueError as error:
-            raise _MalformedRecord(f"{key} must be numeric") from error
-        if not decimal.is_finite():
-            raise _MalformedRecord(f"{key} must be finite")
-        return raw
-
-    @staticmethod
-    def _display_number(value: Any) -> str:
-        if isinstance(value, bool) or value is None or not isinstance(value, (str, int, float)):
-            raise _MalformedRecord("stat_value must have a displayable numeric value")
-        return str(value)
-
-    @staticmethod
-    def _validate_timestamp(value: Any, field: str) -> None:
-        if value is None:
-            return
-        if not isinstance(value, str):
-            raise _MalformedRecord(f"{field} must be an ISO-8601 string")
-        try:
-            normalize_timestamp(value)
-        except ValueError as error:
-            raise _MalformedRecord(str(error)) from error
-
-    @staticmethod
-    def _normalize_status(label: str) -> MarketStatus | None:
-        normalized = label.strip().casefold().replace("-", "_")
-        if normalized in {"active", "open", "available", "pre_game", "pregame"}:
-            return MarketStatus.AVAILABLE
-        if normalized in {"suspended", "paused"}:
-            return MarketStatus.SUSPENDED
-        return None
-
-    @staticmethod
-    def _is_ineligible_event_status(label: str) -> bool:
-        normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
-        return normalized in {"live", "closed", "settled", "final", "in_play", "inplay"}
 
     @staticmethod
     def _invalid_response(detail: Any) -> ProviderUnavailableError:
