@@ -230,6 +230,29 @@ def test_player_projection_market_preserves_evidence_and_uses_exact_threshold():
     assert not hasattr(market, "period")
 
 
+@pytest.mark.parametrize(
+    ("field", "evidence", "expected_type"),
+    [
+        ("league", CompetitionEvidence(label="NBA"), LeagueEvidence),
+        ("league", SportEvidence(label="Basketball"), LeagueEvidence),
+        ("competition", LeagueEvidence(label="NBA"), CompetitionEvidence),
+        ("competition", SportEvidence(label="Basketball"), CompetitionEvidence),
+        ("sport", LeagueEvidence(label="NBA"), SportEvidence),
+        ("sport", CompetitionEvidence(label="NBA"), SportEvidence),
+    ],
+)
+def test_player_projection_market_rejects_cross_slot_evidence_types(
+    field: str,
+    evidence: object,
+    expected_type: type[object],
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=f"market {field} must be {expected_type.__name__} or None",
+    ):
+        PlayerProjectionMarket(provider="dabble", **{field: evidence})
+
+
 def test_player_projection_market_keeps_missing_variant_label_missing():
     market = PlayerProjectionMarket(provider="underdog", variant=MarketVariant.UNKNOWN)
 

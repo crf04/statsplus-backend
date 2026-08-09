@@ -581,15 +581,15 @@ class PlayerProjectionMarket:
         ):
             if evidence is not None and not isinstance(evidence, TeamEvidence):
                 raise ValueError(f"market {name} must be TeamEvidence or None")
-        for evidence, name in (
-            (self.league, "league"),
-            (self.competition, "competition"),
-            (self.sport, "sport"),
+        for evidence, name, expected_type in (
+            (self.league, "league", LeagueEvidence),
+            (self.competition, "competition", CompetitionEvidence),
+            (self.sport, "sport", SportEvidence),
         ):
-            if evidence is not None and not isinstance(
-                evidence, (LeagueEvidence, CompetitionEvidence, SportEvidence)
-            ):
-                raise ValueError(f"market {name} evidence has an invalid type")
+            if evidence is not None and not isinstance(evidence, expected_type):
+                raise ValueError(
+                    f"market {name} must be {expected_type.__name__} or None"
+                )
         if self.statistic is not None and not isinstance(
             self.statistic, StatisticEvidence
         ):
