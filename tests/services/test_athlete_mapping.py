@@ -972,6 +972,93 @@ def test_rejection_suppresses_until_clear_and_clear_is_audited(mapping_db):
     assert any(item.decision_state == "rejection_cleared" for item in repository.history())
 
 
+def _reject_and_clear(repository: AthleteMappingRepository, provider_id: str) -> None:
+    repository.reject(
+        "prizepicks",
+        provider_id,
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    assert repository.clear_rejection(
+        "prizepicks",
+        provider_id,
+        operator_id="ops@example.com",
+        reason="the identity was reinstated",
+    )
+
+
+def test_cleared_rejection_lets_a_reused_identity_map_without_a_conflict(mapping_db):
+    engine, _ = mapping_db
+    repository = AthleteMappingRepository(engine)
+    assert repository.record_resolution(_auto_resolution()).state == "auto"
+    _reject_and_clear(repository, "pp-15")
+
+    # The provider now reports a different athlete under the same ID.  The
+    # rejected row still carries the canonical ID it was mapped to, but nothing
+    # active claims the identity any more, so the fresh evidence maps instead
+    # of queueing a conflict against a decision an operator already undid.
+    reused = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="LeBron James",
+            team=TeamEvidence(
+                provider_id="pp-lal",
+                canonical_id=1610612747,
+                name="Los Angeles Lakers",
+                abbreviation="LAL",
+            ),
+        ),
+        "2024-25",
+    )
+    assert reused.state is MappingResolutionState.AUTO
+
+    mapped = repository.record_resolution(reused)
+    assert mapped.state == "auto"
+    assert mapped.persisted is True
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 23
+    assert active.provider_name == "LeBron James"
+    assert repository.list_conflicts() == []
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+
+
+def test_replaying_the_same_auto_after_a_cleared_rejection_is_a_new_transition(
+    mapping_db,
+):
+    engine, _ = mapping_db
+    repository = AthleteMappingRepository(engine)
+    resolution = _auto_resolution()
+    repository.persist_auto_decision(resolution)
+    _reject_and_clear(repository, "pp-15")
+
+    # Reinstating the identity is a state transition even though the board read
+    # is unchanged, so the audit log records it rather than deduplicating it
+    # against the observation that preceded the rejection.
+    restored = repository.persist_auto_decision(resolution)
+    assert restored.state == "auto"
+    assert restored.persisted is True
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 15
+    assert active.mapping_state == "auto"
+
+    # Reading the same board row again transitions nothing.
+    assert repository.persist_auto_decision(resolution).persisted is False
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+
+
 def test_later_candidate_conflict_deactivates_mapping_and_retains_new_evidence(mapping_db):
     engine, _ = mapping_db
     repository = AthleteMappingRepository(engine)

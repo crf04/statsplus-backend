@@ -622,7 +622,17 @@ class AthleteMappingRepository:
                         mapping=self._mapping_record(existing),
                     )
                 previous_id = existing["canonical_player_id"]
-                if previous_id is not None and int(previous_id) != resolution.canonical_player_id:
+                # Only an *active automatic* mapping asserts a canonical
+                # identity this observation can disagree with.  A row left
+                # behind by a cleared rejection is a decided-and-undecided
+                # history, not a live claim, so the canonical ID it still
+                # carries must not queue a conflict against fresh evidence.
+                if (
+                    bool(existing["is_active"])
+                    and state == MappingResolutionState.AUTO.value
+                    and previous_id is not None
+                    and int(previous_id) != resolution.canonical_player_id
+                ):
                     return self._write_conflict(
                         connection,
                         existing,

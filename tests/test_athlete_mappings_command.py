@@ -709,6 +709,65 @@ def test_cli_reject_blocks_then_clear_restores(tmp_path, capsys):
     ]
 
 
+def test_cli_maps_a_reused_identity_after_a_clear_without_queueing_a_conflict(
+    tmp_path, capsys
+):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    identity = (
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-15",
+        "--operator",
+        "ops@example.com",
+    )
+
+    _seed_board_reads(database_url, [("Nikola Jokic", _team_evidence())])
+    _run(
+        capsys,
+        "reject",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "provider identity is not trusted",
+    )
+    assert _run(
+        capsys,
+        "clear",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "the identity was reinstated",
+    ) == {"cleared": True}
+
+    # The provider reuses the ID for a different athlete the catalog matches
+    # exactly.  Nothing active claims the identity, so it maps automatically.
+    _seed_board_reads(database_url, [("LeBron James", _team_evidence())])
+
+    listed = _run(capsys, "list", "--database-url", database_url)
+    assert listed["conflicts"] == []
+    assert listed["unresolved"] == []
+    assert listed["rejections"] == []
+    assert [item["canonical_player_id"] for item in listed["mappings"]] == [23]
+    assert listed["mappings"][0]["mapping_state"] == "auto"
+
+    # Replaying the same board read transitions nothing, so the append-only
+    # history keeps one entry per transition, oldest first.
+    _seed_board_reads(database_url, [("LeBron James", _team_evidence())])
+    history = _run(capsys, "history", "--database-url", database_url)
+    assert [item["decision_state"] for item in history] == [
+        "auto",
+        "rejected",
+        "rejection_cleared",
+        "auto",
+    ]
+    assert [item["canonical_player_id"] for item in history] == [15, 15, None, 23]
+
+
 def test_cli_clear_reports_no_active_rejection(tmp_path, capsys):
     database_url = _seed_database(tmp_path)
 
