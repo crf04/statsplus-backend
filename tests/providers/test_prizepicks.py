@@ -214,6 +214,20 @@ def test_prizepicks_repeated_wrong_page_is_partial_with_incomplete_pagination() 
     assert [call[1]["page"] for call in session.calls] == [1, 2]
 
 
+def test_prizepicks_canonical_scoring_period_resolves_with_label_evidence() -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+    payload["data"][0]["attributes"]["scoring_period"] = "full_game"
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.scoring_period is ScoringPeriod.FULL_GAME
+    assert market.scoring_period_label == "full_game"
+
+
 def test_prizepicks_shrinking_total_pages_is_partial_with_incomplete_pagination() -> None:
     page_one = _payload("projections.page1.valid.json")
     page_one["meta"] = {"current_page": 1, "total_pages": 3}

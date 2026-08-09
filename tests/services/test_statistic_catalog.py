@@ -423,6 +423,10 @@ def test_resolver_requires_explicit_full_game_evidence_for_canonical_matches() -
         resolver.resolve("prizepicks", "Points", scoring_period="full game").state
         is MatchState.CANONICAL
     )
+    assert (
+        resolver.resolve("prizepicks", "Points", scoring_period="full_game").state
+        is MatchState.CANONICAL
+    )
 
 
 def test_resolver_reports_closed_reasons_for_each_unmapped_outcome() -> None:

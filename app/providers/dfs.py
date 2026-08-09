@@ -133,15 +133,26 @@ def normalize_market_status(label: str | MarketStatus | None) -> NormalizedLabel
     return NormalizedLabel(status, label)
 
 
+_SCORING_PERIOD_VALUES = {period.value: period for period in ScoringPeriod}
+
+
 def normalize_scoring_period(
     label: str | ScoringPeriod | None,
 ) -> NormalizedLabel[ScoringPeriod]:
-    """Normalize reviewed scoring periods without guessing unknown labels."""
+    """Normalize reviewed scoring periods without guessing unknown labels.
+
+    Canonical closed-vocabulary values such as ``full_game`` resolve exactly;
+    everything else falls back to the reviewed label map and stays UNKNOWN.
+    """
 
     if isinstance(label, ScoringPeriod):
         original_label = None if label is ScoringPeriod.UNKNOWN else label.value
         return NormalizedLabel(label, original_label)
-    normalized = label.strip().casefold().replace("-", " ") if isinstance(label, str) else ""
+    cleaned = label.strip().casefold() if isinstance(label, str) else ""
+    canonical = _SCORING_PERIOD_VALUES.get(cleaned)
+    if canonical is not None:
+        return NormalizedLabel(canonical, label)
+    normalized = cleaned.replace("-", " ")
     values = {
         "full game": ScoringPeriod.FULL_GAME,
         "game": ScoringPeriod.FULL_GAME,
