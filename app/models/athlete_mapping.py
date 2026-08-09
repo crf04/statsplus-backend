@@ -128,7 +128,11 @@ class AthleteMappingDecision(Base):
 
     operator_id = Column(String(128), nullable=True)
     reason = Column(Text, nullable=True)
-    idempotency_key = Column(String(128), nullable=True, unique=True)
+    # Repeated evidence is suppressed per transition rather than for the
+    # lifetime of an identity, so the same fingerprint may legitimately
+    # reappear after a different observation or decision.  The repository
+    # compares it with the latest decision for the identity instead.
+    idempotency_key = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

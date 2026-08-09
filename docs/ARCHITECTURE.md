@@ -386,13 +386,26 @@ an ID-only team conflict keeps both the provider and the candidate side.
 
 Ambiguous, inactive-only, unmatched, and team-conflict evidence never becomes
 current mapping state, but each is retained as one durable typed observation
-in the decision log under the same idempotency key, so repeated board reads
+in the decision log under an idempotency key, so repeated board reads
 add nothing and `scripts/athlete_mappings.py list` can show what an operator
-still has to decide. The canonical athletes such an observation could not
-choose between are stored as typed
+still has to decide. Suppression is per transition, not for the lifetime of an
+identity: the key is compared only with the latest decision for that identity,
+so an `auto` → `ambiguous` → `auto` sequence records all three, and an
+identity that is unmatched, rejected, cleared, and then unmatched again
+reappears in the queue. Only a repeated equivalent consecutive observation is
+dropped, and the log stays append-only. The canonical athletes such an
+observation could not choose between are stored as typed
 `athlete_mapping_decision_candidates` rows keyed by decision, not as an opaque
-blob, and a changed candidate set is a new observation rather than a suppressed
-repeat. `list` reports the latest decision per provider identity and includes
+blob, and changed candidate evidence — a different player, name, team ID, team
+name, abbreviation, or season-active flag — is a new observation rather than a
+suppressed repeat.
+
+Identity is the canonical player ID, not a label. When an established
+automatic mapping's canonical player is still active for the season, an
+official display-name change on either the catalog or the provider side keeps
+that mapping (the canonical facts are re-read from the catalog row); a
+relabeled player never becomes unmatched or conflicting on the strength of the
+label alone. `list` reports the latest decision per provider identity and includes
 it only while that decision is still unresolved, so a later automatic, manual,
 or rejection decision removes the identity from the queue. Repository reads and
 operator writes (approve, override, reject, and clear) translate
@@ -409,13 +422,23 @@ an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve
 and override also accept and retain provider name and team evidence, keeping
-the previously observed evidence when none is supplied. Active rejections
-suppress future automatic mappings until explicitly cleared.
+the previously observed evidence when none is supplied. Repeating a conflict
+read an identity already records changes nothing: the retained conflict
+candidate and evidence stay, and no duplicate decision is appended. Automatic
+mapping still requires a catalog row that is active for the season, while a
+governed approve or override may select an inactive-only row; that choice is
+recorded explicitly in the audit as a decision candidate marked not active for
+the season. Active rejections suppress future automatic mappings until
+explicitly cleared, and a manual decision still wins over any later automatic
+read.
 The per-identity lock row is inserted inside a savepoint that is always left
-before a duplicate `IntegrityError` is handled, so PostgreSQL releases the
+before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
 `tests/integration/test_postgres.py` covers that concurrency path against a
-real database when `TEST_DATABASE_URL` is set.
+real database when `TEST_DATABASE_URL` is set. The process-local identity lock
+is per engine and only orders writers inside one process, so the concurrency
+test gives each worker its own engine and repository and releases them from a
+barrier — the overlap is resolved by the database, not by a shared lock.
 Migration 006 also creates a per-identity lock table and database checks for
 closed mapping states, the closed decision-state set, active-state coherence,
 and cleared-rejection coherence. Those checks compare booleans with

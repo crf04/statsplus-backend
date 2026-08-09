@@ -264,6 +264,17 @@ class AthleteResolver:
             athlete for athlete in all_matches if athlete.is_active_for_season
         )
         if not active_matches:
+            retained = self._retained_identity(existing, rows, canonical_season)
+            if retained is not None:
+                return self._result(
+                    normalized_provider,
+                    evidence,
+                    canonical_season,
+                    MappingResolutionState.AUTO,
+                    canonical=retained,
+                    candidates=(retained,),
+                    reason="retained_canonical_identity",
+                )
             if self._existing_name_conflicts(existing, evidence):
                 return self._result(
                     normalized_provider,
@@ -403,11 +414,21 @@ class AthleteResolver:
         if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
             return False
         previous_player_id = existing.get("canonical_player_id")
-        if previous_player_id is not None and int(previous_player_id) != candidate.player_id:
-            return True
-        previous_name = existing.get("provider_name")
-        if previous_name and evidence.name and normalize_athlete_name(previous_name) != normalize_athlete_name(evidence.name):
-            return True
+        if previous_player_id is not None:
+            # The canonical player ID is the identity.  When it still agrees,
+            # a changed official display name is a relabeling of the same NBA
+            # player rather than disagreeing evidence.
+            if int(previous_player_id) != candidate.player_id:
+                return True
+        else:
+            previous_name = existing.get("provider_name")
+            if (
+                previous_name
+                and evidence.name
+                and normalize_athlete_name(previous_name)
+                != normalize_athlete_name(evidence.name)
+            ):
+                return True
         previous_team_id = existing.get("canonical_team_id")
         current_team_id = evidence.team.canonical_id if evidence.team else None
         return bool(
@@ -415,6 +436,36 @@ class AthleteResolver:
             and current_team_id is not None
             and int(previous_team_id) != int(current_team_id)
         )
+
+    @staticmethod
+    def _retained_identity(
+        existing: Mapping[str, Any] | None,
+        rows: Sequence[Mapping[str, Any]],
+        season: str,
+    ) -> CanonicalAthlete | None:
+        """Keep an established identity whose catalog row was only relabeled.
+
+        Official display names change (suffixes, legal names, spellings) on
+        both the catalog and the provider side.  An identity already mapped to
+        a canonical player ID that is still active for the season stays mapped
+        to that player, so a label change alone never turns it into an
+        unmatched or conflicting identity.  The canonical facts are re-read
+        from the catalog row so the current official name is retained.
+        """
+
+        if not existing or not bool(existing.get("is_active", False)):
+            return None
+        if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
+            return None
+        player_id = existing.get("canonical_player_id")
+        if player_id is None:
+            return None
+        for row in rows:
+            if int(row["player_id"]) != int(player_id):
+                continue
+            athlete = CanonicalAthlete.from_row({**row, "season": season})
+            return athlete if athlete.is_active_for_season else None
+        return None
 
     @staticmethod
     def _existing_name_conflicts(

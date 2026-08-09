@@ -647,6 +647,15 @@ class AthleteMappingRepository:
         now = _utc(observed_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
+            if self._is_repeated_conflict(existing, resolution):
+                # The resolver read the conflict this row already records, so
+                # there is nothing new to append and the retained conflict
+                # candidate must not be overwritten with an empty one.
+                return MappingPersistenceResult(
+                    MappingResolutionState.MAPPING_CONFLICT.value,
+                    False,
+                    mapping=self._mapping_record(existing),
+                )
             if existing is None:
                 # Preserve a conflict observation even if the first source
                 # observation was itself ambiguous or conflicting.
@@ -703,11 +712,17 @@ class AthleteMappingRepository:
                 provider_team_abbreviation=values["provider_team_abbreviation"],
                 mapping_state=MappingResolutionState.MAPPING_CONFLICT.value,
                 is_active=False,
-                conflict_canonical_player_id=resolution.canonical_player_id,
+                # Evidence that names no canonical athlete cannot erase the
+                # conflicting candidate an operator still has to review.
+                conflict_canonical_player_id=(
+                    resolution.canonical_player_id
+                    if resolution.canonical_athlete
+                    else existing.get("conflict_canonical_player_id")
+                ),
                 conflict_canonical_name=(
                     resolution.canonical_athlete.display_name
                     if resolution.canonical_athlete
-                    else None
+                    else existing.get("conflict_canonical_name")
                 ),
                 last_seen_at=now,
             )
@@ -973,6 +988,7 @@ class AthleteMappingRepository:
                         conflict_canonical_name=None,
                     )
                 )
+            selected = CanonicalAthlete.from_row(canonical)
             decision = self._insert_manual_decision(
                 connection,
                 provider=provider,
@@ -982,10 +998,14 @@ class AthleteMappingRepository:
                 operator_id=operator_id,
                 reason=reason,
                 existing=existing,
-                canonical=CanonicalAthlete.from_row(canonical),
+                canonical=selected,
                 evidence_values=evidence_values,
                 now=now,
             )
+            if decision is not None and not selected.is_active_for_season:
+                # The operator chose a row automatic mapping would refuse, so
+                # the audit has to name it as an inactive selection.
+                self._insert_candidates(connection, int(decision["id"]), (selected,))
             mapping = self._select_mapping(connection, provider, provider_id)
             return MappingPersistenceResult(
                 state.value,
@@ -1038,15 +1058,40 @@ class AthleteMappingRepository:
         season: str,
         player_id: int,
     ) -> Mapping[str, Any] | None:
+        """Read one catalog row for a season, active for the season or not.
+
+        Automatic mapping still requires an active season row because the
+        resolver only ever matches those.  A governed approve or override may
+        select an inactive-only row, which the decision audit records
+        explicitly as a candidate that was not active for the season.
+        """
+
         return connection.execute(
             select(AthleteCatalog.__table__).where(
                 and_(
                     AthleteCatalog.season == season,
                     AthleteCatalog.player_id == player_id,
-                    AthleteCatalog.is_active_for_season.is_(True),
                 )
             )
         ).mappings().one_or_none()
+
+    @staticmethod
+    def _latest_decision_key(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> str | None:
+        return connection.execute(
+            select(AthleteMappingDecision.idempotency_key)
+            .where(
+                and_(
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
+                )
+            )
+            .order_by(AthleteMappingDecision.id.desc())
+            .limit(1)
+        ).scalars().one_or_none()
 
     def _insert_decision(
         self,
@@ -1061,6 +1106,11 @@ class AthleteMappingRepository:
         """Append one automatic decision or unresolved observation."""
 
         provider, provider_id = self._resolution_key(resolution)
+        if self._latest_decision_key(connection, provider, provider_id) == idempotency_key:
+            # Only a repeated *consecutive* observation is a duplicate.  The
+            # same evidence after a different observation or decision is a new
+            # transition an operator has to be able to see.
+            return None
         canonical = resolution.canonical_athlete
         decision_state = state or resolution.state.value
         values = self._resolution_values(resolution)
@@ -1161,15 +1211,9 @@ class AthleteMappingRepository:
             "idempotency_key": idempotency_key,
             "created_at": created_at,
         }
-        try:
-            with connection.begin_nested():
-                result = connection.execute(
-                    insert(AthleteMappingDecision.__table__).values(**values)
-                )
-        except IntegrityError:
-            if idempotency_key is None:
-                raise
-            return None
+        result = connection.execute(
+            insert(AthleteMappingDecision.__table__).values(**values)
+        )
         decision_id = result.inserted_primary_key[0]
         return connection.execute(
             select(AthleteMappingDecision.__table__).where(
@@ -1257,6 +1301,35 @@ class AthleteMappingRepository:
             "provider_team_abbreviation": team.abbreviation if team else None,
         }
 
+    @classmethod
+    def _is_repeated_conflict(
+        cls,
+        existing: Mapping[str, Any] | None,
+        resolution: AthleteResolution,
+    ) -> bool:
+        """Report whether a conflict read repeats the recorded conflict.
+
+        A resolver that starts from an existing conflict row carries no
+        canonical athlete, so writing it again would only clear the retained
+        conflict candidate and append a duplicate decision.
+        """
+
+        if existing is None or resolution.canonical_athlete is not None:
+            return False
+        if existing["mapping_state"] != MappingResolutionState.MAPPING_CONFLICT.value:
+            return False
+        values = cls._resolution_values(resolution)
+        return all(
+            existing[field] == values[field]
+            for field in (
+                "provider_name",
+                "provider_team_id",
+                "provider_team_canonical_id",
+                "provider_team_name",
+                "provider_team_abbreviation",
+            )
+        )
+
     @staticmethod
     def _existing_evidence_values(existing: Mapping[str, Any] | None) -> dict[str, Any]:
         existing = existing or {}
@@ -1329,10 +1402,22 @@ class AthleteMappingRepository:
             "provider_team_canonical_id": team.canonical_id if team else None,
             "provider_team_name": team.name if team else None,
             "provider_team_abbreviation": team.abbreviation if team else None,
-            # A changed candidate set is different evidence for an operator to
-            # review, so it must not be suppressed as a repeated observation.
+            # Changed candidate evidence is different evidence for an operator
+            # to review, so every typed candidate field the audit retains is
+            # part of the fingerprint rather than the player ID alone.
             "candidates": sorted(
-                candidate.player_id for candidate in resolution.candidates
+                (
+                    [
+                        candidate.player_id,
+                        candidate.display_name,
+                        candidate.team_id,
+                        candidate.team_name,
+                        candidate.team_abbreviation,
+                        candidate.is_active_for_season,
+                    ]
+                    for candidate in resolution.candidates
+                ),
+                key=lambda candidate: candidate[0],
             ),
         }
         return hashlib.sha256(

@@ -750,6 +750,274 @@ def test_a_changed_candidate_set_is_recorded_as_a_new_observation(mapping_db):
     ]
 
 
+def test_a_changed_candidate_evidence_set_is_recorded_as_a_new_observation(mapping_db):
+    """Candidate identity is more than the player ID an operator has to pick."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    evidence = AthleteEvidence(provider_id="pp-77", name="LeBron James")
+    first_rows = [_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
+    traded_rows = [
+        _catalog_row(
+            15,
+            "LeBron James",
+            team_id=1610612743,
+            team_name="Denver Nuggets",
+            team_abbreviation="DEN",
+        ),
+        _catalog_row(23, "LeBron James"),
+    ]
+
+    repository.record_resolution(
+        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+    repeated = repository.record_resolution(
+        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+    changed = repository.record_resolution(
+        _resolver(rows=traded_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+
+    assert repeated.persisted is False
+    assert changed.persisted is True
+    observation = repository.list_unresolved(provider="prizepicks")[0]
+    assert observation.candidates[0].canonical_team_abbreviation == "DEN"
+    assert observation.candidates[0].canonical_team_name == "Denver Nuggets"
+    assert observation.candidates[0].canonical_team_id == 1610612743
+
+
+def test_a_repeated_state_after_a_different_observation_is_recorded_again(mapping_db):
+    """Suppression is per transition, not for the lifetime of an identity."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    ambiguous_rows = [_catalog_row(15, "Nikola Jokić"), _catalog_row(23, "Nikola Jokic")]
+
+    repository.record_resolution(_auto_resolution())
+    ambiguous = repository.record_resolution(
+        _resolver(rows=ambiguous_rows, repository=repository).resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+            "2024-25",
+        )
+    )
+    repeated_auto = repository.record_resolution(_auto_resolution())
+
+    assert ambiguous.state == "ambiguous"
+    assert ambiguous.persisted is True
+    assert repeated_auto.persisted is True
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto", "ambiguous", "auto"]
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    # The identity is decided again, so the unresolved queue is empty.
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_an_unmatched_identity_reappears_after_a_rejection_is_cleared(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    def _unmatched():
+        return _resolver(
+            rows=[_catalog_row(23, "LeBron James")], repository=repository
+        ).resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-77", name="King James"),
+            "2024-25",
+        )
+
+    assert repository.record_resolution(_unmatched()).persisted is True
+    repository.reject(
+        "prizepicks",
+        "pp-77",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    repository.clear_rejection(
+        "prizepicks", "pp-77", operator_id="ops@example.com", reason="new evidence"
+    )
+
+    reappeared = repository.record_resolution(_unmatched())
+
+    assert reappeared.persisted is True
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+    ] == ["unmatched", "rejected", "rejection_cleared", "unmatched"]
+    assert [
+        item.provider_athlete_id
+        for item in repository.list_unresolved(provider="prizepicks")
+    ] == ["pp-77"]
+
+
+def test_an_official_catalog_rename_keeps_the_existing_canonical_identity(mapping_db):
+    """A renamed catalog row is the same NBA player, not a new identity."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    renamed = _resolver(
+        rows=[_catalog_row(15, "Nikola Jokić Sr."), _catalog_row(23, "LeBron James")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="Nikola Jokic",
+            team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+        ),
+        "2024-25",
+    )
+
+    assert renamed.state is MappingResolutionState.AUTO
+    assert renamed.canonical_athlete is not None
+    assert renamed.canonical_athlete.player_id == 15
+    repository.record_resolution(renamed)
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    assert mapping.canonical_name == "Nikola Jokić Sr."
+
+
+def test_a_provider_label_change_to_the_same_player_is_not_a_conflict(mapping_db):
+    """The provider adopting the new official label keeps the same identity."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    relabeled = _resolver(
+        rows=[_catalog_row(15, "Nikola Jokić Sr."), _catalog_row(23, "LeBron James")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="Nikola Jokic Sr.",
+            team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+        ),
+        "2024-25",
+    )
+
+    assert relabeled.state is MappingResolutionState.AUTO
+    assert relabeled.canonical_athlete.player_id == 15
+    repository.record_resolution(relabeled)
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "auto"
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic Sr."
+
+
+def test_repeated_conflict_reads_are_idempotent_and_retain_the_conflict(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    conflicting_evidence = AthleteEvidence(
+        provider_id="pp-15",
+        name="LeBron James",
+        team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+    )
+    repository.record_resolution(
+        _resolver(repository=repository).resolve(
+            "prizepicks", conflicting_evidence, "2024-25"
+        )
+    )
+
+    def _reread():
+        return _resolver(repository=repository).resolve(
+            "prizepicks", conflicting_evidence, "2024-25"
+        )
+
+    assert _reread().state is MappingResolutionState.MAPPING_CONFLICT
+    first_repeat = repository.record_resolution(_reread())
+    second_repeat = repository.record_resolution(_reread())
+
+    assert first_repeat.persisted is False
+    assert second_repeat.persisted is False
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping.mapping_state == "mapping_conflict"
+    assert mapping.is_active is False
+    assert mapping.conflict_canonical_player_id == 23
+    assert mapping.conflict_canonical_name == "LeBron James"
+    assert mapping.provider_name == "LeBron James"
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto", "mapping_conflict"]
+
+
+def test_manual_decisions_may_select_an_inactive_only_catalog_athlete(mapping_db):
+    """Automatic mapping needs an active season row; governance may override."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(AthleteCatalog.__table__),
+            [_catalog_row(31, "Retired Guard", active=False)],
+        )
+    inactive_only = _resolver(
+        rows=[_catalog_row(31, "Retired Guard", active=False)], repository=repository
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-31", name="Retired Guard"),
+        "2024-25",
+    )
+    assert inactive_only.state is MappingResolutionState.INACTIVE_ONLY
+    repository.record_resolution(inactive_only)
+
+    approved = repository.approve(
+        "prizepicks",
+        "pp-31",
+        31,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="two-way contract signed after the catalog snapshot",
+    )
+
+    assert approved.mapping is not None
+    assert approved.mapping.mapping_state == "manual_approved"
+    assert approved.mapping.canonical_player_id == 31
+    assert approved.mapping.is_active is True
+    # The manual selection of an inactive catalog row is explicit in the audit.
+    assert [
+        (candidate.canonical_player_id, candidate.is_active_for_season)
+        for candidate in approved.decision.candidates
+    ] == [(31, False)]
+    assert approved.decision.operator_id == "ops@example.com"
+    # A later automatic read still refuses to map an inactive-only identity.
+    later = _resolver(
+        rows=[_catalog_row(31, "Retired Guard", active=False)], repository=repository
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-32", name="Retired Guard"),
+        "2024-25",
+    )
+    assert later.state is MappingResolutionState.INACTIVE_ONLY
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_manual_decisions_still_reject_an_unknown_canonical_athlete(mapping_db):
+    engine, _ = mapping_db
+    repository = AthleteMappingRepository(engine)
+
+    with pytest.raises(ValueError, match="requested season"):
+        repository.approve(
+            "prizepicks",
+            "pp-15",
+            999,
+            season="2024-25",
+            operator_id="ops@example.com",
+            reason="typo in the canonical ID",
+        )
+
+
 # -- DFS board acceptance ------------------------------------------------
 
 

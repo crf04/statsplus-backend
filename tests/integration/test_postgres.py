@@ -356,24 +356,83 @@ def test_athlete_mapping_round_trip_on_postgres(mapping_engine):
     assert repository.is_rejected("prizepicks", "pp-15") is False
 
 
-def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine):
-    """The duplicate lock row must not abort the surrounding transaction.
+def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine, postgres_url):
+    """Overlapping writers must serialize in the database, not in one process.
 
-    PostgreSQL aborts a transaction whose failed savepoint is still open, so a
-    second writer for the same identity would fail every later statement.
+    Each worker owns a separate engine and repository, so the repository's
+    process-local identity lock is per-engine and cannot stand in for the
+    database guarantee. A barrier releases every worker at once so the
+    transactions genuinely overlap, and the duplicate lock row must not abort
+    the surrounding transaction: PostgreSQL keeps a transaction unusable while
+    a failed savepoint is still open, so it has to be rolled back.
     """
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     from app.services.athlete_mapping_repository import AthleteMappingRepository
 
-    repository = AthleteMappingRepository(mapping_engine)
+    workers = 4
+    barrier = threading.Barrier(workers, timeout=30)
+    engines = [create_engine(postgres_url) for _ in range(workers)]
     resolution = _mapping_resolution()
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(
-            executor.map(repository.persist_auto_decision, [resolution] * 4)
-        )
+    def _write(engine):
+        repository = AthleteMappingRepository(engine)
+        barrier.wait()
+        return repository.persist_auto_decision(resolution)
 
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(_write, engines))
+        # Distinct engines mean distinct process-local locks, so the single
+        # write below was decided by the database rather than by this process.
+        assert (
+            len(
+                {
+                    id(AthleteMappingRepository._identity_locks[
+                        (id(engine), "prizepicks", "pp-15")
+                    ])
+                    for engine in engines
+                }
+            )
+            == workers
+        )
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    reader = AthleteMappingRepository(mapping_engine)
     assert sum(result.persisted for result in results) == 1
-    assert len(repository.list_mappings()) == 1
-    assert len(repository.history(provider="prizepicks")) == 1
+    assert len(reader.list_mappings()) == 1
+    assert len(reader.history(provider="prizepicks")) == 1
+
+
+def test_repeated_state_after_a_different_observation_persists_on_postgres(mapping_engine):
+    """Suppression is per transition on a real database as well as SQLite."""
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    repository = AthleteMappingRepository(mapping_engine)
+    ambiguous_rows = [
+        {
+            "season": "2024-25",
+            "player_id": player_id,
+            "display_name": "Nikola Jokic",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+        for player_id in (15, 23)
+    ]
+
+    repository.record_resolution(_mapping_resolution())
+    repository.record_resolution(_mapping_resolution(rows=ambiguous_rows))
+    repeated = repository.record_resolution(_mapping_resolution())
+
+    assert repeated.persisted is True
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto", "ambiguous", "auto"]
