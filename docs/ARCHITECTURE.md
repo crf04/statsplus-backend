@@ -424,8 +424,11 @@ reported as `conflicts`), pairing the current conflicting row with the
 identity, its observed evidence, the established or approved canonical side,
 and the conflicting candidate; the decision adds the reason and time. The queue
 elaborates the conflicting row rather than repeating it as a mapping, and the
-default listing stays active-only. Approving or overriding the identity is what
-empties the queue. Repository reads and
+default listing stays active-only. `--all` widens the listing to inactive
+history without naming a conflicting identity twice: `list_mappings` omits
+current `mapping_conflict` rows at every visibility, while every other inactive
+row stays visible. Approving or overriding the identity is what empties the
+queue. Repository reads and
 operator writes (approve, override, reject, and clear) translate
 `SQLAlchemyError` to `AthleteMappingPersistenceError` (defined in
 `app.services.athlete_mapping_errors`), and the resolver translates the same

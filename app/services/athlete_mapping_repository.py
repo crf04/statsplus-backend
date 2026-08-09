@@ -410,7 +410,19 @@ class AthleteMappingRepository:
         provider: str | None = None,
         active_only: bool = False,
     ) -> list[ProviderAthleteMappingRecord]:
-        statement = select(ProviderAthleteMapping.__table__)
+        """Return mapping rows, never those whose current state is a conflict.
+
+        A conflict is inactive, so the active-only listing already omits it, but
+        the full listing would otherwise name the same identity twice: once here
+        without its evidence and once in ``list_conflicts`` with both canonical
+        sides.  The conflict queue elaborates it exactly once, so the row is
+        excluded here while every other inactive row stays visible.
+        """
+
+        statement = select(ProviderAthleteMapping.__table__).where(
+            ProviderAthleteMapping.mapping_state
+            != MappingResolutionState.MAPPING_CONFLICT.value
+        )
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
             statement = statement.where(ProviderAthleteMapping.provider == normalized_provider)

@@ -1132,6 +1132,51 @@ def test_a_conflict_is_queued_for_review_without_joining_the_active_mappings(
     ]
 
 
+def test_a_conflict_is_named_by_its_queue_and_not_by_the_full_mapping_listing(
+    mapping_db,
+):
+    """The full listing would otherwise repeat the identity without its evidence."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(
+        resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
+    )
+
+    assert repository.list_mappings() == []
+    assert [
+        item.mapping.provider_athlete_id for item in repository.list_conflicts()
+    ] == ["pp-15"]
+
+    _reapprove_pp_15_as_the_reused_identity(repository)
+
+    # Resolving the conflict returns the identity to the mapping listing.
+    assert repository.list_conflicts() == []
+    assert [item.provider_athlete_id for item in repository.list_mappings()] == ["pp-15"]
+
+
+def test_the_full_mapping_listing_still_shows_other_inactive_rows(mapping_db):
+    """Only conflicts are elaborated elsewhere; a rejection is not."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_pp_15(repository)
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+
+    assert repository.list_mappings(active_only=True) == []
+    listed = repository.list_mappings()
+
+    assert [item.provider_athlete_id for item in listed] == ["pp-15"]
+    assert listed[0].is_active is False
+
+
 def test_a_stale_auto_conflict_cannot_undo_a_deliberate_manual_canonical_choice(
     mapping_db,
 ):

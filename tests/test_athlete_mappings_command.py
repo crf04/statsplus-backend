@@ -288,10 +288,9 @@ def _team_evidence() -> TeamEvidence:
     )
 
 
-def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsys):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def _seed_auto_to_conflict(database_url: str) -> None:
+    """Map an identity automatically, then have the board reuse its provider ID."""
+
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
@@ -313,6 +312,13 @@ def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsy
             )
         )
     engine.dispose()
+
+
+def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsys):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    _seed_auto_to_conflict(database_url)
 
     listed = _run(capsys, "list", "--database-url", database_url)
 
@@ -359,6 +365,79 @@ def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsy
     assert resolved["state"] == "manual_override"
 
     listed = _run(capsys, "list", "--database-url", database_url)
+    assert listed["conflicts"] == []
+    assert [item["provider_athlete_id"] for item in listed["mappings"]] == ["pp-15"]
+
+
+def test_cli_list_all_names_a_conflict_once_and_keeps_other_inactive_rows(
+    tmp_path, capsys
+):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    _seed_auto_to_conflict(database_url)
+    _run(
+        capsys,
+        "reject",
+        "--database-url",
+        database_url,
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-77",
+        "--operator",
+        "ops@example.com",
+        "--reason",
+        "provider identity is not trusted",
+    )
+    _run(
+        capsys,
+        "clear",
+        "--database-url",
+        database_url,
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-77",
+        "--operator",
+        "ops@example.com",
+        "--reason",
+        "the identity was reinstated",
+    )
+
+    listed = _run(capsys, "list", "--database-url", database_url, "--all")
+
+    # The conflict belongs to its own queue, which names both canonical sides.
+    assert listed["mappings"] == []
+    assert [item["mapping"]["provider_athlete_id"] for item in listed["conflicts"]] == [
+        "pp-15"
+    ]
+    # Inactive history that no other section elaborates stays visible.
+    assert [item["provider_athlete_id"] for item in listed["rejections"]] == ["pp-77"]
+    assert listed["rejections"][0]["is_active"] is False
+
+    resolved = _run(
+        capsys,
+        "override",
+        "--database-url",
+        database_url,
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-15",
+        "--season",
+        "2024-25",
+        "--canonical-player-id",
+        "23",
+        "--operator",
+        "ops@example.com",
+        "--reason",
+        "the provider reused the identity",
+    )
+    assert resolved["state"] == "manual_override"
+
+    listed = _run(capsys, "list", "--database-url", database_url, "--all")
+
     assert listed["conflicts"] == []
     assert [item["provider_athlete_id"] for item in listed["mappings"]] == ["pp-15"]
 
