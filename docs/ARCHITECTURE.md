@@ -417,7 +417,17 @@ automatic mapping's canonical player is still active for the season, an
 official display-name change on either the catalog or the provider side keeps
 that mapping (the canonical facts are re-read from the catalog row); a
 relabeled player never becomes unmatched or conflicting on the strength of the
-label alone. A retained identity still validates team evidence: provider team
+label alone. When no active catalog row matches the incoming label, an
+established claim is therefore resolved in one order: an incoming label that
+exactly matches a *different* canonical athlete is a `mapping_conflict` naming
+that candidate, however inactive it is; a provider name that no longer agrees
+with the one observed under this identity is a `mapping_conflict` too, so
+retention covers catalog renames only while the provider still reports the
+athlete we saw; otherwise the claimed row is looked up by canonical player ID
+and either retained (active for the season) or withdrawn as `inactive_only`
+(listed but inactive), whatever the catalog now calls it. Only an identity with
+no claim at all falls back to judging the label alone. A retained identity still
+validates team evidence: provider team
 evidence that disagrees with the requested season's canonical row is a
 `mapping_conflict` that deactivates the mapping, not an automatic one. Team
 evidence is always compared with the candidate for the *requested* season

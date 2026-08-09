@@ -302,39 +302,68 @@ class AthleteResolver:
             athlete for athlete in all_matches if athlete.is_active_for_season
         )
         if not active_matches:
-            retained = self._retained_identity(existing, rows, canonical_season)
-            if retained is not None:
-                if self._team_conflicts(evidence.team, retained):
-                    # Preserving the canonical ID across a label change never
-                    # bypasses team validation: provider team evidence that
-                    # disagrees with the requested season's canonical row is a
-                    # conflict for an operator, not an automatic mapping.
+            # An established claim is resolved by its canonical player ID, not
+            # by the label either side currently prints, so the order is: an
+            # exact label naming a different athlete, then a provider name that
+            # no longer agrees with the observed one, then the claimed row --
+            # retained while it is active for the season, withdrawn once the
+            # catalog only lists it as inactive.
+            claimed_player_id = self._claimed_player_id(existing)
+            if claimed_player_id is not None:
+                mismatched = tuple(
+                    athlete
+                    for athlete in all_matches
+                    if athlete.player_id != claimed_player_id
+                )
+                if mismatched or self._provider_name_changed(existing, evidence):
                     return self._result(
                         normalized_provider,
                         evidence,
                         canonical_season,
                         MappingResolutionState.MAPPING_CONFLICT,
-                        canonical=retained,
-                        candidates=(retained,),
+                        # One exactly matching athlete is the candidate the
+                        # operator has to weigh against the claim; several
+                        # equally exact ones name none of them.
+                        canonical=(mismatched[0] if len(mismatched) == 1 else None),
+                        candidates=mismatched,
                         reason="mapping_conflict",
                     )
-                return self._result(
-                    normalized_provider,
-                    evidence,
-                    canonical_season,
-                    MappingResolutionState.AUTO,
-                    canonical=retained,
-                    candidates=(retained,),
-                    reason="retained_canonical_identity",
-                )
-            if self._existing_name_conflicts(existing, evidence):
-                return self._result(
-                    normalized_provider,
-                    evidence,
-                    canonical_season,
-                    MappingResolutionState.MAPPING_CONFLICT,
-                    reason="mapping_conflict",
-                )
+                claimed = self._catalog_athlete(rows, claimed_player_id, canonical_season)
+                if claimed is not None and claimed.is_active_for_season:
+                    if self._team_conflicts(evidence.team, claimed):
+                        # Preserving the canonical ID across a label change never
+                        # bypasses team validation: provider team evidence that
+                        # disagrees with the requested season's canonical row is a
+                        # conflict for an operator, not an automatic mapping.
+                        return self._result(
+                            normalized_provider,
+                            evidence,
+                            canonical_season,
+                            MappingResolutionState.MAPPING_CONFLICT,
+                            canonical=claimed,
+                            candidates=(claimed,),
+                            reason="mapping_conflict",
+                        )
+                    return self._result(
+                        normalized_provider,
+                        evidence,
+                        canonical_season,
+                        MappingResolutionState.AUTO,
+                        canonical=claimed,
+                        candidates=(claimed,),
+                        reason="retained_canonical_identity",
+                    )
+                if claimed is not None:
+                    # The catalog still lists the claimed athlete, only as
+                    # inactive for this season, whatever it now calls the row.
+                    return self._result(
+                        normalized_provider,
+                        evidence,
+                        canonical_season,
+                        MappingResolutionState.INACTIVE_ONLY,
+                        candidates=(claimed,),
+                        reason="inactive_only",
+                    )
             state = (
                 MappingResolutionState.INACTIVE_ONLY
                 if all_matches
@@ -572,43 +601,50 @@ class AthleteResolver:
         return False
 
     @classmethod
-    def _retained_identity(
-        cls,
-        existing: Mapping[str, Any] | None,
-        rows: Sequence[Mapping[str, Any]],
-        season: str,
-    ) -> CanonicalAthlete | None:
-        """Keep an established identity whose catalog row was only relabeled.
+    def _claimed_player_id(cls, existing: Mapping[str, Any] | None) -> int | None:
+        """Return the canonical player an established claim still names.
 
         Official display names change (suffixes, legal names, spellings) on
-        both the catalog and the provider side.  An identity already mapped to
-        a canonical player ID that is still active for the season stays mapped
-        to that player, so a label change alone never turns it into an
-        unmatched or conflicting identity.  The canonical facts are re-read
-        from the catalog row so the current official name is retained.
+        both the catalog and the provider side, so the claim is read from the
+        stable canonical player ID rather than from either label.
         """
 
         if not cls._asserts_automatic_claim(existing):
             return None
         player_id = existing.get("canonical_player_id")
-        if player_id is None:
-            return None
+        return None if player_id is None else int(player_id)
+
+    @staticmethod
+    def _catalog_athlete(
+        rows: Sequence[Mapping[str, Any]],
+        player_id: int,
+        season: str,
+    ) -> CanonicalAthlete | None:
+        """Read one canonical athlete out of the requested season's catalog.
+
+        The facts come from the catalog row, so the current official name and
+        the row's activity for this season are both what the catalog says now.
+        """
+
         for row in rows:
-            if int(row["player_id"]) != int(player_id):
-                continue
-            athlete = CanonicalAthlete.from_row({**row, "season": season})
-            return athlete if athlete.is_active_for_season else None
+            if int(row["player_id"]) == player_id:
+                return CanonicalAthlete.from_row({**row, "season": season})
         return None
 
-    @classmethod
-    def _existing_name_conflicts(
-        cls,
+    @staticmethod
+    def _provider_name_changed(
         existing: Mapping[str, Any] | None,
         evidence: AthleteEvidence,
     ) -> bool:
-        if not cls._asserts_automatic_claim(existing):
-            return False
-        previous_name = existing.get("provider_name")
+        """Report whether the provider stopped reporting the observed name.
+
+        Retaining a canonical identity through a catalog rename is only safe
+        while the provider still names the athlete we observed under that ID.
+        Once the provider reports a different name that matches nothing active,
+        the identity may have been reused, so it fails closed instead.
+        """
+
+        previous_name = (existing or {}).get("provider_name")
         return bool(
             previous_name
             and evidence.name

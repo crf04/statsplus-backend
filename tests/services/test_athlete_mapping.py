@@ -3041,6 +3041,142 @@ def test_a_withdrawn_mapping_still_conflicts_with_a_reused_identity(mapping_db):
     ]
 
 
+def _renamed_inactive_resolution(
+    repository: AthleteMappingRepository, *, name: str = "Nikola Jokic"
+):
+    """The claimed row was relabeled *and* is inactive for the season."""
+
+    return _resolver(
+        rows=[
+            _catalog_row(15, "Nikola Jokić Sr.", active=False),
+            _catalog_row(23, "LeBron James"),
+        ],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name=name),
+        "2024-25",
+    )
+
+
+def test_a_renamed_inactive_row_withdraws_the_claim_by_canonical_id(mapping_db):
+    """Identity is the canonical player ID, so a rename cannot hide inactivity.
+
+    The provider still reports the name we observed, so the claim still stands;
+    the catalog just relabeled the row and stopped listing it as active.  Read
+    by canonical ID that is an inactive-only observation, not an unmatched one,
+    so the mapping is withdrawn and the evidence reaches the operator's queue.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    withdrawn = _renamed_inactive_resolution(repository)
+
+    assert withdrawn.state is MappingResolutionState.INACTIVE_ONLY
+    assert [candidate.player_id for candidate in withdrawn.candidates] == [15]
+    result = repository.record_resolution(withdrawn)
+
+    assert result.state == "inactive_only"
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "inactive_only"
+    assert mapping.canonical_player_id == 15
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["inactive_only"]
+    assert [candidate.canonical_player_id for candidate in queued[0].candidates] == [15]
+
+
+def test_a_renamed_active_row_still_retains_the_withdrawn_claim(mapping_db):
+    """The safe path: same provider name, active row, relabeled catalog entry."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_renamed_inactive_resolution(repository))
+
+    retained = _resolver(
+        rows=[_catalog_row(15, "Nikola Jokić Sr."), _catalog_row(23, "LeBron James")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+    )
+
+    assert retained.state is MappingResolutionState.AUTO
+    assert retained.reason == "retained_canonical_identity"
+    assert retained.canonical_athlete.player_id == 15
+    assert repository.record_resolution(retained).state == "auto"
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.canonical_player_id == 15
+    assert active.canonical_name == "Nikola Jokić Sr."
+
+
+def test_a_withdrawn_claim_is_not_reactivated_by_an_unmatched_new_name(mapping_db):
+    """Retention needs the provider to still be reporting the same athlete.
+
+    A wholly unmatched label under a claimed identity is a reused provider ID,
+    not a relabeling, so the identity fails closed instead of quietly reviving
+    the old canonical claim.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_renamed_inactive_resolution(repository))
+
+    mystery = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Mystery Prospect"),
+        "2024-25",
+    )
+
+    assert mystery.state is MappingResolutionState.MAPPING_CONFLICT
+    assert repository.record_resolution(mystery).state == "mapping_conflict"
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "mapping_conflict"
+    # The claim and the evidence that unseated it both survive for review.
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Mystery Prospect"
+
+
+def test_an_exact_inactive_match_on_another_player_conflicts_with_the_claim(
+    mapping_db,
+):
+    """An exact label naming a different athlete cannot keep the old claim."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    conflicting = _resolver(
+        rows=[
+            _catalog_row(15, "Nikola Jokić"),
+            _catalog_row(23, "LeBron James", active=False),
+        ],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="LeBron James"),
+        "2024-25",
+    )
+
+    assert conflicting.state is MappingResolutionState.MAPPING_CONFLICT
+    assert [candidate.player_id for candidate in conflicting.candidates] == [23]
+    assert repository.record_resolution(conflicting).state == "mapping_conflict"
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "mapping_conflict"
+    assert mapping.conflict_canonical_player_id == 23
+    assert mapping.provider_name == "LeBron James"
+
+
 def test_catalog_inactivity_never_withdraws_a_manual_mapping(mapping_db):
     """Only a governed conflict may unseat an operator's decision."""
 
