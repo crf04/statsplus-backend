@@ -18,6 +18,7 @@ from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
 from app.models.athlete_mapping import (
     MAPPING_DECISION_STATES,
+    MAPPING_STATES,
     AthleteMappingDecision,
     AthleteMappingLock,
     AthleteMappingRejection,
@@ -246,6 +247,51 @@ def test_decision_state_check_covers_the_closed_resolution_state_set():
         assert f"'{state}'" in statement
 
 
+@pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
+def test_mapping_state_check_covers_the_closed_current_state_set(dialect):
+    """Every state a mapping row may currently hold is enumerated in the check.
+
+    ``unmatched`` is one of them: an established claim whose canonical athlete
+    left the requested season's catalog is withdrawn onto the row itself, so it
+    has to be a legal current state and an inactive one.
+    """
+
+    statement = str(
+        CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect)
+    )
+
+    assert "ck_provider_mapping_state" in statement
+    assert "unmatched" in MAPPING_STATES
+    for state in MAPPING_STATES:
+        assert f"'{state}'" in statement
+
+
+def test_migrated_mapping_state_check_accepts_a_withdrawn_unmatched_row(tmp_path):
+    """The migrated schema, not just the model, allows the withdrawn state."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'migrated.sqlite3'}")
+    run_migrations(engine)
+    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+
+    with engine.begin() as connection:
+        connection.execute(
+            insert(ProviderAthleteMapping.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-15",
+                mapping_state="unmatched",
+                is_active=False,
+                canonical_player_id=15,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+        )
+
+    mapping = AthleteMappingRepository(engine).get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "unmatched"
+    assert mapping.canonical_player_id == 15
+
+
 @pytest.fixture
 def mapping_db(tmp_path):
     engine = create_engine(
@@ -288,6 +334,7 @@ def test_active_state_check_rejects_an_incoherent_row(mapping_db):
         ("manual_approved", False),
         ("inactive_only", True),
         ("ambiguous", True),
+        ("unmatched", True),
     ],
 )
 def test_active_state_check_rejects_an_incoherently_flagged_row(
@@ -321,6 +368,7 @@ def test_active_state_check_rejects_an_incoherently_flagged_row(
         ("manual_approved", True),
         ("rejected", False),
         ("inactive_only", False),
+        ("unmatched", False),
     ],
 )
 @pytest.mark.parametrize(
@@ -3529,3 +3577,256 @@ def test_a_reused_provider_identity_conflicts_instead_of_reading_unmatched(mappi
     assert reused.state is MappingResolutionState.MAPPING_CONFLICT
     assert repository.record_resolution(reused).state == "mapping_conflict"
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+def _absent_catalog_resolution(
+    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
+):
+    """The requested season no longer lists the claimed athlete at all.
+
+    The provider still reports the name the claim was established on, so the
+    identity has not been reused; the catalog row it was mapped to is simply
+    gone from the requested season.
+    """
+
+    return _resolver(
+        rows=[_catalog_row(23, "LeBron James")],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+        observed_at=observed_at,
+    )
+
+
+def test_a_vanished_catalog_row_withdraws_the_claim_as_unmatched(mapping_db):
+    """A claim whose catalog row disappeared may not stay comparable.
+
+    The board can no longer say the identity is that canonical athlete, so the
+    mapping is withdrawn to ``unmatched`` while keeping the claim, and the
+    observation queues the athlete that vanished as its evidence.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    assert repository.record_resolution(_auto_resolution()).state == "auto"
+
+    resolution = _absent_catalog_resolution(repository)
+    assert resolution.state is MappingResolutionState.UNMATCHED
+    assert resolution.reason == "claimed_athlete_absent"
+    result = repository.record_resolution(resolution)
+
+    assert result.state == "unmatched"
+    assert result.persisted is True
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "unmatched"
+    assert mapping.is_active is False
+    assert mapping.canonical_player_id == 15
+    assert mapping.canonical_name == "Nikola Jokić"
+    assert mapping.conflict_canonical_player_id is None
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["unmatched"]
+    assert queued[0].reason == "claimed_athlete_absent"
+    assert queued[0].provider_name == "Nikola Jokic"
+    assert [
+        (candidate.canonical_player_id, candidate.is_active_for_season)
+        for candidate in queued[0].candidates
+    ] == [(15, False)]
+    assert repository.list_conflicts() == []
+    assert [item.provider_athlete_id for item in repository.list_mappings()] == ["pp-15"]
+
+
+def test_an_unclaimed_unmatched_observation_names_no_withdrawn_claim(mapping_db):
+    """An identity with no claim is an ordinary unmatched observation.
+
+    Nothing was withdrawn, so the queue names no canonical candidate and no
+    current mapping state is created for the identity.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    resolution = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="Unlisted Prospect"),
+        "2024-25",
+    )
+    assert resolution.state is MappingResolutionState.UNMATCHED
+    assert resolution.reason == "unmatched"
+    result = repository.record_resolution(resolution)
+
+    assert result.state == "unmatched"
+    assert result.persisted is True
+    assert repository.get_mapping("prizepicks", "pp-77") is None
+    assert repository.list_mappings() == []
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["unmatched"]
+    assert queued[0].reason == "unmatched"
+    assert queued[0].candidates == ()
+
+
+def _withdrawal(name: str):
+    """Return the withdrawing observation factory one transition step names."""
+
+    return {
+        "inactive_only": _inactive_catalog_resolution,
+        "ambiguous": _duplicate_name_resolution,
+        "unmatched": _absent_catalog_resolution,
+    }[name]
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        ("inactive_only", "ambiguous"),
+        ("ambiguous", "inactive_only"),
+        ("inactive_only", "unmatched"),
+        ("unmatched", "inactive_only"),
+        ("ambiguous", "unmatched"),
+        ("unmatched", "ambiguous"),
+        ("inactive_only", "ambiguous", "unmatched", "inactive_only"),
+    ],
+)
+def test_successive_withdrawals_move_the_current_mapping_state(mapping_db, sequence):
+    """Each withdrawal is news about the identity, inactive row or not.
+
+    An operator reads the current row to decide, so it has to say why the
+    identity is withdrawn *now* rather than why it was withdrawn first.  The
+    canonical claim and the provider evidence that established it are kept
+    through every step.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    for step in sequence:
+        result = repository.record_resolution(_withdrawal(step)(repository))
+        assert result.state == step
+        assert result.persisted is True
+
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == sequence[-1]
+    assert mapping.is_active is False
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic"
+    assert mapping.conflict_canonical_player_id is None
+    assert mapping.conflict_canonical_name is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        *sequence,
+    ]
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == [sequence[-1]]
+
+
+@pytest.mark.parametrize("state", ["inactive_only", "ambiguous", "unmatched"])
+def test_a_repeated_withdrawal_only_advances_the_observation_clock(mapping_db, state):
+    """The same withdrawal twice is not a new transition."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    withdrawal = _withdrawal(state)
+    repository.record_resolution(withdrawal(repository, observed_at=_OBSERVED_BEFORE))
+    first = repository.get_mapping("prizepicks", "pp-15")
+
+    repeated = repository.record_resolution(
+        withdrawal(repository, observed_at=_OBSERVED_AFTER)
+    )
+
+    assert repeated.state == state
+    assert repeated.persisted is False
+    assert repository.get_mapping("prizepicks", "pp-15") == first
+    assert [item.decision_state for item in repository.history()] == ["auto", state]
+    assert _observation_clock(engine, "pp-15") == _OBSERVED_AFTER
+
+
+@pytest.mark.parametrize("state", ["inactive_only", "ambiguous", "unmatched"])
+def test_a_withdrawn_identity_is_reclaimed_by_the_same_canonical_athlete(
+    mapping_db, state
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_withdrawal(state)(repository))
+
+    again = repository.record_resolution(_auto_resolution())
+
+    assert again.state == "auto"
+    assert again.persisted is True
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "auto"
+    assert active.canonical_player_id == 15
+    assert active.conflict_canonical_player_id is None
+    assert repository.list_unresolved(provider="prizepicks") == []
+    assert repository.list_conflicts() == []
+
+
+@pytest.mark.parametrize("state", ["inactive_only", "ambiguous", "unmatched"])
+def test_a_withdrawn_identity_still_fails_closed_on_a_different_athlete(
+    mapping_db, state
+):
+    """A suspended claim is still a claim, whichever way it was suspended."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_withdrawal(state)(repository))
+
+    reused = _reused_identity_auto(repository)
+    assert reused.state is MappingResolutionState.MAPPING_CONFLICT
+    result = repository.record_resolution(reused)
+
+    assert result.state == "mapping_conflict"
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    assert mapping.conflict_canonical_player_id == 23
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+def test_catalog_absence_never_withdraws_a_manual_mapping(mapping_db):
+    """Only a governed conflict may unseat an operator's decision."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_pp_15(repository)
+    # Resolved without seeing the manual mapping, as a read in flight would be.
+    absent = _absent_catalog_resolution(None)
+
+    result = repository.record_resolution(absent)
+
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "manual_approved"
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_an_operator_resolves_a_vanished_claim_by_approving_another_athlete(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_absent_catalog_resolution(repository))
+
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the catalog dropped the mapped athlete",
+    )
+
+    assert result.mapping.mapping_state == "manual_approved"
+    assert result.mapping.is_active is True
+    assert result.mapping.canonical_player_id == 23
+    assert repository.list_unresolved(provider="prizepicks") == []

@@ -32,6 +32,7 @@ from app.services.athlete_mapping_errors import (
     AthleteMappingPersistenceError,
 )
 from app.services.athlete_resolver import (
+    WITHDRAWN_CLAIM_STATES,
     AthleteResolution,
     AthleteResolver,
     CanonicalAthlete,
@@ -51,15 +52,17 @@ UNRESOLVED_OBSERVATION_STATES = frozenset(
     }
 )
 
-#: Unresolved observation states that also withdraw an automatic mapping from
+#: Unresolved observation states that also withdraw a claimed mapping from
 #: board comparisons.  An identity may not stay comparable while the board says
 #: which canonical athlete it is cannot be established from this evidence: the
-#: catalog lists the mapped athlete as inactive for the requested season, or it
-#: names two equally exact athletes.  The claim is suspended, not retracted, so
-#: the row keeps its canonical athlete and the observation keeps its candidates.
+#: catalog lists the mapped athlete as inactive for the requested season, names
+#: two equally exact athletes, or no longer lists the claimed athlete at all.
+#: The claim is suspended, not retracted, so the row keeps its canonical
+#: athlete and the observation keeps its candidates.
 _WITHDRAWING_OBSERVATION_STATES = (
     MappingResolutionState.INACTIVE_ONLY,
     MappingResolutionState.AMBIGUOUS,
+    MappingResolutionState.UNMATCHED,
 )
 
 #: Mapping states an operator established and a board observation may not
@@ -774,13 +777,15 @@ class AthleteMappingRepository:
     ) -> MappingPersistenceResult:
         """Retain one typed unresolved observation in the audit log.
 
-        No current mapping row is written because no canonical identity was
+        No current mapping row is created because no canonical identity was
         established; the idempotency key keeps repeated board reads to one
         durable observation per distinct evidence shape.  Some states do change
-        an existing automatic mapping, because an identity cannot stay mapped
-        while the board says it should not be compared: team-conflict evidence
-        promotes it to a conflict for an operator to review, and
-        ``_WITHDRAWING_OBSERVATION_STATES`` withdraw it from comparisons.  The
+        an existing mapping, because an identity cannot stay mapped while the
+        board says it should not be compared: team-conflict evidence promotes
+        it to a conflict for an operator to review, and
+        ``_WITHDRAWING_OBSERVATION_STATES`` withdraw it from comparisons -- an
+        already withdrawn row included, so its state keeps naming the reason
+        that currently holds.  The
         candidates and evidence stay on the appended observation either way, so
         the operator's unresolved queue keeps everything the decision was made
         on.
@@ -797,7 +802,7 @@ class AthleteMappingRepository:
                 return stale
             self._advance_observation_clock(connection, provider, provider_id, resolution)
             if resolution.state in _WITHDRAWING_OBSERVATION_STATES:
-                self._withdraw_automatic_mapping(
+                self._withdraw_claimed_mapping(
                     connection,
                     provider,
                     provider_id,
@@ -825,7 +830,7 @@ class AthleteMappingRepository:
                 decision=self._decision_result(connection, decision),
             )
 
-    def _withdraw_automatic_mapping(
+    def _withdraw_claimed_mapping(
         self,
         connection: Connection,
         provider: str,
@@ -834,25 +839,37 @@ class AthleteMappingRepository:
         state: MappingResolutionState,
         now: datetime,
     ) -> None:
-        """Withdraw an automatic mapping this evidence can no longer support.
+        """Withdraw a claimed mapping this evidence can no longer support.
 
         The resolver found the athlete only as inactive for the requested
-        season, or found two equally exact ones and could choose neither, so the
-        mapping must not reach a board comparison.  The row is kept -- it is
-        still the durable record of which canonical athlete this provider
-        identity was mapped to -- but it is deactivated, and its state records
-        why, so a later unambiguous observation can simply map it again.
+        season, found two equally exact ones and could choose neither, or found
+        the claimed athlete gone from the catalog, so the mapping must not
+        reach a board comparison.  The row is kept -- it is still the durable
+        record of which canonical athlete this provider identity was mapped to
+        -- but it is deactivated, and its state records why, so a later
+        unambiguous observation can simply map it again.
 
-        Only an automatic mapping is withdrawn.  An operator's decision is
-        governed elsewhere and catalog inactivity alone is not the conflict
-        that may unseat it.  A row already withdrawn is left untouched, so a
-        repeated observation writes nothing.
+        An already withdrawn row is withdrawn again for a *different* reason:
+        the operator reads the current row to decide, so it has to say why the
+        identity is out of comparisons now rather than why it first left them.
+        Repeating the state it already holds writes nothing, which keeps a
+        repeated observation a no-op beyond the identity's observation clock.
+
+        Only a claim the board established is withdrawn.  An operator's
+        decision is governed elsewhere, and a conflict already awaits an
+        operator, so neither is moved by evidence like this.
         """
 
         existing = self._select_mapping(connection, provider, provider_id, lock=True)
-        if existing is None or not bool(existing["is_active"]):
+        if existing is None:
             return
-        if str(existing["mapping_state"]) != MappingResolutionState.AUTO.value:
+        current = str(existing["mapping_state"])
+        if current == state.value:
+            return
+        claimed = current == MappingResolutionState.AUTO.value and bool(
+            existing["is_active"]
+        )
+        if not claimed and current not in WITHDRAWN_CLAIM_STATES:
             return
         connection.execute(
             update(ProviderAthleteMapping.__table__)

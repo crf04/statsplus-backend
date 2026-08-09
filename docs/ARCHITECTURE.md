@@ -385,7 +385,8 @@ canonical team IDs, names, and abbreviations are retained as typed evidence, so
 an ID-only team conflict keeps both the provider and the candidate side.
 
 Ambiguous, inactive-only, unmatched, and team-conflict evidence never
-establishes current mapping state, but each is retained as one durable typed observation
+establishes a canonical identity — it only ever withdraws or promotes a claim
+an earlier decision established — but each is retained as one durable typed observation
 in the decision log under an idempotency key, so repeated board reads
 add nothing and `scripts/athlete_mappings.py list` can show what an operator
 still has to decide. Suppression is per transition, not for the lifetime of an
@@ -400,18 +401,30 @@ blob, and changed candidate evidence — a different player, name, team ID, team
 name, abbreviation, or season-active flag — is a new observation rather than a
 suppressed repeat.
 
-Inactive-only and ambiguous evidence do change an existing automatic mapping,
-because the identity cannot stay comparable while the board cannot say which
-canonical athlete it is: the catalog lists its athlete as inactive for the
-requested season, or it names two equally exact athletes and the observation
-chose neither. The row becomes `inactive_only` or `ambiguous` and inactive, so
+Inactive-only, ambiguous, and claim-withdrawing unmatched evidence do change an
+existing mapping, because the identity cannot stay comparable while the board
+cannot say which canonical athlete it is: the catalog lists its athlete as
+inactive for the requested season, it names two equally exact athletes and the
+observation chose neither, or it no longer lists the claimed athlete at all.
+The row becomes `inactive_only`, `ambiguous`, or `unmatched` and inactive, so
 no board comparison can reach it, while keeping the `canonical_player_id` it
 was mapped to: the claim is withdrawn, not retracted, and the observation with
-its candidates stays in the unresolved queue for the operator. A later
+its candidates stays in the unresolved queue for the operator. Withdrawal is a
+state machine rather than a one-way latch: an already withdrawn row moves to
+the state the current evidence names — `auto` → `inactive_only` → `ambiguous`
+leaves the row `ambiguous`, the inverse leaves it `inactive_only`, and a
+claimed athlete disappearing from the catalog leaves it `unmatched` — because
+an operator reads the current row to decide why the identity is out of
+comparisons *now*. The canonical claim, the provider evidence that established
+it, and the conflict-free columns are preserved through every step, the queue
+always shows the latest observation, and repeating the state a row already
+holds writes nothing beyond the identity's observation clock. A later
 unambiguous observation of the same athlete maps the identity again with no
 conflict fields left behind; one naming a *different* athlete under the same
 provider ID is still a `mapping_conflict`, because a suspended claim is still a
-claim. Catalog inactivity or ambiguity alone never withdraws a manual mapping —
+claim. A `mapping_conflict` row is not withdrawn onto another state: it already
+awaits an operator. Catalog inactivity, ambiguity, or absence alone never
+withdraws a manual mapping —
 an operator's decision is unseated only by the fail-closed conflict detection
 below, and approving or overriding the identity resolves the withdrawal and
 empties the queue.
@@ -428,9 +441,14 @@ that candidate, however inactive it is; a provider name that no longer agrees
 with the one observed under this identity is a `mapping_conflict` too, so
 retention covers catalog renames only while the provider still reports the
 athlete we saw; otherwise the claimed row is looked up by canonical player ID
-and either retained (active for the season) or withdrawn as `inactive_only`
-(listed but inactive), whatever the catalog now calls it. Only an identity with
-no claim at all falls back to judging the label alone. A retained identity still
+and either retained (active for the season), withdrawn as `inactive_only`
+(listed but inactive), or withdrawn as `unmatched` (no longer listed at all),
+whatever the catalog now calls it. A claim withdrawn as `unmatched` records the
+athlete that disappeared as the observation's candidate, marked as not active
+for the season, so the operator's queue distinguishes a withdrawn claim from an
+identity that simply matched nothing. Only an identity with
+no claim at all falls back to judging the label alone, and its unmatched
+observation names no candidate. A retained identity still
 validates team evidence: provider team
 evidence that disagrees with the requested season's canonical row is a
 `mapping_conflict` that deactivates the mapping, not an automatic one. Team
@@ -550,10 +568,10 @@ barrier — the overlap is resolved by the database, not by a shared lock.
 Migration 006 also creates a per-identity lock table — which carries that
 identity's observation clock — and database checks for
 closed mapping states (`ambiguous`, `auto`, `inactive_only`, `manual_approved`,
-`manual_override`, `mapping_conflict`, `rejected`), the closed decision-state
-set, active-state coherence — only `auto`, `manual_approved`, and
+`manual_override`, `mapping_conflict`, `rejected`, `unmatched`), the closed
+decision-state set, active-state coherence — only `auto`, `manual_approved`, and
 `manual_override` may be active, and `ambiguous`, `inactive_only`,
-`mapping_conflict`, and `rejected` may not —
+`mapping_conflict`, `rejected`, and `unmatched` may not —
 cleared-rejection coherence — an active rejection carries no `cleared_at`,
 `cleared_by`, or `clear_reason`, and a cleared one carries all three — and
 conflict-column coherence: only a current `mapping_conflict` row may name a
@@ -562,8 +580,13 @@ is reactivated automatically, remapped by an operator, or rejected keeps no
 conflict an operator has already left behind. Those
 checks compare booleans with
 `true`/`false` rather than `1`/`0`, so they are valid on PostgreSQL as well as
-SQLite. The operator CLI never runs migrations implicitly; run
-`scripts/migrate.py` explicitly first.
+SQLite. Migration 006 remains the single definition of those checks rather than
+being followed by a constraint-rebuilding migration, because it is unreleased:
+no deployed database carries an earlier version of the mapping schema, so
+widening the closed state set (as `unmatched` did) is a change to 006 itself
+and `scripts/migrate.py` creates the current checks on any target. The operator
+CLI never runs migrations implicitly; run `scripts/migrate.py` explicitly
+first.
 
 PBP Stats:
 

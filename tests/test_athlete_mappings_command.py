@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, delete, insert
 
 from app.config.settings import load_settings
 from app.migrations import run_migrations
@@ -787,3 +787,57 @@ def test_cli_clear_reports_no_active_rejection(tmp_path, capsys):
     )
 
     assert cleared == {"cleared": False}
+
+
+def _drop_catalog_athlete(database_url: str, player_id: int) -> None:
+    """Remove one canonical athlete from the requested season's catalog."""
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            delete(AthleteCatalog.__table__).where(
+                AthleteCatalog.player_id == player_id
+            )
+        )
+    engine.dispose()
+
+
+def test_cli_list_all_names_a_withdrawn_claim_once_with_its_queued_evidence(
+    tmp_path, capsys
+):
+    """A withdrawn identity reads the same way in the listing and the queue.
+
+    The catalog stopped listing the mapped athlete entirely while the provider
+    kept reporting the same name, so the mapping is withdrawn to ``unmatched``:
+    absent from the default active listing, present once in ``list --all`` with
+    the canonical claim it keeps, and once in the unresolved queue with the
+    candidate that vanished.
+    """
+
+    database_url = _seed_database(tmp_path)
+    _seed_board_reads(database_url, [("Nikola Jokic", _team_evidence())])
+    _drop_catalog_athlete(database_url, 15)
+    _seed_board_reads(database_url, [("Nikola Jokic", _team_evidence())])
+
+    listed = _run(capsys, "list", "--database-url", database_url)
+    assert listed["mappings"] == []
+    assert listed["conflicts"] == []
+
+    listed_all = _run(capsys, "list", "--all", "--database-url", database_url)
+    assert [item["provider_athlete_id"] for item in listed_all["mappings"]] == ["pp-15"]
+    mapping = listed_all["mappings"][0]
+    assert mapping["mapping_state"] == "unmatched"
+    assert mapping["is_active"] is False
+    assert mapping["canonical_player_id"] == 15
+    assert mapping["provider_name"] == "Nikola Jokic"
+    assert mapping["conflict_canonical_player_id"] is None
+    assert listed_all["conflicts"] == []
+
+    for queue in (listed["unresolved"], listed_all["unresolved"]):
+        assert [item["provider_athlete_id"] for item in queue] == ["pp-15"]
+        assert queue[0]["decision_state"] == "unmatched"
+        assert queue[0]["reason"] == "claimed_athlete_absent"
+        assert [
+            (candidate["canonical_player_id"], candidate["is_active_for_season"])
+            for candidate in queue[0]["candidates"]
+        ] == [(15, False)]

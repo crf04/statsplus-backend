@@ -177,11 +177,17 @@ ambiguous, inactive-only, unmatched, or team-conflict, together with the
 canonical candidates that observation could not choose between, so unresolved
 evidence is visible instead of silently dropped. A later automatic or operator
 decision removes the identity from that list. An identity the board can no
-longer place — its canonical athlete is not active for the requested season, or
-the season lists two athletes with that exact name — is also withdrawn from
-board comparisons: its mapping becomes `inactive_only` or `ambiguous` and
-inactive while keeping the canonical player it was mapped to, and a later
-unambiguous observation of the same athlete maps it back. Because a mapping conflict is
+longer place — its canonical athlete is not active for the requested season,
+the season lists two athletes with that exact name, or the season no longer
+lists the mapped athlete at all — is also withdrawn from board comparisons: its
+mapping becomes `inactive_only`, `ambiguous`, or `unmatched` and inactive while
+keeping the canonical player it was mapped to, and a later unambiguous
+observation of the same athlete maps it back. A further withdrawal for a
+different reason updates that state, so the row always says why the identity is
+out of comparisons now; a withdrawal that names the reason already recorded
+changes nothing. Unmatched evidence that withdrew a claim queues the athlete
+that disappeared as its candidate, which is what distinguishes it from an
+ordinary unmatched observation of an identity that never had a claim. Because a mapping conflict is
 inactive and is not one of those observations, `list` reports it in a separate
 `conflicts` review queue that names the provider identity and its evidence, the
 approved or established canonical side, the conflicting candidate, and the

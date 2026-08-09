@@ -267,6 +267,7 @@ def _mapping_resolution(
     rows=None,
     team_canonical_id=1610612747,
     observed_at=None,
+    repository=None,
 ):
     from app.providers.dfs import AthleteEvidence, TeamEvidence
     from app.services.athlete_resolver import AthleteResolver
@@ -289,7 +290,7 @@ def _mapping_resolution(
         def get_catalog(self, season, *, active_only=False):
             return rows
 
-    return AthleteResolver(_Catalog()).resolve(
+    return AthleteResolver(_Catalog(), mapping_repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(
             provider_id=provider_id,
@@ -784,3 +785,45 @@ def test_an_inactive_only_observation_withdraws_the_mapping_on_postgres(mapping_
     assert remapped.mapping_state == "auto"
     assert remapped.conflict_canonical_player_id is None
     assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_a_vanished_catalog_row_withdraws_the_mapping_on_postgres(mapping_engine):
+    """The unmatched withdrawal has to satisfy the Postgres check constraints."""
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    other_rows = [
+        {
+            "season": "2024-25",
+            "player_id": 23,
+            "display_name": "LeBron James",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+    ]
+    repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
+    assert repository.record_resolution(_mapping_resolution()).state == "auto"
+
+    withdrawn = repository.record_resolution(
+        _mapping_resolution(rows=other_rows, repository=repository)
+    )
+
+    assert withdrawn.state == "unmatched"
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "unmatched"
+    assert mapping.canonical_player_id == 15
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["unmatched"]
+    assert [candidate.canonical_player_id for candidate in queued[0].candidates] == [15]
+
+    assert repository.record_resolution(_mapping_resolution()).state == "auto"
+
+    remapped = repository.get_active_mapping("prizepicks", "pp-15")
+    assert remapped is not None
+    assert remapped.mapping_state == "auto"
+    assert remapped.canonical_player_id == 15

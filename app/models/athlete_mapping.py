@@ -24,10 +24,11 @@ from . import Base
 
 
 #: Closed set of mapping states one row may hold as current state.
-#: ``inactive_only`` and ``ambiguous`` are decision states that also became
-#: current state: the catalog lists the mapped athlete as inactive for the
-#: requested season, or names two equally exact athletes, so the claim is
-#: withdrawn from comparisons without being retracted.
+#: ``inactive_only``, ``ambiguous``, and ``unmatched`` are decision states that
+#: also became current state: the catalog lists the mapped athlete as inactive
+#: for the requested season, names two equally exact athletes, or no longer
+#: lists the mapped athlete at all, so the claim is withdrawn from comparisons
+#: without being retracted.
 MAPPING_STATES = (
     "ambiguous",
     "auto",
@@ -36,6 +37,7 @@ MAPPING_STATES = (
     "manual_override",
     "mapping_conflict",
     "rejected",
+    "unmatched",
 )
 
 #: Closed set of append-only decision states.  This mirrors
@@ -45,7 +47,6 @@ MAPPING_DECISION_STATES = frozenset(
     MAPPING_STATES
     + (
         "team_conflict",
-        "unmatched",
         "missing_identity",
         "rejection_cleared",
     )
@@ -97,7 +98,8 @@ class ProviderAthleteMapping(Base):
             "(is_active = true AND mapping_state IN "
             "('auto', 'manual_approved', 'manual_override')) OR "
             "(is_active = false AND mapping_state IN "
-            "('ambiguous', 'inactive_only', 'mapping_conflict', 'rejected'))",
+            "('ambiguous', 'inactive_only', 'mapping_conflict', 'rejected', "
+            "'unmatched'))",
             name="ck_provider_mapping_active_state",
         ),
         # The conflicting canonical athlete is evidence for one state only.  A

@@ -43,10 +43,11 @@ class MappingResolutionState(str, Enum):
 #: Mapping states that withdrew an automatic claim from board comparisons
 #: without retracting it.  The identity still belongs to the canonical athlete
 #: the row names.
-_WITHDRAWN_CLAIM_STATES = frozenset(
+WITHDRAWN_CLAIM_STATES = frozenset(
     {
         MappingResolutionState.INACTIVE_ONLY.value,
         MappingResolutionState.AMBIGUOUS.value,
+        MappingResolutionState.UNMATCHED.value,
     }
 )
 
@@ -375,6 +376,22 @@ class AthleteResolver:
                         candidates=(claimed,),
                         reason="inactive_only",
                     )
+                # The catalog no longer lists the claimed athlete at all for
+                # this season, while the provider still reports the name the
+                # claim was established on.  Nothing supports comparing the
+                # identity any more, so the claim is withdrawn as unmatched
+                # rather than retained -- and the athlete that disappeared is
+                # named as the observation's candidate, which is what tells an
+                # operator this unmatched evidence withdrew a claim instead of
+                # simply matching nothing.
+                return self._result(
+                    normalized_provider,
+                    evidence,
+                    canonical_season,
+                    MappingResolutionState.UNMATCHED,
+                    candidates=self._absent_claim_candidates(existing, canonical_season),
+                    reason="claimed_athlete_absent",
+                )
             state = (
                 MappingResolutionState.INACTIVE_ONLY
                 if all_matches
@@ -507,8 +524,9 @@ class AthleteResolver:
 
         An active automatic mapping does.  So does one withdrawn from
         comparisons because the catalog only lists its athlete as inactive for
-        the requested season, or because the catalog named two equally exact
-        athletes and the board could not choose: either withdrawal suspends the
+        the requested season, because the catalog named two equally exact
+        athletes and the board could not choose, or because the catalog stopped
+        listing the claimed athlete at all: every withdrawal suspends the
         claim rather than retracting it, so the identity still belongs to the
         canonical athlete it was mapped to, and a later observation naming a
         different athlete under the same provider ID is still a conflict rather
@@ -518,7 +536,7 @@ class AthleteResolver:
         if not existing:
             return False
         state = str(existing.get("mapping_state", ""))
-        if state in _WITHDRAWN_CLAIM_STATES:
+        if state in WITHDRAWN_CLAIM_STATES:
             return True
         return state == MappingResolutionState.AUTO.value and bool(
             existing.get("is_active", False)
@@ -628,6 +646,41 @@ class AthleteResolver:
         return None if player_id is None else int(player_id)
 
     @staticmethod
+    def _absent_claim_candidates(
+        existing: Mapping[str, Any] | None,
+        season: str,
+    ) -> tuple["CanonicalAthlete", ...]:
+        """Name the claimed athlete the requested season no longer lists.
+
+        The facts come from the mapping row rather than the catalog, because
+        the catalog is exactly what stopped carrying them.  The candidate is
+        recorded as not active for the season: it is not a row an operator can
+        approve as it stands, it is the claim this observation withdrew.
+        """
+
+        existing = existing or {}
+        player_id = existing.get("canonical_player_id")
+        if player_id is None:
+            return ()
+        return (
+            CanonicalAthlete(
+                season=str(existing.get("season") or season),
+                player_id=int(player_id),
+                display_name=str(existing.get("canonical_name") or ""),
+                roster_status="absent",
+                is_active=False,
+                is_active_for_season=False,
+                team_id=(
+                    None
+                    if existing.get("canonical_team_id") is None
+                    else int(existing["canonical_team_id"])
+                ),
+                team_name=existing.get("canonical_team_name"),
+                team_abbreviation=existing.get("canonical_team_abbreviation"),
+            ),
+        )
+
+    @staticmethod
     def _catalog_athlete(
         rows: Sequence[Mapping[str, Any]],
         player_id: int,
@@ -711,6 +764,7 @@ class AthleteResolver:
 
 
 __all__ = [
+    "WITHDRAWN_CLAIM_STATES",
     "AthleteResolution",
     "AthleteResolver",
     "CanonicalAthlete",
