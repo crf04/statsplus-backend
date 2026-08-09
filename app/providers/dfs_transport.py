@@ -28,6 +28,8 @@ from app.utils.telemetry import (
 
 _Result = TypeVar("_Result")
 _FailureFactory = Callable[[str, Exception], Exception]
+_Worker = Callable[["_RequestResult"], None]
+_ResultObserver = Callable[["_RequestResult", float], None]
 
 # A Requests timeout is advisory to the implementation supplied by the
 # caller.  A bounded set of daemon workers gives us a hard caller-side escape
@@ -124,17 +126,23 @@ def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
         result.done.set()
 
 
-def run_bounded(
+def _run_bounded(
     *,
     context: RetrievalContext,
     now: Callable[[], datetime],
-    call: Callable[[], _Result],
-) -> _Result:
-    """Run a potentially blocking provider pipeline under an absolute deadline.
+    worker: _Worker,
+    worker_name: str,
+    deadline_message: str = "provider retrieval deadline exceeded",
+    observe_result: _ResultObserver | None = None,
+) -> _RequestResult:
+    """Own one bounded worker lifecycle for every provider pipeline.
 
-    The bounded daemon worker is deliberately given no mutable caller-owned
-    accumulator.  If it outlives the deadline, its result and any intermediate
-    state remain isolated and are discarded by the caller.
+    The worker receives only a private result holder.  If it outlives the
+    deadline, its result and any intermediate state remain isolated and are
+    discarded by the caller.  ``observe_result`` runs at the two points where
+    the caller can harvest worker progress: after timeout and after completion.
+    Keeping those points here prevents transport and non-transport callers from
+    growing separate slot, thread, and deadline implementations.
     """
 
     monotonic_start = time.monotonic()
@@ -142,35 +150,65 @@ def run_bounded(
     context.ensure_active(now=current)
     remaining = context.remaining_seconds(now=current)
     monotonic_deadline = monotonic_start + remaining
+    retry_baseline = current_retry_count()
     slot_wait = max(0.0, monotonic_deadline - time.monotonic())
     if not _request_slots.acquire(timeout=slot_wait):
-        raise DeadlineExceededError("provider retrieval deadline exceeded")
+        raise DeadlineExceededError(deadline_message)
 
     result = _RequestResult()
     try:
-        worker = threading.Thread(
-            target=_run_callable,
-            args=(result, call),
+        worker_thread = threading.Thread(
+            target=worker,
+            args=(result,),
             daemon=True,
-            name="statsplus-provider-pipeline",
+            name=worker_name,
         )
-        worker.start()
+        worker_thread.start()
     except BaseException:
         _request_slots.release()
         raise
 
+    def observe() -> None:
+        """Harvest worker retry progress before exposing its result."""
+
+        retry_count = result.retry_count_at(monotonic_deadline)
+        for _ in range(max(0, retry_count - retry_baseline)):
+            increment_retry_count()
+        if observe_result is not None:
+            observe_result(result, monotonic_deadline)
+
     remaining = max(0.0, monotonic_deadline - time.monotonic())
     if not result.done.wait(timeout=remaining):
-        raise DeadlineExceededError("provider retrieval deadline exceeded")
+        observe()
+        raise DeadlineExceededError(deadline_message)
+
+    observe()
     if (
         result.completed_at is None
         or result.completed_at > monotonic_deadline
         or time.monotonic() >= monotonic_deadline
     ):
-        raise DeadlineExceededError("provider retrieval deadline exceeded")
+        raise DeadlineExceededError(deadline_message)
     context.ensure_active(now=now())
     if result.error is not None:
         raise result.error
+    return result
+
+
+def run_bounded(
+    *,
+    context: RetrievalContext,
+    now: Callable[[], datetime],
+    call: Callable[[], _Result],
+) -> _Result:
+    """Run a potentially blocking provider pipeline under an absolute deadline."""
+
+    result = _run_bounded(
+        context=context,
+        now=now,
+        worker=lambda holder: _run_callable(holder, call),
+        worker_name="statsplus-provider-pipeline",
+    )
     return result.value
 
 
@@ -219,7 +257,6 @@ def request_json(
     """
 
     try:
-        monotonic_start = time.monotonic()
         current = now()
         bounded = bounded_timeout(
             context,
@@ -227,74 +264,36 @@ def request_json(
             now=current,
             provider=provider,
         )
-        remaining = context.remaining_seconds(now=current)
-        monotonic_deadline = monotonic_start + remaining
         with provider_call(
             provider,
             operation,
             cache_status=CACHE_DISABLED,
             request_id=context.request_id,
         ) as tracker:
-            slot_wait = max(0.0, monotonic_deadline - time.monotonic())
-            if not _request_slots.acquire(timeout=slot_wait):
-                raise DeadlineExceededError(
-                    f"{provider} retrieval deadline exceeded"
-                )
 
-            result = _RequestResult()
-            try:
-                worker = threading.Thread(
-                    target=_run_request,
-                    args=(
-                        result,
-                        session,
-                        url,
-                        params,
-                        bounded,
-                        context,
-                        now,
-                        parse,
-                        invalid_json_message,
-                    ),
-                    daemon=True,
-                    name=f"statsplus-{provider}-request",
-                )
-                worker.start()
-            except BaseException:
-                # ``_run_request`` releases the slot after it starts.  A
-                # thread-start failure owns no worker and must release here.
-                _request_slots.release()
-                raise
+            def observe_result(result: _RequestResult, _deadline: float) -> None:
+                """Move worker-only response facts into telemetry."""
 
-            remaining = max(0.0, monotonic_deadline - time.monotonic())
-            if not result.done.wait(timeout=remaining):
                 tracker.status_code = result.status_code
-                retry_count = result.retry_count_at(monotonic_deadline)
-                for _ in range(max(0, retry_count - current_retry_count())):
-                    increment_retry_count()
-                raise DeadlineExceededError(
-                    f"{provider} retrieval deadline exceeded"
-                )
 
-            # The event may be set at the boundary while the caller is being
-            # scheduled.  Accept only a result completed before the absolute
-            # deadline and while the caller still has time to process it.
-            tracker.status_code = result.status_code
-            retry_count = result.retry_count_at(monotonic_deadline)
-            for _ in range(max(0, retry_count - current_retry_count())):
-                increment_retry_count()
-
-            if (
-                result.completed_at is None
-                or result.completed_at > monotonic_deadline
-                or time.monotonic() >= monotonic_deadline
-            ):
-                raise DeadlineExceededError(
-                    f"{provider} retrieval deadline exceeded"
-                )
-
-            if result.error is not None:
-                raise result.error
+            result = _run_bounded(
+                context=context,
+                now=now,
+                worker=lambda holder: _run_request(
+                    holder,
+                    session,
+                    url,
+                    params,
+                    bounded,
+                    context,
+                    now,
+                    parse,
+                    invalid_json_message,
+                ),
+                worker_name=f"statsplus-{provider}-request",
+                deadline_message=f"{provider} retrieval deadline exceeded",
+                observe_result=observe_result,
+            )
             return result.value
     except DeadlineExceededError as error:
         if failure_factory is not None:

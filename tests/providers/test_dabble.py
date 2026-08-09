@@ -124,6 +124,77 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     }
 
 
+def test_session_factory_keeps_non_thread_safe_clients_out_of_concurrent_use():
+    """Detail fan-out must never share one mutable client between workers."""
+
+    fixtures = _payload("fixtures.valid.json")
+    details: dict[str, dict[str, object]] = {}
+    for index in range(3):
+        fixture = copy.deepcopy(fixtures["data"][0])
+        fixture["id"] = f"fixture-{index + 1}"
+        if index == 0:
+            fixtures["data"][0] = fixture
+        else:
+            fixtures["data"].append(fixture)
+
+        detail = _payload("fixture_details.valid.json")
+        detail_data = detail["sportFixtureDetail"]
+        detail_data["id"] = fixture["id"]
+        detail_data["playerProps"] = [
+            copy.deepcopy(detail_data["playerProps"][0])
+        ]
+        detail_data["playerProps"][0]["marketId"] = f"market-{index + 1}"
+        detail_data["playerProps"][0]["selectionId"] = f"selection-{index + 1}"
+        details[fixture["id"]] = detail
+
+    detail_barrier = threading.Barrier(3)
+    factory_lock = threading.Lock()
+    sessions: list[object] = []
+
+    class GuardedSession:
+        def __init__(self) -> None:
+            self._in_flight = False
+            self._lock = threading.Lock()
+            self.headers: dict[str, str] = {}
+
+        def get(self, url: str, **kwargs: object) -> FakeResponse:
+            del kwargs
+            is_detail = "/details/" in url
+            if is_detail:
+                with self._lock:
+                    if self._in_flight:
+                        raise AssertionError("one session was used concurrently")
+                    self._in_flight = True
+                try:
+                    detail_barrier.wait(timeout=1.0)
+                    fixture_id = url.rsplit("/", 1)[-1]
+                    return FakeResponse(details[fixture_id])
+                finally:
+                    with self._lock:
+                        self._in_flight = False
+            if url.endswith("/competitions"):
+                return FakeResponse(_payload("competitions.valid.json"))
+            return FakeResponse(fixtures)
+
+    def session_factory() -> GuardedSession:
+        session = GuardedSession()
+        with factory_lock:
+            sessions.append(session)
+        return session
+
+    snapshot = DabbleAdapter(
+        session_factory=session_factory,
+        detail_concurrency=3,
+    ).get_snapshot(NBAMarketQuery(), _context())
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 3
+    detail_sessions = [
+        session for session in sessions if isinstance(session, GuardedSession)
+    ]
+    assert len(detail_sessions) >= 3
+
+
 def test_missing_provider_ids_are_retained_as_null_without_fabrication():
     detail = _payload("fixture_details.valid.json")
     prop = detail["sportFixtureDetail"]["playerProps"][0]

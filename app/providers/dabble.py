@@ -13,6 +13,7 @@ import concurrent.futures
 import copy
 import logging
 import math
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from app.providers.dfs import (
     DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
+    MarketStatus,
     MarketThreshold,
     MarketVariant,
     NBAMarketQuery,
@@ -146,6 +148,39 @@ def _build_session() -> requests.Session:
     return session
 
 
+class _SerializedSession:
+    """Adapt one injected client whose ``get`` method is not thread-safe.
+
+    The lock covers only the session operation that mutates Requests' shared
+    request state.  Response decoding and provider parsing stay outside the
+    lock, so callers retain bounded detail workers while deterministic test
+    doubles can safely be injected as one session.
+    """
+
+    def __init__(self, session: requests.Session | Any) -> None:
+        self._session = session
+        self._get_lock = threading.Lock()
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        with self._get_lock:
+            return self._session.get(url, **kwargs)
+
+
+class _ThreadLocalSession:
+    """Create one independent client for each worker thread using the source."""
+
+    def __init__(self, factory: Callable[[], requests.Session | Any]) -> None:
+        self._factory = factory
+        self._local = threading.local()
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._factory()
+            self._local.session = session
+        return session.get(url, **kwargs)
+
+
 @dataclass(frozen=True, slots=True)
 class _ParsedRows:
     rows: tuple[dict[str, Any], ...]
@@ -205,8 +240,63 @@ class _MarketAccumulator:
     conflict: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _PropFacts:
+    """Validated, provider-shaped facts needed to build one Dabble market."""
+
+    player_name: str
+    status: MarketStatus
+    status_label: Any | None
+    raw_stats: tuple[str, ...]
+    components: tuple[str, ...]
+    scoring_period: ScoringPeriod | str
+    period_label: str | None
+    value: Decimal
+    source_value: str
+    line_type: str
+    provider_athlete_id: str | None
+    variant_label: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PropIdentity:
+    """Raw identity and relationship evidence selected from Dabble resources."""
+
+    fixture_id: str
+    market_id: str | None
+    selection_id: str | None
+    competition_id: str | None
+    sport_id: str | None
+    sport_label: str | None
+    competition_label: str | None
+    event_label: str | None
+    starts_at: Any
+    updated_at: Any
+    team_provider_id: str | None
+    team_name: str | None
+    team_abbreviation: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PropEvidence:
+    """Immutable evidence graph shared by a market and its athlete."""
+
+    team: TeamEvidence
+    athlete: AthleteEvidence
+    sport: SportEvidence
+    competition: CompetitionEvidence
+    league: LeagueEvidence
+
+
 class DabbleAdapter:
-    """Retrieve Dabble's eligible NBA player projection markets."""
+    """Retrieve Dabble's eligible NBA player projection markets.
+
+    Production requests use a thread-local session factory, which keeps the
+    useful fixture fan-out while avoiding concurrent mutation of one Requests
+    session.  An explicitly injected ``session`` is treated as a test or
+    legacy client and its ``get`` calls are serialized.  Callers that provide
+    a concurrent-safe client source should use ``session_factory`` instead.
+    """
 
     BASE_URL = "https://api.dabble.com.au"
     PROVIDER_ID = "dabble"
@@ -225,6 +315,7 @@ class DabbleAdapter:
         self,
         *,
         session: requests.Session | Any | None = None,
+        session_factory: Callable[[], requests.Session | Any] | None = None,
         detail_concurrency: int = DETAIL_CONCURRENCY,
         connect_timeout_seconds: float = CONNECT_TIMEOUT_SECONDS,
         read_timeout_seconds: float = READ_TIMEOUT_SECONDS,
@@ -234,7 +325,19 @@ class DabbleAdapter:
             raise ValueError("detail_concurrency must be at least 1")
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
             raise ValueError("provider timeouts must be positive")
-        self.session = session or _build_session()
+        if session is not None and session_factory is not None:
+            raise ValueError("provide session or session_factory, not both")
+        if session_factory is not None:
+            self.session = _ThreadLocalSession(session_factory)
+            self._request_session = self.session
+        elif session is not None:
+            # Keep the injected object visible for existing test seams while
+            # routing actual calls through its concurrency-safe adapter.
+            self.session = session
+            self._request_session = _SerializedSession(session)
+        else:
+            self.session = _ThreadLocalSession(_build_session)
+            self._request_session = self.session
         self.detail_concurrency = detail_concurrency
         self.connect_timeout_seconds = float(connect_timeout_seconds)
         self.read_timeout_seconds = float(read_timeout_seconds)
@@ -811,6 +914,43 @@ class DabbleAdapter:
         competition: Mapping[str, Any],
         query: NBAMarketQuery,
     ) -> tuple[tuple[Any, ...], PlayerProjectionMarket, Selection]:
+        facts = self._classify_prop(
+            prop,
+            detail=detail,
+            fixture=fixture,
+            competition=competition,
+            query=query,
+        )
+        identity = self._extract_prop_identity(
+            prop,
+            detail=detail,
+            fixture=fixture,
+            competition=competition,
+        )
+        try:
+            evidence = self._build_prop_evidence(
+                facts=facts,
+                identity=identity,
+            )
+            market = self._build_market(facts=facts, identity=identity, evidence=evidence)
+            selection = self._build_selection(prop, facts=facts, identity=identity)
+        except CoverageRecordMalformed:
+            raise
+        except ValueError as error:
+            raise CoverageRecordMalformed(str(error)) from error
+        return self._market_key(identity, facts, evidence, market), market, selection
+
+    def _classify_prop(
+        self,
+        prop: Any,
+        *,
+        detail: Mapping[str, Any],
+        fixture: Mapping[str, Any],
+        competition: Mapping[str, Any],
+        query: NBAMarketQuery,
+    ) -> _PropFacts:
+        """Apply Dabble's inclusion rules and validate projection facts."""
+
         if not isinstance(prop, Mapping):
             raise CoverageRecordMalformed("Dabble player prop must be an object")
 
@@ -820,6 +960,62 @@ class DabbleAdapter:
         player_name = optional_text(prop.get("playerName"))
         if player_name is None:
             raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
+
+        status, status_label = self._eligible_prop_status(
+            prop,
+            detail=detail,
+            fixture=fixture,
+            query=query,
+        )
+        source_sport = (
+            detail.get("sportName")
+            or fixture.get("sportName")
+            or competition.get("sport")
+        )
+        if (
+            source_sport is not None
+            and str(source_sport).strip().casefold() not in _BASKETBALL_LABELS
+        ):
+            raise CoverageRecordExcluded(CoverageCode.NON_NBA_SPORT)
+
+        raw_stats = self._validated_stats(prop.get("stats"))
+        normalized_stats = canonical_stat_components(raw_stats)
+        if not normalized_stats:
+            raise CoverageRecordMalformed("Dabble player prop stats are empty")
+
+        value, source_value = self._decimal_source(prop.get("value"), "value")
+        line_type = prop.get("lineType")
+        if not isinstance(line_type, str) or not line_type.strip():
+            raise CoverageRecordMalformed("Dabble lineType is malformed")
+        components, scoring_period, period_label = self._statistic_period(
+            normalized_stats
+        )
+        return _PropFacts(
+            player_name=player_name,
+            status=status,
+            status_label=status_label,
+            raw_stats=tuple(raw_stats),
+            components=tuple(components),
+            scoring_period=scoring_period,
+            period_label=period_label,
+            value=value,
+            source_value=source_value,
+            line_type=line_type.strip(),
+            provider_athlete_id=self._optional_id(prop.get("playerId")),
+            variant_label=optional_text(
+                prop.get("variant") or prop.get("marketVariant")
+            ),
+        )
+
+    @staticmethod
+    def _eligible_prop_status(
+        prop: Mapping[str, Any],
+        *,
+        detail: Mapping[str, Any],
+        fixture: Mapping[str, Any],
+        query: NBAMarketQuery,
+    ) -> tuple[MarketStatus, Any | None]:
+        """Require every available status source to agree with the query."""
 
         status_labels = tuple(
             label
@@ -842,177 +1038,210 @@ class DabbleAdapter:
             for status in normalized_statuses
         ):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
-        status = normalized_statuses[0]
+        return normalized_statuses[0].value, status_label
 
-        source_sport = (
-            detail.get("sportName")
-            or fixture.get("sportName")
-            or competition.get("sport")
-        )
-        if source_sport is not None and str(source_sport).strip().casefold() not in _BASKETBALL_LABELS:
-            raise CoverageRecordExcluded(CoverageCode.NON_NBA_SPORT)
+    @staticmethod
+    def _validated_stats(value: Any) -> list[str]:
+        """Validate and retain each source statistic label before sorting."""
 
-        stats = prop.get("stats")
-        if not isinstance(stats, list) or not stats:
+        if not isinstance(value, list) or not value:
             raise CoverageRecordMalformed("Dabble player prop stats are malformed")
-        raw_stats = []
-        for stat in stats:
+        raw_stats: list[str] = []
+        for stat in value:
             if not isinstance(stat, str) or not stat.strip():
                 raise CoverageRecordMalformed("Dabble player prop stat is malformed")
             raw_stats.append(stat.strip())
-        normalized_stats = canonical_stat_components(raw_stats)
-        if not normalized_stats:
-            raise CoverageRecordMalformed("Dabble player prop stats are empty")
+        return raw_stats
 
-        value, source_value = self._decimal_source(prop.get("value"), "value")
-        line_type = prop.get("lineType")
-        if not isinstance(line_type, str) or not line_type.strip():
-            raise CoverageRecordMalformed("Dabble lineType is malformed")
-        line_type = line_type.strip()
+    def _extract_prop_identity(
+        self,
+        prop: Mapping[str, Any],
+        *,
+        detail: Mapping[str, Any],
+        fixture: Mapping[str, Any],
+        competition: Mapping[str, Any],
+    ) -> _PropIdentity:
+        """Select IDs and labels using Dabble's fallback relationships."""
 
-        provider_athlete_id = self._optional_id(prop.get("playerId"))
+        return _PropIdentity(
+            fixture_id=str(detail.get("id") or fixture.get("id")),
+            market_id=self._optional_id(prop.get("marketId")),
+            selection_id=self._optional_id(prop.get("selectionId")),
+            competition_id=self._optional_id(
+                detail.get("competitionId")
+                or fixture.get("competitionId")
+                or competition.get("id")
+            ),
+            sport_id=self._optional_id(
+                detail.get("sportId")
+                or fixture.get("sportId")
+                or competition.get("sport_id")
+            ),
+            sport_label=optional_text(
+                detail.get("sportName")
+                or fixture.get("sportName")
+                or competition.get("sport")
+            ),
+            competition_label=optional_text(
+                detail.get("competitionName")
+                or fixture.get("competitionName")
+                or competition.get("name")
+            ),
+            event_label=optional_text(detail.get("name") or fixture.get("name")),
+            starts_at=detail.get("advertisedStart") or fixture.get("advertisedStart"),
+            updated_at=detail.get("updatedAt") or detail.get("updated_at"),
+            team_provider_id=self._optional_id(prop.get("teamId")),
+            team_name=optional_text(prop.get("teamName")),
+            team_abbreviation=optional_text(prop.get("teamAbbreviation")),
+        )
 
-        fixture_id = str(detail.get("id") or fixture.get("id"))
-        market_id = self._optional_id(prop.get("marketId"))
-        selection_id = self._optional_id(prop.get("selectionId"))
-        competition_id = self._optional_id(
-            detail.get("competitionId")
-            or fixture.get("competitionId")
-            or competition.get("id")
-        )
-        sport_id = self._optional_id(
-            detail.get("sportId")
-            or fixture.get("sportId")
-            or competition.get("sport_id")
-        )
-        sport_label = optional_text(
-            detail.get("sportName")
-            or fixture.get("sportName")
-            or competition.get("sport")
-        )
-        competition_label = optional_text(
-            detail.get("competitionName")
-            or fixture.get("competitionName")
-            or competition.get("name")
-        )
-        event_label = optional_text(
-            detail.get("name") or fixture.get("name")
-        )
-        starts_at = detail.get("advertisedStart") or fixture.get("advertisedStart")
-        updated_at = detail.get("updatedAt") or detail.get("updated_at")
-        statistic_label = "+".join(raw_stats)
-        components, scoring_period, period_label = self._statistic_period(normalized_stats)
-        variant_label = optional_text(
-            prop.get("variant") or prop.get("marketVariant")
-        )
-        try:
-            team = TeamEvidence(
-                provider_id=self._optional_id(prop.get("teamId")),
-                name=optional_text(prop.get("teamName")),
-                abbreviation=optional_text(prop.get("teamAbbreviation")),
-            )
-            athlete = AthleteEvidence(
-                provider_id=provider_athlete_id,
-                name=player_name,
-                team=team,
-            )
-            sport = SportEvidence(provider_id=sport_id, label=sport_label)
-            competition_evidence = CompetitionEvidence(
-                provider_id=competition_id,
-                label=competition_label,
-                sport=sport,
-            )
-            market = PlayerProjectionMarket(
-                provider=self.PROVIDER_ID,
-                market_id=market_id,
-                athlete=athlete,
-                event=EventEvidence(
-                    provider_id=fixture_id,
-                    label=event_label,
-                    starts_at=starts_at,
-                    updated_at=updated_at,
-                ),
-                team=team,
-                league=LeagueEvidence(
-                    provider_id=competition_id,
-                    label=competition_label,
-                ),
-                competition=competition_evidence,
-                sport=sport,
-                statistic=StatisticEvidence(
-                    label=statistic_label,
-                    components=tuple(components),
-                ),
-                threshold=MarketThreshold(
-                    value=value,
-                    unit="count",
-                    original_value=source_value,
-                ),
-                status=status.value,
-                status_label=(
-                    str(status_label).strip() if status_label is not None else None
-                ),
-                variant=variant_label,
-                variant_label=variant_label,
-                scoring_period=scoring_period,
-                scoring_period_label=period_label,
-                starts_at=starts_at,
-                updated_at=updated_at,
-            )
+    @staticmethod
+    def _build_prop_evidence(
+        facts: _PropFacts,
+        identity: _PropIdentity,
+    ) -> _PropEvidence:
+        """Construct the shared evidence graph once for market consumers."""
 
-            modifiers: tuple[SelectionModifier, ...] = ()
-            if "multiplier" in prop and prop.get("multiplier") is not None:
-                multiplier, _ = self._decimal_source(
-                    prop.get("multiplier"), "multiplier"
-                )
-                if multiplier <= 0:
-                    raise CoverageRecordMalformed("Dabble multiplier must be positive")
-                multiplier_label = optional_text(
-                    prop.get("multiplierLabel")
-                    or prop.get("payoutMultiplierLabel")
-                    or prop.get("modifierLabel")
-                )
-                modifiers = (
-                    SelectionModifier(
-                        value=multiplier,
-                        kind="multiplier",
-                        scope="selection",
-                        label=multiplier_label,
-                    ),
-                )
-            selection = Selection(
-                selection_id=selection_id,
-                label=line_type,
-                direction=line_type,
-                direction_label=line_type,
-                status=(
-                    str(status_label).strip() if status_label is not None else None
+        team = TeamEvidence(
+            provider_id=identity.team_provider_id,
+            name=identity.team_name,
+            abbreviation=identity.team_abbreviation,
+        )
+        athlete = AthleteEvidence(
+            provider_id=facts.provider_athlete_id,
+            name=facts.player_name,
+            team=team,
+        )
+        sport = SportEvidence(provider_id=identity.sport_id, label=identity.sport_label)
+        competition = CompetitionEvidence(
+            provider_id=identity.competition_id,
+            label=identity.competition_label,
+            sport=sport,
+        )
+        return _PropEvidence(
+            team=team,
+            athlete=athlete,
+            sport=sport,
+            competition=competition,
+            league=LeagueEvidence(
+                provider_id=identity.competition_id,
+                label=identity.competition_label,
+            ),
+        )
+
+    def _build_market(
+        self,
+        *,
+        facts: _PropFacts,
+        identity: _PropIdentity,
+        evidence: _PropEvidence,
+    ) -> PlayerProjectionMarket:
+        """Build one immutable market from validated facts and evidence."""
+
+        return PlayerProjectionMarket(
+            provider=self.PROVIDER_ID,
+            market_id=identity.market_id,
+            athlete=evidence.athlete,
+            event=EventEvidence(
+                provider_id=identity.fixture_id,
+                label=identity.event_label,
+                starts_at=identity.starts_at,
+                updated_at=identity.updated_at,
+            ),
+            team=evidence.team,
+            league=evidence.league,
+            competition=evidence.competition,
+            sport=evidence.sport,
+            statistic=StatisticEvidence(
+                label="+".join(facts.raw_stats),
+                components=facts.components,
+            ),
+            threshold=MarketThreshold(
+                value=facts.value,
+                unit="count",
+                original_value=facts.source_value,
+            ),
+            status=facts.status,
+            status_label=(
+                str(facts.status_label).strip()
+                if facts.status_label is not None
+                else None
+            ),
+            variant=facts.variant_label,
+            variant_label=facts.variant_label,
+            scoring_period=facts.scoring_period,
+            scoring_period_label=facts.period_label,
+            starts_at=identity.starts_at,
+            updated_at=identity.updated_at,
+        )
+
+    def _build_selection(
+        self,
+        prop: Mapping[str, Any],
+        *,
+        facts: _PropFacts,
+        identity: _PropIdentity,
+    ) -> Selection:
+        """Normalize an optional multiplier and construct the selectable side."""
+
+        modifiers: tuple[SelectionModifier, ...] = ()
+        if "multiplier" in prop and prop.get("multiplier") is not None:
+            multiplier, _ = self._decimal_source(prop.get("multiplier"), "multiplier")
+            if multiplier <= 0:
+                raise CoverageRecordMalformed("Dabble multiplier must be positive")
+            multiplier_label = optional_text(
+                prop.get("multiplierLabel")
+                or prop.get("payoutMultiplierLabel")
+                or prop.get("modifierLabel")
+            )
+            modifiers = (
+                SelectionModifier(
+                    value=multiplier,
+                    kind="multiplier",
+                    scope="selection",
+                    label=multiplier_label,
                 ),
-                modifiers=modifiers,
             )
-        except CoverageRecordMalformed:
-            raise
-        except ValueError as error:
-            raise CoverageRecordMalformed(str(error)) from error
-        if market_id is not None:
-            market_key: tuple[Any, ...] = ("market", market_id)
-        else:
-            market_key = (
-                "evidence",
-                fixture_id,
-                athlete.provider_id,
-                athlete.name,
-                team.provider_id,
-                team.name,
-                tuple(components),
-                value,
-                status.value,
-                market.scoring_period,
-                market.scoring_period_label,
-                market.variant,
-                market.variant_label,
-            )
-        return market_key, market, selection
+        status = (
+            str(facts.status_label).strip()
+            if facts.status_label is not None
+            else None
+        )
+        return Selection(
+            selection_id=identity.selection_id,
+            label=facts.line_type,
+            direction=facts.line_type,
+            direction_label=facts.line_type,
+            status=status,
+            modifiers=modifiers,
+        )
+
+    @staticmethod
+    def _market_key(
+        identity: _PropIdentity,
+        facts: _PropFacts,
+        evidence: _PropEvidence,
+        market: PlayerProjectionMarket,
+    ) -> tuple[Any, ...]:
+        """Choose explicit market identity, or a complete evidence identity."""
+
+        if identity.market_id is not None:
+            return ("market", identity.market_id)
+        return (
+            "evidence",
+            identity.fixture_id,
+            evidence.athlete.provider_id,
+            evidence.athlete.name,
+            evidence.team.provider_id,
+            evidence.team.name,
+            facts.components,
+            facts.value,
+            facts.status.value,
+            market.scoring_period,
+            market.scoring_period_label,
+            market.variant,
+            market.variant_label,
+        )
 
     @staticmethod
     def _statistic_period(
@@ -1110,7 +1339,7 @@ class DabbleAdapter:
     ) -> Any:
         return request_json(
             context=context,
-            session=self.session,
+            session=self._request_session,
             url=f"{self.BASE_URL}{path}",
             params=params,
             timeout=(self.connect_timeout_seconds, self.read_timeout_seconds),
