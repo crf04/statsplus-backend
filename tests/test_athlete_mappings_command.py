@@ -277,6 +277,89 @@ def test_cli_resolves_an_unresolved_observation_and_keeps_its_evidence(
     assert _run(capsys, "list", "--database-url", database_url)["unresolved"] == []
 
 
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_cli_keeps_observed_evidence_across_a_reject_and_clear(
+    tmp_path, capsys, action
+):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    engine = create_engine(database_url)
+    repository = AthleteMappingRepository(engine)
+    resolver = AthleteResolver(
+        AthleteCatalogService(engine, settings=load_settings(
+            overrides={"DATABASE_URL": database_url}
+        )),
+        mapping_repository=repository,
+    )
+    repository.record_resolution(
+        resolver.resolve(
+            "prizepicks",
+            AthleteEvidence(
+                provider_id="pp-77",
+                name="King James",
+                team=TeamEvidence(
+                    provider_id="pp-den",
+                    canonical_id=1610612743,
+                    name="Denver Nuggets",
+                    abbreviation="DEN",
+                ),
+            ),
+            "2024-25",
+        )
+    )
+    engine.dispose()
+    identity = (
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-77",
+        "--operator",
+        "ops@example.com",
+    )
+    _run(
+        capsys,
+        "reject",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "provider identity is not trusted",
+    )
+    assert _run(
+        capsys,
+        "clear",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "the identity was reinstated",
+    ) == {"cleared": True}
+
+    resolved = _run(
+        capsys,
+        action,
+        "--database-url",
+        database_url,
+        *identity,
+        "--season",
+        "2024-25",
+        "--canonical-player-id",
+        "23",
+        "--reason",
+        "the provider uses a nickname",
+    )
+
+    # The rejection and its clearing carry no provider evidence, so the last
+    # board observation is still what the provider reported for this identity.
+    assert resolved["mapping"]["provider_name"] == "King James"
+    assert resolved["mapping"]["provider_team_id"] == "pp-den"
+    assert resolved["mapping"]["provider_team_canonical_id"] == 1610612743
+    assert resolved["mapping"]["provider_team_abbreviation"] == "DEN"
+    assert resolved["decision"]["provider_name"] == "King James"
+    assert resolved["decision"]["provider_team_name"] == "Denver Nuggets"
+
+
 def test_cli_reject_blocks_then_clear_restores(tmp_path, capsys):
     database_url = _seed_database(tmp_path)
 

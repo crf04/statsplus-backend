@@ -478,6 +478,12 @@ class AthleteResolver:
         one, so an approval recorded without evidence is never second-guessed
         and a deliberate override to a differently named canonical athlete is
         not read as a conflict.
+
+        Team evidence is judged at the strongest tier both sides recorded:
+        identities first -- the canonical team ID and the provider's own team
+        ID -- then the abbreviation, then the team name.  A disagreement at any
+        comparable identity is a conflict, and agreement there makes a differing
+        label a presentation difference rather than a changed athlete.
         """
 
         previous_name = existing.get("provider_name")
@@ -491,9 +497,17 @@ class AthleteResolver:
         team = evidence.team
         if team is None:
             return False
-        previous_team_id = existing.get("provider_team_canonical_id")
-        if previous_team_id is not None and team.canonical_id is not None:
-            return int(previous_team_id) != int(team.canonical_id)
+        team_identities = [
+            (existing.get("provider_team_canonical_id"), team.canonical_id),
+            (existing.get("provider_team_id"), team.provider_id),
+        ]
+        comparable = [
+            (str(previous).strip(), str(current).strip())
+            for previous, current in team_identities
+            if previous is not None and current is not None
+        ]
+        if comparable:
+            return any(previous != current for previous, current in comparable)
         previous_abbreviation = existing.get("provider_team_abbreviation")
         if previous_abbreviation and team.abbreviation:
             return previous_abbreviation.casefold() != team.abbreviation.casefold()

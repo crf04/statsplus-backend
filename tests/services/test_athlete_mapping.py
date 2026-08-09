@@ -578,6 +578,234 @@ def test_a_reapproval_restores_the_manual_mapping_after_a_conflict(mapping_db):
     )
 
 
+def _reapprove_pp_15_as_the_reused_identity(
+    repository: AthleteMappingRepository,
+) -> None:
+    repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the provider reused the identity",
+        provider_evidence=_reused_identity_evidence(),
+    )
+
+
+def test_a_stale_conflict_cannot_undo_a_newer_manual_decision(mapping_db):
+    """The operator resolved this very conflict, so replaying it changes nothing."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    _approve_pp_15(repository)
+    stale = resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
+    assert stale.state is MappingResolutionState.MAPPING_CONFLICT
+    repository.record_resolution(stale)
+    _reapprove_pp_15_as_the_reused_identity(repository)
+
+    result = repository.record_resolution(stale)
+
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "manual_approved"
+    assert mapping.canonical_player_id == 23
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["manual_approved", "mapping_conflict", "manual_approved"]
+
+
+def test_a_racing_reapproval_beats_a_stale_conflict_promotion(mapping_db):
+    """The reapproval commits inside the window the resolver read across.
+
+    Only a comparison made inside the identity transaction can see that the
+    governed decision now covers exactly the evidence the conflict reports.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    _approve_pp_15(repository)
+    stale = resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
+    assert stale.state is MappingResolutionState.MAPPING_CONFLICT
+
+    serialized = AthleteMappingRepository._transaction.__get__(repository)
+    raced = threading.Event()
+
+    @contextmanager
+    def _transaction_after_a_racing_reapproval(provider, provider_id):
+        if not raced.is_set():
+            raced.set()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(
+                    _reapprove_pp_15_as_the_reused_identity, repository
+                ).result(timeout=10)
+        with serialized(provider, provider_id) as connection:
+            yield connection
+
+    repository._transaction = _transaction_after_a_racing_reapproval
+
+    result = repository.record_resolution(stale)
+
+    assert raced.is_set()
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 23
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["manual_approved", "manual_approved"]
+
+
+def test_later_evidence_still_promotes_a_contradicted_manual_mapping(mapping_db):
+    """A reapproval is not a blanket licence for every later observation."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    _approve_pp_15(repository)
+    _reapprove_pp_15_as_the_reused_identity(repository)
+
+    later = resolver.resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="Stephen Curry",
+            team=TeamEvidence(
+                provider_id="pp-gsw",
+                canonical_id=1610612744,
+                abbreviation="GSW",
+            ),
+        ),
+        "2024-25",
+    )
+    result = repository.record_resolution(later)
+
+    assert later.reason == "manual_mapping_conflict"
+    assert result.state == "mapping_conflict"
+    assert result.persisted is True
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping.canonical_player_id == 23
+    assert mapping.provider_name == "Stephen Curry"
+
+
+@pytest.mark.parametrize(
+    ("team", "conflicts"),
+    [
+        # The provider now reports its own identity for another team while
+        # every other fact it reports is unchanged.
+        (
+            TeamEvidence(
+                provider_id="pp-lal",
+                canonical_id=1610612743,
+                name="Denver Nuggets",
+                abbreviation="DEN",
+            ),
+            True,
+        ),
+        (
+            TeamEvidence(
+                provider_id="pp-den",
+                canonical_id=1610612743,
+                name="Denver Nuggets",
+                abbreviation="DEN",
+            ),
+            False,
+        ),
+        # No comparable provider team ID, so the canonical team ID decides.
+        (TeamEvidence(canonical_id=1610612743, abbreviation="LAL"), False),
+        (TeamEvidence(canonical_id=1610612747, abbreviation="DEN"), True),
+        # No comparable team ID at all, so the abbreviation decides.
+        (TeamEvidence(abbreviation="DEN", name="Los Angeles Lakers"), False),
+        (TeamEvidence(abbreviation="LAL"), True),
+        # Only a team name is comparable.
+        (TeamEvidence(name="Denver Nuggets"), False),
+        (TeamEvidence(name="Los Angeles Lakers"), True),
+    ],
+)
+def test_manual_fail_closed_compares_the_provider_team_identity(
+    mapping_db, team, conflicts
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    _approve_pp_15(repository)
+
+    result = resolver.resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic", team=team),
+        "2024-25",
+    )
+
+    if conflicts:
+        assert result.state is MappingResolutionState.MAPPING_CONFLICT
+        assert result.reason == "manual_mapping_conflict"
+    else:
+        assert result.state is MappingResolutionState.MANUAL_APPROVED
+        assert result.canonical_player_id == 15
+
+
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_a_manual_decision_recovers_observation_evidence_across_a_rejection(
+    mapping_db, action
+):
+    """Rejecting and clearing an identity does not discard what was observed."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    repository.record_resolution(
+        resolver.resolve(
+            "prizepicks",
+            AthleteEvidence(
+                provider_id="pp-77",
+                name="King James",
+                team=TeamEvidence(
+                    provider_id="pp-lal",
+                    canonical_id=1610612747,
+                    name="Los Angeles Lakers",
+                    abbreviation="LAL",
+                ),
+            ),
+            "2024-25",
+        )
+    )
+    repository.reject(
+        "prizepicks",
+        "pp-77",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    assert repository.clear_rejection(
+        "prizepicks",
+        "pp-77",
+        operator_id="ops@example.com",
+        reason="the identity was reinstated",
+    )
+
+    result = getattr(repository, action)(
+        "prizepicks",
+        "pp-77",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the provider uses a nickname",
+    )
+
+    assert result.mapping.provider_name == "King James"
+    assert result.mapping.provider_team_id == "pp-lal"
+    assert result.mapping.provider_team_canonical_id == 1610612747
+    assert result.mapping.provider_team_abbreviation == "LAL"
+    assert result.decision.provider_name == "King James"
+    assert result.decision.provider_team_name == "Los Angeles Lakers"
+
+
 @pytest.mark.parametrize("action", ["approve", "override"])
 def test_a_manual_decision_falls_back_to_the_latest_observation_evidence(
     mapping_db, action

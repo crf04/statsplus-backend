@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -33,6 +33,7 @@ from app.services.athlete_mapping_errors import (
 )
 from app.services.athlete_resolver import (
     AthleteResolution,
+    AthleteResolver,
     CanonicalAthlete,
     MappingResolutionState,
 )
@@ -57,6 +58,15 @@ _MANUAL_MAPPING_STATES = frozenset(
         MappingResolutionState.MANUAL_APPROVED.value,
         MappingResolutionState.MANUAL_OVERRIDE.value,
     }
+)
+
+#: Decision states whose provider evidence is a direct board observation of the
+#: identity.  Operator decisions only ever copy evidence forward, and a
+#: mapping conflict records the *contradicting* side of a disagreement, so
+#: neither may be read as what the provider reports for the identity.
+_OBSERVED_EVIDENCE_DECISION_STATES = frozenset(
+    {state.value for state in UNRESOLVED_OBSERVATION_STATES}
+    | {MappingResolutionState.AUTO.value}
 )
 
 
@@ -648,7 +658,12 @@ class AthleteMappingRepository:
         now = _utc(observed_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
             governed = self._governing_decision(
-                connection, provider, provider_id, promoting_conflict=True
+                connection,
+                provider,
+                provider_id,
+                promoting_conflict=True,
+                resolution=resolution,
+                observed_at=now,
             )
             if governed is not None:
                 return governed
@@ -701,7 +716,12 @@ class AthleteMappingRepository:
         # The caller may have observed an older row.  Re-lock and re-read it
         # immediately before writing so a newer governed decision wins.
         governed = self._governing_decision(
-            connection, provider, provider_id, promoting_conflict=promoting_conflict
+            connection,
+            provider,
+            provider_id,
+            promoting_conflict=promoting_conflict,
+            resolution=resolution,
+            observed_at=now,
         )
         if governed is not None:
             return governed
@@ -1040,6 +1060,8 @@ class AthleteMappingRepository:
         provider_id: str,
         *,
         promoting_conflict: bool = False,
+        resolution: AthleteResolution | None = None,
+        observed_at: datetime | None = None,
     ) -> MappingPersistenceResult | None:
         """Return the governed state a board observation must not supersede.
 
@@ -1052,8 +1074,11 @@ class AthleteMappingRepository:
 
         Manual precedence protects a governed mapping from automatic
         *overwrite*, not from fail-closed conflict detection, so a conflict is
-        allowed to promote it (``promoting_conflict``).  An active rejection
-        governs either way: a suppressed identity has nothing to conflict with.
+        allowed to promote it (``promoting_conflict``) -- but only while the
+        governed decision still contradicts the observed evidence, so a
+        conflict an operator has already resolved cannot undo the resolution.
+        An active rejection governs either way: a suppressed identity has
+        nothing to conflict with.
         """
 
         rejection = self._select_rejection(connection, provider, provider_id, lock=True)
@@ -1068,7 +1093,17 @@ class AthleteMappingRepository:
             mapping is not None
             and mapping["is_active"]
             and str(mapping["mapping_state"]) in _MANUAL_MAPPING_STATES
-            and not promoting_conflict
+            and (
+                not promoting_conflict
+                or not self._conflict_still_applies(
+                    connection,
+                    provider,
+                    provider_id,
+                    mapping,
+                    resolution,
+                    observed_at,
+                )
+            )
         ):
             return MappingPersistenceResult(
                 str(mapping["mapping_state"]),
@@ -1076,6 +1111,68 @@ class AthleteMappingRepository:
                 mapping=self._mapping_record(mapping),
             )
         return None
+
+    @classmethod
+    def _conflict_still_applies(
+        cls,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+        mapping: Mapping[str, Any],
+        resolution: AthleteResolution | None,
+        observed_at: datetime | None,
+    ) -> bool:
+        """Report whether observed evidence still contradicts the manual state.
+
+        A conflict is resolved outside this transaction: an operator can
+        approve or override the very identity the conflict reports, and the
+        stale read may only land afterwards.  The comparison is made against
+        the governing manual decision recorded at or after the observation --
+        that operator decided knowing this evidence -- and against the current
+        mapping row otherwise.  Evidence the governed decision no longer
+        contradicts is spent; evidence it still contradicts fails closed as
+        before.
+        """
+
+        if resolution is None:
+            return True
+        governed = mapping
+        latest_manual = cls._latest_manual_decision(connection, provider, provider_id)
+        if (
+            latest_manual is not None
+            and observed_at is not None
+            and _utc(latest_manual["created_at"]) >= _utc(observed_at)
+        ):
+            governed = latest_manual
+        canonical_player_id = governed.get("canonical_player_id")
+        if (
+            canonical_player_id is not None
+            and resolution.canonical_player_id is not None
+            and int(canonical_player_id) != int(resolution.canonical_player_id)
+        ):
+            return True
+        return AthleteResolver._manual_evidence_conflicts(
+            governed, resolution.provider_evidence
+        )
+
+    @staticmethod
+    def _latest_manual_decision(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> Mapping[str, Any] | None:
+        return connection.execute(
+            select(AthleteMappingDecision.__table__)
+            .where(
+                and_(
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
+                    AthleteMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+                )
+            )
+            .order_by(AthleteMappingDecision.id.desc())
+            .limit(1)
+        ).mappings().one_or_none()
 
     @staticmethod
     def _select_mapping(
@@ -1154,6 +1251,42 @@ class AthleteMappingRepository:
             .limit(1)
         ).mappings().one_or_none()
 
+    @staticmethod
+    def _latest_observed_evidence(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Read the newest board observation that carries provider evidence.
+
+        Rejections, clearings, and evidence-free observations are skipped, so
+        an identity that was observed, rejected, cleared, and then approved
+        still records what the provider actually reported for it.
+        """
+
+        evidence_columns = (
+            AthleteMappingDecision.provider_name,
+            AthleteMappingDecision.provider_team_id,
+            AthleteMappingDecision.provider_team_canonical_id,
+            AthleteMappingDecision.provider_team_name,
+            AthleteMappingDecision.provider_team_abbreviation,
+        )
+        return connection.execute(
+            select(AthleteMappingDecision.__table__)
+            .where(
+                and_(
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
+                    AthleteMappingDecision.decision_state.in_(
+                        _OBSERVED_EVIDENCE_DECISION_STATES
+                    ),
+                    or_(*(column.isnot(None) for column in evidence_columns)),
+                )
+            )
+            .order_by(AthleteMappingDecision.id.desc())
+            .limit(1)
+        ).mappings().one_or_none()
+
     @classmethod
     def _latest_decision_key(
         cls,
@@ -1179,9 +1312,9 @@ class AthleteMappingRepository:
         An operator who supplies no evidence is not discarding what the
         provider reported.  The mapping row is the freshest observed evidence
         when there is one; an identity that only ever produced unresolved
-        observations has none, so the latest durable decision -- read inside the
-        same identity transaction -- carries the evidence forward instead of
-        writing an unlabeled mapping.
+        observations has none, so the latest durable board observation -- read
+        inside the same identity transaction -- carries the evidence forward
+        instead of writing an unlabeled mapping.
         """
 
         if provider_evidence is not None:
@@ -1189,7 +1322,7 @@ class AthleteMappingRepository:
         if existing is not None:
             return cls._existing_evidence_values(existing)
         return cls._existing_evidence_values(
-            cls._latest_decision(connection, provider, provider_id)
+            cls._latest_observed_evidence(connection, provider, provider_id)
         )
 
     def _insert_decision(
