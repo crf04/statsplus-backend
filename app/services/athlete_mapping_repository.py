@@ -245,6 +245,28 @@ class MappingDecisionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MappingConflictRecord:
+    """One identity whose current state is an unreviewed mapping conflict.
+
+    The current row carries the provider identity, its observed evidence, the
+    canonical side that was established or approved, and the conflicting
+    candidate; the decision that recorded the conflict carries the reason and
+    the time an operator has to reason from.
+    """
+
+    mapping: ProviderAthleteMappingRecord
+    latest_decision: MappingDecisionRecord | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mapping": self.mapping.to_dict(),
+            "latest_decision": (
+                None if self.latest_decision is None else self.latest_decision.to_dict()
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MappingRejectionRecord:
     """Durable suppression state for one provider athlete identity."""
 
@@ -484,6 +506,53 @@ class AthleteMappingRepository:
             ]
             return self._decision_records(connection, pending)
 
+    @_translate_storage_failures
+    def list_conflicts(
+        self,
+        *,
+        provider: str | None = None,
+    ) -> list[MappingConflictRecord]:
+        """Return each identity whose current state is a mapping conflict.
+
+        A conflict is inactive by construction, so it is absent from the
+        active-only mapping listing, and it is not an unresolved observation
+        state, so it is absent from that queue too.  Without its own queue an
+        operator would see nothing left to act on for the one state that always
+        requires an operator.  The conflicting row is paired with the decision
+        that recorded the conflict rather than repeated as a mapping, so the
+        queue names both canonical sides and the evidence behind them exactly
+        once.
+        """
+
+        statement = select(ProviderAthleteMapping.__table__).where(
+            ProviderAthleteMapping.mapping_state
+            == MappingResolutionState.MAPPING_CONFLICT.value
+        )
+        if provider is not None:
+            normalized_provider, _ = _normalized_key(provider, "_placeholder")
+            statement = statement.where(
+                ProviderAthleteMapping.provider == normalized_provider
+            )
+        statement = statement.order_by(
+            ProviderAthleteMapping.provider,
+            ProviderAthleteMapping.provider_athlete_id,
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+            return [
+                MappingConflictRecord(
+                    mapping=self._mapping_record(row),
+                    latest_decision=self._decision_result(
+                        connection,
+                        self._latest_conflict_decision(
+                            connection, row["provider"], row["provider_athlete_id"]
+                        ),
+                    ),
+                )
+                for row in rows
+                if row is not None
+            ]
+
     # -- automatic board observations -------------------------------------
 
     def persist_auto_decision(
@@ -663,7 +732,6 @@ class AthleteMappingRepository:
                 provider_id,
                 promoting_conflict=True,
                 resolution=resolution,
-                observed_at=now,
             )
             if governed is not None:
                 return governed
@@ -721,7 +789,6 @@ class AthleteMappingRepository:
             provider_id,
             promoting_conflict=promoting_conflict,
             resolution=resolution,
-            observed_at=now,
         )
         if governed is not None:
             return governed
@@ -1061,7 +1128,6 @@ class AthleteMappingRepository:
         *,
         promoting_conflict: bool = False,
         resolution: AthleteResolution | None = None,
-        observed_at: datetime | None = None,
     ) -> MappingPersistenceResult | None:
         """Return the governed state a board observation must not supersede.
 
@@ -1101,7 +1167,6 @@ class AthleteMappingRepository:
                     provider_id,
                     mapping,
                     resolution,
-                    observed_at,
                 )
             )
         ):
@@ -1120,37 +1185,29 @@ class AthleteMappingRepository:
         provider_id: str,
         mapping: Mapping[str, Any],
         resolution: AthleteResolution | None,
-        observed_at: datetime | None,
     ) -> bool:
         """Report whether observed evidence still contradicts the manual state.
 
         A conflict is resolved outside this transaction: an operator can
         approve or override the very identity the conflict reports, and the
-        stale read may only land afterwards.  The comparison is made against
-        the governing manual decision recorded at or after the observation --
-        that operator decided knowing this evidence -- and against the current
-        mapping row otherwise.  Evidence the governed decision no longer
-        contradicts is spent; evidence it still contradicts fails closed as
-        before.
+        stale read may only land afterwards.  Only the provider-side evidence
+        decides, and it is compared with the governing manual decision read
+        inside this transaction -- the operator who recorded it saw exactly
+        that evidence.  A decision timestamp cannot stand in for that
+        comparison, because ``observed_at`` is when a read is persisted rather
+        than when the resolver produced it.
+
+        The canonical choice is deliberately not compared.  An operator who
+        accepts the provider's observation may still keep or pick a canonical
+        athlete the automatic side would not have chosen -- that disagreement
+        is the decision, not a conflict -- so a stale automatic candidate must
+        never undo it.  Evidence the governed decision does contradict is
+        evidence nobody reviewed, and still fails closed.
         """
 
         if resolution is None:
             return True
-        governed = mapping
-        latest_manual = cls._latest_manual_decision(connection, provider, provider_id)
-        if (
-            latest_manual is not None
-            and observed_at is not None
-            and _utc(latest_manual["created_at"]) >= _utc(observed_at)
-        ):
-            governed = latest_manual
-        canonical_player_id = governed.get("canonical_player_id")
-        if (
-            canonical_player_id is not None
-            and resolution.canonical_player_id is not None
-            and int(canonical_player_id) != int(resolution.canonical_player_id)
-        ):
-            return True
+        governed = cls._latest_manual_decision(connection, provider, provider_id) or mapping
         return AthleteResolver._manual_evidence_conflicts(
             governed, resolution.provider_evidence
         )
@@ -1168,6 +1225,26 @@ class AthleteMappingRepository:
                     AthleteMappingDecision.provider == provider,
                     AthleteMappingDecision.provider_athlete_id == provider_id,
                     AthleteMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+                )
+            )
+            .order_by(AthleteMappingDecision.id.desc())
+            .limit(1)
+        ).mappings().one_or_none()
+
+    @staticmethod
+    def _latest_conflict_decision(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> Mapping[str, Any] | None:
+        return connection.execute(
+            select(AthleteMappingDecision.__table__)
+            .where(
+                and_(
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
+                    AthleteMappingDecision.decision_state
+                    == MappingResolutionState.MAPPING_CONFLICT.value,
                 )
             )
             .order_by(AthleteMappingDecision.id.desc())
@@ -1788,6 +1865,7 @@ __all__ = [
     "AthleteMappingRepository",
     "AthleteMappingPersistenceError",
     "MappingCandidateRecord",
+    "MappingConflictRecord",
     "MappingDecisionRecord",
     "MappingPersistenceResult",
     "MappingRejectionRecord",

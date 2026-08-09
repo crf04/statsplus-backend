@@ -215,6 +215,10 @@ def _run(database_url: str, args: argparse.Namespace) -> Any:
                     provider=args.provider, active_only=not args.all
                 ),
                 "unresolved": repository.list_unresolved(provider=args.provider),
+                # Conflicts are inactive and are not unresolved observations,
+                # so the actionable review queue is reported separately rather
+                # than dropped from the default listing.
+                "conflicts": repository.list_conflicts(provider=args.provider),
             }
         if args.command == "history":
             return repository.history(

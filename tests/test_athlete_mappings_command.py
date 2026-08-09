@@ -277,6 +277,92 @@ def test_cli_resolves_an_unresolved_observation_and_keeps_its_evidence(
     assert _run(capsys, "list", "--database-url", database_url)["unresolved"] == []
 
 
+def _team_evidence() -> TeamEvidence:
+    """The one team every seeded catalog athlete plays for."""
+
+    return TeamEvidence(
+        provider_id="pp-den",
+        canonical_id=1610612743,
+        name="Denver Nuggets",
+        abbreviation="DEN",
+    )
+
+
+def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsys):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    engine = create_engine(database_url)
+    repository = AthleteMappingRepository(engine)
+    resolver = AthleteResolver(
+        AthleteCatalogService(engine, settings=load_settings(
+            overrides={"DATABASE_URL": database_url}
+        )),
+        mapping_repository=repository,
+    )
+    # One board read maps the identity automatically; the next reports a
+    # different athlete under the same provider ID.
+    for name in ("Nikola Jokic", "LeBron James"):
+        repository.record_resolution(
+            resolver.resolve(
+                "prizepicks",
+                AthleteEvidence(
+                    provider_id="pp-15", name=name, team=_team_evidence()
+                ),
+                "2024-25",
+            )
+        )
+    engine.dispose()
+
+    listed = _run(capsys, "list", "--database-url", database_url)
+
+    # The conflict is inactive, so the default listing has to show it in its
+    # own review queue rather than dropping the only actionable identity.
+    assert listed["mappings"] == []
+    assert listed["unresolved"] == []
+    assert len(listed["conflicts"]) == 1
+    conflict = listed["conflicts"][0]
+    mapping = conflict["mapping"]
+    assert mapping["provider"] == "prizepicks"
+    assert mapping["provider_athlete_id"] == "pp-15"
+    assert mapping["mapping_state"] == "mapping_conflict"
+    assert mapping["is_active"] is False
+    # Everything an operator needs to approve, override, or read history.
+    assert mapping["season"] == "2024-25"
+    assert mapping["provider_name"] == "LeBron James"
+    assert mapping["provider_team_id"] == "pp-den"
+    assert mapping["canonical_player_id"] == 15
+    assert mapping["conflict_canonical_player_id"] == 23
+    assert mapping["conflict_canonical_name"] == "LeBron James"
+    assert conflict["latest_decision"]["decision_state"] == "mapping_conflict"
+    assert conflict["latest_decision"]["canonical_player_id"] == 23
+    assert conflict["latest_decision"]["reason"] == "mapping_conflict"
+
+    resolved = _run(
+        capsys,
+        "override",
+        "--database-url",
+        database_url,
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-15",
+        "--season",
+        "2024-25",
+        "--canonical-player-id",
+        "23",
+        "--operator",
+        "ops@example.com",
+        "--reason",
+        "the provider reused the identity",
+    )
+    assert resolved["state"] == "manual_override"
+
+    listed = _run(capsys, "list", "--database-url", database_url)
+    assert listed["conflicts"] == []
+    assert [item["provider_athlete_id"] for item in listed["mappings"]] == ["pp-15"]
+
+
 @pytest.mark.parametrize("action", ["approve", "override"])
 def test_cli_keeps_observed_evidence_across_a_reject_and_clear(
     tmp_path, capsys, action

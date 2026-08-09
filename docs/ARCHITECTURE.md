@@ -414,7 +414,18 @@ legitimately changes teams between seasons keeps an active mapping for the new
 season while genuinely inconsistent current evidence still conflicts.
 `list` reports the latest decision per provider identity and includes
 it only while that decision is still unresolved, so a later automatic, manual,
-or rejection decision removes the identity from the queue. Repository reads and
+or rejection decision removes the identity from the queue. A `mapping_conflict`
+is neither of those: it is inactive, so it is absent from the active-only
+mapping listing, and it is not an unresolved observation state, so it is absent
+from that queue — yet it is the one state that always needs an operator. It
+therefore has its own review queue (`AthleteMappingRepository.list_conflicts`,
+reported as `conflicts`), pairing the current conflicting row with the
+`mapping_conflict` decision that recorded it. The row names the provider
+identity, its observed evidence, the established or approved canonical side,
+and the conflicting candidate; the decision adds the reason and time. The queue
+elaborates the conflicting row rather than repeating it as a mapping, and the
+default listing stays active-only. Approving or overriding the identity is what
+empties the queue. Repository reads and
 operator writes (approve, override, reject, and clear) translate
 `SQLAlchemyError` to `AthleteMappingPersistenceError` (defined in
 `app.services.athlete_mapping_errors`), and the resolver translates the same
@@ -463,7 +474,16 @@ its result may already be stale; the current mapping and rejection are re-read
 inside that transaction immediately before every automatic, unresolved, or
 conflict write, so a manual approve/override or an active rejection recorded in
 between wins: a stale unmatched observation cannot requeue a decided identity
-and a stale conflict cannot replace a rejection.
+and a stale conflict cannot replace a rejection. Whether a stale conflict is
+still live is decided by the provider-side evidence alone, compared with the
+governing manual decision read inside that transaction. The canonical choice is
+not compared: an operator who accepts the provider's observation may still keep
+or pick a canonical athlete the automatic side would not have chosen — that
+disagreement is the decision — so a stale automatic candidate cannot undo it.
+A decision timestamp cannot stand in for the comparison either, because the
+observation time a write carries is when the read is persisted, not when the
+resolver produced it. Evidence the governed decision does contradict is
+evidence nobody reviewed, and still promotes a conflict.
 The per-identity lock row is inserted inside a savepoint that is always left
 before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
@@ -521,9 +541,10 @@ Migration 006 creates the provider athlete mapping, append-only decision,
 decision candidate, and durable rejection tables. Operators use
 `scripts/athlete_mappings.py` for
 read-only listing, dry runs, audited approve/override/reject/clear actions,
-and history. `list` reports current mappings, active rejections, and every
+and history. `list` reports current mappings, active rejections, every
 identity whose latest decision is still unresolved, with the candidates an
-operator has to choose between. These commands require an
+operator has to choose between, and the `conflicts` review queue of identities
+whose current state is a mapping conflict. These commands require an
 explicit writable database URL and never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run

@@ -1089,6 +1089,108 @@ def test_a_later_manual_decision_removes_an_identity_from_unresolved(mapping_db,
     assert repository.list_unresolved() == []
 
 
+def test_a_conflict_is_queued_for_review_without_joining_the_active_mappings(
+    mapping_db,
+):
+    """A conflict is inactive, so only its own queue can surface it."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(
+        resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
+    )
+
+    # The conflict is neither an active mapping nor an unresolved observation,
+    # so an operator would otherwise see nothing left to act on.
+    assert repository.list_mappings(active_only=True) == []
+    assert repository.list_unresolved() == []
+    conflicts = repository.list_conflicts()
+
+    assert len(conflicts) == 1
+    conflict = conflicts[0]
+    assert conflict.mapping.provider == "prizepicks"
+    assert conflict.mapping.provider_athlete_id == "pp-15"
+    assert conflict.mapping.season == "2024-25"
+    # Both sides of the disagreement, plus the provider evidence that caused it.
+    assert conflict.mapping.canonical_player_id == 15
+    assert conflict.mapping.conflict_canonical_player_id == 23
+    assert conflict.mapping.conflict_canonical_name == "LeBron James"
+    assert conflict.mapping.provider_name == "LeBron James"
+    assert conflict.latest_decision is not None
+    assert conflict.latest_decision.decision_state == "mapping_conflict"
+    assert conflict.latest_decision.canonical_player_id == 23
+    assert conflict.latest_decision.created_at == conflict.mapping.last_seen_at
+
+    _reapprove_pp_15_as_the_reused_identity(repository)
+
+    # Resolving the conflict is what empties the queue.
+    assert repository.list_conflicts() == []
+    assert [item.provider_athlete_id for item in repository.list_mappings(active_only=True)] == [
+        "pp-15"
+    ]
+
+
+def test_a_stale_auto_conflict_cannot_undo_a_deliberate_manual_canonical_choice(
+    mapping_db,
+):
+    """The operator accepted this evidence and still chose their own canonical."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    repository.record_resolution(_auto_resolution())
+
+    stale = resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
+    assert stale.state is MappingResolutionState.MAPPING_CONFLICT
+    # The automatic side of the disagreement names a different canonical athlete
+    # from the one the operator is about to keep.
+    assert stale.canonical_player_id == 23
+    repository.override(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the provider relabeled the athlete we already approved",
+        provider_evidence=_reused_identity_evidence(),
+    )
+
+    result = repository.record_resolution(stale)
+
+    assert result.state == "manual_override"
+    assert result.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "manual_override"
+    assert mapping.canonical_player_id == 15
+    assert repository.list_conflicts() == []
+
+    # Evidence the operator never reviewed still promotes a conflict.
+    changed = resolver.resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="Stephen Curry",
+            team=TeamEvidence(
+                provider_id="pp-gsw",
+                canonical_id=1610612744,
+                abbreviation="GSW",
+            ),
+        ),
+        "2024-25",
+    )
+    promoted = repository.record_resolution(changed)
+
+    assert promoted.state == "mapping_conflict"
+    assert promoted.persisted is True
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    assert [
+        item.mapping.provider_athlete_id for item in repository.list_conflicts()
+    ] == ["pp-15"]
+
+
 def test_id_only_team_conflict_retains_both_team_sides(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
