@@ -380,6 +380,87 @@ def test_prizepicks_active_player_future_without_event_is_excluded() -> None:
     assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
 
 
+def test_prizepicks_linked_future_relationship_is_excluded_with_coverage() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    included = payload["included"]
+    assert isinstance(rows, list)
+    assert isinstance(included, list)
+
+    linked_future = copy.deepcopy(rows[0])
+    linked_future["id"] = "projection-linked-future"
+    linked_future["relationships"]["future"] = {
+        "data": {"type": "future", "id": "future-2026-nba-champion"}
+    }
+    rows.append(linked_future)
+    included.append(
+        {
+            "type": "future",
+            "id": "future-2026-nba-champion",
+            "attributes": {"name": "2026 NBA Champion"},
+        }
+    )
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
+    assert snapshot.coverage.fetched_count == 2
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_linked_future_without_resource_is_excluded_without_event_id() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    assert isinstance(rows, list)
+
+    linked_future = copy.deepcopy(rows[0])
+    linked_future["id"] = "projection-linked-future-without-resource"
+    linked_future["relationships"]["future"] = {
+        "data": {"type": "future", "id": "future-not-included"}
+    }
+    rows.append(linked_future)
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
+    assert snapshot.markets[0].event is not None
+    assert snapshot.markets[0].event.provider_id is None
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
+
+
+def test_prizepicks_malformed_linked_future_relationship_is_partial() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    assert isinstance(rows, list)
+
+    malformed_future = copy.deepcopy(rows[0])
+    malformed_future["id"] = "projection-malformed-future"
+    malformed_future["relationships"]["future"] = {
+        "data": {"type": "future"}
+    }
+    rows.append(malformed_future)
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
+    assert snapshot.coverage.skipped_count == 1
+    assert snapshot.coverage.fanout_complete is False
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.warning_codes
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
+    assert "id must be present" in snapshot.coverage.diagnostic_details
+
+
 def test_prizepicks_deadline_is_checked_after_upstream_response() -> None:
     deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
     now = {"value": datetime(2029, 12, 31, 23, 59, 55, tzinfo=timezone.utc)}

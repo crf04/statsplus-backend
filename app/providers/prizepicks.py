@@ -360,7 +360,8 @@ class PrizePicksAdapter:
         if not isinstance(attributes, Mapping) or not isinstance(relationships, Mapping):
             raise CoverageRecordMalformed("projection attributes and relationships must be objects")
         market_kind = cls._market_kind(attributes)
-        if market_kind in {"non_player", "future"}:
+        future_relation = cls._future_relationship(relationships)
+        if market_kind in {"non_player", "future"} or future_relation is not None:
             raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
         projection_id = required_identifier(row, "id")
         player_id = cls._relationship_id(relationships, "new_player")
@@ -492,6 +493,27 @@ class PrizePicksAdapter:
         for name in ("event", "game", "fixture", "match"):
             if name in relationships:
                 return cls._optional_relationship(relationships, name)
+        return None
+
+    @classmethod
+    def _future_relationship(
+        cls,
+        relationships: Mapping[str, Any],
+    ) -> tuple[str, str] | None:
+        """Recognize a linked future before resolving player/event resources."""
+
+        for name in ("future", "futures"):
+            if name not in relationships:
+                continue
+            relation = cls._optional_relationship(relationships, name)
+            if relation is None:
+                return None
+            relation_type, _ = relation
+            if relation_type.casefold() not in _FUTURES_MARKET_KINDS:
+                raise CoverageRecordMalformed(
+                    f"{name} relationship has an unexpected type"
+                )
+            return relation
         return None
 
     @staticmethod
