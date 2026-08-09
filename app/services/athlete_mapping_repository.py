@@ -493,12 +493,6 @@ class AthleteMappingRepository:
         if not resolution.is_auto_qualifying:
             if resolution.state is MappingResolutionState.MAPPING_CONFLICT:
                 return self._persist_mapping_conflict(resolution, observed_at=observed_at)
-            if resolution.state is MappingResolutionState.TEAM_CONFLICT:
-                current = self.get_active_mapping(*self._resolution_key(resolution))
-                if current is not None:
-                    return self._persist_mapping_conflict(
-                        resolution, observed_at=observed_at
-                    )
             if resolution.state in UNRESOLVED_OBSERVATION_STATES:
                 return self._persist_unresolved_observation(
                     resolution, observed_at=observed_at
@@ -598,7 +592,10 @@ class AthleteMappingRepository:
 
         No current mapping row is written because no canonical identity was
         established; the idempotency key keeps repeated board reads to one
-        durable observation per distinct evidence shape.
+        durable observation per distinct evidence shape.  Team-conflict
+        evidence is the exception: an identity that is already mapped
+        automatically cannot stay mapped while its team evidence disagrees, so
+        the mapping is promoted to a conflict for an operator to review.
         """
 
         provider, provider_id = self._resolution_key(resolution)
@@ -607,6 +604,15 @@ class AthleteMappingRepository:
             governed = self._governing_decision(connection, provider, provider_id)
             if governed is not None:
                 return governed
+            if resolution.state is MappingResolutionState.TEAM_CONFLICT:
+                # The active mapping has to be read inside this serialized
+                # transaction.  A lookup taken before the lock can miss an
+                # automatic mapping a concurrent board read commits in the
+                # meantime, which would leave the identity actively mapped
+                # while only an observation records the disagreement.
+                active = self._select_mapping(connection, provider, provider_id, lock=True)
+                if active is not None and bool(active["is_active"]):
+                    return self._write_conflict(connection, active, resolution, now=now)
             decision = self._insert_decision(
                 connection,
                 resolution,

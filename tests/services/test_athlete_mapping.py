@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -1069,6 +1070,101 @@ def test_a_racing_stale_observation_never_lands_after_a_manual_decision(mapping_
     mapping = repository.get_active_mapping("prizepicks", "pp-77")
     assert mapping is not None
     assert mapping.mapping_state == "manual_approved"
+
+
+@pytest.mark.parametrize(
+    ("racing", "expected_state", "expected_mapping_state", "expected_active"),
+    [
+        ("auto", "mapping_conflict", "mapping_conflict", False),
+        ("approve", "manual_approved", "manual_approved", True),
+        ("reject", "rejected", None, None),
+    ],
+)
+def test_team_conflict_promotion_reads_the_mapping_inside_the_identity_lock(
+    mapping_db, racing, expected_state, expected_mapping_state, expected_active
+):
+    """A mapping committed after the resolver read must still be promoted.
+
+    The racing write lands in the window between the resolver's read and the
+    serialized append, so only an inspection inside the identity transaction
+    can see it.  An automatic mapping is promoted to a conflict and
+    deactivated; a manual decision or an active rejection still wins.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    conflicting = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-15",
+            name="Nikola Jokic",
+            team=TeamEvidence(provider_id="pp-den", canonical_id=1610612743),
+        ),
+        "2024-25",
+    )
+    assert conflicting.state is MappingResolutionState.TEAM_CONFLICT
+
+    def _race():
+        if racing == "auto":
+            return repository.record_resolution(_auto_resolution())
+        if racing == "approve":
+            return repository.approve(
+                "prizepicks",
+                "pp-15",
+                15,
+                season="2024-25",
+                operator_id="ops@example.com",
+                reason="verified source identity",
+            )
+        return repository.reject(
+            "prizepicks",
+            "pp-15",
+            operator_id="ops@example.com",
+            reason="provider identity is not trusted",
+        )
+
+    serialized = AthleteMappingRepository._transaction.__get__(repository)
+    raced = threading.Event()
+
+    @contextmanager
+    def _transaction_after_a_racing_commit(provider, provider_id):
+        if not raced.is_set():
+            raced.set()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(_race).result(timeout=10)
+        with serialized(provider, provider_id) as connection:
+            yield connection
+
+    repository._transaction = _transaction_after_a_racing_commit
+
+    result = repository.record_resolution(conflicting)
+
+    assert raced.is_set()
+    assert result.state == expected_state
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    if expected_mapping_state is None:
+        assert mapping is None
+    else:
+        assert mapping is not None
+        assert mapping.mapping_state == expected_mapping_state
+        assert mapping.is_active is expected_active
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+    if racing == "auto":
+        assert result.persisted is True
+        assert repository.get_active_mapping("prizepicks", "pp-15") is None
+        # The promoted row keeps both sides of the disagreement for review.
+        assert mapping.canonical_player_id == 15
+        assert mapping.conflict_canonical_player_id == 15
+        assert mapping.provider_team_canonical_id == 1610612743
+        assert [
+            item.decision_state
+            for item in repository.history(
+                provider="prizepicks", provider_athlete_id="pp-15"
+            )
+        ] == ["auto", "mapping_conflict"]
+    else:
+        assert result.persisted is False
 
 
 def test_a_stale_conflict_cannot_replace_an_active_rejection(mapping_db):

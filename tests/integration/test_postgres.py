@@ -261,7 +261,12 @@ def mapping_engine(postgres_url):
     engine.dispose()
 
 
-def _mapping_resolution(name="Nikola Jokic", provider_id="pp-15", rows=None):
+def _mapping_resolution(
+    name="Nikola Jokic",
+    provider_id="pp-15",
+    rows=None,
+    team_canonical_id=1610612747,
+):
     from app.providers.dfs import AthleteEvidence, TeamEvidence
     from app.services.athlete_resolver import AthleteResolver
 
@@ -288,7 +293,7 @@ def _mapping_resolution(name="Nikola Jokic", provider_id="pp-15", rows=None):
         AthleteEvidence(
             provider_id=provider_id,
             name=name,
-            team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+            team=TeamEvidence(provider_id="pp-lal", canonical_id=team_canonical_id),
         ),
         "2024-25",
     )
@@ -467,6 +472,62 @@ def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(
     mapping = reader.get_active_mapping("prizepicks", "pp-77")
     assert mapping is not None
     assert mapping.mapping_state == "manual_approved"
+
+
+def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(
+    mapping_engine, postgres_url
+):
+    """The promotion must be decided inside the identity transaction.
+
+    The automatic mapping is committed by another engine after the resolver
+    read and before the observing append takes the lock, so a lookup outside
+    the transaction cannot see it. Postgres row locks order the two writes.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    conflicting = _mapping_resolution(team_canonical_id=1610612743)
+    assert conflicting.state.value == "team_conflict"
+
+    observer = AthleteMappingRepository(mapping_engine)
+    serialized = AthleteMappingRepository._transaction.__get__(observer)
+    racing_engine = create_engine(postgres_url)
+    raced = []
+
+    @contextmanager
+    def _transaction_after_a_racing_commit(provider, provider_id):
+        if not raced:
+            raced.append(True)
+            racer = AthleteMappingRepository(racing_engine)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(
+                    racer.record_resolution, _mapping_resolution()
+                ).result(timeout=60)
+        with serialized(provider, provider_id) as connection:
+            yield connection
+
+    observer._transaction = _transaction_after_a_racing_commit
+    try:
+        result = observer.record_resolution(conflicting)
+    finally:
+        racing_engine.dispose()
+
+    assert raced
+    assert result.state == "mapping_conflict"
+    reader = AthleteMappingRepository(mapping_engine)
+    mapping = reader.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.is_active is False
+    assert mapping.canonical_player_id == 15
+    assert mapping.conflict_canonical_player_id == 15
+    assert mapping.provider_team_canonical_id == 1610612743
+    assert [
+        item.decision_state
+        for item in reader.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["auto", "mapping_conflict"]
+    assert reader.list_unresolved(provider="prizepicks") == []
 
 
 def test_repeated_state_after_a_different_observation_persists_on_postgres(mapping_engine):
