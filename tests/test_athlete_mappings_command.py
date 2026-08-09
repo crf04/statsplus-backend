@@ -288,6 +288,35 @@ def _team_evidence() -> TeamEvidence:
     )
 
 
+def _seed_board_reads(
+    database_url: str,
+    reads: list[tuple[str, TeamEvidence | None]],
+    *,
+    provider_athlete_id: str = "pp-15",
+) -> None:
+    """Persist board reads of one identity the way the ingest path would."""
+
+    engine = create_engine(database_url)
+    repository = AthleteMappingRepository(engine)
+    resolver = AthleteResolver(
+        AthleteCatalogService(engine, settings=load_settings(
+            overrides={"DATABASE_URL": database_url}
+        )),
+        mapping_repository=repository,
+    )
+    for name, team in reads:
+        repository.record_resolution(
+            resolver.resolve(
+                "prizepicks",
+                AthleteEvidence(
+                    provider_id=provider_athlete_id, name=name, team=team
+                ),
+                "2024-25",
+            )
+        )
+    engine.dispose()
+
+
 def _seed_auto_to_conflict(database_url: str) -> None:
     """Map an identity automatically, then have the board reuse its provider ID."""
 
@@ -523,6 +552,83 @@ def test_cli_keeps_observed_evidence_across_a_reject_and_clear(
     assert resolved["mapping"]["provider_team_abbreviation"] == "DEN"
     assert resolved["decision"]["provider_name"] == "King James"
     assert resolved["decision"]["provider_team_name"] == "Denver Nuggets"
+
+
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_cli_resolves_with_the_observation_that_replaced_a_rejected_mapping(
+    tmp_path, capsys, action
+):
+    database_url = _seed_database(
+        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
+    )
+    identity = (
+        "--provider",
+        "prizepicks",
+        "--provider-athlete-id",
+        "pp-15",
+        "--operator",
+        "ops@example.com",
+    )
+
+    # The board maps the identity automatically before it is rejected.
+    _seed_board_reads(database_url, [("Nikola Jokic", _team_evidence())])
+    _run(
+        capsys,
+        "reject",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "provider identity is not trusted",
+    )
+    assert _run(
+        capsys,
+        "clear",
+        "--database-url",
+        database_url,
+        *identity,
+        "--reason",
+        "the identity was reinstated",
+    ) == {"cleared": True}
+    # The provider then reuses the ID for someone the catalog cannot match.
+    lakers = TeamEvidence(
+        provider_id="pp-lal",
+        canonical_id=1610612747,
+        name="Los Angeles Lakers",
+        abbreviation="LAL",
+    )
+    _seed_board_reads(database_url, [("King James", lakers)])
+
+    resolved = _run(
+        capsys,
+        action,
+        "--database-url",
+        database_url,
+        *identity,
+        "--season",
+        "2024-25",
+        "--canonical-player-id",
+        "23",
+        "--reason",
+        "the provider uses a nickname",
+    )
+
+    # The inactive mapping still names the athlete the board stopped reporting,
+    # so the newer observation is what the operator is approving.
+    assert resolved["mapping"]["canonical_player_id"] == 23
+    assert resolved["mapping"]["provider_name"] == "King James"
+    assert resolved["mapping"]["provider_team_id"] == "pp-lal"
+    assert resolved["mapping"]["provider_team_abbreviation"] == "LAL"
+    assert resolved["decision"]["provider_name"] == "King James"
+    assert resolved["decision"]["provider_team_name"] == "Los Angeles Lakers"
+
+    # Reading the same board row again may not contradict the decision.
+    _seed_board_reads(database_url, [("King James", lakers)])
+    listed = _run(capsys, "list", "--database-url", database_url)
+    assert listed["conflicts"] == []
+    assert listed["unresolved"] == []
+    assert [item["provider_athlete_id"] for item in listed["mappings"]] == ["pp-15"]
+    assert listed["mappings"][0]["provider_name"] == "King James"
 
 
 def test_cli_reject_blocks_then_clear_restores(tmp_path, capsys):

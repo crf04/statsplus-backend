@@ -849,6 +849,101 @@ def test_a_manual_decision_falls_back_to_the_latest_observation_evidence(
     assert result.decision.provider_team_abbreviation == "LAL"
 
 
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_a_manual_decision_prefers_an_observation_newer_than_a_stale_mapping(
+    mapping_db, action
+):
+    """A rejected mapping's frozen evidence is not what the provider reports now.
+
+    The board reused the provider ID for a different athlete after the
+    rejection was cleared, so the observation an operator is acting on is newer
+    than anything the inactive mapping row still carries.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(
+        rows=[
+            _catalog_row(
+                15,
+                "Nikola Jokić",
+                team_id=1610612743,
+                team_name="Denver Nuggets",
+                team_abbreviation="DEN",
+            ),
+            _catalog_row(23, "LeBron James"),
+        ],
+        repository=repository,
+    )
+    nuggets = TeamEvidence(
+        provider_id="pp-den",
+        canonical_id=1610612743,
+        name="Denver Nuggets",
+        abbreviation="DEN",
+    )
+    lakers = TeamEvidence(
+        provider_id="pp-lal",
+        canonical_id=1610612747,
+        name="Los Angeles Lakers",
+        abbreviation="LAL",
+    )
+    mapped = repository.record_resolution(
+        resolver.resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-15", name="Nikola Jokic", team=nuggets),
+            "2024-25",
+        )
+    )
+    assert mapped.state == "auto"
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    assert repository.clear_rejection(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="the identity was reinstated",
+    )
+    reused = AthleteEvidence(provider_id="pp-15", name="King James", team=lakers)
+    observed = resolver.resolve("prizepicks", reused, "2024-25")
+    assert observed.state is MappingResolutionState.UNMATCHED
+    repository.record_resolution(observed)
+
+    result = getattr(repository, action)(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the provider uses a nickname",
+    )
+
+    assert result.mapping.canonical_player_id == 23
+    assert result.mapping.provider_name == "King James"
+    assert result.mapping.provider_team_id == "pp-lal"
+    assert result.mapping.provider_team_canonical_id == 1610612747
+    assert result.mapping.provider_team_abbreviation == "LAL"
+    assert result.decision.provider_name == "King James"
+    assert result.decision.provider_team_name == "Los Angeles Lakers"
+
+    # The operator reviewed exactly this evidence, so reading the same board
+    # row again may not immediately contradict the decision.
+    replay = repository.record_resolution(
+        resolver.resolve("prizepicks", reused, "2024-25")
+    )
+    assert replay.state == result.state
+    retained = repository.get_active_mapping("prizepicks", "pp-15")
+    assert retained is not None
+    assert retained.canonical_player_id == 23
+    assert retained.provider_name == "King James"
+    assert all(
+        item.decision_state != "mapping_conflict" for item in repository.history()
+    )
+
+
 def test_rejection_suppresses_until_clear_and_clear_is_audited(mapping_db):
     engine, _ = mapping_db
     repository = AthleteMappingRepository(engine)

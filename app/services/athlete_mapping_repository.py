@@ -69,6 +69,19 @@ _OBSERVED_EVIDENCE_DECISION_STATES = frozenset(
     | {MappingResolutionState.AUTO.value}
 )
 
+#: Decision states whose evidence was written onto the mapping row itself.  The
+#: newest of these is what the mapping row currently reports, so it is the
+#: chronological marker a later board observation has to beat.  A rejection or
+#: its clearing carries no evidence of its own and only freezes what was
+#: already there, so neither appears here.
+_MAPPING_EVIDENCE_DECISION_STATES = frozenset(
+    _MANUAL_MAPPING_STATES
+    | {
+        MappingResolutionState.AUTO.value,
+        MappingResolutionState.MAPPING_CONFLICT.value,
+    }
+)
+
 
 def _translate_storage_failures(method):
     """Translate storage failures at the repository boundary.
@@ -1376,6 +1389,34 @@ class AthleteMappingRepository:
             .limit(1)
         ).mappings().one_or_none()
 
+    @staticmethod
+    def _latest_mapping_evidence_decision_id(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> int:
+        """Return the ID of the decision the mapping row's evidence came from.
+
+        Zero when no decision ever wrote evidence onto the row, which leaves
+        any durable board observation newer than it.
+        """
+
+        decision_id = connection.execute(
+            select(AthleteMappingDecision.id)
+            .where(
+                and_(
+                    AthleteMappingDecision.provider == provider,
+                    AthleteMappingDecision.provider_athlete_id == provider_id,
+                    AthleteMappingDecision.decision_state.in_(
+                        _MAPPING_EVIDENCE_DECISION_STATES
+                    ),
+                )
+            )
+            .order_by(AthleteMappingDecision.id.desc())
+            .limit(1)
+        ).scalar()
+        return 0 if decision_id is None else int(decision_id)
+
     @classmethod
     def _latest_decision_key(
         cls,
@@ -1399,20 +1440,33 @@ class AthleteMappingRepository:
         """Choose the typed provider evidence a manual decision records.
 
         An operator who supplies no evidence is not discarding what the
-        provider reported.  The mapping row is the freshest observed evidence
-        when there is one; an identity that only ever produced unresolved
-        observations has none, so the latest durable board observation -- read
-        inside the same identity transaction -- carries the evidence forward
-        instead of writing an unlabeled mapping.
+        provider reported, so the freshest evidence for the identity is carried
+        forward -- and freshest is a question of order, not of which table it
+        sits in.  A governing manual mapping is authoritative: an operator saw
+        that evidence and no board read may supersede it.  Otherwise the newest
+        durable board observation wins whenever it postdates the decision that
+        last wrote the mapping row, because a rejected or otherwise stale
+        mapping keeps reporting evidence the board has since replaced.  Both
+        sides are read inside the same identity transaction so the choice
+        cannot straddle a concurrent write.
         """
 
         if provider_evidence is not None:
             return cls._evidence_values(provider_evidence)
-        if existing is not None:
+        if (
+            existing is not None
+            and existing["is_active"]
+            and str(existing["mapping_state"]) in _MANUAL_MAPPING_STATES
+        ):
             return cls._existing_evidence_values(existing)
-        return cls._existing_evidence_values(
-            cls._latest_observed_evidence(connection, provider, provider_id)
-        )
+        observed = cls._latest_observed_evidence(connection, provider, provider_id)
+        if observed is not None and (
+            existing is None
+            or int(observed["id"])
+            > cls._latest_mapping_evidence_decision_id(connection, provider, provider_id)
+        ):
+            return cls._existing_evidence_values(observed)
+        return cls._existing_evidence_values(existing)
 
     def _insert_decision(
         self,
