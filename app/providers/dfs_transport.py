@@ -19,9 +19,11 @@ from app.providers.dfs import (
 from app.utils.telemetry import (
     CACHE_DISABLED,
     ProviderResponseError,
+    clear_retry_progress_callback,
     current_retry_count,
     increment_retry_count,
     provider_call,
+    set_retry_progress_callback,
 )
 
 _Result = TypeVar("_Result")
@@ -41,10 +43,29 @@ class _RequestResult:
 
     def __init__(self) -> None:
         self.done = threading.Event()
-        self.response: Any = None
+        self.value: Any = None
+        self.status_code: int | None = None
         self.error: BaseException | None = None
         self.retry_count = 0
+        self._retry_lock = threading.Lock()
+        self._retry_progress: list[tuple[float, int]] = []
         self.completed_at: float | None = None
+
+    def record_retry_progress(self, count: int) -> None:
+        """Record one worker retry without touching the caller's thread-local."""
+
+        with self._retry_lock:
+            self.retry_count = max(self.retry_count, count)
+            self._retry_progress.append((time.monotonic(), count))
+
+    def retry_count_at(self, deadline: float) -> int:
+        """Return retries observed by the absolute monotonic deadline."""
+
+        with self._retry_lock:
+            return max(
+                (count for timestamp, count in self._retry_progress if timestamp <= deadline),
+                default=0,
+            )
 
 
 def _run_request(
@@ -53,20 +74,38 @@ def _run_request(
     url: str,
     params: Mapping[str, Any] | None,
     timeout: tuple[float, float],
+    context: RetrievalContext,
+    now: Callable[[], datetime],
+    parse: Callable[[Any], _Result],
+    invalid_json_message: str,
 ) -> None:
-    """Run only the potentially blocking network operation in a daemon."""
+    """Run the complete potentially blocking response pipeline in a daemon."""
 
     try:
+        # Requests retry hooks increment a thread-local counter.  Publish each
+        # increment to this request's result as it happens so a caller that
+        # reaches its deadline can report progress before this worker finishes.
+        set_retry_progress_callback(result.record_retry_progress)
         if params is None:
-            result.response = session.get(url, timeout=timeout)
+            response = session.get(url, timeout=timeout)
         else:
-            result.response = session.get(url, params=params, timeout=timeout)
+            response = session.get(url, params=params, timeout=timeout)
+        result.status_code = getattr(response, "status_code", None)
+        context.ensure_active(now=now())
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as error:
+            raise ProviderResponseError(invalid_json_message) from error
+        try:
+            result.value = parse(payload)
+        except MalformedProviderResponseError as error:
+            raise ProviderResponseError(str(error)) from error
+        context.ensure_active(now=now())
     except BaseException as error:  # propagate provider failures to the caller
         result.error = error
     finally:
-        # Retry counters are thread-local.  Carry the worker's count back to
-        # the provider-call thread before the telemetry context closes.
-        result.retry_count = current_retry_count()
+        clear_retry_progress_callback()
         result.completed_at = time.monotonic()
         _request_slots.release()
         result.done.set()
@@ -111,8 +150,9 @@ def request_json(
     The Requests ``(connect, read)`` timeout is still passed through so normal
     sessions retain their retry and socket behavior.  The caller also waits
     on a bounded daemon worker using a monotonic deadline, because a custom
-    session may ignore or reinterpret those two phases.  Late responses are
-    never parsed or returned.
+    session may ignore or reinterpret those two phases.  The worker owns the
+    complete response pipeline (status handling, JSON decoding, and provider
+    parsing), so late pipeline work cannot block the caller or be returned.
     """
 
     try:
@@ -142,7 +182,17 @@ def request_json(
             try:
                 worker = threading.Thread(
                     target=_run_request,
-                    args=(result, session, url, params, bounded),
+                    args=(
+                        result,
+                        session,
+                        url,
+                        params,
+                        bounded,
+                        context,
+                        now,
+                        parse,
+                        invalid_json_message,
+                    ),
                     daemon=True,
                     name=f"statsplus-{provider}-request",
                 )
@@ -155,6 +205,10 @@ def request_json(
 
             remaining = max(0.0, monotonic_deadline - time.monotonic())
             if not result.done.wait(timeout=remaining):
+                tracker.status_code = result.status_code
+                retry_count = result.retry_count_at(monotonic_deadline)
+                for _ in range(max(0, retry_count - current_retry_count())):
+                    increment_retry_count()
                 raise DeadlineExceededError(
                     f"{provider} retrieval deadline exceeded"
                 )
@@ -162,6 +216,11 @@ def request_json(
             # The event may be set at the boundary while the caller is being
             # scheduled.  Accept only a result completed before the absolute
             # deadline and while the caller still has time to process it.
+            tracker.status_code = result.status_code
+            retry_count = result.retry_count_at(monotonic_deadline)
+            for _ in range(max(0, retry_count - current_retry_count())):
+                increment_retry_count()
+
             if (
                 result.completed_at is None
                 or result.completed_at > monotonic_deadline
@@ -171,25 +230,9 @@ def request_json(
                     f"{provider} retrieval deadline exceeded"
                 )
 
-            for _ in range(result.retry_count):
-                increment_retry_count()
             if result.error is not None:
                 raise result.error
-
-            response = result.response
-            tracker.status_code = getattr(response, "status_code", None)
-            context.ensure_active(now=now())
-            response.raise_for_status()
-            try:
-                payload = response.json()
-            except (TypeError, ValueError) as error:
-                raise ProviderResponseError(invalid_json_message) from error
-            try:
-                result = parse(payload)
-            except MalformedProviderResponseError as error:
-                raise ProviderResponseError(str(error)) from error
-            context.ensure_active(now=now())
-            return result
+            return result.value
     except DeadlineExceededError as error:
         if failure_factory is not None:
             raise failure_factory("deadline_exceeded", error) from error

@@ -190,7 +190,11 @@ def reset_retry_count() -> None:
 
 
 def increment_retry_count() -> None:
-    _retry_local.count = getattr(_retry_local, "count", 0) + 1
+    count = getattr(_retry_local, "count", 0) + 1
+    _retry_local.count = count
+    progress_callback = getattr(_retry_local, "progress_callback", None)
+    if progress_callback is not None:
+        progress_callback(count)
 
 
 def current_retry_count() -> int:
@@ -199,6 +203,25 @@ def current_retry_count() -> int:
         "count",
         0,
     )
+
+
+def set_retry_progress_callback(callback: Callable[[int], None]) -> None:
+    """Publish retry increments to a caller while its provider worker runs.
+
+    Retry counters are intentionally thread-local so concurrent provider calls
+    cannot contaminate each other's telemetry.  A bounded transport worker
+    needs one additional, request-local observation point because its caller
+    may time out before the worker finishes.  The callback lives on that same
+    thread-local state and must be cleared by the worker when it exits.
+    """
+
+    _retry_local.progress_callback = callback
+
+
+def clear_retry_progress_callback() -> None:
+    """Remove a worker's retry progress callback from its thread-local state."""
+
+    _retry_local.__dict__.pop("progress_callback", None)
 
 
 def record_provider_event(event: ProviderEvent) -> None:
@@ -438,6 +461,8 @@ __all__ = [
     "clear_recorded_provider_events",
     "current_request_id",
     "current_retry_count",
+    "set_retry_progress_callback",
+    "clear_retry_progress_callback",
     "get_recorded_provider_events",
     "increment_retry_count",
     "provider_call",
