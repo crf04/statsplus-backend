@@ -32,6 +32,7 @@ class ApplicationDependencies:
     provider_health_service: Any
     nl_service: Any
     user_service: Any
+    dfs_snapshot_cache: Any | None = None
 
 
 def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
@@ -47,6 +48,10 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     from app.services.provider_health_service import ProviderHealthService
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.dfs_board import DFSBoardService
+    from app.services.dfs_snapshot_cache import (
+        ProviderSnapshotCache,
+        ProviderSnapshotCacheCoordinator,
+    )
     from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.dabble import DabbleAdapter
@@ -61,26 +66,40 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
 
     dfs_providers: dict[str, Any] = {}
+    cached_dfs_providers: dict[str, Any] = {}
+    dfs_snapshot_cache = ProviderSnapshotCacheCoordinator()
     dfs_timeout = (
         settings.providers.dfs_provider_connect_timeout_seconds,
         settings.providers.dfs_provider_read_timeout_seconds,
     )
     for provider_name in settings.providers.dfs_enabled_providers:
         if provider_name == DFS_DABBLE:
-            dfs_providers[provider_name] = DabbleAdapter(
+            provider = DabbleAdapter(
                 connect_timeout_seconds=dfs_timeout[0],
                 read_timeout_seconds=dfs_timeout[1],
                 detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
             )
         elif provider_name == DFS_PRIZEPICKS:
-            dfs_providers[provider_name] = PrizePicksAdapter(timeout=dfs_timeout)
+            provider = PrizePicksAdapter(timeout=dfs_timeout)
         elif provider_name == DFS_UNDERDOG:
-            dfs_providers[provider_name] = UnderdogAdapter(timeout=dfs_timeout)
+            provider = UnderdogAdapter(timeout=dfs_timeout)
         else:  # settings validation normally makes this unreachable
             raise ValueError(f"unsupported DFS provider {provider_name}")
+        dfs_providers[provider_name] = provider
+        cached_dfs_providers[provider_name] = ProviderSnapshotCache(
+            provider,
+            provider_name=provider_name,
+            redis_client=redis_client,
+            enabled=settings.cache.enabled and redis_client is not None,
+            fresh_seconds=settings.providers.dfs_cache_fresh_seconds_for(provider_name),
+            stale_if_error_seconds=settings.providers.dfs_cache_stale_if_error_seconds_for(
+                provider_name
+            ),
+            coordinator=dfs_snapshot_cache,
+        )
 
     dfs_board_service = DFSBoardService(
-        provider_registry=dfs_providers,
+        provider_registry=cached_dfs_providers,
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
         settings=settings,
@@ -147,6 +166,7 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
+        dfs_snapshot_cache=dfs_snapshot_cache,
     )
 
 

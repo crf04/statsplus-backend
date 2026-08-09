@@ -127,6 +127,21 @@ def test_settings_parse_internal_dfs_board_registry_and_bounds(monkeypatch):
     assert settings.providers.dfs_dabble_detail_concurrency == 2
 
 
+def test_settings_parse_provider_snapshot_cache_windows(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("DFS_CACHE_FRESH_SECONDS", "301")
+    monkeypatch.setenv("DFS_CACHE_STALE_IF_ERROR_SECONDS", "1801")
+    monkeypatch.setenv("DFS_DABBLE_CACHE_FRESH_SECONDS", "45")
+    monkeypatch.setenv("DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS", "240")
+
+    settings = load_settings()
+
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == 45
+    assert settings.providers.dfs_cache_stale_if_error_seconds_for("dabble") == 240
+    assert settings.providers.dfs_cache_fresh_seconds_for("underdog") == 301
+    assert settings.providers.dfs_cache_stale_if_error_seconds_for("underdog") == 1801
+
+
 def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypatch):
     monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
     monkeypatch.delenv("DFS_BOARD_ENABLED", raising=False)

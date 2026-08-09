@@ -1,0 +1,608 @@
+"""TDD contract tests for the injected DFS provider-snapshot cache."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from threading import Event, Lock, Thread
+
+import pytest
+
+from app.providers.dfs import (
+    CoverageEvidence,
+    AthleteEvidence,
+    AppearanceEvidence,
+    EventEvidence,
+    MarketThreshold,
+    NBAMarketQuery,
+    PlayerProjectionMarket,
+    ProviderSnapshot,
+    RetrievalContext,
+    Selection,
+    SelectionModifier,
+    StatisticEvidence,
+    TeamEvidence,
+    SnapshotStatus,
+)
+from app.services.dfs_snapshot_cache import (
+    deserialize_provider_snapshot,
+    ProviderSnapshotCache,
+    serialize_provider_snapshot,
+)
+from app.services.dfs_board import DFSBoardService
+from app.utils import telemetry
+from app.utils.telemetry import ProviderResponseError
+
+
+_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+
+
+def _snapshot(provider: str = "dabble") -> ProviderSnapshot:
+    return ProviderSnapshot(
+        provider=provider,
+        status=SnapshotStatus.COMPLETE,
+        markets=(),
+        coverage=CoverageEvidence(
+            pagination_complete=True,
+            fanout_complete=True,
+        ),
+        retrieved_at=_RETRIEVED_AT,
+    )
+
+
+def test_complete_provider_snapshot_serializes_and_round_trips_immutably() -> None:
+    original = _snapshot()
+
+    payload = serialize_provider_snapshot(original)
+    restored = deserialize_provider_snapshot(payload, expected_contract_version="1")
+
+    assert isinstance(payload, str)
+    assert restored == original
+    assert restored is not original
+    assert restored.status is SnapshotStatus.COMPLETE
+    assert restored.retrieved_at == _RETRIEVED_AT
+
+
+def test_snapshot_codec_preserves_nested_decimal_and_evidence_values() -> None:
+    market = PlayerProjectionMarket(
+        provider="dabble",
+        market_id="market-1",
+        athlete=AthleteEvidence(
+            provider_id="athlete-1",
+            canonical_id=23,
+            name="LeBron James",
+            team=TeamEvidence(provider_id="team-1", name="Los Angeles Lakers"),
+        ),
+        event=EventEvidence(
+            provider_id="game-1",
+            starts_at=_RETRIEVED_AT,
+            home_team=TeamEvidence(abbreviation="LAL"),
+        ),
+        statistic=StatisticEvidence(label="Points", components=("points",)),
+        threshold=MarketThreshold(
+            value=Decimal("25.500"),
+            unit="points",
+            original_value="25.5 pts",
+        ),
+        selections=(
+            Selection(
+                selection_id="selection-1",
+                direction="higher",
+                modifiers=(
+                    SelectionModifier(
+                        value=Decimal("1.10"),
+                        kind="multiplier",
+                        scope="selection",
+                    ),
+                ),
+            ),
+        ),
+        appearance=AppearanceEvidence(provider_id="appearance-1"),
+    )
+    original = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            pagination_complete=True,
+            fanout_complete=True,
+        ),
+        retrieved_at=_RETRIEVED_AT,
+    )
+
+    restored = deserialize_provider_snapshot(serialize_provider_snapshot(original))
+
+    assert restored == original
+    assert restored.markets[0].threshold is not None
+    assert restored.markets[0].threshold.value == Decimal("25.500")
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.get_calls: list[str] = []
+        self.set_calls: list[tuple[str, str, int]] = []
+        self.get_error: BaseException | None = None
+        self.set_error: BaseException | None = None
+
+    def get(self, key: str) -> str | None:
+        self.get_calls.append(key)
+        if self.get_error is not None:
+            raise self.get_error
+        return self.values.get(key)
+
+    def setex(self, key: str, ttl: int, value: str) -> bool:
+        if self.set_error is not None:
+            raise self.set_error
+        self.values[key] = value
+        self.ttls[key] = ttl
+        self.set_calls.append((key, value, ttl))
+        return True
+
+
+class ControlledClock:
+    def __init__(self, now: datetime = _RETRIEVED_AT) -> None:
+        self.now_value = now
+
+    def now(self) -> datetime:
+        return self.now_value
+
+    def advance(self, seconds: float) -> None:
+        self.now_value += timedelta(seconds=seconds)
+
+
+class FakeProvider:
+    def __init__(self, snapshot: ProviderSnapshot, *, error: BaseException | None = None) -> None:
+        self.snapshot = snapshot
+        self.error = error
+        self.calls: list[tuple[NBAMarketQuery, RetrievalContext]] = []
+        self.lock = Lock()
+
+    def get_snapshot(
+        self, query: NBAMarketQuery, context: RetrievalContext
+    ) -> ProviderSnapshot:
+        with self.lock:
+            self.calls.append((query, context))
+        if self.error is not None:
+            raise self.error
+        return self.snapshot
+
+
+def _context() -> RetrievalContext:
+    return RetrievalContext(
+        deadline=datetime(2026, 8, 9, 21, 0, tzinfo=timezone.utc),
+        request_id="cache-test",
+    )
+
+
+def test_fresh_cache_hit_uses_provider_query_key_and_exposes_age() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+
+    first = cache.get_snapshot(NBAMarketQuery(), _context())
+    clock.advance(60)
+    second = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert first == second == provider.snapshot
+    assert len(provider.calls) == 1
+    assert len(redis.set_calls) == 1
+    assert redis.set_calls[0][2] == 1800
+    assert len(redis.get_calls) == 2
+    assert cache.last_result.cache_status == "hit"
+    assert cache.last_result.age_seconds == 60
+    assert cache.cache_key(NBAMarketQuery()).startswith(
+        "statsplus:dfs:snapshot:v1:dabble:"
+    )
+
+
+def test_corrupt_or_incompatible_payload_is_a_miss_and_is_replaced() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = '{"schema":"not-statsplus"}'
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert len(provider.calls) == 1
+    assert len(redis.set_calls) == 1
+    assert redis.values[key] == redis.set_calls[0][1]
+
+    redis.values[key] = serialize_provider_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
+            retrieved_at=_RETRIEVED_AT,
+            contract_version="old",
+        )
+    )
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    assert len(provider.calls) == 2
+
+
+def test_current_partial_result_never_replaces_last_complete_snapshot() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    complete = _snapshot()
+    partial = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.PARTIAL,
+        markets=(PlayerProjectionMarket(provider="dabble"),),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            skipped_count=0,
+            pagination_complete=False,
+        ),
+        retrieved_at=_RETRIEVED_AT,
+    )
+    provider = FakeProvider(partial)
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = serialize_provider_snapshot(complete)
+    clock.advance(600)
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is partial
+    assert redis.values[key] == serialize_provider_snapshot(complete)
+    assert redis.set_calls == []
+    assert cache.last_result.cache_status == "miss"
+
+
+def test_stale_complete_is_served_only_after_total_refresh_failure_with_metadata() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(
+        _snapshot(),
+        error=TimeoutError("upstream unavailable"),
+    )
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = serialize_provider_snapshot(_snapshot())
+    clock.advance(600)
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result == provider.snapshot
+    assert len(provider.calls) == 1
+    assert cache.last_result.cache_status == "stale"
+    assert cache.last_result.age_seconds == 600
+    assert cache.last_result.refresh_failure_reason == "timeout"
+    assert cache.last_result.refresh_failed_at == clock.now_value
+    assert cache.last_result.retrieved_at == _RETRIEVED_AT
+
+
+def test_stale_failure_reason_is_sanitized_for_malformed_provider_payloads() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=ProviderResponseError("raw body leaked"))
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
+    clock.advance(600)
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert cache.last_result.refresh_failure_reason == "malformed_response"
+    assert "raw body" not in repr(cache.last_result)
+
+
+def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> None:
+    redis = FakeRedis()
+    provider = FakeProvider(_snapshot())
+    started = Event()
+    release = Event()
+
+    original_get_snapshot = provider.get_snapshot
+
+    def blocking_get_snapshot(query, context):
+        started.set()
+        release.wait(timeout=2)
+        return original_get_snapshot(query, context)
+
+    provider.get_snapshot = blocking_get_snapshot  # type: ignore[method-assign]
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+    )
+    results: list[ProviderSnapshot] = []
+    errors: list[BaseException] = []
+
+    def retrieve() -> None:
+        try:
+            results.append(cache.get_snapshot(NBAMarketQuery(), _context()))
+        except BaseException as error:  # pragma: no cover - diagnostic assertion below
+            errors.append(error)
+
+    first = Thread(target=retrieve)
+    second = Thread(target=retrieve)
+    first.start()
+    assert started.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert errors == []
+    assert results == [provider.snapshot, provider.snapshot]
+    assert len(provider.calls) == 1
+    assert len(redis.set_calls) == 1
+
+
+class ManualFuture:
+    def __init__(self) -> None:
+        self.value: ProviderSnapshot | None = None
+        self.error: BaseException | None = None
+        self.cancelled = False
+        self.callbacks: list[object] = []
+
+    def done(self) -> bool:
+        return self.value is not None or self.error is not None or self.cancelled
+
+    def result(self, timeout: float | None = None) -> ProviderSnapshot:
+        del timeout
+        if self.cancelled:
+            from concurrent.futures import CancelledError
+
+            raise CancelledError()
+        if self.error is not None:
+            raise self.error
+        if self.value is None:
+            raise TimeoutError()
+        return self.value
+
+    def cancel(self) -> bool:
+        self.cancelled = True
+        for callback in self.callbacks:
+            callback(self)
+        return True
+
+    def add_done_callback(self, callback) -> None:
+        self.callbacks.append(callback)
+
+    def complete(self, value: ProviderSnapshot) -> None:
+        self.value = value
+        for callback in self.callbacks:
+            callback(self)
+
+
+class ManualExecutor:
+    def __init__(self) -> None:
+        self.future = ManualFuture()
+
+    def submit(self, function):
+        self.function = function
+        return self.future
+
+
+def test_deadline_cancels_pending_refresh_and_late_result_is_not_published() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    executor = ManualExecutor()
+    cache = ProviderSnapshotCache(
+        FakeProvider(_snapshot()),
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        executor=executor,
+    )
+    result: dict[str, BaseException] = {}
+    context = RetrievalContext(
+        deadline=_RETRIEVED_AT + timedelta(seconds=1),
+        request_id="cache-test",
+    )
+
+    thread = Thread(
+        target=lambda: _capture_error(
+            result,
+            lambda: cache.get_snapshot(NBAMarketQuery(), context),
+        )
+    )
+    thread.start()
+    clock.advance(2)
+    thread.join(timeout=2)
+    assert isinstance(result["error"], TimeoutError)
+    assert executor.future.cancelled
+
+    executor.future.complete(_snapshot())
+    assert redis.set_calls == []
+
+
+def _capture_error(target: dict[str, BaseException], function) -> None:
+    try:
+        function()
+    except BaseException as error:
+        target["error"] = error
+
+
+def test_injected_cache_decorator_is_used_by_the_internal_board() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    service = DFSBoardService(
+        provider_registry={"dabble": provider},
+        snapshot_cache=lambda name, value: cache if name == "dabble" else value,
+        clock=clock.now,
+        monotonic=lambda: 0.0,
+    )
+    context = RetrievalContext(deadline=_RETRIEVED_AT + timedelta(seconds=10))
+
+    first = service.get_board(NBAMarketQuery(), context)
+    second = service.get_board(NBAMarketQuery(), context)
+
+    assert first.provider_outcomes[0].cache_status == "miss"
+    assert second.provider_outcomes[0].cache_status == "hit"
+    assert second.provider_outcomes[0].cache_age_seconds == 0
+    assert len(provider.calls) == 1
+
+
+def test_disabled_cache_fails_open_without_an_in_process_stale_store() -> None:
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=None,
+        enabled=False,
+    )
+
+    first = cache.get_snapshot(NBAMarketQuery(), _context())
+    second = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert first is second is provider.snapshot
+    assert len(provider.calls) == 2
+    assert cache.last_result.cache_status == "disabled"
+
+
+def test_redis_read_failure_does_not_turn_a_direct_failure_into_stale_fallback() -> None:
+    redis = FakeRedis()
+    redis.get_error = ConnectionError("redis unavailable")
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=ControlledClock().now,
+    )
+
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert len(provider.calls) == 1
+    assert redis.set_calls == []
+
+
+def test_redis_write_failure_returns_direct_snapshot_without_local_reuse() -> None:
+    redis = FakeRedis()
+    redis.set_error = ConnectionError("redis unavailable")
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+    )
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert len(provider.calls) == 2
+    assert cache.last_result.cache_status == "error"
+
+
+def test_cache_windows_have_explicit_fresh_and_stale_boundaries() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        fresh_seconds=300,
+        stale_if_error_seconds=1800,
+    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+
+    clock.advance(300)
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    assert cache.last_result.cache_status == "stale"
+
+    clock.advance(1501)
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+    assert len(provider.calls) == 2
+
+
+def test_stale_window_is_rechecked_when_refresh_failure_arrives_late() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+
+    def late_failure(query, context):
+        del query, context
+        clock.advance(10)
+        raise TimeoutError("upstream unavailable")
+
+    provider.get_snapshot = late_failure  # type: ignore[method-assign]
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        stale_if_error_seconds=1800,
+    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
+    clock.advance(1795)
+
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert cache.get_last_result() is None
+
+
+def test_cache_telemetry_is_bounded_by_provider_and_status() -> None:
+    telemetry.clear_recorded_provider_events()
+    try:
+        redis = FakeRedis()
+        clock = ControlledClock()
+        provider = FakeProvider(_snapshot())
+        cache = ProviderSnapshotCache(
+            provider,
+            provider_name="dabble",
+            redis_client=redis,
+            clock=clock.now,
+        )
+        cache.get_snapshot(NBAMarketQuery(), _context())
+        clock.advance(1)
+        cache.get_snapshot(NBAMarketQuery(), _context())
+
+        statuses = telemetry.snapshot_metrics()["cache"]["dabble"]
+        assert statuses["miss"] == 1
+        assert statuses["hit"] == 1
+        assert set(statuses) <= {"hit", "miss", "disabled", "stale", "error"}
+    finally:
+        telemetry.clear_recorded_provider_events()

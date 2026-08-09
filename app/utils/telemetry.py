@@ -99,6 +99,8 @@ OUTCOME_ERROR = "error"
 CACHE_HIT = "hit"
 CACHE_MISS = "miss"
 CACHE_DISABLED = "disabled"
+CACHE_STALE = "stale"
+CACHE_ERROR = "error"
 
 #: Max events retained in the process-wide buffer; prevents unbounded growth.
 EVENT_BUFFER_CAPACITY = 5000
@@ -428,6 +430,22 @@ def record_cached_provider_event(
     )
 
 
+def record_cache_status(provider: str, cache_status: str) -> None:
+    """Record one bounded cache decision without fabricating an upstream call.
+
+    Snapshot caching sits outside the provider adapter seam.  Miss, disabled,
+    stale, and backend-error decisions therefore update the existing bounded
+    cache counters without adding a duplicate provider event.
+    """
+
+    allowed = {CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR}
+    if cache_status not in allowed:
+        cache_status = CACHE_ERROR
+    with _buffer_lock:
+        per_provider = _cache_counts.setdefault(provider, {})
+        per_provider[cache_status] = per_provider.get(cache_status, 0) + 1
+
+
 def record_application_failure(code: str) -> None:
     """Count one application failure from the central error handling layer.
 
@@ -603,8 +621,10 @@ def provider_normalization_call(
 
 __all__ = [
     "CACHE_DISABLED",
+    "CACHE_ERROR",
     "CACHE_HIT",
     "CACHE_MISS",
+    "CACHE_STALE",
     "EVENT_BUFFER_CAPACITY",
     "OUTCOME_ERROR",
     "OUTCOME_HTTP_ERROR",
@@ -644,6 +664,7 @@ __all__ = [
     "provider_normalization_call",
     "record_application_failure",
     "record_cached_provider_event",
+    "record_cache_status",
     "record_provider_event",
     "reset_retry_count",
     "set_clock",

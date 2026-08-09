@@ -34,6 +34,10 @@ from app.providers.dfs import (
     RetrievalContext,
     SnapshotStatus,
 )
+from app.services.dfs_snapshot_cache import (
+    ProviderSnapshotCache,
+    ProviderSnapshotCacheCoordinator,
+)
 from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
     BoardTelemetryEvent,
@@ -45,6 +49,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BOARD_DEADLINE_SECONDS = 15.0
 DEFAULT_BOARD_MAX_CONCURRENCY = 3
+
+__all__ = [
+    "DFSBoard",
+    "DFSBoardService",
+    "ProviderFailureReason",
+    "ProviderOutcome",
+    "ProviderOutcomeStatus",
+    "ProviderSnapshotCache",
+    "ProviderSnapshotCacheCoordinator",
+]
 
 # CoverageCode is a closed shared vocabulary. Keep the board's semantic
 # classification closed too, so newly reviewed malformed/pagination codes
@@ -119,6 +133,11 @@ class ProviderOutcome:
     status: ProviderOutcomeStatus | str
     snapshot: ProviderSnapshot | None = None
     reason: ProviderFailureReason | str | None = None
+    cache_status: str | None = None
+    cache_retrieved_at: datetime | str | None = None
+    cache_age_seconds: float | None = None
+    cache_failure_reason: str | None = None
+    cache_failure_at: datetime | str | None = None
 
     def __post_init__(self) -> None:
         provider = _provider_name(self.provider)
@@ -160,9 +179,60 @@ class ProviderOutcome:
         if status is ProviderOutcomeStatus.FAILED and reason is None:
             raise ValueError("failed provider outcomes require a reason")
 
+        cache_status = self.cache_status
+        if cache_status is not None and cache_status not in {
+            "hit",
+            "miss",
+            "disabled",
+            "stale",
+            "error",
+        }:
+            raise ValueError("provider outcome cache_status is invalid")
+        cache_failure_reason = self.cache_failure_reason
+        if cache_failure_reason is not None and (
+            not isinstance(cache_failure_reason, str) or not cache_failure_reason.strip()
+        ):
+            raise ValueError("provider outcome cache_failure_reason is invalid")
+        cache_age = self.cache_age_seconds
+        if cache_age is not None and (
+            isinstance(cache_age, bool)
+            or not isinstance(cache_age, (int, float))
+            or cache_age < 0
+        ):
+            raise ValueError("provider outcome cache_age_seconds must be non-negative")
+        cache_retrieved_at = self.cache_retrieved_at
+        if cache_retrieved_at is not None:
+            if isinstance(cache_retrieved_at, str):
+                try:
+                    cache_retrieved_at = datetime.fromisoformat(
+                        cache_retrieved_at.replace("Z", "+00:00")
+                    )
+                except ValueError as error:
+                    raise ValueError("provider outcome cache_retrieved_at is invalid") from error
+            if not isinstance(cache_retrieved_at, datetime) or cache_retrieved_at.tzinfo is None:
+                raise ValueError("provider outcome cache_retrieved_at must be timezone-aware")
+            cache_retrieved_at = cache_retrieved_at.astimezone(timezone.utc)
+        cache_failure_at = self.cache_failure_at
+        if cache_failure_at is not None:
+            if isinstance(cache_failure_at, str):
+                try:
+                    cache_failure_at = datetime.fromisoformat(
+                        cache_failure_at.replace("Z", "+00:00")
+                    )
+                except ValueError as error:
+                    raise ValueError("provider outcome cache_failure_at is invalid") from error
+            if not isinstance(cache_failure_at, datetime) or cache_failure_at.tzinfo is None:
+                raise ValueError("provider outcome cache_failure_at must be timezone-aware")
+            cache_failure_at = cache_failure_at.astimezone(timezone.utc)
+
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "cache_status", cache_status)
+        object.__setattr__(self, "cache_failure_reason", cache_failure_reason)
+        object.__setattr__(self, "cache_retrieved_at", cache_retrieved_at)
+        object.__setattr__(self, "cache_age_seconds", cache_age)
+        object.__setattr__(self, "cache_failure_at", cache_failure_at)
 
     @property
     def usable(self) -> bool:
@@ -178,6 +248,18 @@ class ProviderOutcome:
         """Expose adapter coverage without copying or flattening its evidence."""
 
         return self.snapshot.coverage if self.snapshot is not None else None
+
+    @property
+    def cache_age(self) -> float | None:
+        """Short alias for the cache age exposed on this provider outcome."""
+
+        return self.cache_age_seconds
+
+    @property
+    def cache_retrieved(self) -> datetime | None:
+        """Return the source retrieval time represented by the cache result."""
+
+        return self.cache_retrieved_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,8 +332,36 @@ class DFSBoardService:
         monotonic: Callable[[], float] | None = None,
         settings: RuntimeSettings | None = None,
         telemetry_recorder: BoardTelemetryRecorder | None = None,
+        snapshot_cache: Callable[
+            [str, ProviderSnapshotProvider], ProviderSnapshotProvider
+        ]
+        | None = None,
+        cache_decorator: Callable[
+            [str, ProviderSnapshotProvider], ProviderSnapshotProvider
+        ]
+        | None = None,
+        cache_coordinator: Any | None = None,
     ) -> None:
         registry = self._build_registry(provider_registry)
+        supplied_decorators = tuple(
+            value
+            for value in (snapshot_cache, cache_decorator, cache_coordinator)
+            if value is not None
+        )
+        if len(supplied_decorators) > 1:
+            raise ValueError("provide only one DFS snapshot cache decorator")
+        decorator = supplied_decorators[0] if supplied_decorators else None
+        if decorator is not None:
+            decorate = getattr(decorator, "decorate", None)
+            if callable(decorate):
+                decorator = decorate
+            if not callable(decorator):
+                raise TypeError("DFS snapshot cache decorator must be callable")
+            registry = {
+                name: decorator(name, provider)
+                for name, provider in registry.items()
+            }
+            registry = self._build_registry(registry)
         enabled = tuple(registry)
         if settings is not None and settings.environment == "production" and not enabled:
             raise ConfigurationError(
@@ -462,7 +572,8 @@ class DFSBoardService:
                 )
                 return
             context.ensure_active(now=self._clock_utc())
-            snapshot = self.provider_registry[name].get_snapshot(query, context)
+            provider = self.provider_registry[name]
+            snapshot = provider.get_snapshot(query, context)
             if self.monotonic() > board_deadline:
                 holder["outcome"] = ProviderOutcome(
                     provider=name,
@@ -470,7 +581,20 @@ class DFSBoardService:
                     reason=ProviderFailureReason.DEADLINE_EXCEEDED,
                 )
                 return
-            holder["outcome"] = self._outcome_from_snapshot(name, snapshot)
+            cache_result = None
+            get_last_result = getattr(provider, "get_last_result", None)
+            if callable(get_last_result):
+                cache_result = get_last_result()
+            if cache_result is None:
+                # Keep the narrow existing provider seam compatible with
+                # injected test doubles that override this class method.
+                holder["outcome"] = self._outcome_from_snapshot(name, snapshot)
+            else:
+                holder["outcome"] = self._outcome_from_snapshot(
+                    name,
+                    snapshot,
+                    cache_result=cache_result,
+                )
         except (
             DeadlineExceededError,
             ProviderUnavailableError,
@@ -537,6 +661,8 @@ class DFSBoardService:
         cls,
         name: str,
         snapshot: ProviderSnapshot,
+        *,
+        cache_result: Any | None = None,
     ) -> ProviderOutcome:
         if not isinstance(snapshot, ProviderSnapshot):
             raise TypeError("DFS provider get_snapshot must return ProviderSnapshot")
@@ -547,12 +673,24 @@ class DFSBoardService:
                 provider=name,
                 status=ProviderOutcomeStatus.COMPLETE,
                 snapshot=snapshot,
+                cache_status=getattr(cache_result, "cache_status", None),
+                cache_retrieved_at=getattr(cache_result, "retrieved_at", None),
+                cache_age_seconds=getattr(cache_result, "age_seconds", None),
+                cache_failure_reason=getattr(
+                    cache_result, "refresh_failure_reason", None
+                ),
+                cache_failure_at=getattr(cache_result, "refresh_failed_at", None),
             )
         return ProviderOutcome(
             provider=name,
             status=ProviderOutcomeStatus.PARTIAL,
             snapshot=snapshot,
             reason=cls._partial_reason(snapshot),
+            cache_status=getattr(cache_result, "cache_status", None),
+            cache_retrieved_at=getattr(cache_result, "retrieved_at", None),
+            cache_age_seconds=getattr(cache_result, "age_seconds", None),
+            cache_failure_reason=getattr(cache_result, "refresh_failure_reason", None),
+            cache_failure_at=getattr(cache_result, "refresh_failed_at", None),
         )
 
     @staticmethod

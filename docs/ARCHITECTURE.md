@@ -90,6 +90,17 @@ source evidence, exact decimal thresholds and modifiers, original labels,
 coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
 
+`ProviderSnapshotCache` is an injected decorator around that seam. It stores
+only complete normalized snapshots in Redis under a provider/query key that
+includes the adapter-contract version; it never serializes a `DFSBoard`.
+Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
+Partial refreshes are returned to the current caller but never written over a
+complete value. A complete value past its fresh window is used only as a
+stale-if-error fallback after a later expected total refresh failure. Redis
+failure bypasses the cache without an in-process stale copy, and
+`ProviderSnapshotCacheCoordinator` suppresses duplicate refreshes only within
+one worker (there is no distributed lock).
+
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
 providers while collecting. Enabled providers run concurrently behind one
