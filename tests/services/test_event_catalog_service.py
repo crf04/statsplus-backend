@@ -1,0 +1,181 @@
+"""Offline contract tests for the canonical event catalog."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+import pytest
+from sqlalchemy import create_engine, inspect
+
+from app.errors import ProviderUnavailableError
+from app.migrations import run_migrations
+from app.models.event_catalog import EventCatalogEntry
+from app.services.event_catalog_service import EventCatalogService
+
+
+FIXTURE = json.loads(
+    (Path(__file__).parents[1] / "fixtures/nba_stats/schedule.valid.json").read_text()
+)
+
+
+def _frame() -> pd.DataFrame:
+    result_set = FIXTURE["resultSets"][0]
+    return pd.DataFrame(result_set["rowSet"], columns=result_set["headers"])
+
+
+def _engine(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'events.sqlite3'}")
+    run_migrations(engine)
+    return engine
+
+
+class FakeScheduleProvider:
+    def __init__(self, frame: pd.DataFrame | None = None):
+        self.frame = frame if frame is not None else _frame()
+        self.calls: list[str] = []
+        self.error: Exception | None = None
+
+    def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
+        self.calls.append(season)
+        if self.error is not None:
+            raise self.error
+        return self.frame.copy()
+
+
+def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now)
+
+    result = service.refresh("2025-26")
+    rows = service.get_events("2025-26")
+
+    assert result.event_count == 2
+    assert provider.calls == ["2025-26"]
+    assert rows[0]["nba_game_id"] == "0022500001"
+    assert rows[0]["home_team"]["id"] == 1610612747
+    assert rows[0]["away_team"]["tricode"] == "SAS"
+    assert rows[0]["scheduled_at"] == "2025-10-23T00:00:00+00:00"
+    assert rows[0]["postponement_evidence"] is None
+    assert rows[0]["is_postponed"] is False
+    postponed = next(row for row in rows if row["nba_game_id"] == "0022500002")
+    assert postponed["status_text"] == "Postponed"
+    assert postponed["postponed_status"] == "Postponed"
+    assert postponed["postponement_evidence"]
+    assert postponed["is_postponed"] is True
+    assert postponed["classification"] == "Regular Season"
+
+
+def test_refresh_upserts_by_game_id_and_retains_audit_rows(tmp_path):
+    engine = _engine(tmp_path)
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(engine, provider, clock=lambda: now)
+    service.refresh("2025-26")
+
+    with engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__.update()
+            .where(EventCatalogEntry.nba_game_id == "0022500002")
+            .values(
+                mapping_needed=True,
+                audit_status="needs_review",
+                audit_note="keep",
+                classification="mapping_needed",
+            )
+        )
+
+    updated = _frame()
+    updated.loc[updated["gameId"] == "0022500001", "gameDateTimeUTC"] = (
+        "2025-10-23T01:00:00Z"
+    )
+    updated.loc[updated["gameId"] == "0022500001", "gameStatusText"] = "8:00 pm ET"
+    updated = updated[updated["gameId"] != "0022500002"]
+    provider.frame = updated
+    service.refresh("2025-26")
+
+    rows = service.get_events("2025-26")
+    assert {row["nba_game_id"] for row in rows} == {"0022500001", "0022500002"}
+    changed = next(row for row in rows if row["nba_game_id"] == "0022500001")
+    assert changed["scheduled_at"] == "2025-10-23T01:00:00+00:00"
+    retained = next(row for row in rows if row["nba_game_id"] == "0022500002")
+    assert retained["mapping_needed"] is True
+    assert retained["audit_status"] == "needs_review"
+    assert retained["audit_note"] == "keep"
+    assert retained["classification"] == "mapping_needed"
+
+
+def test_replacement_game_id_is_a_new_event_without_heuristic_transfer(tmp_path):
+    engine = _engine(tmp_path)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(engine, provider)
+    service.refresh("2025-26")
+
+    replacement = _frame().iloc[[0]].copy()
+    replacement.loc[:, "gameId"] = "0022500999"
+    provider.frame = replacement
+    service.refresh("2025-26")
+
+    rows = service.get_events("2025-26")
+    assert {row["nba_game_id"] for row in rows} == {
+        "0022500001",
+        "0022500002",
+        "0022500999",
+    }
+
+
+def test_invalid_batch_is_atomic_and_previous_events_survive(tmp_path):
+    engine = _engine(tmp_path)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(engine, provider)
+    service.refresh("2025-26")
+    before = service.get_events("2025-26")
+
+    invalid = _frame().copy()
+    invalid.loc[0, "homeTeam_teamId"] = None
+    provider.frame = invalid
+    with pytest.raises(ProviderUnavailableError):
+        service.refresh("2025-26")
+
+    assert service.get_events("2025-26") == before
+    status = service.get_freshness("2025-26")
+    assert status["last_success_at"]
+    assert status["last_failure_at"]
+    assert status["fresh"] is True
+
+
+def test_freshness_is_configurable_and_success_failure_are_independent(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(
+        _engine(tmp_path), provider, clock=lambda: now, max_age=timedelta(hours=72)
+    )
+    service.refresh("2025-26")
+    assert service.get_freshness("2025-26")["fresh"] is True
+
+    provider.error = RuntimeError("provider unavailable")
+    service._clock = lambda: now + timedelta(hours=73)
+    with pytest.raises(ProviderUnavailableError):
+        service.refresh("2025-26")
+
+    status = service.get_freshness("2025-26")
+    assert status["fresh"] is False
+    assert status["last_success_at"] == "2025-10-20T00:00:00+00:00"
+    assert status["last_failure_at"] == "2025-10-23T01:00:00+00:00"
+
+
+@pytest.mark.parametrize("season", ["2025", "2025-2026", "current", "2025-27"])
+def test_service_requires_explicit_canonical_season(tmp_path, season):
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
+    with pytest.raises(ValueError, match="canonical NBA season"):
+        service.get_events(season)
+
+
+def test_migration_creates_event_tables_in_writable_database_only(tmp_path):
+    engine = _engine(tmp_path)
+    names = set(inspect(engine).get_table_names())
+    assert {"event_catalog", "event_catalog_refreshes"}.issubset(names)
+    assert engine.url.database != "nba_play_types.db"

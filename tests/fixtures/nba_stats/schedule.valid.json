@@ -1,0 +1,73 @@
+{
+  "resource": "scheduleleaguev2",
+  "parameters": {
+    "LeagueID": "00",
+    "Season": "2025-26"
+  },
+  "resultSets": [
+    {
+      "name": "SeasonGames",
+      "headers": [
+        "leagueId",
+        "seasonYear",
+        "gameDate",
+        "gameId",
+        "gameStatus",
+        "gameStatusText",
+        "gameDateTimeUTC",
+        "postponedStatus",
+        "gameLabel",
+        "gameSubtype",
+        "homeTeam_teamId",
+        "homeTeam_teamName",
+        "homeTeam_teamTricode",
+        "awayTeam_teamId",
+        "awayTeam_teamName",
+        "awayTeam_teamTricode"
+      ],
+      "rowSet": [
+        [
+          "00",
+          "2025",
+          "2025-10-22",
+          "0022500001",
+          1,
+          "7:00 pm ET",
+          "2025-10-23T00:00:00Z",
+          "",
+          "Regular Season",
+          "",
+          1610612747,
+          "Los Angeles Lakers",
+          "LAL",
+          1610612759,
+          "San Antonio Spurs",
+          "SAS"
+        ],
+        [
+          "00",
+          "2025",
+          "2025-10-23",
+          "0022500002",
+          1,
+          "Postponed",
+          "2025-10-24T01:00:00Z",
+          "Postponed",
+          "Regular Season",
+          "",
+          1610612738,
+          "Boston Celtics",
+          "BOS",
+          1610612751,
+          "Brooklyn Nets",
+          "BKN"
+        ]
+      ]
+    },
+    {
+      "name": "SeasonWeeks",
+      "headers": ["leagueId", "seasonYear", "weekNumber", "weekName", "startDate", "endDate"],
+      "rowSet": []
+    }
+  ]
+}
