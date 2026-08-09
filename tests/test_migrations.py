@@ -42,6 +42,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
+        "005_create_event_catalog",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -51,6 +52,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "data_refresh_jobs",
             "athlete_catalog",
             "athlete_catalog_freshness",
+            "event_catalog",
+            "event_catalog_refreshes",
         ]
     )
     assert {
@@ -91,6 +94,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (2, "002_create_data_refresh_jobs"),
             (3, "003_durable_data_refresh_queue"),
             (4, "004_create_athlete_catalog"),
+            (5, "005_create_event_catalog"),
         ]
 
 
@@ -109,9 +113,12 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
+        "005_create_event_catalog",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
+    assert inspect(engine).has_table("athlete_catalog")
+    assert inspect(engine).has_table("event_catalog")
 
 
 def test_demo_database_validation_is_read_only():
@@ -174,6 +181,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "data_refresh_jobs",
             "athlete_catalog",
             "athlete_catalog_freshness",
+            "event_catalog",
+            "event_catalog_refreshes",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None

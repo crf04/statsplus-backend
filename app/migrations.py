@@ -120,6 +120,19 @@ def _upgrade_data_refresh_jobs_queue(connection: Connection) -> None:
     )
 
 
+def _create_event_catalog_tables(connection: Connection) -> None:
+    """Create the writable canonical event and refresh-state tables.
+
+    Version 005 is intentionally reserved for the event catalog.  Issue #25
+    owns migration 004; the two migrations are expected to be adjacent after
+    merge even though this branch is runnable on its own with a gap.
+    """
+    from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+
+    EventCatalogEntry.__table__.create(connection, checkfirst=True)
+    EventCatalogRefresh.__table__.create(connection, checkfirst=True)
+
+
 def _create_athlete_catalog_tables(connection: Connection) -> None:
     """Create the application-owned canonical athlete catalog tables."""
     from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
@@ -133,6 +146,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
     Migration(3, "003_durable_data_refresh_queue", _upgrade_data_refresh_jobs_queue),
     Migration(4, "004_create_athlete_catalog", _create_athlete_catalog_tables),
+    Migration(5, "005_create_event_catalog", _create_event_catalog_tables),
 )
 
 

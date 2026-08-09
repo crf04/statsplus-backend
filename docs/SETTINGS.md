@@ -17,7 +17,7 @@ The model is intentionally grouped by responsibility:
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
-| `CatalogSettings` | `athlete_freshness_days` | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`) |
+| `CatalogSettings` | `athlete_freshness_days`, `event_max_age_hours` | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`) |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
@@ -59,9 +59,8 @@ Local and test startup is credential-free by default:
 - CORS defaults explicitly to `http://localhost:3000` for local development.
   `CORS_ALLOWED_ORIGINS` is a comma-separated list of exact `http://` or
   `https://` origins; wildcard `*` values are rejected.
-- Canonical athlete catalogs are refreshed only for explicit seasons by
-  `scripts/refresh_athlete_catalog.py`; `ATHLETE_CATALOG_FRESHNESS_DAYS`
-  controls the persisted success TTL and defaults to seven days.
+- Athlete and event catalogs have independent persisted freshness policies;
+  refreshes require explicit seasons and do not use a wall-clock season default.
 
 Production startup raises `ConfigurationError` with the invalid field names
 when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase

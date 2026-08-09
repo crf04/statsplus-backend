@@ -33,6 +33,8 @@ not routed through this adapter.
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 from typing import Any, Callable, Iterable
 
@@ -94,6 +96,311 @@ RECORDED_GAME_LOG_REQUIRED_COLUMNS: tuple[str, ...] = (
     "AST",
 )
 
+# ``ScheduleLeagueV2`` is the one whole-season NBA Stats seam used by the
+# event catalog.  Keep its provider shape here and normalize it before the
+# service sees any endpoint-specific names.
+SCHEDULE_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "gameId",
+    "gameDateTimeUTC",
+    "gameStatusText",
+    "homeTeam_teamId",
+    "homeTeam_teamName",
+    "homeTeam_teamTricode",
+    "awayTeam_teamId",
+    "awayTeam_teamName",
+    "awayTeam_teamTricode",
+)
+SCHEDULE_OPTIONAL_COLUMNS: tuple[str, ...] = (
+    "gameStatus",
+    "postponedStatus",
+    "gameLabel",
+    "gameSubLabel",
+    "gameSubtype",
+    "seasonYear",
+)
+CANONICAL_SCHEDULE_COLUMNS: tuple[str, ...] = (
+    "nba_game_id",
+    "season",
+    "scheduled_at",
+    "status_text",
+    "status_code",
+    "postponed_status",
+    "postponement_evidence",
+    "classification",
+    "home_team_id",
+    "home_team_name",
+    "home_team_tricode",
+    "away_team_id",
+    "away_team_name",
+    "away_team_tricode",
+)
+
+
+def validate_canonical_season(season: str) -> str:
+    """Validate and return one explicit NBA ``YYYY-YY`` season label."""
+
+    if not isinstance(season, str):
+        raise ValueError("season must be an explicit canonical NBA season")
+    value = season.strip()
+    match = re.fullmatch(r"([0-9]{4})-([0-9]{2})", value)
+    if match is None or match.group(2) != f"{(int(match.group(1)) + 1) % 100:02d}":
+        raise ValueError("season must be an explicit canonical NBA season (YYYY-YY)")
+    return value
+
+
+def _schedule_column_map(columns: Iterable[object]) -> dict[object, str]:
+    """Map provider/canonical schedule aliases to one normalized spelling."""
+
+    aliases = {
+        "gameid": "gameId",
+        "nba_game_id": "gameId",
+        "game_id": "gameId",
+        "gamedatetimeutc": "gameDateTimeUTC",
+        "gamedateutc": "gameDateTimeUTC",
+        "game_datetime_utc": "gameDateTimeUTC",
+        "game_date_time_utc": "gameDateTimeUTC",
+        "scheduledat": "gameDateTimeUTC",
+        "scheduled_at": "gameDateTimeUTC",
+        "scheduled_time_utc": "gameDateTimeUTC",
+        "gamestatustext": "gameStatusText",
+        "status_text": "gameStatusText",
+        "game_status_text": "gameStatusText",
+        "gamestatus": "gameStatus",
+        "status_code": "gameStatus",
+        "game_status_code": "gameStatus",
+        "postponedstatus": "postponedStatus",
+        "postponed_status": "postponedStatus",
+        "postponementevidence": "postponementEvidence",
+        "postponement_evidence": "postponementEvidence",
+        "gamelabel": "gameLabel",
+        "gamesublabel": "gameSubLabel",
+        "gamesubtype": "gameSubtype",
+        "classification": "classification",
+        "eventclassification": "classification",
+        "season": "season",
+        "seasonyear": "seasonYear",
+        "hometeam_teamid": "homeTeam_teamId",
+        "home_team_id": "homeTeam_teamId",
+        "hometeamid": "homeTeam_teamId",
+        "hometeam_teamname": "homeTeam_teamName",
+        "home_team_name": "homeTeam_teamName",
+        "home_team_full_name": "homeTeam_teamName",
+        "hometeamname": "homeTeam_teamName",
+        "hometeam_teamtricode": "homeTeam_teamTricode",
+        "home_team_tricode": "homeTeam_teamTricode",
+        "home_team_abbreviation": "homeTeam_teamTricode",
+        "hometeamtricode": "homeTeam_teamTricode",
+        "awayteam_teamid": "awayTeam_teamId",
+        "away_team_id": "awayTeam_teamId",
+        "awayteamid": "awayTeam_teamId",
+        "awayteam_teamname": "awayTeam_teamName",
+        "away_team_name": "awayTeam_teamName",
+        "away_team_full_name": "awayTeam_teamName",
+        "awayteamname": "awayTeam_teamName",
+        "awayteam_teamtricode": "awayTeam_teamTricode",
+        "away_team_tricode": "awayTeam_teamTricode",
+        "away_team_abbreviation": "awayTeam_teamTricode",
+        "awayteamtricode": "awayTeam_teamTricode",
+        "visitor_team_id": "awayTeam_teamId",
+        "visitor_team_name": "awayTeam_teamName",
+        "visitor_team_tricode": "awayTeam_teamTricode",
+        "visitor_team_abbreviation": "awayTeam_teamTricode",
+    }
+    result: dict[object, str] = {}
+    for column in columns:
+        key = re.sub(r"[^a-z0-9_]", "", str(column).strip().lower())
+        target = aliases.get(key)
+        if target is not None:
+            result[column] = target
+    return result
+
+
+def _text_value(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        missing = False
+    if not hasattr(missing, "__len__"):
+        try:
+            if bool(missing):
+                return ""
+        except (TypeError, ValueError):
+            pass
+    return str(value).strip()
+
+
+def normalize_whole_season_schedule(
+    raw_frame: pd.DataFrame,
+    *,
+    season: str,
+) -> pd.DataFrame:
+    """Normalize one ``ScheduleLeagueV2`` frame to canonical event facts.
+
+    The entire frame is validated before any event-catalog transaction starts.
+    This is the provider boundary: missing team identity, game ID, season, or
+    UTC schedule time is a malformed upstream response rather than a partial
+    local catalog update.
+    """
+
+    canonical_season = validate_canonical_season(season)
+    if not isinstance(raw_frame, pd.DataFrame):
+        raise ProviderResponseError("NBA Stats returned an invalid schedule frame.")
+
+    frame = raw_frame.rename(columns=_schedule_column_map(raw_frame.columns)).copy()
+    missing = [
+        column for column in SCHEDULE_REQUIRED_COLUMNS if column not in frame.columns
+    ]
+    if missing:
+        raise ProviderResponseError(
+            "NBA Stats returned an unsupported schedule schema.",
+            detail=f"missing columns: {', '.join(missing)}",
+        )
+
+    if frame["gameId"].duplicated().any():
+        raise ProviderResponseError("NBA Stats returned duplicate game IDs.")
+
+    frame["gameId"] = frame["gameId"].map(_text_value)
+    if (frame["gameId"] == "").any():
+        raise ProviderResponseError("NBA Stats returned a schedule row without a game ID.")
+
+    parsed_dates = pd.to_datetime(frame["gameDateTimeUTC"], utc=True, errors="coerce")
+    if parsed_dates.isna().any():
+        raise ProviderResponseError(
+            "NBA Stats returned a schedule row without a valid UTC scheduled time."
+        )
+
+    output: list[dict[str, object]] = []
+    for index, row in frame.iterrows():
+        row_season = _text_value(row.get("season"))
+        if not row_season:
+            row_season = _text_value(row.get("seasonYear"))
+            if re.fullmatch(r"[0-9]{4}", row_season):
+                row_season = f"{row_season}-{(int(row_season) + 1) % 100:02d}"
+        if row_season and row_season != canonical_season:
+            raise ProviderResponseError(
+                "NBA Stats returned a schedule row for a different season."
+            )
+
+        team_values: dict[str, object] = {}
+        for side in ("home", "away"):
+            team_id = pd.to_numeric(row.get(f"{side}Team_teamId"), errors="coerce")
+            name = _text_value(row.get(f"{side}Team_teamName"))
+            tricode = _text_value(row.get(f"{side}Team_teamTricode"))
+            if pd.isna(team_id) or not name or not tricode:
+                raise ProviderResponseError(
+                    "NBA Stats returned a schedule row without explicit team identity."
+                )
+            team_values[f"{side}_team_id"] = int(team_id)
+            team_values[f"{side}_team_name"] = name
+            team_values[f"{side}_team_tricode"] = tricode
+        if team_values["home_team_id"] == team_values["away_team_id"]:
+            raise ProviderResponseError("NBA Stats returned identical home and away teams.")
+
+        status_text = _text_value(row.get("gameStatusText"))
+        if not status_text:
+            raise ProviderResponseError("NBA Stats returned a schedule row without status text.")
+
+        raw_status_code = row.get("gameStatus")
+        status_code = pd.to_numeric(raw_status_code, errors="coerce")
+        status_code_value = None if pd.isna(status_code) else int(status_code)
+        postponed_status = _text_value(row.get("postponedStatus")) or None
+        classification = (
+            _text_value(row.get("classification"))
+            or _text_value(row.get("gameSubtype"))
+            or _text_value(row.get("gameLabel"))
+            or "unknown"
+        )
+        evidence: dict[str, object] = {}
+        status_marker = any(
+            "postpon" in _text_value(row.get(field)).lower()
+            for field in ("postponedStatus", "gameStatusText", "gameSubLabel")
+        )
+        if postponed_status or status_marker:
+            evidence["postponed_status"] = postponed_status or "indicated by status"
+        for field in ("gameStatus", "gameStatusText", "gameSubLabel"):
+            value = row.get(field)
+            text_value = _text_value(value)
+            if text_value and (postponed_status or status_marker):
+                evidence[field] = text_value
+        explicit_evidence = row.get("postponementEvidence")
+        if isinstance(explicit_evidence, (dict, list)):
+            # Structured provider evidence is already canonical; retain its
+            # shape rather than wrapping it in a provider-specific envelope.
+            evidence = explicit_evidence
+        elif explicit_evidence is not None and _text_value(explicit_evidence):
+            evidence = _text_value(explicit_evidence)
+
+        output.append(
+            {
+                "nba_game_id": _text_value(row["gameId"]),
+                "season": canonical_season,
+                "scheduled_at": parsed_dates.loc[index].to_pydatetime(),
+                "status_text": status_text,
+                "status_code": status_code_value,
+                "postponed_status": postponed_status,
+                "postponement_evidence": json.dumps(evidence, sort_keys=True)
+                if evidence
+                else None,
+                "classification": classification,
+                **team_values,
+            }
+        )
+
+    return pd.DataFrame(output, columns=CANONICAL_SCHEDULE_COLUMNS)
+
+
+def parse_recorded_schedule(payload: dict[str, Any], *, season: str) -> pd.DataFrame:
+    """Parse a recorded ScheduleLeagueV2 payload without making a network call."""
+
+    from nba_api.stats.endpoints import ScheduleLeagueV2
+    from nba_api.stats.library.http import NBAStatsResponse
+
+    try:
+        response = NBAStatsResponse(
+            response=json.dumps(payload),
+            status_code=200,
+            url="https://stats.nba.com/stats/scheduleleaguev2",
+        )
+        endpoint = ScheduleLeagueV2(season=season, get_request=False)
+        endpoint.nba_response = response
+        endpoint.load_response()
+        frames = endpoint.get_data_frames()
+        frame = frames[0]
+    except ProviderResponseError:
+        raise
+    except (ValueError, TypeError, KeyError, IndexError) as error:
+        # Older recorded fixtures in this repository use the tabular
+        # ``resultSets`` envelope used by several nba_api endpoints.  The
+        # current ScheduleLeagueV2 endpoint uses its nested league-schedule
+        # envelope; accept both while keeping normalization identical.
+        result_sets = payload.get("resultSets")
+        if not isinstance(result_sets, list):
+            raise ProviderResponseError(
+                "The recorded NBA Stats schedule could not be parsed."
+            ) from error
+        season_games = next(
+            (
+                result_set
+                for result_set in result_sets
+                if result_set.get("name") == "SeasonGames"
+            ),
+            None,
+        )
+        if not isinstance(season_games, dict):
+            raise ProviderResponseError(
+                "The recorded NBA Stats schedule could not be parsed."
+            ) from error
+        headers = season_games.get("headers")
+        rows = season_games.get("rowSet")
+        if not isinstance(headers, list) or not isinstance(rows, list):
+            raise ProviderResponseError(
+                "The recorded NBA Stats schedule could not be parsed."
+            ) from error
+        frame = pd.DataFrame(rows, columns=headers)
+    return normalize_whole_season_schedule(frame, season=season)
+
 _bound_lock = threading.Lock()
 _shared_bounds: dict[int, threading.BoundedSemaphore] = {}
 
@@ -134,7 +441,7 @@ def _validate_frame(
             "NBA Stats returned an invalid data frame."
         )
     required = tuple(required_columns)
-    if frame.empty and not required and validator is None:
+    if frame.empty and not required:
         raise ProviderResponseError(
             "NBA Stats returned an empty data frame without a declared schema."
         )
@@ -156,8 +463,6 @@ def _validate_frame(
             raise ProviderResponseError(
                 "NBA Stats returned a data frame with an invalid schema."
             )
-        if isinstance(valid, pd.DataFrame):
-            frame = valid
     return frame
 
 
@@ -205,31 +510,20 @@ def parse_recorded_player_roster(
 ) -> pd.DataFrame:
     """Normalize a recorded ``CommonAllPlayers`` payload without network access."""
 
-    import json
-
     from nba_api.stats.endpoints import commonallplayers
     from nba_api.stats.library.http import NBAStatsResponse
-
     from app.providers.nba_stats import normalize_player_roster
 
-    with provider_call(
-        PROVIDER_NBA_STATS,
-        "player_roster_recorded",
-        cache_status=CACHE_DISABLED,
-    ):
+    with provider_call(PROVIDER_NBA_STATS, "player_roster_recorded", cache_status=CACHE_DISABLED):
         try:
             response = NBAStatsResponse(
-                response=json.dumps(payload),
-                status_code=200,
+                response=json.dumps(payload), status_code=200,
                 url="https://stats.nba.com/stats/commonallplayers",
             )
-            endpoint = commonallplayers.CommonAllPlayers(
-                get_request=False, season=season
-            )
+            endpoint = commonallplayers.CommonAllPlayers(get_request=False, season=season)
             endpoint.nba_response = response
             endpoint.load_response()
-            frame = endpoint.get_data_frames()[0]
-            return normalize_player_roster(frame, season=season)
+            return normalize_player_roster(endpoint.get_data_frames()[0], season=season)
         except ProviderResponseError:
             raise
         except (ValueError, TypeError, KeyError, IndexError) as error:
@@ -270,7 +564,11 @@ class NBAStatsAdapter:
         self._concurrency_limit = self.settings.providers.nba_stats_max_concurrency
         self._bound = _shared_concurrency_bound(self._concurrency_limit)
         self._last_status_code: int | None = None
+        # The optional constructor seam is used by recorded/offline schedule
+        # tests.  Existing game-log helpers construct their own endpoint and
+        # remain unchanged.
         self._endpoint_factory = endpoint_factory
+        self._schedule_endpoint_factory = endpoint_factory
         self._roster_endpoint_factory = roster_endpoint_factory
 
     @property
@@ -447,43 +745,6 @@ class NBAStatsAdapter:
             ) from error
         normalized = normalize_archetype_game_logs(frame)
         return normalized[normalized["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
-
-    def get_player_roster(self, *, season: str) -> pd.DataFrame:
-        """Return one explicit season's normalized CommonAllPlayers roster."""
-
-        from app.providers.nba_stats import normalize_player_roster
-        from app.providers.nba_stats import validate_canonical_season
-
-        season = validate_canonical_season(season)
-        factory = self._roster_endpoint_factory or endpoints.commonallplayers.CommonAllPlayers
-
-        def normalize(frame: pd.DataFrame) -> pd.DataFrame:
-            return normalize_player_roster(frame, season=season)
-
-        try:
-            frame = self.run_endpoint(
-                "player_roster",
-                lambda timeout: factory(
-                    is_only_current_season=0,
-                    season=season,
-                    timeout=timeout,
-                ),
-                validator=normalize,
-            )
-        except requests.exceptions.Timeout as error:
-            raise ProviderUnavailableError(
-                "The upstream stats provider timed out. Please try again shortly.",
-                detail=error,
-            ) from error
-        except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
-        except ProviderResponseError as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats roster response was malformed.", detail=error
-            ) from error
-        return frame
 
     def fetch_player_game_logs(
         self,
@@ -718,9 +979,72 @@ class NBAStatsAdapter:
             required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
+    def get_player_roster(self, *, season: str) -> pd.DataFrame:
+        """Return one explicit season's normalized CommonAllPlayers roster."""
+        from app.providers.nba_stats import normalize_player_roster
+
+        canonical = validate_canonical_season(season)
+        factory = self._roster_endpoint_factory or endpoints.commonallplayers.CommonAllPlayers
+        try:
+            frame = self.run_endpoint(
+                "player_roster",
+                lambda timeout: factory(is_only_current_season=0, season=canonical, timeout=timeout),
+                validator=lambda candidate: normalize_player_roster(candidate, season=canonical),
+            )
+            return normalize_player_roster(frame, season=canonical)
+        except ProviderResponseError as error:
+            raise ProviderUnavailableError("The NBA Stats roster response was malformed.", detail=error) from error
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError("The upstream stats provider timed out. Please try again shortly.", detail=error) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
+
+    def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
+        """Fetch one explicit season through the instrumented schedule seam."""
+
+        from nba_api.stats import endpoints as stats_endpoints
+
+        canonical_season = validate_canonical_season(season)
+        endpoint_factory = (
+            self._schedule_endpoint_factory
+            or stats_endpoints.ScheduleLeagueV2
+        )
+        try:
+            frame = self.run_endpoint(
+                "schedule_whole_season",
+                lambda timeout: endpoint_factory(
+                    season=canonical_season,
+                    timeout=timeout,
+                ),
+                required_columns=SCHEDULE_REQUIRED_COLUMNS,
+                validator=lambda candidate: normalize_whole_season_schedule(
+                    candidate, season=canonical_season
+                ),
+            )
+            return normalize_whole_season_schedule(frame, season=canonical_season)
+        except ProviderResponseError as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats provider returned an unsupported schedule.",
+                detail=error,
+            ) from error
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError(
+                "The upstream stats provider timed out. Please try again shortly.",
+                detail=error,
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats provider is unavailable.", detail=error
+            ) from error
 
 __all__ = [
     "GAME_LOG_REQUIRED_COLUMNS",
+    "SCHEDULE_REQUIRED_COLUMNS",
+    "CANONICAL_SCHEDULE_COLUMNS",
     "NBAStatsAdapter",
+    "normalize_whole_season_schedule",
+    "parse_recorded_schedule",
+    "parse_recorded_player_roster",
     "parse_recorded_game_logs",
+    "validate_canonical_season",
 ]

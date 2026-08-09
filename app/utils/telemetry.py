@@ -62,6 +62,7 @@ NBA_STATS_OPERATIONS = frozenset(
         "player_shooting_zone",
         "player_shot_chart",
         "player_gamelogs_against",
+        "schedule_whole_season",
     }
 )
 PBP_STATS_OPERATIONS = frozenset(

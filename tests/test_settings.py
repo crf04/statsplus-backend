@@ -20,6 +20,16 @@ def test_current_nba_season_uses_october_boundary():
     assert current_nba_season(date(2026, 10, 1)) == "2026-27"
 
 
+def test_event_catalog_max_age_is_configurable(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    monkeypatch.setenv("EVENT_CATALOG_MAX_AGE_HOURS", "24")
+
+    settings = load_settings()
+
+    assert settings.catalog.event_max_age_hours == 24
+
+
 def test_local_settings_have_typed_safe_defaults(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.delenv("DATABASE_URL", raising=False)

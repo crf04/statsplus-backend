@@ -74,7 +74,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -170,6 +170,15 @@ The production adapter owns endpoint construction, timeout, concurrency,
 telemetry, response normalization, and provider error translation. Tests inject
 the protocol into `GameService` or `PlayerService` rather than patching
 `nba_api`.
+
+`NBAStatsAdapter.fetch_whole_season_schedule(season=...)` is the provider seam
+for the canonical event catalog. It accepts only an explicit canonical
+`YYYY-YY` season, calls `ScheduleLeagueV2` through the shared NBA Stats
+concurrency/timeout bound, and emits the closed `schedule_whole_season`
+telemetry operation. Its normalized frame retains the NBA game ID, explicit
+home/away team IDs and identities, UTC scheduled time, status text,
+postponement evidence, and provider classification. Recorded fixtures use
+`parse_recorded_schedule` and never make a network request.
 
 Natural-language query:
 
@@ -273,6 +282,16 @@ be created or upgraded with an explicit `--database-url` argument or
 provided. Rerunning the command is idempotent because applied versions are
 recorded in `schema_migrations`. Status output masks database passwords.
 
+Migration 005 creates the writable `event_catalog` and
+`event_catalog_refreshes` tables. Migrations are applied in order. Event
+refreshes upsert by NBA game ID in one transaction without replacing the
+table; omitted historical rows remain available and replacement IDs remain
+distinct. Mapping and audit state belong to #28. Event freshness is
+independent from Athlete Catalog freshness and defaults to 72 hours through
+`EVENT_CATALOG_MAX_AGE_HOURS`. Operators use
+`scripts/refresh_event_catalog.py` with one or more explicit seasons; each
+season is independent and the command exits nonzero if any season fails.
+
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
 opening it for writes. Migration tests must use a temporary database, and the
@@ -284,7 +303,7 @@ validator must not be used to repair the fixture.
 - Route/service interaction: replace methods on the dependency graph supplied
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
-- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `PBPTotalsAdapter.parse_totals`) with no network.
+- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`) with no network.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.

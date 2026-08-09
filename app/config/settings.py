@@ -262,11 +262,12 @@ class NBASeasonSettings(BaseModel):
 
 
 class CatalogSettings(BaseModel):
-    """Freshness policy for persisted canonical catalogs."""
+    """Independent freshness policies for canonical catalogs."""
 
     model_config = ConfigDict(frozen=True)
 
     athlete_freshness_days: int = Field(default=7, ge=0)
+    event_max_age_hours: float = Field(default=72.0, gt=0)
 
 
 class RuntimeSettings(BaseModel):
@@ -282,6 +283,9 @@ class RuntimeSettings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
+    # Event-catalog freshness is intentionally independent from athlete
+    # catalog state.  Operators may lengthen/shorten the read-age window
+    # without changing the provider timeout or a worker schedule.
     catalog: CatalogSettings = Field(default_factory=CatalogSettings)
     port: int = Field(default=5000, ge=1, le=65535)
     debug: bool = True
@@ -299,6 +303,7 @@ class RuntimeSettings(BaseModel):
                 f"got {value!r}"
             )
         return normalized
+
 
 class _EnvironmentReader:
     """Read environment values while keeping parsing errors actionable."""
@@ -442,6 +447,9 @@ def _build_settings(
                 CatalogSettings,
                 athlete_freshness_days=reader.integer(
                     "ATHLETE_CATALOG_FRESHNESS_DAYS", 7
+                ),
+                event_max_age_hours=reader.decimal(
+                    "EVENT_CATALOG_MAX_AGE_HOURS", 72.0
                 ),
             ),
             port=reader.integer("PORT", 5000),

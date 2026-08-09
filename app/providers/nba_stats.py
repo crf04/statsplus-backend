@@ -24,7 +24,13 @@ from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.services.nba_stats_adapter import NBAStatsAdapter as _InstrumentedNBAStatsAdapter
+from app.services.nba_stats_adapter import (
+    CANONICAL_SCHEDULE_COLUMNS,
+    SCHEDULE_REQUIRED_COLUMNS,
+    NBAStatsAdapter as _InstrumentedNBAStatsAdapter,
+    normalize_whole_season_schedule,
+    parse_recorded_schedule,
+)
 from app.utils.telemetry import ProviderResponseError
 
 logger = logging.getLogger(__name__)
@@ -239,6 +245,9 @@ class NBAStatsProvider(Protocol):
 
     def get_player_roster(self, *, season: str) -> pd.DataFrame:
         """Return the season-scoped canonical player roster."""
+
+    def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
+        """Return canonical schedule facts for one explicit NBA season."""
 
 
 # These fields are required by GameService's filters, summaries, and output.
@@ -506,7 +515,11 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         endpoint_factory: Callable[..., Any] | None = None,
         roster_endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
-        super().__init__(settings=settings, roster_endpoint_factory=roster_endpoint_factory)
+        super().__init__(
+            settings=settings,
+            endpoint_factory=endpoint_factory,
+            roster_endpoint_factory=roster_endpoint_factory,
+        )
         self._endpoint_factory = (
             endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
         )
@@ -547,6 +560,9 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         )
         return frame[frame["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
+    def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
+        return _InstrumentedNBAStatsAdapter.fetch_whole_season_schedule(self, season=season)
+
     def _get_normalized_game_logs(
         self,
         *,
@@ -580,6 +596,10 @@ __all__ = [
     "REQUIRED_GAME_LOG_COLUMNS",
     "normalize_archetype_game_logs",
     "normalize_player_roster",
+    "CANONICAL_SCHEDULE_COLUMNS",
+    "SCHEDULE_REQUIRED_COLUMNS",
+    "normalize_whole_season_schedule",
+    "parse_recorded_schedule",
     "normalize_player_game_logs",
     "ROSTER_COLUMNS",
     "validate_canonical_season",
