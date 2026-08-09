@@ -90,6 +90,54 @@ source evidence, exact decimal thresholds and modifiers, original labels,
 coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
 
+`ProviderSnapshotCache` is an injected decorator around that seam. It stores
+only complete normalized snapshots in Redis under a provider/query key that
+includes the adapter-contract version; it never serializes a `DFSBoard`.
+Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
+Partial refreshes are returned to the current caller but never written over a
+complete value. A complete value past its fresh window is used only as a
+stale-if-error fallback after a later expected total refresh failure. Redis
+failure bypasses the cache without an in-process stale copy, and
+`ProviderSnapshotCacheCoordinator` suppresses duplicate refreshes only within
+one worker (there is no distributed lock). One flight shares the whole cache
+decision: a follower adopts the owner's result or failure verbatim, including
+its cache status, age, and sanitized refresh-failure provenance, and never
+substitutes a stale value from its own Redis read. When the owner's deadline
+elapses before an uncancellable refresh finishes, that deadline failure becomes
+the flight's decision immediately: the flight stays active, and every follower
+receives the owner's failure verbatim however much later its own deadline is.
+The late result then only drains and validates the abandoned work and retires
+the key — it publishes nothing, and never turns the shared failure into a
+success carrying cache provenance the abandoned request never had. A follower's
+own deadline still applies to itself alone; it never abandons the refresh.
+
+Publication is decided at a single instant, before the write: work that
+finished at or after the deadline is never written, and a value written before
+that instant is never retracted, so no concurrent reader can observe a value
+that a later cleanup would remove again. A write that itself outlives the
+budget still stands, but its caller is not served past its own deadline. The
+absolute deadline is also enforced after the Redis read — including after a
+read that fails slowly, which calls no provider at all — and before any value
+is returned. Only an unusable payload is cleaned up, comparing and deleting
+atomically so a newer concurrent value survives.
+
+A cached payload is used only when its bytes are already exactly the canonical
+document this codec writes, compared against the stored text rather than a
+normalizing re-dump, so surrounding whitespace, reordered keys, and alternate
+escapes are all rejected. A duplicate key at any nesting level is rejected
+before decoding, because JSON's last-value-wins would otherwise let one payload
+carry a second, conflicting document. Anything a constructor would normalize,
+drop, canonicalize from an alias, or deduplicate is corrupt too, as is a value
+no domain constructor can represent — a wire number whose conversion raises
+`OverflowError`, for example. Every such failure is contained at this seam: the
+key is deleted and the request becomes a miss.
+
+Cache decisions are recorded once per request as bounded cache counters only;
+the cache never emits a provider-operation event, and provider events never
+increment the cache counters. A retrieval that makes many upstream calls (the
+Dabble fixture-detail fan-out) therefore records many provider events and still
+exactly one cache decision.
+
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
 providers while collecting. Enabled providers run concurrently behind one

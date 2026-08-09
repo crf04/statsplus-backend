@@ -1145,6 +1145,7 @@ class RetrievalContext:
 
     deadline: datetime | str
     request_id: str | None = None
+    cache_status: str = "disabled"
 
     def __post_init__(self) -> None:
         deadline = normalize_timestamp(self.deadline)
@@ -1156,6 +1157,13 @@ class RetrievalContext:
                 raise ValueError("retrieval request_id is invalid")
         object.__setattr__(self, "deadline", deadline)
         object.__setattr__(self, "request_id", request_id)
+        if self.cache_status not in {"hit", "miss", "disabled", "stale", "error"}:
+            raise ValueError("retrieval cache_status is invalid")
+
+    def with_cache_status(self, status: str) -> "RetrievalContext":
+        """Return this request context with its cache state for provider telemetry."""
+
+        return RetrievalContext(self.deadline, self.request_id, status)
 
     def remaining_seconds(self, *, now: datetime | str | None = None) -> float:
         """Return non-negative seconds left in the absolute retrieval budget."""
@@ -1195,7 +1203,13 @@ class NBAMarketQuery:
         league = self.league.strip().upper() if isinstance(self.league, str) else ""
         if sport != "NBA" or league != "NBA":
             raise ValueError("the shared provider query supports NBA only")
-        statuses = tuple(normalize_market_status(status).value for status in self.market_statuses)
+        # A repeated status names the same semantic query, so it is deduplicated
+        # here rather than becoming a second cache key and a second refresh.
+        statuses = tuple(
+            dict.fromkeys(
+                normalize_market_status(status).value for status in self.market_statuses
+            )
+        )
         if not statuses:
             raise ValueError("query market_statuses must not be empty")
         if self.pregame_only is not True:

@@ -13,7 +13,7 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, and Dabble fan-out bound | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY` |
+| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -43,6 +43,19 @@ budget. A safe GET receives at most one retry for a timeout or HTTP 429, 500,
 are not retried. Dabble fixture-detail concurrency defaults to 3. These
 settings apply only to the internal collector and do not change NBA Stats or
 PBP Stats timeout/health signals.
+
+The injected DFS snapshot cache stores only complete, normalized
+`ProviderSnapshot` values in Redis. Its default fresh window is 300 seconds and
+its maximum stale-if-error age is 1800 seconds; both scalar settings can be
+overridden per provider with `DFS_DABBLE_CACHE_FRESH_SECONDS` and
+`DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS` (and the equivalent provider name).
+The cache key contains the provider, semantic NBA query, and adapter-contract
+version. Boards are never serialized. A partial observation is returned to its
+caller but cannot replace a complete Redis value. A stale complete value is
+returned only after a later expected upstream failure, with bounded cache
+provenance on the provider outcome. Redis errors fail open to direct upstream
+work and never create an in-process stale store; single-flight suppression is
+per worker only.
 
 ## Defaults and validation
 

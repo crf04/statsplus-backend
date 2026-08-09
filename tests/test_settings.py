@@ -127,6 +127,66 @@ def test_settings_parse_internal_dfs_board_registry_and_bounds(monkeypatch):
     assert settings.providers.dfs_dabble_detail_concurrency == 2
 
 
+def test_settings_parse_provider_snapshot_cache_windows(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("DFS_CACHE_FRESH_SECONDS", "301")
+    monkeypatch.setenv("DFS_CACHE_STALE_IF_ERROR_SECONDS", "1801")
+    monkeypatch.setenv("DFS_DABBLE_CACHE_FRESH_SECONDS", "45")
+    monkeypatch.setenv("DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS", "240")
+
+    settings = load_settings()
+
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == 45
+    assert settings.providers.dfs_cache_stale_if_error_seconds_for("dabble") == 240
+    assert settings.providers.dfs_cache_fresh_seconds_for("underdog") == 301
+    assert settings.providers.dfs_cache_stale_if_error_seconds_for("underdog") == 1801
+
+
+def test_settings_ignore_undocumented_dfs_cache_window_spellings(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("DFS_CACHE_MAX_STALE_SECONDS", "99")
+    monkeypatch.setenv("DFS_CACHE_DABBLE_FRESH_SECONDS", "98")
+    monkeypatch.setenv("DFS_DABBLE_SNAPSHOT_CACHE_FRESH_SECONDS", "97")
+    monkeypatch.setenv("DFS_DABBLE_CACHE_MAX_STALE_SECONDS", "96")
+    monkeypatch.setenv("DFS_DABBLE_SNAPSHOT_CACHE_STALE_IF_ERROR_SECONDS", "95")
+
+    settings = load_settings()
+
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == 300.0
+    assert settings.providers.dfs_cache_stale_if_error_seconds_for("dabble") == 1800.0
+    assert not hasattr(settings.providers, "dfs_snapshot_cache_fresh_seconds")
+    assert not hasattr(settings.providers, "dfs_snapshot_cache_stale_if_error_seconds")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"DFS_CACHE_FRESH_SECONDS": True},
+        {"DFS_CACHE_STALE_IF_ERROR_SECONDS": False},
+        {"DFS_DABBLE_CACHE_FRESH_SECONDS": True},
+        {"DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS": True},
+    ],
+)
+def test_settings_reject_boolean_dfs_cache_windows(overrides):
+    # ``True`` is an int in Python, so an unguarded float() would silently
+    # configure a one-second window.
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing"}, overrides=overrides)
+
+
+@pytest.mark.parametrize(
+    "window",
+    [True, {"dabble": True}],
+)
+def test_provider_settings_reject_boolean_cache_windows(window):
+    from app.config.settings import ProviderSettings
+
+    with pytest.raises(ValueError):
+        ProviderSettings(dfs_cache_fresh_seconds=window)
+    with pytest.raises(ValueError):
+        ProviderSettings(dfs_cache_stale_if_error_seconds=window)
+
+
 def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypatch):
     monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
     monkeypatch.delenv("DFS_BOARD_ENABLED", raising=False)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date
+from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -88,6 +89,39 @@ class AuthenticationSettings(BaseModel):
         return has_file or has_json or has_parts
 
 
+def _provider_window(
+    value: float | Mapping[str, float], provider: str, *, default: float
+) -> float:
+    """Resolve one scalar-or-provider-map cache setting."""
+
+    if isinstance(value, Mapping):
+        selected = value.get(str(provider).strip().casefold())
+        if selected is not None:
+            return float(selected)
+        if "*" in value:
+            return float(value["*"])
+        return default
+    return float(value)
+
+
+def _cache_window_number(value: Any) -> float:
+    """Parse one positive cache window, rejecting booleans as numbers.
+
+    ``True`` is an ``int`` in Python, so an unguarded ``float()`` would turn a
+    misconfigured flag into a one-second window instead of a startup error.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError("DFS cache windows must be numbers")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("DFS cache windows must be numbers") from error
+    if number <= 0 or not isfinite(number):
+        raise ValueError("DFS cache windows must be positive")
+    return number
+
+
 class CacheSettings(BaseModel):
     """Optional Redis cache settings."""
 
@@ -119,6 +153,10 @@ class ProviderSettings(BaseModel):
     dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
     dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
+    # A scalar applies to every enabled DFS provider.  A mapping may override
+    # one or more providers when their publication cadence differs.
+    dfs_cache_fresh_seconds: float | dict[str, float] = Field(default=300.0)
+    dfs_cache_stale_if_error_seconds: float | dict[str, float] = Field(default=1800.0)
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -146,6 +184,35 @@ class ProviderSettings(BaseModel):
                 providers.append(provider)
                 seen.add(provider)
         return tuple(providers)
+
+    @field_validator(
+        "dfs_cache_fresh_seconds", "dfs_cache_stale_if_error_seconds", mode="before"
+    )
+    @classmethod
+    def validate_dfs_cache_window(cls, value: Any) -> float | dict[str, float]:
+        if isinstance(value, Mapping):
+            normalized: dict[str, float] = {}
+            for provider, window in value.items():
+                name = str(provider).strip().casefold()
+                if not name:
+                    raise ValueError("DFS cache provider names must be non-empty")
+                normalized[name] = _cache_window_number(window)
+            return normalized
+        return _cache_window_number(value)
+
+    def dfs_cache_fresh_seconds_for(self, provider: str) -> float:
+        """Return the configured fresh window for one provider."""
+
+        return _provider_window(self.dfs_cache_fresh_seconds, provider, default=300.0)
+
+    def dfs_cache_stale_if_error_seconds_for(self, provider: str) -> float:
+        """Return the configured stale-if-error age for one provider."""
+
+        return _provider_window(
+            self.dfs_cache_stale_if_error_seconds,
+            provider,
+            default=1800.0,
+        )
 
 
 class LLMSettings(BaseModel):
@@ -351,6 +418,9 @@ class _EnvironmentReader:
 
     def decimal(self, name: str, default: float, *aliases: str) -> float:
         value = self.raw(name, default, *aliases)
+        if isinstance(value, bool):
+            # ``float(True)`` would silently accept a boolean as 1.0.
+            raise ConfigurationError(f"{name} must be a number, got {value!r}")
         try:
             return float(value)
         except (TypeError, ValueError) as error:
@@ -368,6 +438,29 @@ def _build_settings(
     database_url = reader.text("DATABASE_URL", DEFAULT_SQLITE_URL) or DEFAULT_SQLITE_URL
 
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
+
+    dfs_cache_fresh = reader.decimal("DFS_CACHE_FRESH_SECONDS", 300.0)
+    dfs_cache_stale = reader.decimal("DFS_CACHE_STALE_IF_ERROR_SECONDS", 1800.0)
+    fresh_overrides: dict[str, float] = {}
+    stale_overrides: dict[str, float] = {}
+    for provider_name in DFS_PROVIDER_NAME_SET:
+        env_name = provider_name.upper()
+        fresh_value = reader.raw(f"DFS_{env_name}_CACHE_FRESH_SECONDS")
+        stale_value = reader.raw(f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS")
+        if fresh_value is not None:
+            try:
+                fresh_overrides[provider_name] = _cache_window_number(fresh_value)
+            except ValueError as error:
+                raise ConfigurationError(
+                    f"DFS_{env_name}_CACHE_FRESH_SECONDS must be a number"
+                ) from error
+        if stale_value is not None:
+            try:
+                stale_overrides[provider_name] = _cache_window_number(stale_value)
+            except ValueError as error:
+                raise ConfigurationError(
+                    f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS must be a number"
+                ) from error
 
     auth = _validated_model(
         AuthenticationSettings,
@@ -409,6 +502,16 @@ def _build_settings(
         ),
         dfs_dabble_detail_concurrency=reader.integer(
             "DFS_DABBLE_DETAIL_CONCURRENCY", 3
+        ),
+        dfs_cache_fresh_seconds=(
+            {"*": dfs_cache_fresh, **fresh_overrides}
+            if fresh_overrides
+            else dfs_cache_fresh
+        ),
+        dfs_cache_stale_if_error_seconds=(
+            {"*": dfs_cache_stale, **stale_overrides}
+            if stale_overrides
+            else dfs_cache_stale
         ),
     )
 

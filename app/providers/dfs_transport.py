@@ -18,7 +18,6 @@ from app.providers.dfs import (
     RetrievalContext,
 )
 from app.utils.telemetry import (
-    CACHE_DISABLED,
     ProviderResponseError,
     clear_retry_progress_callback,
     current_retry_count,
@@ -344,7 +343,7 @@ def request_json(
         with provider_call(
             provider,
             operation,
-            cache_status=CACHE_DISABLED,
+            cache_status=context.cache_status,
             request_id=context.request_id,
         ) as tracker:
 
