@@ -15,6 +15,7 @@ this boundary.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
@@ -29,12 +30,189 @@ from app.services.nba_stats_adapter import (
     NBAStatsAdapter as _InstrumentedNBAStatsAdapter,
     normalize_whole_season_schedule,
     parse_recorded_schedule,
-    validate_canonical_season,
 )
+from app.utils.telemetry import ProviderResponseError
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEASON_TYPE = "Regular Season"
+_CANONICAL_SEASON = re.compile(r"^(?P<start>\d{4})-(?P<end>\d{2})$")
+
+ROSTER_COLUMNS = (
+    "player_id",
+    "display_name",
+    "roster_status",
+    "is_active",
+    "is_active_for_season",
+    "season",
+    "team_id",
+    "team_name",
+    "team_abbreviation",
+)
+
+_ROSTER_COLUMN_ALIASES = {
+    "PERSON_ID": "player_id",
+    "PLAYER_ID": "player_id",
+    "DISPLAY_FIRST_LAST": "display_name",
+    "DISPLAY_LAST_COMMA_FIRST": "display_name",
+    "DISPLAY_NAME": "display_name",
+    "PLAYER_NAME": "display_name",
+    "ROSTERSTATUS": "roster_status_raw",
+    "ROSTER_STATUS": "roster_status_raw",
+    "FROM_YEAR": "from_year",
+    "TO_YEAR": "to_year",
+    "TEAM_ID": "team_id",
+    "TEAM_NAME": "team_name",
+    "TEAM_ABBREVIATION": "team_abbreviation",
+    "TEAM_ABBR": "team_abbreviation",
+}
+
+
+def validate_canonical_season(season: str) -> str:
+    """Validate and return one explicit NBA season (for example ``2024-25``)."""
+
+    if not isinstance(season, str):
+        raise ValueError("season must be a string in YYYY-YY form")
+    normalized = season.strip()
+    match = _CANONICAL_SEASON.fullmatch(normalized)
+    if match is None:
+        raise ValueError("season must be a canonical YYYY-YY value")
+    start_year = int(match.group("start"))
+    if int(match.group("end")) != (start_year + 1) % 100:
+        raise ValueError("season must span consecutive calendar years")
+    return normalized
+
+
+def _roster_status_is_active(value: Any) -> bool:
+    """Interpret the provider's documented 0/1 roster status values."""
+
+    if isinstance(value, bool):
+        return value
+    if value is None or pd.isna(value):
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "active", "current", "true", "yes"}
+
+
+def _nullable_int(value: Any) -> int | None:
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ProviderResponseError("NBA Stats returned an invalid roster value.") from error
+    if not number.is_integer():
+        raise ProviderResponseError("NBA Stats returned an invalid roster value.")
+    return int(number)
+
+
+def _nullable_text(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _canonicalize_roster_columns(raw_frame: pd.DataFrame) -> pd.DataFrame:
+    rename_map: dict[Any, str] = {}
+    source_columns = {
+        str(column).strip().upper().replace(" ", "_")
+        for column in raw_frame.columns
+    }
+    canonical_columns = set(ROSTER_COLUMNS)
+    for column in raw_frame.columns:
+        if str(column) in canonical_columns:
+            continue
+        normalized_name = str(column).strip().upper().replace(" ", "_")
+        if normalized_name == "DISPLAY_LAST_COMMA_FIRST" and "DISPLAY_FIRST_LAST" in source_columns:
+            continue
+        canonical_name = _ROSTER_COLUMN_ALIASES.get(normalized_name)
+        if canonical_name and canonical_name not in raw_frame.columns:
+            rename_map[column] = canonical_name
+    frame = raw_frame.rename(columns=rename_map).copy()
+    missing = [column for column in ("player_id", "display_name") if column not in frame.columns]
+    if missing:
+        raise ProviderResponseError("NBA Stats returned an unsupported roster schema.")
+    for column in ("roster_status_raw", "from_year", "to_year", "team_id", "team_name", "team_abbreviation"):
+        if column not in frame.columns:
+            frame[column] = None
+    return frame
+
+
+def _classify_roster_status(row: dict[str, Any], start_year: int) -> str:
+    existing_status = _nullable_text(row.get("roster_status"))
+    if existing_status in {"active", "inactive", "historical"}:
+        return existing_status
+    from_year = _nullable_int(row.get("from_year"))
+    to_year = _nullable_int(row.get("to_year"))
+    covers_season = (
+        (from_year is None or from_year <= start_year)
+        and (to_year is None or to_year >= start_year)
+    )
+    if not covers_season:
+        return "historical"
+    return "active" if _roster_status_is_active(row.get("roster_status_raw")) else "inactive"
+
+
+def _roster_record(row: dict[str, Any], season: str, start_year: int) -> dict[str, Any]:
+    player_id = _nullable_int(row.get("player_id"))
+    display_name = _nullable_text(row.get("display_name"))
+    if player_id is None or player_id <= 0 or not display_name:
+        raise ProviderResponseError("NBA Stats returned a roster row without player identity.")
+    roster_status = _classify_roster_status(row, start_year)
+    return {
+        "player_id": player_id,
+        "display_name": display_name,
+        "roster_status": roster_status,
+        "is_active": roster_status == "active",
+        "is_active_for_season": roster_status == "active",
+        "season": season,
+        "team_id": _nullable_int(row.get("team_id")),
+        "team_name": _nullable_text(row.get("team_name")),
+        "team_abbreviation": _nullable_text(row.get("team_abbreviation")),
+        "_status_rank": {"active": 0, "inactive": 1, "historical": 2}[roster_status],
+    }
+
+
+def _deduplicate_roster_records(records: list[dict[str, Any]]) -> pd.DataFrame:
+    normalized = pd.DataFrame(records)
+    if normalized.empty:
+        return pd.DataFrame(columns=ROSTER_COLUMNS)
+    return (
+        normalized.sort_values(["player_id", "_status_rank"])
+        .drop_duplicates("player_id", keep="first")
+        .drop(columns=["_status_rank"])
+        .sort_values("player_id")
+        .reset_index(drop=True)
+        .loc[:, ROSTER_COLUMNS]
+    )
+
+
+def normalize_player_roster(raw_frame: pd.DataFrame, season: str) -> pd.DataFrame:
+    """Normalize one ``CommonAllPlayers`` response for a requested season.
+
+    NBA Stats returns one long-lived row per player, including retired and
+    historical players.  The season is supplied by the caller rather than
+    inferred from the wall clock; ``roster_status`` therefore captures both
+    the provider's active flag and whether the player's NBA tenure covers the
+    requested season.
+    """
+
+    season = validate_canonical_season(season)
+    if not isinstance(raw_frame, pd.DataFrame):
+        raise ProviderResponseError("NBA Stats returned an invalid roster response.")
+
+    frame = _canonicalize_roster_columns(raw_frame)
+    start_year = int(season[:4])
+    normalized = _deduplicate_roster_records(
+        [_roster_record(row, season, start_year) for row in frame.to_dict(orient="records")]
+    )
+    if normalized.empty:
+        raise ProviderResponseError(
+            "NBA Stats returned an empty roster for the requested season."
+        )
+    return normalized
 
 
 class NBAStatsProvider(Protocol):
@@ -64,6 +242,9 @@ class NBAStatsProvider(Protocol):
         season_type: str = DEFAULT_SEASON_TYPE,
     ) -> pd.DataFrame:
         """Return normalized logs for cluster members against one opponent."""
+
+    def get_player_roster(self, *, season: str) -> pd.DataFrame:
+        """Return the season-scoped canonical player roster."""
 
     def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
         """Return canonical schedule facts for one explicit NBA season."""
@@ -332,8 +513,13 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         settings: RuntimeSettings | None = None,
         *,
         endpoint_factory: Callable[..., Any] | None = None,
+        roster_endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
-        super().__init__(settings=settings, endpoint_factory=endpoint_factory)
+        super().__init__(
+            settings=settings,
+            endpoint_factory=endpoint_factory,
+            roster_endpoint_factory=roster_endpoint_factory,
+        )
         self._endpoint_factory = (
             endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
         )
@@ -374,6 +560,9 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         )
         return frame[frame["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
+    def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
+        return _InstrumentedNBAStatsAdapter.fetch_whole_season_schedule(self, season=season)
+
     def _get_normalized_game_logs(
         self,
         *,
@@ -405,11 +594,13 @@ __all__ = [
     "NBAStatsProvider",
     "OPTIONAL_GAME_LOG_COLUMNS",
     "REQUIRED_GAME_LOG_COLUMNS",
-    "SCHEDULE_REQUIRED_COLUMNS",
-    "CANONICAL_SCHEDULE_COLUMNS",
     "normalize_archetype_game_logs",
-    "normalize_player_game_logs",
+    "normalize_player_roster",
+    "CANONICAL_SCHEDULE_COLUMNS",
+    "SCHEDULE_REQUIRED_COLUMNS",
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
+    "normalize_player_game_logs",
+    "ROSTER_COLUMNS",
     "validate_canonical_season",
 ]

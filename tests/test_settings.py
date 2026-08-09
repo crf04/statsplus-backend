@@ -27,7 +27,7 @@ def test_event_catalog_max_age_is_configurable(monkeypatch):
 
     settings = load_settings()
 
-    assert settings.event_catalog_max_age_hours == 24
+    assert settings.catalog.event_max_age_hours == 24
 
 
 def test_local_settings_have_typed_safe_defaults(monkeypatch):

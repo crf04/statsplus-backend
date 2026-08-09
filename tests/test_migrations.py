@@ -41,6 +41,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "001_create_users",
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
+        "004_create_athlete_catalog",
         "005_create_event_catalog",
     )
     assert second.applied == ()
@@ -49,6 +50,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "schema_migrations",
             "users",
             "data_refresh_jobs",
+            "athlete_catalog",
+            "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
         ]
@@ -90,6 +93,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (1, "001_create_users"),
             (2, "002_create_data_refresh_jobs"),
             (3, "003_durable_data_refresh_queue"),
+            (4, "004_create_athlete_catalog"),
             (5, "005_create_event_catalog"),
         ]
 
@@ -108,10 +112,12 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "001_create_users",
         "002_create_data_refresh_jobs",
         "003_durable_data_refresh_queue",
+        "004_create_athlete_catalog",
         "005_create_event_catalog",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
+    assert inspect(engine).has_table("athlete_catalog")
     assert inspect(engine).has_table("event_catalog")
 
 
@@ -165,6 +171,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "schema_migrations",
             "users",
             "data_refresh_jobs",
+            "athlete_catalog",
+            "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
         ]

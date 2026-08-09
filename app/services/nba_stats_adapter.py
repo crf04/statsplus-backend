@@ -505,6 +505,33 @@ def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
             ) from error
 
 
+def parse_recorded_player_roster(
+    payload: dict[str, Any], season: str
+) -> pd.DataFrame:
+    """Normalize a recorded ``CommonAllPlayers`` payload without network access."""
+
+    from nba_api.stats.endpoints import commonallplayers
+    from nba_api.stats.library.http import NBAStatsResponse
+    from app.providers.nba_stats import normalize_player_roster
+
+    with provider_call(PROVIDER_NBA_STATS, "player_roster_recorded", cache_status=CACHE_DISABLED):
+        try:
+            response = NBAStatsResponse(
+                response=json.dumps(payload), status_code=200,
+                url="https://stats.nba.com/stats/commonallplayers",
+            )
+            endpoint = commonallplayers.CommonAllPlayers(get_request=False, season=season)
+            endpoint.nba_response = response
+            endpoint.load_response()
+            return normalize_player_roster(endpoint.get_data_frames()[0], season=season)
+        except ProviderResponseError:
+            raise
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            raise ProviderResponseError(
+                "The recorded NBA Stats roster response could not be parsed."
+            ) from error
+
+
 def _response_status(endpoint: object) -> int | None:
     """Extract the upstream HTTP status ``nba_api`` recorded, if any.
 
@@ -530,6 +557,7 @@ class NBAStatsAdapter:
         settings: RuntimeSettings | None = None,
         *,
         endpoint_factory: Callable[..., object] | None = None,
+        roster_endpoint_factory: Callable[..., object] | None = None,
     ):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
@@ -541,6 +569,7 @@ class NBAStatsAdapter:
         # remain unchanged.
         self._endpoint_factory = endpoint_factory
         self._schedule_endpoint_factory = endpoint_factory
+        self._roster_endpoint_factory = roster_endpoint_factory
 
     @property
     def max_concurrency(self) -> int:
@@ -950,6 +979,26 @@ class NBAStatsAdapter:
             required_columns=("TEAM_ID", "TEAM_NAME"),
         )
 
+    def get_player_roster(self, *, season: str) -> pd.DataFrame:
+        """Return one explicit season's normalized CommonAllPlayers roster."""
+        from app.providers.nba_stats import normalize_player_roster
+
+        canonical = validate_canonical_season(season)
+        factory = self._roster_endpoint_factory or endpoints.commonallplayers.CommonAllPlayers
+        try:
+            frame = self.run_endpoint(
+                "player_roster",
+                lambda timeout: factory(is_only_current_season=0, season=canonical, timeout=timeout),
+                validator=lambda candidate: normalize_player_roster(candidate, season=canonical),
+            )
+            return normalize_player_roster(frame, season=canonical)
+        except ProviderResponseError as error:
+            raise ProviderUnavailableError("The NBA Stats roster response was malformed.", detail=error) from error
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError("The upstream stats provider timed out. Please try again shortly.", detail=error) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
+
     def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
         """Fetch one explicit season through the instrumented schedule seam."""
 
@@ -995,6 +1044,7 @@ __all__ = [
     "NBAStatsAdapter",
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
+    "parse_recorded_player_roster",
     "parse_recorded_game_logs",
     "validate_canonical_season",
 ]
