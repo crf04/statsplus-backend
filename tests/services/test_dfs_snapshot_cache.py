@@ -11,6 +11,7 @@ import pytest
 
 from app.providers.dfs import (
     CoverageEvidence,
+    MarketStatus,
     AthleteEvidence,
     AppearanceEvidence,
     EventEvidence,
@@ -326,6 +327,39 @@ def test_snapshot_codec_rejects_excessively_nested_payloads() -> None:
         )
 
 
+#: Past the interpreter's digit limit for integer string conversion, so the
+#: parser rejects the token with a plain ValueError rather than a
+#: JSONDecodeError.
+_OVERSIZED_INTEGER = "1" * 5000
+
+
+def test_snapshot_codec_rejects_oversized_integer_tokens() -> None:
+    """A digit-limit ValueError is corrupt wire data, not a defect."""
+
+    payload = serialize_provider_snapshot(_market_payload_snapshot()).replace(
+        '"american_price":null', f'"american_price":{_OVERSIZED_INTEGER}', 1
+    )
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(
+            payload,
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+def test_snapshot_codec_keeps_the_duplicate_key_failure_distinct() -> None:
+    """Mapping parser failures must not swallow the duplicate-key decision."""
+
+    payload = serialize_provider_snapshot(_snapshot()).replace(
+        '"provider":"dabble"', '"provider":"dabble","provider":"dabble"', 1
+    )
+
+    with pytest.raises(SnapshotCacheError, match="duplicate keys"):
+        deserialize_provider_snapshot(payload, expected_contract_version="1")
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
@@ -560,6 +594,7 @@ def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> No
         provider,
         provider_name="dabble",
         redis_client=redis,
+        clock=ControlledClock().now,
     )
     results: list[ProviderSnapshot] = []
     errors: list[BaseException] = []
@@ -1558,6 +1593,7 @@ def test_disabled_cache_fails_open_without_an_in_process_stale_store() -> None:
         provider_name="dabble",
         redis_client=None,
         enabled=False,
+        clock=ControlledClock().now,
     )
 
     first = cache.get_snapshot(NBAMarketQuery(), _context())
@@ -1594,6 +1630,7 @@ def test_redis_write_failure_returns_direct_snapshot_without_local_reuse() -> No
         provider,
         provider_name="dabble",
         redis_client=redis,
+        clock=ControlledClock().now,
     )
 
     cache.get_snapshot(NBAMarketQuery(), _context())
@@ -1678,3 +1715,159 @@ def test_cache_telemetry_is_bounded_by_provider_and_status() -> None:
         assert set(statuses) <= {"hit", "miss", "disabled", "stale", "error"}
     finally:
         telemetry.clear_recorded_provider_events()
+
+
+def test_oversized_cached_integer_is_a_miss_and_the_key_is_replaced() -> None:
+    """A digit-limit ValueError from the parser must not escape the seam."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = serialize_provider_snapshot(_market_payload_snapshot()).replace(
+        '"american_price":null', f'"american_price":{_OVERSIZED_INTEGER}', 1
+    )
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+def test_repeated_query_statuses_canonicalize_to_one_key_and_payload() -> None:
+    """A repeated status names the same semantic query, not a second one."""
+
+    canonical = NBAMarketQuery()
+    repeated = NBAMarketQuery(market_statuses=("available", "available", "suspended"))
+
+    assert repeated.market_statuses == (MarketStatus.AVAILABLE, MarketStatus.SUSPENDED)
+    assert repeated == canonical
+
+    cache = ProviderSnapshotCache(
+        FakeProvider(_snapshot()),
+        provider_name="dabble",
+        redis_client=FakeRedis(),
+        clock=ControlledClock().now,
+    )
+    assert cache.cache_key(repeated) == cache.cache_key(canonical)
+    assert serialize_provider_snapshot(
+        _snapshot(), repeated
+    ) == serialize_provider_snapshot(_snapshot(), canonical)
+
+
+def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
+    redis = FakeRedis()
+    provider = FakeProvider(_snapshot())
+    clock = ControlledClock()
+    started = Event()
+    release = Event()
+
+    original_get_snapshot = provider.get_snapshot
+
+    def blocking_get_snapshot(query, context):
+        started.set()
+        release.wait(timeout=2)
+        return original_get_snapshot(query, context)
+
+    provider.get_snapshot = blocking_get_snapshot  # type: ignore[method-assign]
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    results: list[ProviderSnapshot] = []
+    errors: list[BaseException] = []
+
+    def retrieve(query: NBAMarketQuery) -> None:
+        try:
+            results.append(cache.get_snapshot(query, _context()))
+        except BaseException as error:  # pragma: no cover - diagnostic assertion
+            errors.append(error)
+
+    first = Thread(target=retrieve, args=(NBAMarketQuery(),))
+    second = Thread(
+        target=retrieve,
+        args=(NBAMarketQuery(market_statuses=("available", "available", "suspended")),),
+    )
+    first.start()
+    assert started.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert errors == []
+    assert results == [provider.snapshot, provider.snapshot]
+    assert len(provider.calls) == 1
+    assert len(redis.set_calls) == 1
+
+
+def test_future_dated_cached_snapshot_is_a_miss_and_the_key_is_replaced() -> None:
+    """A value observed after the current instant cannot be aged, so it is unusable."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    key = cache.cache_key(NBAMarketQuery())
+    redis.values[key] = serialize_provider_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
+            retrieved_at=_RETRIEVED_AT + timedelta(seconds=1),
+        )
+    )
+
+    result = cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert result is provider.snapshot
+    assert redis.deleted == [key]
+    assert cache.last_result.cache_status == "miss"
+    assert cache.last_result.age_seconds == 0
+    assert redis.values[key] == redis.set_calls[0][1]
+
+
+def test_future_dated_refresh_is_never_published_or_served() -> None:
+    """A provider snapshot dated past the clock breaks the temporal contract."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
+            retrieved_at=_RETRIEVED_AT + timedelta(seconds=1),
+        )
+    )
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+
+    with pytest.raises(ValueError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+
+    assert redis.values == {}
+    assert redis.set_calls == []
+    assert cache.get_last_result() is None
+    assert cache.coordinator.pending_count() == 0

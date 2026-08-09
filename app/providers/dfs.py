@@ -1203,7 +1203,13 @@ class NBAMarketQuery:
         league = self.league.strip().upper() if isinstance(self.league, str) else ""
         if sport != "NBA" or league != "NBA":
             raise ValueError("the shared provider query supports NBA only")
-        statuses = tuple(normalize_market_status(status).value for status in self.market_statuses)
+        # A repeated status names the same semantic query, so it is deduplicated
+        # here rather than becoming a second cache key and a second refresh.
+        statuses = tuple(
+            dict.fromkeys(
+                normalize_market_status(status).value for status in self.market_statuses
+            )
+        )
         if not statuses:
             raise ValueError("query market_statuses must not be empty")
         if self.pregame_only is not True:

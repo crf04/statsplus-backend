@@ -418,7 +418,13 @@ def deserialize_provider_snapshot(
         raise SnapshotCacheError("snapshot payload must be JSON text")
     try:
         raw = json.loads(payload, object_pairs_hook=_unique_pairs)
-    except (TypeError, json.JSONDecodeError) as error:
+    except SnapshotCacheError:
+        # The duplicate-key hook already decided;  it must not be reworded into
+        # a generic parse failure by the broader ValueError clause below.
+        raise
+    except (TypeError, ValueError) as error:
+        # Not every parser rejection is a JSONDecodeError: an integer token past
+        # the interpreter's digit limit escapes as a plain ValueError.
         raise SnapshotCacheError("snapshot payload is not valid JSON") from error
     except RecursionError as error:
         # A payload nested past the interpreter's recursion limit exhausts the
@@ -731,14 +737,10 @@ class ProviderSnapshotCache:
 
         if not isinstance(query, NBAMarketQuery):
             raise TypeError("query must be NBAMarketQuery")
-        query_payload = {
-            "sport": query.sport,
-            "league": query.league,
-            "market_statuses": sorted(status.value for status in query.market_statuses),
-            "pregame_only": query.pregame_only,
-        }
+        # The key and the cached payload must describe one query the same way,
+        # so both are built from the single canonical projection.
         digest = sha256(
-            json.dumps(query_payload, separators=(",", ":"), sort_keys=True).encode(
+            json.dumps(_query_payload(query), separators=(",", ":"), sort_keys=True).encode(
                 "utf-8"
             )
         ).hexdigest()
@@ -815,6 +817,12 @@ class ProviderSnapshotCache:
         now = self._clock_utc()
         if now >= context.deadline:
             raise DeadlineExceededError("provider retrieval deadline exceeded")
+
+        if cached is not None and cached.retrieved_at > now:
+            # An observation dated after the current instant has no age this
+            # clock can measure, so it is unusable rather than freshly zero.
+            self._delete_if_unchanged(key, raw)
+            cached = None
 
         if cached is not None:
             age = self._age_seconds(cached, now)
@@ -954,6 +962,10 @@ class ProviderSnapshotCache:
             raise ValueError("DFS provider snapshot provider does not match cache provider")
         if snapshot.contract_version != self.contract_version:
             raise ValueError("DFS provider snapshot contract version does not match cache")
+        if snapshot.retrieved_at > self._clock_utc():
+            # A result dated after this clock cannot be aged, so it is neither
+            # published nor served: the temporal contract is part of validity.
+            raise ValueError("DFS provider snapshot is dated after the cache clock")
         return snapshot
 
     def _stale_fallback(
