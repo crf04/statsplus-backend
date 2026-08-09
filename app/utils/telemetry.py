@@ -1,9 +1,11 @@
-"""Structured provider telemetry for NBA Stats and PBP Stats.
+"""Structured telemetry for provider seams and local normalization decisions.
 
-One :class:`ProviderEvent` is emitted per upstream invocation.  The event is
-written to the application log as a single structured line and retained in an
-in-process, bounded, thread-safe buffer so operators and tests can inspect the
-contract without a logging backend.
+One :class:`ProviderEvent` is emitted per instrumented provider seam.  Most
+seams are upstream invocations; adapters may also explicitly instrument a
+local normalization seam when no upstream invocation represents a terminal
+failure.  The event is written to the application log as a single structured
+line and retained in an in-process, bounded, thread-safe buffer so operators
+and tests can inspect the contract without a logging backend.
 
 Events carry the provider name, operation, duration, outcome, retry count,
 cache status, and the ``request_id`` that correlates them with the incoming
@@ -29,10 +31,15 @@ from typing import Any, Callable
 
 import requests
 
+from app.utils.request_id import is_valid_request_id
+
 logger = logging.getLogger(__name__)
 
 PROVIDER_NBA_STATS = "nba_stats"
 PROVIDER_PBP_STATS = "pbp_stats"
+PROVIDER_DABBLE = "dabble"
+PROVIDER_PRIZEPICKS = "prizepicks"
+PROVIDER_UNDERDOG = "underdog"
 
 # Keep provider operation names in one place.  These names are part of the
 # telemetry contract: adapter methods, provider health checks, and the admin
@@ -58,9 +65,26 @@ NBA_STATS_OPERATIONS = frozenset(
 PBP_STATS_OPERATIONS = frozenset(
     {"get_totals_player", "get_totals_opponent", "health_probe"}
 )
+DABBLE_OPERATIONS = frozenset(
+    {
+        "competition_lookup",
+        "competition_fixtures",
+        "fixture_details",
+        "snapshot_normalization",
+    }
+)
+DABBLE_UPSTREAM_OPERATIONS = frozenset(
+    {"competition_lookup", "competition_fixtures", "fixture_details"}
+)
+DABBLE_NORMALIZATION_OPERATIONS = frozenset({"snapshot_normalization"})
+PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
+UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
     PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
+    PROVIDER_DABBLE: DABBLE_OPERATIONS,
+    PROVIDER_PRIZEPICKS: PRIZEPICKS_OPERATIONS,
+    PROVIDER_UNDERDOG: UNDERDOG_OPERATIONS,
 }
 
 OUTCOME_SUCCESS = "success"
@@ -88,6 +112,17 @@ _cache_counts: dict[str, dict[str, int]] = {}
 
 #: Injectable monotonic and wall-clock functions for deterministic tests.
 _monotonic = time.monotonic
+
+
+def _is_deadline_exceeded(error: BaseException) -> bool:
+    """Recognize the shared deadline type without importing providers early."""
+
+    # ``app.errors`` imports this module, while ``app.providers`` re-exports
+    # adapters that import ``app.errors``.  Keep this import lazy to avoid
+    # creating that package-initialization cycle at module import time.
+    from app.providers.dfs import DeadlineExceededError
+
+    return isinstance(error, DeadlineExceededError)
 
 
 def _now_iso() -> str:
@@ -166,7 +201,11 @@ def reset_retry_count() -> None:
 
 
 def increment_retry_count() -> None:
-    _retry_local.count = getattr(_retry_local, "count", 0) + 1
+    count = getattr(_retry_local, "count", 0) + 1
+    _retry_local.count = count
+    progress_callback = getattr(_retry_local, "progress_callback", None)
+    if progress_callback is not None:
+        progress_callback(count)
 
 
 def current_retry_count() -> int:
@@ -175,6 +214,25 @@ def current_retry_count() -> int:
         "count",
         0,
     )
+
+
+def set_retry_progress_callback(callback: Callable[[int], None]) -> None:
+    """Publish retry increments to a caller while its provider worker runs.
+
+    Retry counters are intentionally thread-local so concurrent provider calls
+    cannot contaminate each other's telemetry.  A bounded transport worker
+    needs one additional, request-local observation point because its caller
+    may time out before the worker finishes.  The callback lives on that same
+    thread-local state and must be cleared by the worker when it exits.
+    """
+
+    _retry_local.progress_callback = callback
+
+
+def clear_retry_progress_callback() -> None:
+    """Remove a worker's retry progress callback from its thread-local state."""
+
+    _retry_local.__dict__.pop("progress_callback", None)
 
 
 def record_provider_event(event: ProviderEvent) -> None:
@@ -299,7 +357,7 @@ def clear_recorded_provider_events() -> None:
 
 
 class ProviderTracker:
-    """Context manager that records one :class:`ProviderEvent` around a call.
+    """Context manager that records one :class:`ProviderEvent` around a seam.
 
     Enclosing code can set ``tracker.status_code`` when an upstream response is
     available so the event reflects the HTTP status rather than only an
@@ -312,10 +370,14 @@ class ProviderTracker:
         operation: str,
         *,
         cache_status: str = CACHE_MISS,
+        request_id: str | None = None,
     ) -> None:
+        if request_id is not None and not is_valid_request_id(request_id):
+            raise ValueError("provider request_id is invalid")
         self.provider = provider
         self.operation = operation
         self.cache_status = cache_status
+        self.request_id = request_id
         self.status_code: int | None = None
 
     def __enter__(self) -> "ProviderTracker":
@@ -331,6 +393,8 @@ class ProviderTracker:
         if exc is not None:
             if isinstance(exc, ProviderResponseError):
                 outcome = OUTCOME_MALFORMED
+            elif _is_deadline_exceeded(exc):
+                outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.Timeout):
                 outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.RequestException):
@@ -347,7 +411,11 @@ class ProviderTracker:
                 duration_ms=duration_ms,
                 retry_count=current_retry_count(),
                 cache_status=self.cache_status,
-                request_id=current_request_id(),
+                request_id=(
+                    self.request_id
+                    if self.request_id is not None
+                    else current_request_id()
+                ),
                 status_code=self.status_code,
             )
         )
@@ -359,8 +427,9 @@ def provider_call(
     operation: str,
     *,
     cache_status: str = CACHE_MISS,
+    request_id: str | None = None,
 ) -> ProviderTracker:
-    """Return a context manager that records telemetry for a provider call.
+    """Instrument one upstream provider invocation.
 
     Usage::
 
@@ -368,7 +437,34 @@ def provider_call(
             tracker.status_code = ...
             result = endpoint.get_data_frames()[0]
     """
-    return ProviderTracker(provider, operation, cache_status=cache_status)
+    return ProviderTracker(
+        provider,
+        operation,
+        cache_status=cache_status,
+        request_id=request_id,
+    )
+
+
+def provider_normalization_call(
+    provider: str,
+    operation: str,
+    *,
+    cache_status: str = CACHE_MISS,
+    request_id: str | None = None,
+) -> ProviderTracker:
+    """Instrument an explicit local provider-normalization seam.
+
+    The event and counter shape intentionally matches :func:`provider_call`.
+    Adapters decide locally whether this seam is needed, so an upstream
+    malformed or timeout event is never recounted as a normalization failure.
+    """
+
+    return ProviderTracker(
+        provider,
+        operation,
+        cache_status=cache_status,
+        request_id=request_id,
+    )
 
 
 __all__ = [
@@ -383,8 +479,16 @@ __all__ = [
     "OUTCOME_TIMEOUT",
     "PROVIDER_NBA_STATS",
     "PROVIDER_PBP_STATS",
+    "PROVIDER_DABBLE",
+    "DABBLE_OPERATIONS",
+    "DABBLE_UPSTREAM_OPERATIONS",
+    "DABBLE_NORMALIZATION_OPERATIONS",
+    "PROVIDER_PRIZEPICKS",
+    "PROVIDER_UNDERDOG",
     "NBA_STATS_OPERATIONS",
     "PBP_STATS_OPERATIONS",
+    "PRIZEPICKS_OPERATIONS",
+    "UNDERDOG_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "ProviderResponseError",
@@ -392,9 +496,12 @@ __all__ = [
     "clear_recorded_provider_events",
     "current_request_id",
     "current_retry_count",
+    "set_retry_progress_callback",
+    "clear_retry_progress_callback",
     "get_recorded_provider_events",
     "increment_retry_count",
     "provider_call",
+    "provider_normalization_call",
     "record_application_failure",
     "record_cached_provider_event",
     "record_provider_event",

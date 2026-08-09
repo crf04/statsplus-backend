@@ -23,11 +23,22 @@ def generate_request_id() -> str:
     return uuid.uuid4().hex
 
 
+def is_valid_request_id(value: object) -> bool:
+    """Return whether ``value`` is safe for headers, logs, and telemetry."""
+
+    return isinstance(value, str) and bool(_VALID_REQUEST_ID_PATTERN.fullmatch(value))
+
+
 def resolve_request_id(incoming: str | None) -> str:
     """Return a valid ``incoming`` ID, or generate a new one."""
-    if isinstance(incoming, str) and _VALID_REQUEST_ID_PATTERN.fullmatch(incoming):
+    if is_valid_request_id(incoming):
         return incoming
     return generate_request_id()
 
 
-__all__ = ["HEADER_NAME", "generate_request_id", "resolve_request_id"]
+__all__ = [
+    "HEADER_NAME",
+    "generate_request_id",
+    "is_valid_request_id",
+    "resolve_request_id",
+]

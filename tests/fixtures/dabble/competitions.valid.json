@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "090c2877-4d13-4f6e-8faf-886092153c58",
+      "name": "NBA",
+      "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+      "sportName": "Basketball",
+      "country": "USA"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import pytest
 import requests
 from flask import Flask
 
+from app.providers.dfs import DeadlineExceededError
 import app.utils.telemetry as telemetry
 
 
@@ -63,6 +64,31 @@ def test_provider_event_includes_status_code_when_set():
     assert event["status_code"] == 200
 
 
+def test_provider_call_uses_explicit_request_id_and_closed_dfs_catalog():
+    with telemetry.provider_call(
+        telemetry.PROVIDER_UNDERDOG,
+        "get_snapshot",
+        request_id="retrieval-123",
+    ):
+        pass
+
+    event = telemetry.get_recorded_provider_events()[0]
+    assert event["request_id"] == "retrieval-123"
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
+        telemetry.PROVIDER_UNDERDOG
+    ]
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
+        telemetry.PROVIDER_PRIZEPICKS
+    ]
+
+    with pytest.raises(ValueError, match="request_id"):
+        telemetry.provider_call(
+            telemetry.PROVIDER_UNDERDOG,
+            "get_snapshot",
+            request_id="unsafe request id",
+        )
+
+
 def test_event_outcome_distinguishes_timeout_http_and_malformed():
     with pytest.raises(requests.exceptions.ReadTimeout):
         with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"):
@@ -78,6 +104,19 @@ def test_event_outcome_distinguishes_timeout_http_and_malformed():
     assert events["timeout_op"]["outcome"] == telemetry.OUTCOME_TIMEOUT
     assert events["http_op"]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
     assert events["bad_op"]["outcome"] == telemetry.OUTCOME_MALFORMED
+
+
+def test_deadline_timeout_is_distinct_from_unrelated_builtin_timeout():
+    with pytest.raises(DeadlineExceededError):
+        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
+            raise DeadlineExceededError("retrieval deadline exceeded")
+    with pytest.raises(TimeoutError):
+        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
+            raise TimeoutError("unrelated implementation timeout")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[0]["outcome"] == telemetry.OUTCOME_TIMEOUT
+    assert events[1]["outcome"] == telemetry.OUTCOME_ERROR
 
 
 def test_retry_count_is_read_from_the_thread_counter():

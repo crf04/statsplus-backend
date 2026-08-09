@@ -64,26 +64,47 @@ otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
 ID flows into provider telemetry events, so a log, a provider event, and a
 response header share one correlation key.
 
-Provider calls at the two external seams are wrapped in one structured event
-(`app.utils.telemetry.ProviderEvent`):
+External provider invocations and explicit local provider-normalization seams
+are wrapped in one structured event (`app.utils.telemetry.ProviderEvent`).
+`provider_call` identifies upstream work; `provider_normalization_call` is an
+adapter-owned normalization/empty-result decision.  The latter is emitted
+only when the local retrieval outcome says no upstream malformed or timeout
+event already represents the terminal failure, so one underlying defect is
+not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory with `_DabbleRetry`; explicitly injected sessions serialize only their `get` call. |
+| PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
+| Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
+
+The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
+context)`. Dabble, PrizePicks, and Underdog accept the same pregame NBA query,
+eligible market statuses, and absolute retrieval deadline and return immutable,
+market-centric provider snapshots. Canonical athlete, event, and statistic
+filters remain central because provider IDs are only evidence until later
+resolution. The shared model retains nullable provider identity and typed
+source evidence, exact decimal thresholds and modifiers, original labels,
+coverage, and complete/partial status. Adapters exclude ineligible offerings
+without guessing missing facts; they expose no provider-specific public routes.
 
 An event records provider, operation, outcome (success/timeout/http_error/
-malformed/error), duration, retry count (thread-safe counter incremented by
-`RetryWithLogging`), cache status (hit/miss/disabled), HTTP status, and the
-request ID. Events are written as one structured log line and retained in a
-bounded, thread-safe buffer (capacity 5000); credentials, authorization
-headers, URLs, raw bodies, and exception messages are never captured.
+malformed/error), duration, retry count (updated only when a configured
+provider retry hook reports a retry), cache status (hit/miss/disabled), HTTP
+status, and the request ID. Events are written as one structured log line and
+retained in a bounded, thread-safe buffer (capacity 5000); credentials,
+authorization headers, URLs, raw bodies, and exception messages are never
+captured.
 
-Provider failures are counted at the provider seam. The central error handler
-in `app.errors` counts only *application* failures (actual `AppError` codes and
-HTTP >= 500 responses) and skips `provider_unavailable` so the same provider
-error is never double counted. Operators read the bounded counters and recent
-events from the admin-only `GET /api/data/telemetry` endpoint.
+Provider failures are counted once at the seam that owns the failure. The
+central error handler in `app.errors` counts only *application* failures
+(actual `AppError` codes and HTTP >= 500 responses) and skips
+`provider_unavailable`; adapters also avoid emitting a local normalization
+failure when an upstream malformed or timeout event already represents the
+same terminal retrieval outcome. Operators read the bounded counters and
+recent events from the admin-only `GET /api/data/telemetry` endpoint.
 
 ## Request flows
 
@@ -209,6 +230,9 @@ validator must not be used to repair the fixture.
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `PBPTotalsAdapter.parse_totals`) with no network.
+- DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
+  against its recorded fixtures through `get_snapshot`; the shared compliance
+  suite verifies the same immutable `ProviderSnapshot` boundary for all three.
 - `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
