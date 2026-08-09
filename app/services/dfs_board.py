@@ -124,6 +124,45 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _identity_key(resolution: Any) -> tuple[str, str] | None:
+    """The provider identity one resolution describes, if it names one."""
+
+    provider_athlete_id = resolution.provider_athlete_id
+    if not isinstance(provider_athlete_id, str) or not provider_athlete_id.strip():
+        return None
+    return resolution.provider, provider_athlete_id.strip()
+
+
+def _consolidate_mapping_outcomes(
+    observed: Iterable[tuple[tuple[str, str] | None, Any]],
+) -> tuple[Any, ...]:
+    """Report one governed outcome per provider identity, in board order.
+
+    A snapshot can carry several markets for the same provider athlete, and
+    each one is observed in turn, so every outcome but the last describes a
+    state the identity has already left -- an automatic claim that a
+    contradicting market then promoted to a conflict, say.  Reporting them all
+    would hand a caller a canonical claim governance has since withdrawn,
+    right next to the state that withdrew it.  Each identity's last write is
+    the state that is durable when the board is returned, so it stands for
+    every occurrence, reported where the identity first appeared.  Evidence
+    that names no provider ID names no identity to consolidate, and is kept as
+    observed.
+    """
+
+    observed = tuple(observed)
+    final = {key: outcome for key, outcome in observed if key is not None}
+    consolidated: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for key, outcome in observed:
+        if key is None:
+            consolidated.append(outcome)
+        elif key not in seen:
+            seen.add(key)
+            consolidated.append(final[key])
+    return tuple(consolidated)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderOutcome:
     """One provider's complete, partial, or failed retrieval observation."""
@@ -625,7 +664,7 @@ class DFSBoardService:
             or board.query.season is None
         ):
             return board
-        outcomes: list[Any] = []
+        observed: list[tuple[tuple[str, str] | None, Any]] = []
         for snapshot in board.snapshots:
             for market in snapshot.markets:
                 if market.athlete is None:
@@ -653,14 +692,15 @@ class DFSBoardService:
                 # write returns the state governance reached for the identity,
                 # and the board reports that -- converted from the value in
                 # hand, never re-read, so the report cannot race the write.
-                outcomes.append(result.board_outcome(resolution))
+                outcome = result.board_outcome(resolution)
+                observed.append((_identity_key(resolution), outcome))
         return DFSBoard(
             query=board.query,
             provider_outcomes=board.provider_outcomes,
             disabled_providers=board.disabled_providers,
             generated_at=board.generated_at,
             contract_version=board.contract_version,
-            mapping_outcomes=tuple(outcomes),
+            mapping_outcomes=_consolidate_mapping_outcomes(observed),
         )
 
     def _record_telemetry(

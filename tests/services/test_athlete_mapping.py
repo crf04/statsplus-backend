@@ -2295,14 +2295,15 @@ def test_manual_decisions_still_reject_an_unknown_canonical_athlete(mapping_db):
 
 
 def _market(
-    provider_athlete_id: str = "pp-15",
+    provider_athlete_id: str | None = "pp-15",
     name: str = "Nikola Jokic",
     *,
     team: TeamEvidence | None = None,
+    market_id: str | None = None,
 ) -> PlayerProjectionMarket:
     return PlayerProjectionMarket(
         provider="prizepicks",
-        market_id=f"m-{provider_athlete_id}",
+        market_id=market_id or f"m-{provider_athlete_id}",
         athlete=AthleteEvidence(provider_id=provider_athlete_id, name=name, team=team),
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
@@ -2750,6 +2751,164 @@ def test_board_keeps_reporting_the_mapping_a_repeated_read_left_alone(mapping_db
     assert repeated.persisted is False
     assert repeated.canonical_player_id == 15
     assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+def test_a_fenced_read_that_left_no_mapping_claims_no_canonical_athlete(mapping_db):
+    """A governed state without an active mapping row asserts no claim."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    unmatched = resolver.resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="King James"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+    assert repository.record_resolution(unmatched).persisted is True
+    _reject_and_clear(repository, "pp-77")
+    delayed = resolver.resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+        "2024-25",
+        observed_at=_OBSERVED_BEFORE,
+    )
+
+    result = repository.record_resolution(delayed)
+    outcome = result.board_outcome(delayed)
+
+    # The read predates the clearing, so it is fenced and nothing is stored.
+    assert result.state == "auto"
+    assert result.persisted is False
+    assert result.mapping is None
+    assert repository.get_mapping("prizepicks", "pp-77") is None
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.resolution.canonical_player_id == 23
+    # Only an active governed mapping supplies a canonical athlete.
+    assert outcome.canonical_player_id is None
+
+
+def test_board_reports_one_outcome_when_a_snapshot_repeats_an_identity(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    board = _board_service(
+        _snapshot(_market(), _market(market_id="m-pp-15-again")),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    assert len(board.snapshots[0].markets) == 2
+    (outcome,) = board.mapping_outcomes
+    # The last write is the durable state, and the repeat changed nothing.
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.persisted is False
+    assert outcome.canonical_player_id == 15
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+def test_board_reports_the_conflict_a_contradictory_snapshot_ended_in(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    board = _board_service(
+        _snapshot(_market(), _market(name="LeBron James", market_id="m-pp-15-alt")),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    assert len(board.snapshots[0].markets) == 2
+    # Two markets shared one provider identity and disagreed about it.  The
+    # board reports the state that governs it now, not the claim it opened with.
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+def test_board_keeps_every_observation_that_names_no_provider_identity(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+
+    board = _board_service(
+        _snapshot(
+            _market(provider_athlete_id=None, market_id="m-1"),
+            _market(provider_athlete_id=None, market_id="m-2"),
+        ),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    # Neither observation names an identity, so neither stands for the other.
+    states = [outcome.state for outcome in board.mapping_outcomes]
+    assert states == [MappingResolutionState.MISSING_IDENTITY] * 2
+
+
+def test_board_reports_the_rejection_that_governs_a_repeated_identity(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    rejected = []
+
+    def race():
+        if rejected:
+            return
+        rejected.append(
+            repository.reject(
+                "prizepicks",
+                "pp-15",
+                operator_id="ops@example.com",
+                reason="provider identity is not trusted",
+            )
+        )
+
+    board, _ = _racing_board(
+        repository, _snapshot(_market(), _market(market_id="m-pp-15-again")), race
+    )
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.REJECTED
+    assert outcome.canonical_player_id is None
+
+
+def test_board_reports_the_manual_mapping_a_contradictory_snapshot_ended_in(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolved = []
+
+    def race():
+        resolved.append(None)
+        if len(resolved) != 3:
+            return
+        # An operator approves the identity the snapshot just conflicted over.
+        repository.approve(
+            "prizepicks",
+            "pp-15",
+            15,
+            season="2024-25",
+            operator_id="ops@example.com",
+            reason="verified source identity",
+            provider_evidence=AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        )
+
+    board, _ = _racing_board(
+        repository,
+        _snapshot(
+            _market(),
+            _market(name="LeBron James", market_id="m-pp-15-alt"),
+            _market(market_id="m-pp-15-again"),
+        ),
+        race,
+    )
+
+    # The identity conflicted mid-snapshot and was governed again before it
+    # ended, so the board reports the mapping that is actually durable now.
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MANUAL_APPROVED
+    assert outcome.canonical_player_id == 15
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "manual_approved"
 
 
 def _reused_identity_auto(

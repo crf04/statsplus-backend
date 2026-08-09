@@ -387,16 +387,17 @@ class BoardMappingOutcome:
     def canonical_player_id(self) -> int | None:
         """The canonical athlete this identity may be compared as.
 
-        ``None`` whenever the governed state asserts no claim, so a suppressed,
+        Only the active governed mapping supplies it, so a suppressed,
         disputed, or withdrawn identity cannot reach a comparison through the
-        canonical athlete the pre-transaction resolution happened to name.
+        canonical athlete the pre-transaction resolution happened to name.  A
+        claiming state with no mapping in hand is no exception: a fenced read
+        reports the state that governs the identity while storing nothing, so
+        there is no durable claim behind the athlete it proposed.
         """
 
-        if self.state not in CLAIMING_MAPPING_STATES:
+        if self.mapping is None or self.state not in CLAIMING_MAPPING_STATES:
             return None
-        if self.mapping is not None:
-            return self.mapping.canonical_player_id
-        return self.resolution.canonical_player_id
+        return self.mapping.canonical_player_id
 
 
 @dataclass(frozen=True, slots=True)
