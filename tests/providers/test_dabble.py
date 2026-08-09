@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -177,6 +178,39 @@ def test_idless_markets_with_distinct_variant_labels_remain_distinct():
     assert len(idless) == 2
     assert {market.variant_label for market in idless} == {"Partner A", "Partner B"}
     assert {market.variant.value for market in idless} == {"unknown"}
+
+
+def test_idless_markets_with_distinct_scoring_periods_remain_distinct():
+    detail = _payload("fixture_details.valid.json")
+    original = detail["sportFixtureDetail"]["playerProps"][0]
+    full_game = copy.deepcopy(original)
+    first_half = copy.deepcopy(original)
+    full_game.pop("marketId")
+    first_half.pop("marketId")
+    full_game["stats"] = ["points"]
+    first_half["stats"] = ["first-half-points"]
+    detail["sportFixtureDetail"]["playerProps"] = [
+        full_game,
+        first_half,
+        detail["sportFixtureDetail"]["playerProps"][2],
+    ]
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(detail),
+    ]
+
+    snapshot = DabbleAdapter(session=session).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
+
+    idless = [market for market in snapshot.markets if market.market_id is None]
+    assert len(idless) == 2
+    assert {market.scoring_period.value for market in idless} == {
+        "full_game",
+        "first_half",
+    }
 
 
 @pytest.mark.parametrize(
@@ -442,6 +476,45 @@ def test_conflicting_repeated_market_identity_is_malformed_and_partial():
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.markets
     assert "conflicting_source_identity" in snapshot.coverage.warning_codes
+    assert snapshot.coverage.fetched_count == 4
+    assert snapshot.coverage.eligible_count == 3
+    assert snapshot.coverage.normalized_count == 3
+    assert snapshot.coverage.skipped_count == 1
+
+
+def test_blocking_normalizer_cannot_extend_dabble_deadline(monkeypatch):
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_normalizer(*args, **kwargs):
+        del args, kwargs
+        started.set()
+        release.wait()
+        raise AssertionError("normalizer must not finish after the deadline")
+
+    adapter = DabbleAdapter(session=session)
+    monkeypatch.setattr(adapter, "_normalize_prop", blocking_normalizer)
+    deadline = datetime.now(timezone.utc).timestamp() + 0.05
+    deadline_at = datetime.fromtimestamp(deadline, tz=timezone.utc)
+    started_at = time.monotonic()
+
+    try:
+        with pytest.raises(ProviderUnavailableError):
+            adapter.get_snapshot(
+                NBAMarketQuery(),
+                RetrievalContext(deadline=deadline_at),
+            )
+    finally:
+        release.set()
+
+    assert started.is_set()
+    assert time.monotonic() - started_at < 0.5
 
 
 def test_invalid_json_and_http_errors_are_provider_unavailable():

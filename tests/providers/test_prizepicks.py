@@ -597,6 +597,31 @@ def test_prizepicks_conflicting_duplicate_identity_is_malformed() -> None:
         ).get_snapshot(_query(), _context())
 
 
+def test_prizepicks_conflict_is_counted_once_after_identity_acceptance() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    assert isinstance(rows, list)
+    conflict = copy.deepcopy(rows[0])
+    conflict["attributes"]["line_score"] = "28.500"
+    retained = copy.deepcopy(rows[0])
+    retained["id"] = "projection-retained"
+    rows.extend([conflict, retained])
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert [market.market_id for market in snapshot.markets] == [
+        "projection-retained"
+    ]
+    assert snapshot.coverage.fetched_count == 3
+    assert snapshot.coverage.eligible_count == 2
+    assert snapshot.coverage.normalized_count == 2
+    assert snapshot.coverage.skipped_count == 1
+
+
 def test_prizepicks_does_not_hide_implementation_defects(monkeypatch) -> None:
     session = FakeSession([FakeResponse(_payload("projections.page1.valid.json"))])
     adapter = PrizePicksAdapter(session=session)

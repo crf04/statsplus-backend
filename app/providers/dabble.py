@@ -30,6 +30,7 @@ from app.providers.dfs import (
     CoverageCode,
     CoverageRecordExcluded,
     CoverageRecordMalformed,
+    DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
     MarketThreshold,
@@ -44,12 +45,13 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    _NormalizedBatch,
     normalize_market_status,
     _RecordCoverageAccumulator,
     _build_snapshot,
 )
 from app.providers.dfs_normalization import optional_text
-from app.providers.dfs_transport import request_json
+from app.providers.dfs_transport import request_json, run_bounded
 from app.utils.telemetry import (
     PROVIDER_DABBLE,
     ProviderResponseError,
@@ -159,6 +161,34 @@ class _DetailResult:
     malformed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _DabbleDiscovery:
+    """Immutable discovery facts handed to the bounded detail pipeline."""
+
+    fixtures: tuple[tuple[dict[str, Any], dict[str, Any]], ...]
+    skipped_count: int = 0
+    warning_codes: tuple[CoverageCode, ...] = ()
+    skipped_reasons: tuple[CoverageCode, ...] = ()
+    diagnostic_details: tuple[str, ...] = ()
+    fanout_complete: bool = True
+    malformed_seen: bool = False
+    fixture_fetch_failed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _DabbleNormalization:
+    """One isolated, fully normalized fixture-detail observation."""
+
+    batch: _NormalizedBatch
+    skipped_count: int = 0
+    warning_codes: tuple[CoverageCode, ...] = ()
+    skipped_reasons: tuple[CoverageCode, ...] = ()
+    diagnostic_details: tuple[str, ...] = ()
+    fanout_complete: bool = True
+    malformed_seen: bool = False
+    deadline_error: bool = False
+
+
 class _DabbleRequestFailure(Exception):
     """Expected failure while fetching one Dabble resource."""
 
@@ -223,21 +253,126 @@ class DabbleAdapter:
             raise TypeError("context must be RetrievalContext")
 
         retrieved_at = self._now_utc()
-        merged_markets: dict[tuple[Any, ...], _MarketAccumulator] = {}
-        conflicted_market_keys: set[tuple[Any, ...]] = set()
+        discovery = self._discover_fixtures(query, context)
+        if not discovery.fixtures:
+            if discovery.fixture_fetch_failed:
+                raise self._unavailable(
+                    _DabbleRequestFailure("upstream_error", "fixture list")
+                )
+            if discovery.malformed_seen:
+                raise self._unavailable(
+                    ProviderResponseError("Dabble returned no usable fixture data")
+                )
+            return _build_snapshot(
+                provider=self.PROVIDER_ID,
+                markets=(),
+                retrieved_at=retrieved_at,
+                skipped_count=discovery.skipped_count,
+                pagination_complete=True,
+                fanout_complete=discovery.fanout_complete,
+                warning_codes=discovery.warning_codes,
+                skipped_reasons=discovery.skipped_reasons,
+                diagnostic_details=discovery.diagnostic_details,
+            )
+
+        detail_results = self._fetch_details(discovery.fixtures, context)
+        if context.is_expired(now=self._now_utc()):
+            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+        try:
+            normalization = run_bounded(
+                context=context,
+                now=self._now_utc,
+                call=lambda: self._normalize_detail_results(detail_results, query),
+            )
+        except DeadlineExceededError as error:
+            raise self._unavailable(
+                _DabbleRequestFailure("deadline_exceeded", error)
+            ) from error
+        if normalization.deadline_error or context.is_expired(now=self._now_utc()):
+            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+
+        batch = normalization.batch
+        warnings = (*discovery.warning_codes, *normalization.warning_codes, *batch.warning_codes)
+        skipped_reasons = (
+            *discovery.skipped_reasons,
+            *normalization.skipped_reasons,
+            *batch.skipped_reasons,
+        )
+        diagnostic_details = (
+            *discovery.diagnostic_details,
+            *normalization.diagnostic_details,
+            *batch.diagnostic_details,
+        )
+        skipped_count = (
+            discovery.skipped_count
+            + normalization.skipped_count
+            + batch.skipped_count
+        )
+        malformed_seen = (
+            discovery.malformed_seen
+            or normalization.malformed_seen
+            or batch.malformed_count > 0
+        )
+        fanout_complete = (
+            discovery.fanout_complete
+            and normalization.fanout_complete
+            and not malformed_seen
+        )
+
+        if not batch.markets:
+            if malformed_seen or not normalization.fanout_complete:
+                raise self._unavailable(
+                    ProviderResponseError("Dabble produced no usable markets")
+                )
+            return _build_snapshot(
+                provider=self.PROVIDER_ID,
+                markets=(),
+                retrieved_at=retrieved_at,
+                fetched_count=batch.fetched_count,
+                eligible_count=batch.eligible_count,
+                normalized_count=batch.normalized_count,
+                skipped_count=skipped_count,
+                pagination_complete=True,
+                fanout_complete=fanout_complete,
+                warning_codes=warnings,
+                skipped_reasons=skipped_reasons,
+                diagnostic_details=diagnostic_details,
+            )
+
+        return _build_snapshot(
+            provider=self.PROVIDER_ID,
+            markets=batch.markets,
+            retrieved_at=retrieved_at,
+            fetched_count=batch.fetched_count,
+            eligible_count=batch.eligible_count,
+            normalized_count=batch.normalized_count,
+            skipped_count=skipped_count,
+            pagination_complete=True,
+            fanout_complete=fanout_complete,
+            warning_codes=warnings,
+            skipped_reasons=skipped_reasons,
+            diagnostic_details=diagnostic_details,
+        )
+
+    def _discover_fixtures(
+        self,
+        query: NBAMarketQuery,
+        context: RetrievalContext,
+    ) -> _DabbleDiscovery:
+        """Discover eligible fixtures and own discovery coverage decisions."""
+
         warning_codes: list[CoverageCode] = []
         skipped_reasons: list[CoverageCode] = []
-        diagnostic_details: list[str] = []
-        record_coverage = _RecordCoverageAccumulator(malformed_is_eligible=True)
         skipped_count = 0
-        fanout_complete = True
         malformed_seen = False
+        fanout_complete = True
+        fixture_fetch_failed = False
 
         def warn(code: CoverageCode) -> None:
             if code not in warning_codes:
                 warning_codes.append(code)
 
-        def skipped(reason: CoverageCode, *, warning: bool = False) -> None:
+        def skip(reason: CoverageCode, *, warning: bool = False) -> None:
             nonlocal skipped_count
             skipped_count += 1
             if reason not in skipped_reasons:
@@ -260,7 +395,7 @@ class DabbleAdapter:
         if competitions_result.skipped_count:
             warn(CoverageCode.MALFORMED_RECORD)
             for _ in range(competitions_result.skipped_count):
-                skipped(CoverageCode.MALFORMED_RECORD)
+                skip(CoverageCode.MALFORMED_RECORD)
             malformed_seen = True
         if not competitions and competitions_result.skipped_count:
             raise self._unavailable(
@@ -270,21 +405,18 @@ class DabbleAdapter:
         nba_competitions: list[dict[str, Any]] = []
         for competition in competitions:
             if not self._is_nba_competition(competition, query):
-                skipped(CoverageCode.NON_NBA_COMPETITION)
+                skip(CoverageCode.NON_NBA_COMPETITION)
                 continue
             if not competition.get("id"):
-                skipped(CoverageCode.MISSING_COMPETITION_ID, warning=True)
+                skip(CoverageCode.MISSING_COMPETITION_ID, warning=True)
                 malformed_seen = True
                 continue
             nba_competitions.append(competition)
 
         fixtures: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        fixture_fetch_failed = False
         for competition in nba_competitions:
             if context.is_expired(now=self._now_utc()):
-                raise self._unavailable(
-                    _DabbleRequestFailure("deadline_exceeded")
-                )
+                raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
             try:
                 fixtures_result = self._request_json(
                     context,
@@ -300,61 +432,68 @@ class DabbleAdapter:
                 fixture_fetch_failed = True
                 fanout_complete = False
                 warn(CoverageCode.FIXTURE_LIST_FAILED)
-                skipped(CoverageCode.FIXTURE_LIST_FAILED, warning=False)
+                skip(CoverageCode.FIXTURE_LIST_FAILED)
                 logger.warning("Dabble fixture list failed: %s", type(error).__name__)
                 continue
             if fixtures_result.skipped_count:
                 warn(CoverageCode.MALFORMED_RECORD)
                 for _ in range(fixtures_result.skipped_count):
-                    skipped(CoverageCode.MALFORMED_RECORD)
+                    skip(CoverageCode.MALFORMED_RECORD)
                 malformed_seen = True
             for fixture in fixtures_result.rows:
                 if not self._fixture_matches_query(fixture):
-                    skipped(CoverageCode.NON_NBA_SPORT)
+                    skip(CoverageCode.NON_NBA_SPORT)
                     continue
                 try:
-                    status = normalize_market_status(
-                        fixture.get("status")
-                    ).value
+                    status = normalize_market_status(fixture.get("status")).value
                 except ValueError:
-                    skipped(CoverageCode.INELIGIBLE_STATUS)
+                    skip(CoverageCode.INELIGIBLE_STATUS)
                     continue
                 if status.value not in query.market_statuses:
-                    skipped(CoverageCode.INELIGIBLE_STATUS)
+                    skip(CoverageCode.INELIGIBLE_STATUS)
                     continue
                 fixtures.append((fixture, competition))
 
         if context.is_expired(now=self._now_utc()):
             raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+        return _DabbleDiscovery(
+            fixtures=tuple(fixtures),
+            skipped_count=skipped_count,
+            warning_codes=tuple(warning_codes),
+            skipped_reasons=tuple(skipped_reasons),
+            fanout_complete=fanout_complete,
+            malformed_seen=malformed_seen,
+            fixture_fetch_failed=fixture_fetch_failed,
+        )
 
-        if not fixtures:
-            if fixture_fetch_failed:
-                raise self._unavailable(
-                    _DabbleRequestFailure("upstream_error", "fixture list")
-                )
-            if malformed_seen:
-                raise self._unavailable(
-                    ProviderResponseError("Dabble returned no usable fixture data")
-                )
-            return _build_snapshot(
-                provider=self.PROVIDER_ID,
-                markets=(),
-                retrieved_at=retrieved_at,
-                fetched_count=record_coverage.fetched_count,
-                eligible_count=record_coverage.eligible_count,
-                normalized_count=record_coverage.normalized_count,
-                skipped_count=skipped_count + record_coverage.skipped_count,
-                pagination_complete=True,
-                fanout_complete=True,
-                warning_codes=warning_codes + record_coverage.warning_codes,
-                skipped_reasons=skipped_reasons + record_coverage.skipped_reasons,
-                diagnostic_details=diagnostic_details + record_coverage.diagnostic_details,
+    def _normalize_detail_results(
+        self,
+        detail_results: Sequence[_DetailResult],
+        query: NBAMarketQuery,
+    ) -> _DabbleNormalization:
+        """Normalize and merge details in caller-isolated state."""
+
+        merged_markets: dict[tuple[Any, ...], _MarketAccumulator] = {}
+        conflicted_market_keys: set[tuple[Any, ...]] = set()
+        warning_codes: list[CoverageCode] = []
+        skipped_reasons: list[CoverageCode] = []
+        diagnostic_details: list[str] = []
+        record_coverage = _RecordCoverageAccumulator()
+        skipped_count = 0
+        fanout_complete = True
+        malformed_seen = False
+        deadline_error = False
+
+        def merge(
+            normalized: tuple[tuple[Any, ...], PlayerProjectionMarket, Selection],
+        ) -> None:
+            self._merge_normalized_prop(
+                normalized,
+                warning_codes,
+                merged_markets,
+                conflicted_market_keys,
             )
 
-        detail_results = self._fetch_details(fixtures, context)
-        if context.is_expired(now=self._now_utc()):
-            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
-        deadline_error = False
         for result in detail_results:
             if result.error is not None:
                 if getattr(result.error, "reason", None) == "deadline_exceeded":
@@ -362,11 +501,12 @@ class DabbleAdapter:
                 fanout_complete = False
                 if result.malformed:
                     malformed_seen = True
-                    warn(CoverageCode.FIXTURE_MALFORMED)
-                    skipped(CoverageCode.FIXTURE_MALFORMED, warning=False)
+                    warning_codes.append(CoverageCode.FIXTURE_MALFORMED)
+                    skipped_reasons.append(CoverageCode.FIXTURE_MALFORMED)
                 else:
-                    warn(CoverageCode.FIXTURE_FAILED)
-                    skipped(CoverageCode.FIXTURE_FAILED, warning=False)
+                    warning_codes.append(CoverageCode.FIXTURE_FAILED)
+                    skipped_reasons.append(CoverageCode.FIXTURE_FAILED)
+                skipped_count += 1
                 continue
             assert result.detail is not None
             detail = result.detail
@@ -374,8 +514,9 @@ class DabbleAdapter:
             if not isinstance(props, list):
                 fanout_complete = False
                 malformed_seen = True
-                warn(CoverageCode.FIXTURE_MALFORMED)
-                skipped(CoverageCode.FIXTURE_MALFORMED, warning=False)
+                warning_codes.append(CoverageCode.FIXTURE_MALFORMED)
+                skipped_reasons.append(CoverageCode.FIXTURE_MALFORMED)
+                skipped_count += 1
                 continue
             record_coverage.extend(
                 props,
@@ -386,49 +527,36 @@ class DabbleAdapter:
                     competition=result.competition,
                     query=query,
                 ),
-                on_success=lambda normalized: self._merge_normalized_prop(
-                    normalized,
-                    warning_codes,
-                    merged_markets,
-                    conflicted_market_keys,
-                ),
+                on_success=merge,
             )
-
             if record_coverage.malformed_count:
                 malformed_seen = True
                 fanout_complete = False
 
-        if deadline_error or context.is_expired(now=self._now_utc()):
-            raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
+        batch = _NormalizedBatch.from_accumulator(
+            record_coverage,
+            markets=self._assemble_markets(merged_markets),
+            warning_codes=warning_codes,
+        )
+        return _DabbleNormalization(
+            batch=batch,
+            skipped_count=skipped_count,
+            warning_codes=tuple(warning_codes),
+            skipped_reasons=tuple(skipped_reasons),
+            diagnostic_details=tuple(diagnostic_details),
+            fanout_complete=fanout_complete,
+            malformed_seen=malformed_seen,
+            deadline_error=deadline_error,
+        )
 
-        skipped_count += record_coverage.skipped_count
-        warning_codes.extend(record_coverage.warning_codes)
-        skipped_reasons.extend(record_coverage.skipped_reasons)
-        diagnostic_details.extend(record_coverage.diagnostic_details)
-        markets = merged_markets
+    def _assemble_markets(
+        self,
+        merged_markets: Mapping[tuple[Any, ...], _MarketAccumulator],
+    ) -> tuple[PlayerProjectionMarket, ...]:
+        """Finalize merged selections only after normalization is committed."""
 
-        if not markets:
-            if malformed_seen or not fanout_complete:
-                raise self._unavailable(
-                    ProviderResponseError("Dabble produced no usable markets")
-                )
-            return _build_snapshot(
-                provider=self.PROVIDER_ID,
-                markets=(),
-                retrieved_at=retrieved_at,
-                fetched_count=record_coverage.fetched_count,
-                eligible_count=record_coverage.eligible_count,
-                normalized_count=record_coverage.normalized_count,
-                skipped_count=skipped_count,
-                pagination_complete=True,
-                fanout_complete=True,
-                warning_codes=warning_codes,
-                skipped_reasons=skipped_reasons,
-                diagnostic_details=diagnostic_details,
-            )
-
-        market_values = []
-        for accumulator in markets.values():
+        market_values: list[PlayerProjectionMarket] = []
+        for accumulator in merged_markets.values():
             selections = tuple(
                 accumulator.selections[key]
                 for key in sorted(accumulator.selections, key=str)
@@ -444,21 +572,7 @@ class DabbleAdapter:
                     selections=selections,
                 )
             )
-
-        return _build_snapshot(
-            provider=self.PROVIDER_ID,
-            markets=tuple(sorted(market_values, key=self._market_sort_key)),
-            retrieved_at=retrieved_at,
-            fetched_count=record_coverage.fetched_count,
-            eligible_count=record_coverage.eligible_count,
-            normalized_count=record_coverage.normalized_count,
-            skipped_count=skipped_count,
-            pagination_complete=True,
-            fanout_complete=fanout_complete and not malformed_seen,
-            warning_codes=warning_codes,
-            skipped_reasons=skipped_reasons,
-            diagnostic_details=diagnostic_details,
-        )
+        return tuple(sorted(market_values, key=self._market_sort_key))
 
     def _merge_normalized_prop(
         self,
@@ -893,6 +1007,8 @@ class DabbleAdapter:
                 tuple(components),
                 value,
                 status.value,
+                market.scoring_period,
+                market.scoring_period_label,
                 market.variant,
                 market.variant_label,
             )

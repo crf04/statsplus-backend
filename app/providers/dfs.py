@@ -737,7 +737,7 @@ class CoverageRecordMalformed(MalformedProviderResponseError):
 class _RecordCoverageAccumulator:
     """Account for normalized records consistently across provider adapters."""
 
-    def __init__(self, *, malformed_is_eligible: bool = False) -> None:
+    def __init__(self) -> None:
         self.markets: list[Any] = []
         self.fetched_count = 0
         self.eligible_count = 0
@@ -747,7 +747,6 @@ class _RecordCoverageAccumulator:
         self.warning_codes: list[CoverageCode] = []
         self.skipped_reasons: list[CoverageCode] = []
         self.diagnostic_details: list[str] = []
-        self._malformed_is_eligible = malformed_is_eligible
 
     def add(
         self,
@@ -765,18 +764,71 @@ class _RecordCoverageAccumulator:
             self._exclude(error)
             return
         except CoverageRecordMalformed as error:
-            self._malformed(error, count_as_eligible=self._malformed_is_eligible)
+            self._malformed(error)
             return
 
-        self.eligible_count += 1
-        self.normalized_count += 1
         try:
             if on_success is None:
                 self.markets.append(normalized)
             else:
                 on_success(normalized)
         except CoverageRecordMalformed as error:
-            self._malformed(error, count_as_eligible=False)
+            self._malformed(error)
+            return
+
+        # Identity-aware consumers (such as the shared market collector) may
+        # reject a normalized value.  Commit source coverage only after that
+        # transaction accepts the value; a rejected value is one malformed
+        # source row, accounted for by _malformed above.
+        self.eligible_count += 1
+        self.normalized_count += 1
+
+    def accept_normalized(
+        self,
+        normalized: Any,
+        *,
+        on_success: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Commit one already-normalized row after identity acceptance.
+
+        Parsers may need to normalize inside a bounded transport worker.  A
+        caller can then feed the immutable normalized batch through the same
+        identity transaction without counting the row twice as fetched.
+        """
+
+        try:
+            if on_success is None:
+                self.markets.append(normalized)
+            else:
+                on_success(normalized)
+        except CoverageRecordMalformed as error:
+            self._malformed(error)
+            return
+        self.eligible_count += 1
+        self.normalized_count += 1
+
+    def absorb(
+        self,
+        batch: "_NormalizedBatch",
+        *,
+        on_success: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Merge a parser batch while retaining one identity/accounting owner."""
+
+        self.fetched_count += batch.fetched_count
+        self.skipped_count += batch.skipped_count
+        self.malformed_count += batch.malformed_count
+        for code in batch.warning_codes:
+            if code not in self.warning_codes:
+                self.warning_codes.append(code)
+        for code in batch.skipped_reasons:
+            if code not in self.skipped_reasons:
+                self.skipped_reasons.append(code)
+        for detail in batch.diagnostic_details:
+            if detail not in self.diagnostic_details:
+                self.diagnostic_details.append(detail)
+        for normalized in batch.markets:
+            self.accept_normalized(normalized, on_success=on_success)
 
     def extend(
         self,
@@ -798,13 +850,9 @@ class _RecordCoverageAccumulator:
     def _malformed(
         self,
         error: CoverageRecordMalformed,
-        *,
-        count_as_eligible: bool,
     ) -> None:
         self.skipped_count += 1
         self.malformed_count += 1
-        if count_as_eligible:
-            self.eligible_count += 1
         if CoverageCode.MALFORMED_RECORD not in self.warning_codes:
             self.warning_codes.append(CoverageCode.MALFORMED_RECORD)
         if error.code not in self.skipped_reasons:
@@ -836,20 +884,43 @@ class _NormalizedBatch:
     diagnostic_details: tuple[str, ...]
     malformed_count: int
 
+    def __post_init__(self) -> None:
+        if self.fetched_count != self.eligible_count + self.skipped_count:
+            raise ValueError(
+                "normalized batch coverage must partition fetched rows"
+            )
+        if self.normalized_count != self.eligible_count:
+            raise ValueError(
+                "normalized batch normalized and eligible counts must agree"
+            )
+        if self.malformed_count > self.skipped_count:
+            raise ValueError(
+                "normalized batch malformed rows cannot exceed skipped rows"
+            )
+        if len(self.markets) > self.normalized_count:
+            raise ValueError(
+                "normalized batch retained markets cannot exceed normalized rows"
+            )
+
     @classmethod
     def from_accumulator(
         cls,
         accumulator: _RecordCoverageAccumulator,
+        *,
+        markets: Iterable[PlayerProjectionMarket] | None = None,
+        warning_codes: Iterable[CoverageCode] = (),
     ) -> "_NormalizedBatch":
         """Finalize one normalized-record accumulator consistently."""
 
         return cls(
-            markets=tuple(accumulator.markets),
+            markets=tuple(accumulator.markets if markets is None else markets),
             fetched_count=accumulator.fetched_count,
             eligible_count=accumulator.eligible_count,
             normalized_count=accumulator.normalized_count,
             skipped_count=accumulator.skipped_count,
-            warning_codes=accumulator.warning_values(),
+            warning_codes=tuple(
+                dict.fromkeys((*accumulator.warning_values(), *warning_codes))
+            ),
             skipped_reasons=accumulator.skipped_values(),
             diagnostic_details=accumulator.diagnostic_values(),
             malformed_count=accumulator.malformed_count,
@@ -979,10 +1050,6 @@ class _SnapshotMarketCollector:
         self._seen: dict[tuple[str, str], PlayerProjectionMarket] = {}
         self._conflicting: set[tuple[str, str]] = set()
         self._warning_codes: list[CoverageCode] = []
-        self._skipped_reasons: list[CoverageCode] = []
-        self._diagnostic_details: list[str] = []
-        self.skipped_count = 0
-        self.malformed_count = 0
 
     def add(self, market: PlayerProjectionMarket) -> None:
         """Add one normalized market, recording exact duplicates or conflicts."""
@@ -1000,12 +1067,10 @@ class _SnapshotMarketCollector:
             self._warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
             return
         self._conflicting.add(identity)
-        self.skipped_count += 1
-        self.malformed_count += 1
         self._warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-        self._skipped_reasons.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-        self._diagnostic_details.append(
-            "repeated provider market identity has conflicting normalized content"
+        raise CoverageRecordMalformed(
+            "repeated provider market identity has conflicting normalized content",
+            code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
         )
 
     def extend(self, markets: Iterable[PlayerProjectionMarket]) -> None:
@@ -1029,14 +1094,6 @@ class _SnapshotMarketCollector:
     @property
     def warning_codes(self) -> tuple[CoverageCode, ...]:
         return tuple(dict.fromkeys(self._warning_codes))
-
-    @property
-    def skipped_reasons(self) -> tuple[CoverageCode, ...]:
-        return tuple(dict.fromkeys(self._skipped_reasons))
-
-    @property
-    def diagnostic_details(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(self._diagnostic_details))
 
 
 def _build_snapshot(

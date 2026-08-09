@@ -360,6 +360,28 @@ def test_underdog_conflicting_duplicate_identity_is_malformed() -> None:
         ).get_snapshot(_query(), _context())
 
 
+def test_underdog_conflict_is_counted_once_after_identity_acceptance() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    conflict = copy.deepcopy(rows[0])
+    conflict["stat_value"] = "13.500"
+    retained = copy.deepcopy(rows[0])
+    retained["id"] = "line-retained"
+    rows.extend([conflict, retained])
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert [market.market_id for market in snapshot.markets] == ["line-retained"]
+    assert snapshot.coverage.fetched_count == 3
+    assert snapshot.coverage.eligible_count == 2
+    assert snapshot.coverage.normalized_count == 2
+    assert snapshot.coverage.skipped_count == 1
+
+
 def test_underdog_timeout_is_typed_provider_error() -> None:
     with pytest.raises(ProviderUnavailableError):
         UnderdogAdapter(

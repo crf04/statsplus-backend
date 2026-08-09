@@ -111,6 +111,69 @@ def _run_request(
         result.done.set()
 
 
+def _run_callable(result: _RequestResult, call: Callable[[], _Result]) -> None:
+    """Run non-transport provider work in the same bounded daemon pool."""
+
+    try:
+        result.value = call()
+    except BaseException as error:  # propagate implementation failures
+        result.error = error
+    finally:
+        result.completed_at = time.monotonic()
+        _request_slots.release()
+        result.done.set()
+
+
+def run_bounded(
+    *,
+    context: RetrievalContext,
+    now: Callable[[], datetime],
+    call: Callable[[], _Result],
+) -> _Result:
+    """Run a potentially blocking provider pipeline under an absolute deadline.
+
+    The bounded daemon worker is deliberately given no mutable caller-owned
+    accumulator.  If it outlives the deadline, its result and any intermediate
+    state remain isolated and are discarded by the caller.
+    """
+
+    monotonic_start = time.monotonic()
+    current = now()
+    context.ensure_active(now=current)
+    remaining = context.remaining_seconds(now=current)
+    monotonic_deadline = monotonic_start + remaining
+    slot_wait = max(0.0, monotonic_deadline - time.monotonic())
+    if not _request_slots.acquire(timeout=slot_wait):
+        raise DeadlineExceededError("provider retrieval deadline exceeded")
+
+    result = _RequestResult()
+    try:
+        worker = threading.Thread(
+            target=_run_callable,
+            args=(result, call),
+            daemon=True,
+            name="statsplus-provider-pipeline",
+        )
+        worker.start()
+    except BaseException:
+        _request_slots.release()
+        raise
+
+    remaining = max(0.0, monotonic_deadline - time.monotonic())
+    if not result.done.wait(timeout=remaining):
+        raise DeadlineExceededError("provider retrieval deadline exceeded")
+    if (
+        result.completed_at is None
+        or result.completed_at > monotonic_deadline
+        or time.monotonic() >= monotonic_deadline
+    ):
+        raise DeadlineExceededError("provider retrieval deadline exceeded")
+    context.ensure_active(now=now())
+    if result.error is not None:
+        raise result.error
+    return result.value
+
+
 def bounded_timeout(
     context: RetrievalContext,
     timeout: tuple[float, float],
@@ -251,4 +314,4 @@ def request_json(
         raise ProviderUnavailableError(unavailable_message, detail=error) from error
 
 
-__all__ = ["bounded_timeout", "request_json"]
+__all__ = ["bounded_timeout", "request_json", "run_bounded"]

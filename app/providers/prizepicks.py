@@ -121,11 +121,7 @@ class PrizePicksAdapter:
         total_pages = 1
         expected_total: int | None = None
         collection = _SnapshotMarketCollector()
-        fetched_count = 0
-        eligible_count = 0
-        normalized_count = 0
-        skipped_count = 0
-        malformed_count = 0
+        coverage = _RecordCoverageAccumulator()
         warning_codes: list[CoverageCode] = []
         skipped_reasons: list[CoverageCode] = []
         diagnostic_details: list[str] = []
@@ -196,29 +192,18 @@ class PrizePicksAdapter:
                 skipped_reasons.append(CoverageCode.PAGINATION_EXPECTED_TOTAL_CHANGED)
                 break
             batch = result.batch
-            fetched_count += batch.fetched_count
-            eligible_count += batch.eligible_count
-            normalized_count += batch.normalized_count
-            skipped_count += batch.skipped_count
-            malformed_count += batch.malformed_count
-            warning_codes.extend(batch.warning_codes)
-            skipped_reasons.extend(batch.skipped_reasons)
-            diagnostic_details.extend(batch.diagnostic_details)
-            if batch.malformed_count:
+            coverage.absorb(batch, on_success=collection.add)
+            if coverage.malformed_count:
                 fanout_complete = False
-
-            collection.extend(batch.markets)
 
             page += 1
 
         markets = collection.markets
-        skipped_count += collection.skipped_count
-        malformed_count += collection.malformed_count
+        malformed_count = coverage.malformed_count
+        warning_codes.extend(coverage.warning_values())
+        skipped_reasons.extend(coverage.skipped_values())
+        diagnostic_details.extend(coverage.diagnostic_values())
         warning_codes.extend(collection.warning_codes)
-        skipped_reasons.extend(collection.skipped_reasons)
-        diagnostic_details.extend(collection.diagnostic_details)
-        if collection.malformed_count:
-            fanout_complete = False
         if malformed_count:
             fanout_complete = False
 
@@ -227,7 +212,7 @@ class PrizePicksAdapter:
         if (
             not markets
             and expected_total is not None
-            and fetched_count < expected_total
+            and coverage.fetched_count < expected_total
         ):
             raise self._invalid_response(
                 "pagination ended before the expected PrizePicks records were fetched"
@@ -236,10 +221,10 @@ class PrizePicksAdapter:
             provider=self.name,
             markets=markets,
             retrieved_at=retrieved_at,
-            fetched_count=fetched_count,
-            eligible_count=eligible_count,
-            normalized_count=normalized_count,
-            skipped_count=skipped_count,
+            fetched_count=coverage.fetched_count,
+            eligible_count=coverage.eligible_count,
+            normalized_count=coverage.normalized_count,
+            skipped_count=coverage.skipped_count,
             pagination_complete=pagination_complete,
             fanout_complete=fanout_complete,
             expected_total=expected_total,

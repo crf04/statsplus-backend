@@ -102,19 +102,12 @@ class UnderdogAdapter:
         except _MalformedPayload as error:
             raise self._invalid_response(error) from error
 
-        collection = _SnapshotMarketCollector()
         warning_codes = list(result.warning_codes)
         skipped_reasons = list(result.skipped_reasons)
         diagnostic_details = list(result.diagnostic_details)
         skipped_count = result.skipped_count
         malformed_count = result.malformed_count
-        collection.extend(result.markets)
-        markets = collection.markets
-        skipped_count += collection.skipped_count
-        malformed_count += collection.malformed_count
-        warning_codes.extend(collection.warning_codes)
-        skipped_reasons.extend(collection.skipped_reasons)
-        diagnostic_details.extend(collection.diagnostic_details)
+        markets = result.markets
         if malformed_count and not markets:
             raise self._invalid_response("no usable Underdog player markets")
         snapshot = _build_snapshot(
@@ -195,6 +188,7 @@ class UnderdogAdapter:
                 raise _MalformedPayload("game identity has conflicting content")
             games.setdefault(match_id, match)
 
+        collection = _SnapshotMarketCollector()
         records = _RecordCoverageAccumulator()
         records.extend(
             rows,
@@ -206,9 +200,14 @@ class UnderdogAdapter:
                 expected_sport=expected_sport,
                 allowed_statuses=allowed_statuses,
             ),
+            on_success=collection.add,
         )
 
-        return _NormalizedBatch.from_accumulator(records)
+        return _NormalizedBatch.from_accumulator(
+            records,
+            markets=collection.markets,
+            warning_codes=collection.warning_codes,
+        )
 
     @classmethod
     def _normalize_line(
