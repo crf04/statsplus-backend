@@ -328,11 +328,10 @@ def test_prizepicks_recorded_boundary_excludes_ineligible_market_kinds_with_cove
     assert snapshot.coverage.skipped_count == 8
     assert "ineligible_status" in snapshot.coverage.skipped_reasons
     assert "non_player_market" in snapshot.coverage.skipped_reasons
-    assert "missing_event_relationship" in snapshot.coverage.skipped_reasons
     assert "non_nba_market" in snapshot.coverage.skipped_reasons
 
 
-def test_prizepicks_future_with_linked_event_keeps_supplied_event_evidence() -> None:
+def test_prizepicks_future_with_linked_event_is_excluded_with_coverage() -> None:
     payload = _payload("projections.page1.valid.json")
     row = payload["data"][0]
     included = payload["included"]
@@ -358,10 +357,10 @@ def test_prizepicks_future_with_linked_event_keeps_supplied_event_evidence() -> 
     ).get_snapshot(_query(), _context())
 
     assert snapshot.status is SnapshotStatus.COMPLETE
-    assert len(snapshot.markets) == 1
-    assert snapshot.markets[0].event is not None
-    assert snapshot.markets[0].event.provider_id == "game-future-1"
-    assert snapshot.markets[0].event.label == "DAL vs. SAS"
+    assert snapshot.markets == ()
+    assert snapshot.coverage.fetched_count == 1
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
 
 
 def test_prizepicks_active_player_future_without_event_is_excluded() -> None:
@@ -376,8 +375,9 @@ def test_prizepicks_active_player_future_without_event_is_excluded() -> None:
     ).get_snapshot(_query(), _context())
 
     assert snapshot.markets == ()
+    assert snapshot.coverage.fetched_count == 1
     assert snapshot.coverage.skipped_count == 1
-    assert "missing_event_relationship" in snapshot.coverage.skipped_reasons
+    assert CoverageCode.NON_PLAYER_MARKET in snapshot.coverage.skipped_reasons
 
 
 def test_prizepicks_deadline_is_checked_after_upstream_response() -> None:
@@ -446,3 +446,22 @@ def test_prizepicks_does_not_hide_implementation_defects(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="adapter bug"):
         adapter.get_snapshot(_query(), _context())
+
+
+def test_prizepicks_does_not_hide_value_error_from_normalizer(monkeypatch) -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+    session = FakeSession([FakeResponse(payload)])
+
+    def broken_market_kind(attributes):
+        del attributes
+        raise ValueError("normalizer bug")
+
+    monkeypatch.setattr(
+        PrizePicksAdapter,
+        "_market_kind",
+        staticmethod(broken_market_kind),
+    )
+
+    with pytest.raises(ValueError, match="normalizer bug"):
+        PrizePicksAdapter(session=session).get_snapshot(_query(), _context())

@@ -346,7 +346,7 @@ class PrizePicksAdapter:
             except _ExcludedRecord as error:
                 skipped_count += 1
                 skipped_reasons.append(CoverageCode(error.reason))
-            except ValueError as error:
+            except _MalformedRecord as error:
                 skipped_count += 1
                 malformed_count += 1
                 warning_codes.append(CoverageCode.MALFORMED_RECORD)
@@ -396,13 +396,9 @@ class PrizePicksAdapter:
         if not isinstance(attributes, Mapping) or not isinstance(relationships, Mapping):
             raise _MalformedRecord("projection attributes and relationships must be objects")
         market_kind = cls._market_kind(attributes)
-        if market_kind == "non_player":
+        if market_kind in {"non_player", "future"}:
             raise _ExcludedRecord("non_player_market")
-        is_future = market_kind == "future"
-        projection_id = required_identifier(row, "id")
-        player_relation = cls._optional_relationship(relationships, "new_player")
-        if player_relation is None and is_future:
-            raise _ExcludedRecord("non_player_market")
+        projection_id = cls._record_identifier(row, "id")
         player_id = cls._relationship_id(relationships, "new_player")
         league_id = cls._relationship_id(relationships, "league")
         player = resources.get(("new_player", player_id))
@@ -414,23 +410,23 @@ class PrizePicksAdapter:
         if not isinstance(player_attributes, Mapping) or not isinstance(league_attributes, Mapping):
             raise _MalformedRecord("related resource attributes must be objects")
 
-        league_name = required_text(league_attributes, "name")
+        league_name = cls._record_text(league_attributes, "name")
         if league_name.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
-        raw_status = required_text(attributes, "status")
+        raw_status = cls._record_text(attributes, "status")
         status = normalize_status(raw_status)
         if status is None:
             raise _ExcludedRecord("ineligible_status")
         if status not in allowed_statuses:
             raise _ExcludedRecord("status_filter")
 
-        player_name = required_text(player_attributes, "name")
-        stat_label = required_text(attributes, "stat_type")
-        line_score = required_number(attributes, "line_score")
+        player_name = cls._record_text(player_attributes, "name")
+        stat_label = cls._record_text(attributes, "stat_type")
+        line_score = cls._record_number(attributes, "line_score")
         start_value = attributes.get("start_time")
         updated_value = attributes.get("updated_at")
-        validate_timestamp(start_value, "start_time")
-        validate_timestamp(updated_value, "updated_at")
+        cls._record_timestamp(start_value, "start_time")
+        cls._record_timestamp(updated_value, "updated_at")
 
         team = cls._team_from_mapping(player_attributes)
         sport = SportEvidence(label=league_name)
@@ -439,12 +435,7 @@ class PrizePicksAdapter:
             label=league_name,
             sport=sport,
         )
-        event_relation = cls._event_relationship(relationships)
-        if is_future and event_relation is None:
-            raise _ExcludedRecord("missing_event_relationship")
         event = cls._event_from_projection(attributes, relationships, resources)
-        if is_future and event is None:
-            raise _ExcludedRecord("missing_event_relationship")
         variant_label = optional_text(attributes.get("odds_type"))
         variant = normalize_market_variant(variant_label)
         period_label = optional_text(
@@ -513,8 +504,8 @@ class PrizePicksAdapter:
         )
         if status_label is not None and is_ineligible_event_status(status_label):
             raise _ExcludedRecord("ineligible_event_status")
-        validate_timestamp(starts_at, "event start_time")
-        validate_timestamp(updated_at, "event updated_at")
+        cls._record_timestamp(starts_at, "event start_time")
+        cls._record_timestamp(updated_at, "event updated_at")
         if provider_id is None and label is None and starts_at is None and updated_at is None:
             return None
         try:
@@ -537,6 +528,34 @@ class PrizePicksAdapter:
             if name in relationships:
                 return cls._optional_relationship(relationships, name)
         return None
+
+    @staticmethod
+    def _record_identifier(value: Mapping[str, Any], key: str) -> str:
+        try:
+            return required_identifier(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _record_text(value: Mapping[str, Any], key: str) -> str:
+        try:
+            return required_text(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _record_number(value: Mapping[str, Any], key: str) -> str | int | float:
+        try:
+            return required_number(value, key)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
+
+    @staticmethod
+    def _record_timestamp(value: Any, field: str) -> None:
+        try:
+            validate_timestamp(value, field)
+        except ValueError as error:
+            raise _MalformedRecord(str(error)) from error
 
     @staticmethod
     def _market_kind(attributes: Mapping[str, Any]) -> str | None:
@@ -617,7 +636,7 @@ class PrizePicksAdapter:
             return None
         if not isinstance(data, Mapping):
             raise _MalformedRecord(f"{name} relationship data must be an object")
-        return required_text(data, "type"), required_identifier(data, "id")
+        return cls._record_text(data, "type"), cls._record_identifier(data, "id")
 
     @classmethod
     def _team_from_mapping(cls, attributes: Mapping[str, Any]) -> TeamEvidence | None:
