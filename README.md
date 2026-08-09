@@ -202,6 +202,42 @@ read-only with respect to providers and rejects the bundled demo database.
 Read-only commands never run migrations; initialize or upgrade the writable
 schema explicitly with `python scripts/migrate.py` first.
 
+Provider event identity is resolved the same way, from canonical home and away
+teams plus schedule proximity to the canonical event catalog. Inspect or operate
+the durable mapping state with its own offline operator CLI:
+
+```bash
+python scripts/event_mappings.py list \
+  --database-url sqlite:////tmp/statsplus.sqlite3
+python scripts/event_mappings.py dry-run \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --provider underdog --provider-event-id ud-123 --season 2025-26 \
+  --starts-at 2025-10-23T00:00:00+00:00 \
+  --home-team-abbreviation LAL --away-team-abbreviation SAS
+```
+
+An event maps automatically only when both canonical teams are identified in the
+orientation the provider reported and exactly one scheduled NBA game sits within
+`EVENT_MAPPING_MATCH_WINDOW_HOURS` (default six, boundary included) of the
+reported start time. Two equally near games are `ambiguous`, none is
+`unmatched`, and a matchup label is retained as evidence rather than parsed into
+teams. A market with teams and a start time but no provider event ID is matched
+for the current board and reevaluated on the next read; it never receives a
+fabricated durable identity, so nothing is stored for it. When the schedule
+stops listing the game an identity was mapped to, the mapping becomes
+`replacement_pending` and keeps that game while the queue names every nearby
+replacement — a replacement NBA game ID never inherits the mapping, and an
+ambiguous replacement stays unresolved until an operator approves one. Later
+evidence naming a different scheduled game, or contradicting a governed manual
+decision, reports `mapping_conflict` and stops the mapping pending review, while
+a reschedule inside the window is the same game. Missing or over-age event
+catalog data leaves the normalized markets visible with no event comparison
+identity and records nothing. `list`, `dry-run`, `approve`, `override`,
+`reject`, `clear`, and `history` behave exactly as the athlete commands do,
+including the `unresolved` and `conflicts` review queues, the `--operator` and
+`--reason` requirements, and the retained provider evidence (`--label`,
+`--starts-at`, `--status-label`, and the `--home-*`/`--away-*` team options).
+
 ## Run locally
 
 ```bash

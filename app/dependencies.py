@@ -38,6 +38,9 @@ class ApplicationDependencies:
     statistic_catalog: Any | None = None
     athlete_mapping_repository: Any | None = None
     athlete_resolver: Any | None = None
+    event_catalog_service: Any | None = None
+    event_mapping_repository: Any | None = None
+    event_resolver: Any | None = None
 
 
 def build_dependencies(
@@ -160,6 +163,9 @@ def build_dependencies(
     athlete_catalog_service = None
     athlete_mapping_repository = None
     athlete_resolver = None
+    event_catalog_service = None
+    event_mapping_repository = None
+    event_resolver = None
     from app.utils.db import is_demo_database_url
 
     if not is_demo_database_url(settings.database.url):
@@ -170,11 +176,25 @@ def build_dependencies(
         )
         from app.services.athlete_mapping_repository import AthleteMappingRepository
         from app.services.athlete_resolver import AthleteResolver
+        from app.services.event_catalog_service import EventCatalogService
+        from app.services.event_mapping_repository import EventMappingRepository
+        from app.services.event_resolver import EventResolver
 
         athlete_mapping_repository = AthleteMappingRepository(engine)
         athlete_resolver = AthleteResolver(
             athlete_catalog_service,
             mapping_repository=athlete_mapping_repository,
+        )
+        event_catalog_service = EventCatalogService(
+            engine,
+            settings=settings,
+            nba_stats_provider=nba_stats_provider,
+        )
+        event_mapping_repository = EventMappingRepository(engine)
+        event_resolver = EventResolver(
+            event_catalog_service,
+            mapping_repository=event_mapping_repository,
+            settings=settings,
         )
 
     dfs_board_service = DFSBoardService(
@@ -185,6 +205,8 @@ def build_dependencies(
         statistic_catalog=statistic_catalog,
         athlete_resolver=athlete_resolver,
         athlete_mapping_repository=athlete_mapping_repository,
+        event_resolver=event_resolver,
+        event_mapping_repository=event_mapping_repository,
     )
 
     return ApplicationDependencies(
@@ -203,6 +225,9 @@ def build_dependencies(
         athlete_catalog_service=athlete_catalog_service,
         athlete_mapping_repository=athlete_mapping_repository,
         athlete_resolver=athlete_resolver,
+        event_catalog_service=event_catalog_service,
+        event_mapping_repository=event_mapping_repository,
+        event_resolver=event_resolver,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
