@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -14,7 +15,7 @@ from app.models.athlete_catalog import AthleteCatalog
 from app.providers.dfs import AthleteEvidence, TeamEvidence
 from app.services.athlete_catalog_service import AthleteCatalogService
 from app.services.athlete_mapping_repository import AthleteMappingRepository
-from app.services.athlete_resolver import AthleteResolver
+from app.services.athlete_resolver import AthleteResolver, MappingResolutionState
 from scripts import athlete_mappings
 
 
@@ -841,3 +842,57 @@ def test_cli_list_all_names_a_withdrawn_claim_once_with_its_queued_evidence(
             (candidate["canonical_player_id"], candidate["is_active_for_season"])
             for candidate in queue[0]["candidates"]
         ] == [(15, False)]
+
+
+def _seed_contradictory_read(database_url: str) -> None:
+    """Persist one fail-closed observation the way a contradictory board read would."""
+
+    engine = create_engine(database_url)
+    repository = AthleteMappingRepository(engine)
+    resolver = AthleteResolver(
+        AthleteCatalogService(
+            engine, settings=load_settings(overrides={"DATABASE_URL": database_url})
+        ),
+        mapping_repository=repository,
+    )
+    observed = [
+        resolver.resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-15", name=name, team=team),
+            "2024-25",
+        )
+        for name, team in (("Nikola Jokic", _team_evidence()), ("Unknown Player", None))
+    ]
+    repository.record_resolution(
+        replace(
+            observed[0],
+            state=MappingResolutionState.MAPPING_CONFLICT,
+            candidates=(observed[0].canonical_athlete,),
+            contradictory_evidence=tuple(item.provider_evidence for item in observed),
+            reason="contradictory_provider_evidence",
+        )
+    )
+    engine.dispose()
+
+
+def test_cli_reports_every_evidence_a_contradiction_was_recorded_over(
+    tmp_path, capsys
+):
+    """An operator reviews the whole contradiction, not its representative."""
+
+    database_url = _seed_database(tmp_path)
+    _seed_contradictory_read(database_url)
+
+    listed = _run(capsys, "list", "--database-url", database_url)
+    history = _run(capsys, "history", "--database-url", database_url)
+
+    (conflict,) = listed["conflicts"]
+    evidence = conflict["latest_decision"]["contradictory_evidence"]
+    assert [item["provider_name"] for item in evidence] == [
+        "Nikola Jokic",
+        "Unknown Player",
+    ]
+    assert evidence[0]["provider_team_abbreviation"] == "DEN"
+    assert evidence[0]["provider_team_canonical_id"] == 1610612743
+    assert evidence[1]["provider_team_id"] is None
+    assert history[-1]["contradictory_evidence"] == evidence

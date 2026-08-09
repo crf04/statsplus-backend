@@ -57,6 +57,7 @@ from .event_catalog import EventCatalogEntry, EventCatalogRefresh  # noqa: E402
 from .athlete_mapping import (  # noqa: E402
     AthleteMappingDecision,
     AthleteMappingDecisionCandidate,
+    AthleteMappingDecisionContradiction,
     AthleteMappingLock,
     AthleteMappingRejection,
     ProviderAthleteMapping,
@@ -75,6 +76,7 @@ __all__ = [
     'ProviderAthleteMapping',
     'AthleteMappingDecision',
     'AthleteMappingDecisionCandidate',
+    'AthleteMappingDecisionContradiction',
     'AthleteMappingLock',
     'AthleteMappingRejection',
 ]

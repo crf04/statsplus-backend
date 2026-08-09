@@ -160,6 +160,19 @@ def _create_athlete_mapping_tables(connection: Connection) -> None:
     AthleteMappingLock.__table__.create(connection, checkfirst=True)
 
 
+def _create_athlete_mapping_contradictions_table(connection: Connection) -> None:
+    """Create the typed contradictory evidence retained beside a decision.
+
+    Migration 006 created the decision table this one references, so the child
+    table is added on its own rather than by recreating it.  Existing decisions
+    keep the representative evidence they were recorded on; only contradictions
+    observed after the upgrade have rows here.
+    """
+    from app.models.athlete_mapping import AthleteMappingDecisionContradiction
+
+    AthleteMappingDecisionContradiction.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -167,6 +180,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(4, "004_create_athlete_catalog", _create_athlete_catalog_tables),
     Migration(5, "005_create_event_catalog", _create_event_catalog_tables),
     Migration(6, "006_create_athlete_mappings", _create_athlete_mapping_tables),
+    Migration(
+        7,
+        "007_create_athlete_mapping_contradictions",
+        _create_athlete_mapping_contradictions_table,
+    ),
 )
 
 

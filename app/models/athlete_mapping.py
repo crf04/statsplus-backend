@@ -194,6 +194,34 @@ class AthleteMappingDecisionCandidate(Base):
     )
 
 
+class AthleteMappingDecisionContradiction(Base):
+    """One typed provider evidence a contradictory observation asserted.
+
+    A fail-closed conflict is recorded on one representative evidence, but what
+    the operator has to review is every athlete the markets named.  The rest of
+    the contradiction is therefore stored as typed rows beside the decision,
+    exactly like its candidates, rather than surviving only in the observation
+    that produced it.
+    """
+
+    __tablename__ = "athlete_mapping_decision_contradictions"
+
+    decision_id = Column(
+        Integer,
+        ForeignKey("athlete_mapping_decisions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    #: Position in the decision's own deterministic evidence order.
+    evidence_index = Column(Integer, primary_key=True)
+    provider_athlete_id = Column(String(128), nullable=True)
+    provider_canonical_id = Column(Integer, nullable=True)
+    provider_name = Column(String(255), nullable=True)
+    provider_team_id = Column(String(128), nullable=True)
+    provider_team_canonical_id = Column(Integer, nullable=True)
+    provider_team_name = Column(String(255), nullable=True)
+    provider_team_abbreviation = Column(String(16), nullable=True)
+
+
 class AthleteMappingRejection(Base):
     """Durable suppression state for one provider athlete identity."""
 
@@ -254,6 +282,7 @@ __all__ = [
     "MAPPING_STATES",
     "AthleteMappingDecision",
     "AthleteMappingDecisionCandidate",
+    "AthleteMappingDecisionContradiction",
     "AthleteMappingRejection",
     "AthleteMappingLock",
     "ProviderAthleteMapping",

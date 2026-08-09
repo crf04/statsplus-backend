@@ -494,26 +494,34 @@ the same accent/case/punctuation normalization resolution uses, so equivalent
 spellings are not a disagreement — the identity fails closed on the
 contradiction itself as one `mapping_conflict` reasoned
 `contradictory_provider_evidence`, carrying every athlete the markets named as
-a candidate. Disagreement is judged by merging what the markets actually
-assert, fact by fact and at the same team tiers resolution compares: a market
-that omits the canonical ID or the team, or names the team at a weaker tier
-than another does, describes the same athlete more sparsely rather than a
-different one, so only a fact whose value changed contradicts. Which evidence
-the conflict is *recorded on*, and the order of its candidates, come from
-sorting the observations rather than from the provider's listing order, and the
-whole contradicting set is rechecked against a governing manual decision — one
-market reporting exactly the approved athlete cannot answer for a read that
-also reports another. Resolving those markets in turn would instead let their
-arrival order decide the identity, because each is judged against what the
-previous one stored: an unmatched or team-conflicting market followed by an
-exactly matching one would map automatically while the reverse order promoted a
-conflict. Markets that agree about the athlete may still disagree about whether
-it may be claimed — one reporting no team where another reports one the catalog
-contradicts — so an identity's claims are written before its objections and the
-objection is what stands. Contradicted evidence therefore never enters a
-canonical comparison in any market order, and repeated markets, repeated board
-reads, and a repeat that lists the same markets in another order all append no
-further decision and leave the same durable row. Later evidence that disagrees with
+a candidate and every typed evidence they named it on. Disagreement is judged
+by comparing the observations themselves — every market against every other
+market for that identity, fact by fact and at the same team tiers resolution
+compares: a market that omits the canonical ID or the team, or names the team
+at a weaker tier than another does, describes the same athlete more sparsely
+rather than a different one, so only a fact whose value changed contradicts.
+Comparing each market against a running merge instead would answer for evidence
+no market reported and let a weaker fact overwrite a stronger one, so with
+three or more markets the provider's listing order would decide whether a
+disagreement stayed visible. Which evidence the conflict is *recorded on*, and
+the order of its candidates and retained evidence, come from sorting the
+observations rather than from the provider's listing order, and the whole
+contradicting set is rechecked against a governing manual decision — one market
+reporting exactly the approved athlete cannot answer for a read that also
+reports another. Markets that do agree about the athlete are combined into one
+durable observation carrying every provider and canonical ID, name, and
+abbreviation any of them reported, so the row keeps the whole read rather than
+whichever market was written last; where they disagree about whether the
+identity may be claimed — one reporting no team where another reports one the
+catalog contradicts — the objection is what the combined evidence supports and
+what stands, and the identity is never claimed and disputed by one read.
+Persisting those markets in turn would instead let their arrival order decide
+the identity, because each was judged against what the previous one stored, and
+would append one observation per market, so an unchanged repeat kept growing
+the audit. Contradicted evidence therefore never enters a canonical comparison
+in any market order, and repeated markets, repeated board reads, and a repeat
+that lists the same markets in another order all append no further decision and
+leave the same durable row. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve
@@ -657,13 +665,22 @@ independent from Athlete Catalog freshness and defaults to 72 hours through
 season is independent and the command exits nonzero if any season fails.
 
 Migration 006 creates the provider athlete mapping, append-only decision,
-decision candidate, and durable rejection tables. Operators use
+decision candidate, and durable rejection tables. Migration 007 adds
+`athlete_mapping_decision_contradictions`, the typed evidence a fail-closed
+observation contradicted itself over, keyed by decision and ordered by the same
+deterministic evidence order the conflict was recorded in; the decision itself
+carries only the representative evidence, so without those rows the rest of the
+contradiction would be missing from history and the conflict queue. Operators
+use
 `scripts/athlete_mappings.py` for
 read-only listing, dry runs, audited approve/override/reject/clear actions,
 and history. `list` reports current mappings, active rejections, every
 identity whose latest decision is still unresolved, with the candidates an
 operator has to choose between, and the `conflicts` review queue of identities
-whose current state is a mapping conflict. These commands require an
+whose current state is a mapping conflict. `history` and the conflict queue
+report each decision's `contradictory_evidence` alongside its candidates, so an
+operator reviews everything the markets asserted rather than the one evidence
+the conflict happened to be recorded on. These commands require an
 explicit writable database URL and never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run

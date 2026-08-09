@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from itertools import permutations
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ from app.models.athlete_mapping import (
     MAPPING_DECISION_STATES,
     MAPPING_STATES,
     AthleteMappingDecision,
+    AthleteMappingDecisionContradiction,
     AthleteMappingLock,
     AthleteMappingRejection,
     ProviderAthleteMapping,
@@ -2801,9 +2803,9 @@ def test_board_reports_one_outcome_when_a_snapshot_repeats_an_identity(mapping_d
 
     assert len(board.snapshots[0].markets) == 2
     (outcome,) = board.mapping_outcomes
-    # The last write is the durable state, and the repeat changed nothing.
+    # The repeated market adds nothing, so the identity is observed once.
     assert outcome.state is MappingResolutionState.AUTO
-    assert outcome.persisted is False
+    assert outcome.persisted is True
     assert outcome.canonical_player_id == 15
     assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
 
@@ -2833,8 +2835,17 @@ def _contradictory_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
 
     if case == "unmatched_name":
         return (_market(), _market(name="Unknown Player", market_id="m-pp-15-alt"))
-    if case == "different_athlete":
-        return (_market(), _market(name="LeBron James", market_id="m-pp-15-alt"))
+    return (_market(), _market(name="LeBron James", market_id="m-pp-15-alt"))
+
+
+def _catalog_disputed_markets() -> tuple[PlayerProjectionMarket, ...]:
+    """Markets that agree about the identity and dispute the catalog's team.
+
+    Neither market names another athlete -- one simply reports no team at all
+    -- so together they are one observation whose team evidence the catalog
+    contradicts, exactly as if a single market had reported both facts.
+    """
+
     return (
         _market(),
         _market(
@@ -2849,9 +2860,7 @@ def _contradictory_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
     )
 
 
-@pytest.mark.parametrize(
-    "case", ["unmatched_name", "different_athlete", "conflicting_team"]
-)
+@pytest.mark.parametrize("case", ["unmatched_name", "different_athlete"])
 @pytest.mark.parametrize("swapped", [False, True])
 def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(
     mapping_db, case, swapped
@@ -2883,9 +2892,7 @@ def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(
     assert stored.is_active is False
 
 
-@pytest.mark.parametrize(
-    "case", ["unmatched_name", "different_athlete", "conflicting_team"]
-)
+@pytest.mark.parametrize("case", ["unmatched_name", "different_athlete"])
 def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(
     mapping_db, case
 ):
@@ -2965,7 +2972,6 @@ def test_board_fails_closed_when_a_snapshot_contradicts_a_manual_mapping(
     [
         ("unmatched_name", False),
         ("different_athlete", False),
-        ("conflicting_team", False),
         # A manual mapping is only disputed by evidence the operator never
         # reviewed, and team evidence the catalog contradicts is theirs to keep.
         ("unmatched_name", True),
@@ -4686,3 +4692,225 @@ def test_one_board_read_keeps_cache_statistics_and_governed_mappings(mapping_db)
     assert mapping is not None
     assert mapping.mapping_state == "auto"
     assert mapping.canonical_player_id == 15
+
+
+def _aggregate_markets() -> tuple[PlayerProjectionMarket, ...]:
+    """Three markets for one identity that no pair-by-pair merge can judge.
+
+    The first two agree on the canonical team and differ only in the label
+    printed beside it, which the strongest-tier rule treats as a presentation
+    difference.  The third names a team only by abbreviation, and that
+    abbreviation disagrees with the second market's.  Whether the disagreement
+    is visible must not depend on which market the provider listed first.
+    """
+
+    return (
+        _identified_market(
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+            market_id="m-pp-15-a",
+        ),
+        _identified_market(
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="BOS"),
+            market_id="m-pp-15-b",
+        ),
+        _identified_market(team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15-c"),
+    )
+
+
+@pytest.mark.parametrize("order", list(permutations(range(3))))
+def test_board_fails_closed_on_aggregate_contradiction_in_every_order(
+    mapping_db, order
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _aggregate_markets()
+
+    board = _board_service(
+        _snapshot(*(markets[index] for index in order)),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+
+
+def _additive_markets() -> tuple[PlayerProjectionMarket, ...]:
+    """Markets whose team evidence only ever adds facts about one team."""
+
+    return (
+        _identified_market(
+            team=TeamEvidence(provider_id="pp-lal", name="Los Angeles Lakers"),
+            market_id="m-pp-15-a",
+        ),
+        _identified_market(
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+            market_id="m-pp-15-b",
+        ),
+        _identified_market(canonical_id=15, market_id="m-pp-15-c"),
+    )
+
+
+def test_board_records_one_observation_for_a_compatible_identity(mapping_db):
+    """One identity's compatible markets are one observation, not several."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _additive_markets()
+    query = NBAMarketQuery(season="2024-25")
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(query)
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.canonical_player_id == 15
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    # Every compatible fact the markets reported survives on the durable row.
+    assert mapping.provider_name == "Nikola Jokic"
+    assert mapping.provider_team_id == "pp-lal"
+    assert mapping.provider_team_canonical_id == 1610612747
+    assert mapping.provider_team_name == "Los Angeles Lakers"
+    assert mapping.provider_team_abbreviation == "LAL"
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+@pytest.mark.parametrize("order", list(permutations(range(3))))
+def test_a_repeated_compatible_snapshot_appends_nothing_in_any_order(
+    mapping_db, order
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _additive_markets()
+    query = NBAMarketQuery(season="2024-25")
+
+    _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(query)
+    established = repository.get_mapping("prizepicks", "pp-15").to_dict()
+    repeated = _board_service(
+        _snapshot(*(markets[index] for index in order)),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(query)
+
+    (outcome,) = repeated.mapping_outcomes
+    assert outcome.state is MappingResolutionState.AUTO
+    # The same markets in any order are the same observation of the identity.
+    assert repository.get_mapping("prizepicks", "pp-15").to_dict() == established
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+def test_a_contradictory_snapshot_retains_every_typed_evidence(mapping_db):
+    """The audit keeps all the evidence the identity was disputed over."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    service = _board_service(
+        _snapshot(
+            _market(
+                team=TeamEvidence(
+                    provider_id="pp-lal",
+                    canonical_id=1610612747,
+                    name="Los Angeles Lakers",
+                    abbreviation="LAL",
+                )
+            ),
+            _market(name="Unknown Player", market_id="m-pp-15-alt"),
+        ),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+
+    service.get_board(query)
+
+    (recorded,) = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [item.provider_name for item in recorded.contradictory_evidence] == [
+        "Nikola Jokic",
+        "Unknown Player",
+    ]
+    (jokic, unknown) = recorded.contradictory_evidence
+    assert jokic.provider_athlete_id == "pp-15"
+    assert jokic.provider_team_id == "pp-lal"
+    assert jokic.provider_team_canonical_id == 1610612747
+    assert jokic.provider_team_name == "Los Angeles Lakers"
+    assert jokic.provider_team_abbreviation == "LAL"
+    assert unknown.provider_team_id is None
+    # The operator's conflict queue reports the same durable evidence.
+    (queued,) = repository.list_conflicts()
+    assert queued.latest_decision.contradictory_evidence == recorded.contradictory_evidence
+    assert [
+        candidate.canonical_player_id for candidate in queued.latest_decision.candidates
+    ] == [15]
+    assert recorded.to_dict()["contradictory_evidence"] == [
+        item.to_dict() for item in recorded.contradictory_evidence
+    ]
+
+    service.get_board(query)
+
+    # A repeated read is the same observation, so nothing is appended and the
+    # retained evidence is not duplicated.
+    (repeated,) = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert repeated.to_dict() == recorded.to_dict()
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_snapshot_never_claims_an_identity_its_own_team_evidence_disputes(
+    mapping_db, swapped
+):
+    """Combined evidence the catalog disputes maps nothing, in either order."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _catalog_disputed_markets()
+    if swapped:
+        markets = tuple(reversed(markets))
+    service = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+
+    board = service.get_board(query)
+
+    (outcome,) = board.mapping_outcomes
+    # One market omitted the team the other reported, so the read observes one
+    # athlete whose team the catalog contradicts rather than a claim the very
+    # same snapshot disputes.  The identity is never comparable either way.
+    assert outcome.state is MappingResolutionState.TEAM_CONFLICT
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["team_conflict"]
+    assert queued[0].provider_team_abbreviation == "BOS"
+    assert queued[0].provider_name == "Nikola Jokic"
+
+    service.get_board(query)
+
+    # The repeat is the same observation, so nothing is appended.
+    assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
+
+
+@pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
+def test_contradiction_table_is_emitted_for_every_dialect(dialect):
+    statement = str(
+        CreateTable(AthleteMappingDecisionContradiction.__table__).compile(
+            dialect=dialect
+        )
+    )
+
+    # The retained evidence is a child of the decision on both dialects, so a
+    # deleted decision can never leave orphaned contradiction rows behind.
+    assert "athlete_mapping_decision_contradictions" in statement
+    assert "FOREIGN KEY(decision_id) REFERENCES athlete_mapping_decisions (id)" in statement
+    assert "ON DELETE CASCADE" in statement
+    assert "PRIMARY KEY (decision_id, evidence_index)" in statement

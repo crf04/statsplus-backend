@@ -31,6 +31,7 @@ from app.services.athlete_resolver import (
     normalize_athlete_name,
 )
 from app.providers.dfs import (
+    AthleteEvidence,
     CoverageCode,
     DeadlineExceededError,
     MalformedProviderResponseError,
@@ -41,6 +42,7 @@ from app.providers.dfs import (
     RetrievalContext,
     SnapshotStatus,
     StatisticEvidence,
+    TeamEvidence,
 )
 from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
@@ -186,24 +188,24 @@ def _evidence_order(resolution: Any) -> tuple[str, ...]:
     return tuple("" if facts[fact] is None else str(facts[fact]) for fact in sorted(facts))
 
 
-def _contradicts(merged: Mapping[str, Any], facts: Mapping[str, Any]) -> bool:
-    """Report whether one observation disagrees with what is known so far.
+def _contradicts(facts: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """Report whether two observations of one identity name different athletes.
 
     Only facts both sides actually assert are comparable.  Evidence that adds a
     canonical ID, a team, or a stronger team identifier to what a sparser
-    market reported is the same athlete described more completely, so it merges
+    market reported is the same athlete described more completely, so it agrees
     rather than contradicting; a fact whose value changed names someone else.
     """
 
     for fact in _ATHLETE_FACTS:
-        known, current = merged.get(fact), facts[fact]
+        known, current = facts[fact], other[fact]
         if known is not None and current is not None and known != current:
             return True
     for tier in _TEAM_FACT_TIERS:
         comparable = [
-            (merged[fact], facts[fact])
+            (facts[fact], other[fact])
             for fact in tier
-            if merged.get(fact) is not None and facts[fact] is not None
+            if facts[fact] is not None and other[fact] is not None
         ]
         if comparable:
             return any(known != current for known, current in comparable)
@@ -215,26 +217,36 @@ def _contradictory_identities(
 ) -> set[tuple[str, str]]:
     """Identities one board read observed asserting more than one athlete.
 
-    Each identity's observations are merged in turn, so a market that only adds
-    facts leaves the merged athlete intact and one that changes a comparable
-    fact marks the identity contradictory.  Merging rather than comparing pairs
-    keeps the answer independent of the order the markets arrived in.
+    Every observation of an identity is compared with every other one, rather
+    than with a running merge of the facts observed so far.  A merge answers
+    for evidence no single market reported -- a team named by canonical ID in
+    one market and by an abbreviation in another becomes one team that a third
+    market is then judged against -- and a weaker fact overwrites a stronger
+    one, so which disagreements stay visible depends on the order the markets
+    arrived in.  Comparing the observations themselves makes the answer a
+    property of the whole set: an identity is contradictory exactly when two of
+    its markets disagree, in every order the provider could list them in.
     """
 
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    contradictory: set[tuple[str, str]] = set()
+    observations: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for key, resolution in observed:
-        if key is None or key in contradictory:
+        if key is None:
             continue
         facts = _evidence_facts(resolution)
-        known = merged.setdefault(key, {})
-        if _contradicts(known, facts):
-            contradictory.add(key)
-            continue
-        known.update(
-            {fact: value for fact, value in facts.items() if value is not None}
+        asserted = observations.setdefault(key, [])
+        # Markets that assert exactly the same facts are one assertion, and
+        # comparing a repeat with itself can never find a disagreement.
+        if facts not in asserted:
+            asserted.append(facts)
+    return {
+        key
+        for key, asserted in observations.items()
+        if any(
+            _contradicts(facts, other)
+            for position, facts in enumerate(asserted)
+            for other in asserted[position + 1 :]
         )
-    return contradictory
+    }
 
 
 def _fail_closed_conflict(resolutions: Iterable[Any]) -> Any:
@@ -313,29 +325,78 @@ def _identity_groups(
     return tuple((key, tuple(group)) for key, group in groups)
 
 
-def _observation_order(resolutions: Iterable[Any]) -> tuple[Any, ...]:
-    """One identity's observations, claims first and objections last.
+def _first_reported(values: Iterable[Any]) -> Any:
+    """The first value a market actually reported, or ``None`` if none did."""
 
-    The markets agree about who the identity is, but not necessarily about
-    whether it may be claimed: one market may report no team at all while
-    another reports one the catalog contradicts, or evidence an operator's
-    approval does not cover.  Observing them in the provider's listing order
-    would let it decide, because the objection only promotes a claim that was
-    already stored, and a claim made after an objection simply maps the
-    identity.  Every claim is therefore written first and every objection last,
-    so the identity ends the read in the state its whole evidence supports,
-    with the provider's order broken by the evidence itself.
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _merged_evidence(resolutions: Iterable[Any]) -> AthleteEvidence:
+    """Everything one identity's compatible markets reported about it.
+
+    The markets agree about who the identity is, so a fact one of them omits
+    is a fact about the same athlete rather than about a different one: one
+    market may name the team only by provider ID and another only by
+    abbreviation.  Combining them keeps every typed fact the read observed,
+    where writing the markets one at a time would leave the durable row
+    reporting whichever of them happened to be written last.  Facts are taken
+    in evidence order, so the group yields the same combined evidence -- and
+    therefore the same idempotency fingerprint -- however the provider listed
+    the markets.
     """
 
-    return tuple(
-        sorted(
-            resolutions,
-            key=lambda resolution: (
-                resolution.state not in CLAIMING_MAPPING_STATES,
-                _evidence_order(resolution),
-            ),
-        )
+    evidence = [
+        resolution.provider_evidence
+        for resolution in sorted(resolutions, key=_evidence_order)
+    ]
+    teams = [item.team for item in evidence if item.team is not None]
+    return AthleteEvidence(
+        provider_id=_first_reported(item.provider_id for item in evidence),
+        canonical_id=_first_reported(item.canonical_id for item in evidence),
+        name=_first_reported(item.name for item in evidence),
+        team=(
+            None
+            if not teams
+            else TeamEvidence(
+                provider_id=_first_reported(team.provider_id for team in teams),
+                canonical_id=_first_reported(team.canonical_id for team in teams),
+                name=_first_reported(team.name for team in teams),
+                abbreviation=_first_reported(team.abbreviation for team in teams),
+            )
+        ),
     )
+
+
+def _merged_observation(resolutions: Iterable[Any]) -> Any:
+    """One identity's compatible markets as a single durable observation.
+
+    A snapshot's markets for one provider athlete are one observation of it,
+    not a sequence that supersedes itself, so they are recorded once with the
+    combined evidence they reported.  Persisting them one at a time made the
+    provider's listing order the decider -- an objection only promoted a claim
+    that was already stored, while a claim made after an objection simply
+    mapped the identity -- and appended one durable observation per market, so
+    an unchanged repeat of the same snapshot kept growing the audit.
+
+    The markets agree about who the identity is but not necessarily about
+    whether it may be claimed: one may report no team while another reports one
+    the catalog contradicts, or evidence an operator's approval does not cover.
+    The objection is therefore what the whole group observed, and the claims it
+    was raised against add their evidence to it, so the identity ends the read
+    in the state its combined evidence supports whatever order it arrived in.
+    """
+
+    ordered = sorted(
+        resolutions,
+        key=lambda resolution: (
+            resolution.state in CLAIMING_MAPPING_STATES,
+            _evidence_order(resolution),
+        ),
+    )
+    return replace(ordered[0], provider_evidence=_merged_evidence(ordered))
 
 
 @dataclass(frozen=True, slots=True)
@@ -870,7 +931,10 @@ class DFSBoardService:
                 # markets it disagreed across are written once, together.
                 group = (_fail_closed_conflict(group),)
             elif key is not None and len(group) > 1:
-                group = _observation_order(group)
+                # The markets agree about the identity, so together they are
+                # one observation of it and are written once, with everything
+                # they reported about it.
+                group = (_merged_observation(group),)
             governed = None
             for resolution in group:
                 try:

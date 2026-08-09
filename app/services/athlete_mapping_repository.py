@@ -20,6 +20,7 @@ from app.errors import InvalidConfigurationError
 from app.models.athlete_mapping import (
     AthleteMappingDecision,
     AthleteMappingDecisionCandidate,
+    AthleteMappingDecisionContradiction,
     AthleteMappingLock,
     AthleteMappingRejection,
     ProviderAthleteMapping,
@@ -245,6 +246,30 @@ class MappingCandidateRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MappingEvidenceRecord:
+    """One typed provider evidence a contradictory observation asserted."""
+
+    provider_athlete_id: str | None
+    provider_canonical_id: int | None
+    provider_name: str | None
+    provider_team_id: str | None
+    provider_team_canonical_id: int | None
+    provider_team_name: str | None
+    provider_team_abbreviation: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider_athlete_id": self.provider_athlete_id,
+            "provider_canonical_id": self.provider_canonical_id,
+            "provider_name": self.provider_name,
+            "provider_team_id": self.provider_team_id,
+            "provider_team_canonical_id": self.provider_team_canonical_id,
+            "provider_team_name": self.provider_team_name,
+            "provider_team_abbreviation": self.provider_team_abbreviation,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MappingDecisionRecord:
     """One append-only decision or durable unresolved observation."""
 
@@ -268,6 +293,9 @@ class MappingDecisionRecord:
     observed_at: str | None
     created_at: str
     candidates: tuple[MappingCandidateRecord, ...] = ()
+    #: Every typed evidence a fail-closed observation contradicted itself
+    #: over.  The decision itself carries only the representative one.
+    contradictory_evidence: tuple[MappingEvidenceRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -291,6 +319,9 @@ class MappingDecisionRecord:
             "observed_at": self.observed_at,
             "created_at": self.created_at,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "contradictory_evidence": [
+                evidence.to_dict() for evidence in self.contradictory_evidence
+            ],
         }
 
 
@@ -1903,6 +1934,10 @@ class AthleteMappingRepository:
             self._insert_candidates(
                 connection, int(decision["id"]), resolution.candidates
             )
+        if decision is not None:
+            self._insert_contradictory_evidence(
+                connection, int(decision["id"]), resolution.contradictory_evidence
+            )
         return decision
 
     @staticmethod
@@ -1934,6 +1969,45 @@ class AthleteMappingRepository:
                     "is_active_for_season": candidate.is_active_for_season,
                 }
                 for candidate in candidates
+            ],
+        )
+
+    @staticmethod
+    def _insert_contradictory_evidence(
+        connection: Connection,
+        decision_id: int,
+        evidence: tuple[AthleteEvidence, ...],
+    ) -> None:
+        """Retain every evidence a contradictory observation asserted.
+
+        The decision row records one representative evidence, so without these
+        rows the rest of the contradiction would exist only in the observation
+        that produced it and would be missing from the operator's conflict
+        queue and the identity's history.  The board already orders the
+        evidence deterministically, and the stored index keeps that order.
+        """
+
+        if not evidence:
+            return
+        connection.execute(
+            insert(AthleteMappingDecisionContradiction.__table__),
+            [
+                {
+                    "decision_id": decision_id,
+                    "evidence_index": index,
+                    "provider_athlete_id": item.provider_id,
+                    "provider_canonical_id": item.canonical_id,
+                    "provider_name": item.name,
+                    "provider_team_id": item.team.provider_id if item.team else None,
+                    "provider_team_canonical_id": (
+                        item.team.canonical_id if item.team else None
+                    ),
+                    "provider_team_name": item.team.name if item.team else None,
+                    "provider_team_abbreviation": (
+                        item.team.abbreviation if item.team else None
+                    ),
+                }
+                for index, item in enumerate(evidence)
             ],
         )
 
@@ -2256,8 +2330,8 @@ class AthleteMappingRepository:
 
         if row is None:
             return None
-        candidates = cls._select_candidates(connection, [int(row["id"])])
-        return cls._decision_record(row, candidates.get(int(row["id"]), ()))
+        (record,) = cls._decision_records(connection, [row])
+        return record
 
     @classmethod
     def _decision_records(
@@ -2266,9 +2340,16 @@ class AthleteMappingRepository:
         rows: Any,
     ) -> list[MappingDecisionRecord]:
         rows = [row for row in rows if row is not None]
-        candidates = cls._select_candidates(connection, [int(row["id"]) for row in rows])
+        decision_ids = [int(row["id"]) for row in rows]
+        candidates = cls._select_candidates(connection, decision_ids)
+        contradictions = cls._select_contradictory_evidence(connection, decision_ids)
         return [
-            cls._decision_record(row, candidates.get(int(row["id"]), ())) for row in rows
+            cls._decision_record(
+                row,
+                candidates.get(int(row["id"]), ()),
+                contradictions.get(int(row["id"]), ()),
+            )
+            for row in rows
         ]
 
     @staticmethod
@@ -2302,9 +2383,41 @@ class AthleteMappingRepository:
         return candidates
 
     @staticmethod
+    def _select_contradictory_evidence(
+        connection: Connection,
+        decision_ids: list[int],
+    ) -> dict[int, tuple[MappingEvidenceRecord, ...]]:
+        if not decision_ids:
+            return {}
+        rows = connection.execute(
+            select(AthleteMappingDecisionContradiction.__table__)
+            .where(AthleteMappingDecisionContradiction.decision_id.in_(decision_ids))
+            .order_by(
+                AthleteMappingDecisionContradiction.decision_id,
+                AthleteMappingDecisionContradiction.evidence_index,
+            )
+        ).mappings().all()
+        evidence: dict[int, tuple[MappingEvidenceRecord, ...]] = {}
+        for row in rows:
+            decision_id = int(row["decision_id"])
+            evidence[decision_id] = evidence.get(decision_id, ()) + (
+                MappingEvidenceRecord(
+                    provider_athlete_id=row["provider_athlete_id"],
+                    provider_canonical_id=row["provider_canonical_id"],
+                    provider_name=row["provider_name"],
+                    provider_team_id=row["provider_team_id"],
+                    provider_team_canonical_id=row["provider_team_canonical_id"],
+                    provider_team_name=row["provider_team_name"],
+                    provider_team_abbreviation=row["provider_team_abbreviation"],
+                ),
+            )
+        return evidence
+
+    @staticmethod
     def _decision_record(
         row: Mapping[str, Any] | None,
         candidates: tuple[MappingCandidateRecord, ...] = (),
+        contradictory_evidence: tuple[MappingEvidenceRecord, ...] = (),
     ) -> MappingDecisionRecord | None:
         if row is None:
             return None
@@ -2329,6 +2442,7 @@ class AthleteMappingRepository:
             observed_at=_iso(row["observed_at"]),
             created_at=_iso(row["created_at"]) or "",
             candidates=candidates,
+            contradictory_evidence=contradictory_evidence,
         )
 
     @staticmethod
@@ -2357,6 +2471,7 @@ __all__ = [
     "MappingCandidateRecord",
     "MappingConflictRecord",
     "MappingDecisionRecord",
+    "MappingEvidenceRecord",
     "MappingPersistenceResult",
     "MappingRejectionRecord",
     "ProviderAthleteMappingRecord",

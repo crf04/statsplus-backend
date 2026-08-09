@@ -827,3 +827,49 @@ def test_a_vanished_catalog_row_withdraws_the_mapping_on_postgres(mapping_engine
     assert remapped is not None
     assert remapped.mapping_state == "auto"
     assert remapped.canonical_player_id == 15
+
+
+def test_contradictory_evidence_round_trips_on_postgres(mapping_engine):
+    """Every evidence a contradiction was recorded over must be durable."""
+    from dataclasses import replace
+
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+    from app.services.athlete_resolver import MappingResolutionState
+
+    repository = AthleteMappingRepository(mapping_engine)
+    observed = [
+        _mapping_resolution(name=name, team_canonical_id=team_canonical_id)
+        for name, team_canonical_id in (
+            ("Nikola Jokic", 1610612747),
+            ("Unknown Player", 1610612738),
+        )
+    ]
+    contradiction = replace(
+        observed[0],
+        state=MappingResolutionState.MAPPING_CONFLICT,
+        candidates=(observed[0].canonical_athlete,),
+        contradictory_evidence=tuple(item.provider_evidence for item in observed),
+        reason="contradictory_provider_evidence",
+    )
+
+    first = repository.record_resolution(contradiction)
+    repeated = repository.record_resolution(contradiction)
+
+    assert first.persisted is True
+    # The same contradiction observed again is not a second observation.
+    assert repeated.persisted is False
+    (queued,) = repository.list_conflicts(provider="prizepicks")
+    evidence = queued.latest_decision.contradictory_evidence
+    assert [item.provider_name for item in evidence] == [
+        "Nikola Jokic",
+        "Unknown Player",
+    ]
+    assert [item.provider_team_canonical_id for item in evidence] == [
+        1610612747,
+        1610612738,
+    ]
+    assert [item.provider_athlete_id for item in evidence] == ["pp-15", "pp-15"]
+    (recorded,) = repository.history(
+        provider="prizepicks", provider_athlete_id="pp-15"
+    )
+    assert recorded.contradictory_evidence == evidence
