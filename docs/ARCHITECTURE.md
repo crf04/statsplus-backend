@@ -360,6 +360,32 @@ seasons. `get_catalog()` and
 `ATHLETE_CATALOG_FRESHNESS_DAYS` (default seven days). The tracked demo
 database is rejected as a migration or catalog target.
 
+### Provider athlete mappings
+
+`AthleteResolver` accepts one typed provider `AthleteEvidence` value and an
+explicit requested season. It compares only the accent/case/punctuation-
+normalized official name among active `is_active_for_season` catalog rows.
+Exactly one candidate with non-conflicting canonical team evidence is
+automatically qualifying; missing team evidence is allowed. Duplicate names,
+inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
+non-matches. `AthleteMappingRepository` persists one current
+`provider_athlete_mappings` row per provider identity, an append-only
+`athlete_mapping_decisions` audit log, and durable
+`athlete_mapping_rejections` suppressions. Provider names and team IDs,
+names, and abbreviations are retained as typed evidence.
+
+An injected DFS board read may transactionally record the first qualifying
+automatic decision. The repository is idempotent under repeated and concurrent
+reads, never replaces manual approvals or overrides, and isolates persistence
+failures from the normalized market result. Later evidence that disagrees with
+an active automatic mapping deactivates it as `mapping_conflict` while keeping
+the conflicting evidence in the current row and audit history. Operator
+approve/override/reject/clear actions require an identity and reason; active
+rejections suppress future automatic mappings until explicitly cleared.
+Migration 006 also creates a per-identity lock table and database checks for
+closed mapping states and active-state coherence. The operator CLI never runs
+migrations implicitly; run `scripts/migrate.py` explicitly first.
+
 PBP Stats:
 
 ```text
@@ -389,11 +415,19 @@ Migration 005 creates the writable `event_catalog` and
 `event_catalog_refreshes` tables. Migrations are applied in order. Event
 refreshes upsert by NBA game ID in one transaction without replacing the
 table; omitted historical rows remain available and replacement IDs remain
-distinct. Mapping and audit state belong to #28. Event freshness is
+distinct. Event/competition mapping state belongs to #28; provider-athlete
+mapping state is owned by migration 006 below. Event freshness is
 independent from Athlete Catalog freshness and defaults to 72 hours through
 `EVENT_CATALOG_MAX_AGE_HOURS`. Operators use
 `scripts/refresh_event_catalog.py` with one or more explicit seasons; each
 season is independent and the command exits nonzero if any season fails.
+
+Migration 006 creates the provider athlete mapping, append-only decision, and
+durable rejection tables. Operators use
+`scripts/athlete_mappings.py` for
+read-only listing, dry runs, audited approve/override/reject/clear actions,
+and history. These commands require an explicit writable database URL and
+never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

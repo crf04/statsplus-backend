@@ -7,6 +7,7 @@ the immutable snapshot models returned by adapters.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -1212,6 +1213,7 @@ class NBAMarketQuery:
         MarketStatus.SUSPENDED,
     )
     pregame_only: bool = True
+    season: str | None = None
 
     def __post_init__(self) -> None:
         sport = self.sport.strip().upper() if isinstance(self.sport, str) else ""
@@ -1229,8 +1231,14 @@ class NBAMarketQuery:
             raise ValueError("query market_statuses must not be empty")
         if self.pregame_only is not True:
             raise ValueError("the shared provider query supports pregame markets only")
+        season = self.season
+        if season is not None:
+            if not isinstance(season, str) or not re.fullmatch(r"\d{4}-\d{2}", season.strip()):
+                raise ValueError("query season must be in YYYY-YY form")
+            season = season.strip()
         object.__setattr__(self, "sport", sport)
         object.__setattr__(self, "league", league)
+        object.__setattr__(self, "season", season)
         object.__setattr__(self, "market_statuses", statuses)
 
 @runtime_checkable

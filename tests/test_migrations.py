@@ -43,6 +43,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
         "005_create_event_catalog",
+        "006_create_athlete_mappings",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -54,6 +55,10 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
+            "provider_athlete_mappings",
+            "athlete_mapping_decisions",
+            "athlete_mapping_rejections",
+            "athlete_mapping_locks",
         ]
     )
     assert {
@@ -95,6 +100,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (3, "003_durable_data_refresh_queue"),
             (4, "004_create_athlete_catalog"),
             (5, "005_create_event_catalog"),
+            (6, "006_create_athlete_mappings"),
         ]
 
 
@@ -114,6 +120,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "003_durable_data_refresh_queue",
         "004_create_athlete_catalog",
         "005_create_event_catalog",
+        "006_create_athlete_mappings",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -183,9 +190,14 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "athlete_catalog_freshness",
             "event_catalog",
             "event_catalog_refreshes",
+            "provider_athlete_mappings",
+            "athlete_mapping_decisions",
+            "athlete_mapping_rejections",
+            "athlete_mapping_locks",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
+    assert application.extensions["dependencies"].athlete_mapping_repository is not None
     assert "athlete_catalog" not in application.extensions["request_services"]
 
 

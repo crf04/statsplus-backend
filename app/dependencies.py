@@ -36,6 +36,8 @@ class ApplicationDependencies:
     user_service: Any
     dfs_snapshot_cache: Any | None = None
     statistic_catalog: Any | None = None
+    athlete_mapping_repository: Any | None = None
+    athlete_resolver: Any | None = None
 
 
 def build_dependencies(
@@ -121,14 +123,6 @@ def build_dependencies(
             coordinator=dfs_snapshot_cache,
         )
 
-    dfs_board_service = DFSBoardService(
-        provider_registry=cached_dfs_providers,
-        max_concurrency=3,
-        deadline_seconds=settings.providers.dfs_board_deadline_seconds,
-        settings=settings,
-        statistic_catalog=statistic_catalog,
-    )
-
     game_service = GameService(
         engine,
         redis_client=redis_client,
@@ -164,6 +158,8 @@ def build_dependencies(
         player_service=player_service,
     )
     athlete_catalog_service = None
+    athlete_mapping_repository = None
+    athlete_resolver = None
     from app.utils.db import is_demo_database_url
 
     if not is_demo_database_url(settings.database.url):
@@ -172,6 +168,24 @@ def build_dependencies(
             settings=settings,
             nba_stats_provider=nba_stats_provider,
         )
+        from app.services.athlete_mapping_repository import AthleteMappingRepository
+        from app.services.athlete_resolver import AthleteResolver
+
+        athlete_mapping_repository = AthleteMappingRepository(engine)
+        athlete_resolver = AthleteResolver(
+            athlete_catalog_service,
+            mapping_repository=athlete_mapping_repository,
+        )
+
+    dfs_board_service = DFSBoardService(
+        provider_registry=cached_dfs_providers,
+        max_concurrency=3,
+        deadline_seconds=settings.providers.dfs_board_deadline_seconds,
+        settings=settings,
+        statistic_catalog=statistic_catalog,
+        athlete_resolver=athlete_resolver,
+        athlete_mapping_repository=athlete_mapping_repository,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -187,6 +201,8 @@ def build_dependencies(
         data_service=data_service,
         data_refresh_jobs_service=data_refresh_jobs_service,
         athlete_catalog_service=athlete_catalog_service,
+        athlete_mapping_repository=athlete_mapping_repository,
+        athlete_resolver=athlete_resolver,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),

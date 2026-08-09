@@ -141,12 +141,28 @@ def _create_athlete_catalog_tables(connection: Connection) -> None:
     AthleteCatalogFreshness.__table__.create(connection, checkfirst=True)
 
 
+def _create_athlete_mapping_tables(connection: Connection) -> None:
+    """Create provider athlete mapping state, decisions, and rejections."""
+    from app.models.athlete_mapping import (
+        AthleteMappingDecision,
+        AthleteMappingLock,
+        AthleteMappingRejection,
+        ProviderAthleteMapping,
+    )
+
+    ProviderAthleteMapping.__table__.create(connection, checkfirst=True)
+    AthleteMappingDecision.__table__.create(connection, checkfirst=True)
+    AthleteMappingRejection.__table__.create(connection, checkfirst=True)
+    AthleteMappingLock.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
     Migration(3, "003_durable_data_refresh_queue", _upgrade_data_refresh_jobs_queue),
     Migration(4, "004_create_athlete_catalog", _create_athlete_catalog_tables),
     Migration(5, "005_create_event_catalog", _create_event_catalog_tables),
+    Migration(6, "006_create_athlete_mappings", _create_athlete_mapping_tables),
 )
 
 

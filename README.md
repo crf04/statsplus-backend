@@ -158,6 +158,26 @@ season rows and independent success/failure metadata. Provider or publication
 failures preserve the last successful catalog. The command prints each
 season's outcome and exits nonzero if any requested season fails.
 
+Provider athlete identity is resolved conservatively from typed DFS evidence
+and the requested season's active canonical catalog. Inspect or operate the
+durable mapping state with the offline operator CLI:
+
+```bash
+python scripts/athlete_mappings.py list \
+  --database-url sqlite:////tmp/statsplus.sqlite3
+python scripts/athlete_mappings.py dry-run \
+  --database-url sqlite:////tmp/statsplus.sqlite3 \
+  --provider prizepicks --provider-athlete-id pp-123 \
+  --season 2024-25 --name "Nikola Jokic"
+```
+
+Automatic decisions are idempotent and retain provider name/team evidence.
+Manual approve, override, reject, and clear commands require `--operator`
+and `--reason`; rejected identities stay suppressed until cleared. The CLI is
+read-only with respect to providers and rejects the bundled demo database.
+Read-only commands never run migrations; initialize or upgrade the writable
+schema explicitly with `python scripts/migrate.py` first.
+
 ## Run locally
 
 ```bash

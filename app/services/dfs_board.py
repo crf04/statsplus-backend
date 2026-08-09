@@ -24,6 +24,7 @@ import requests
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
+from app.services.athlete_mapping_repository import AthleteMappingPersistenceError
 from app.providers.dfs import (
     CoverageCode,
     DeadlineExceededError,
@@ -259,6 +260,7 @@ class DFSBoard:
         default_factory=lambda: datetime.now(timezone.utc)
     )
     contract_version: str = "1"
+    mapping_outcomes: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, NBAMarketQuery):
@@ -282,10 +284,12 @@ class DFSBoard:
             raise ValueError("DFS board generated_at must be timezone-aware")
         if not isinstance(self.contract_version, str) or not self.contract_version.strip():
             raise ValueError("DFS board contract_version must be non-empty")
+        mapping_outcomes = tuple(self.mapping_outcomes)
         object.__setattr__(self, "provider_outcomes", outcomes)
         object.__setattr__(self, "disabled_providers", disabled)
         object.__setattr__(self, "generated_at", generated.astimezone(timezone.utc))
         object.__setattr__(self, "contract_version", self.contract_version.strip())
+        object.__setattr__(self, "mapping_outcomes", mapping_outcomes)
 
     @property
     def snapshots(self) -> tuple[ProviderSnapshot, ...]:
@@ -375,6 +379,11 @@ class DFSBoardService:
         | None = None,
         statistic_catalog: StatisticCatalog | None = None,
         statistic_resolver: StatisticResolver | None = None,
+        athlete_resolver: Any | None = None,
+        athlete_mapping_repository: Any | None = None,
+        mapping_resolver: Any | None = None,
+        mapping_repository: Any | None = None,
+        persist_athlete_mappings: bool = True,
     ) -> None:
         registry = self._build_registry(provider_registry)
         decorator = snapshot_cache
@@ -430,6 +439,13 @@ class DFSBoardService:
         )
         self.statistic_catalog = catalog
         self.statistic_resolver = statistic_resolver or StatisticResolver(catalog)
+        self.athlete_resolver = athlete_resolver or mapping_resolver
+        self.athlete_mapping_repository = (
+            athlete_mapping_repository or mapping_repository
+        )
+        if not isinstance(persist_athlete_mappings, bool):
+            raise ValueError("persist_athlete_mappings must be a boolean")
+        self.persist_athlete_mappings = persist_athlete_mappings
 
     @staticmethod
     def _build_registry(
@@ -556,6 +572,7 @@ class DFSBoardService:
             disabled_providers=self.disabled_providers,
             generated_at=generated_at,
         )
+        board = self._resolve_athlete_mappings(board)
         self._record_telemetry(
             self.monotonic() - start,
             board,
@@ -599,6 +616,45 @@ class DFSBoardService:
         if tuple(resolved_markets) == snapshot.markets:
             return snapshot
         return replace(snapshot, markets=tuple(resolved_markets))
+
+    def _resolve_athlete_mappings(self, board: DFSBoard) -> DFSBoard:
+        """Observe typed market evidence without making board reads fragile.
+
+        Mapping persistence is opt-in through the injected resolver and
+        repository.  Any persistence failure is sanitized and isolated from
+        the normalized provider snapshots returned to the caller.
+        """
+
+        if (
+            not self.persist_athlete_mappings
+            or self.athlete_resolver is None
+            or self.athlete_mapping_repository is None
+            or board.query.season is None
+        ):
+            return board
+        outcomes: list[Any] = []
+        for snapshot in board.snapshots:
+            for market in snapshot.markets:
+                if market.athlete is None:
+                    continue
+                try:
+                    resolution = self.athlete_resolver.resolve(
+                        market, board.query.season
+                    )
+                    outcomes.append(resolution)
+                    self.athlete_mapping_repository.record_resolution(resolution)
+                except AthleteMappingPersistenceError:
+                    # Board retrieval is a normalized read; mapping storage is
+                    # an audit side effect and must never remove a market.
+                    logger.warning("Could not persist one athlete mapping observation")
+        return DFSBoard(
+            query=board.query,
+            provider_outcomes=board.provider_outcomes,
+            disabled_providers=board.disabled_providers,
+            generated_at=board.generated_at,
+            contract_version=board.contract_version,
+            mapping_outcomes=tuple(outcomes),
+        )
 
     def _record_telemetry(
         self,
