@@ -146,6 +146,37 @@ def test_missing_provider_ids_are_retained_as_null_without_fabrication():
     assert market.selections[0].selection_id is None
 
 
+def test_idless_markets_with_distinct_variant_labels_remain_distinct():
+    detail = _payload("fixture_details.valid.json")
+    original = detail["sportFixtureDetail"]["playerProps"][0]
+    first = copy.deepcopy(original)
+    second = copy.deepcopy(original)
+    first.pop("marketId")
+    second.pop("marketId")
+    first["variant"] = "Partner A"
+    second["variant"] = "Partner B"
+    detail["sportFixtureDetail"]["playerProps"] = [
+        first,
+        second,
+        detail["sportFixtureDetail"]["playerProps"][2],
+    ]
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(detail),
+    ]
+
+    snapshot = DabbleAdapter(session=session).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
+
+    idless = [market for market in snapshot.markets if market.market_id is None]
+    assert len(idless) == 2
+    assert {market.variant_label for market in idless} == {"Partner A", "Partner B"}
+    assert {market.variant.value for market in idless} == {"unknown"}
+
+
 @pytest.mark.parametrize(
     ("status", "expected_status"),
     [("Open", "available"), ("Suspended", "suspended")],

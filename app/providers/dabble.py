@@ -372,7 +372,7 @@ class DabbleAdapter:
                 retrieved_at=retrieved_at,
             )
 
-        detail_results = self._fetch_details(fixtures, query, context)
+        detail_results = self._fetch_details(fixtures, context)
         for result in detail_results:
             if result.error is not None:
                 fanout_complete = False
@@ -538,12 +538,10 @@ class DabbleAdapter:
     def _fetch_details(
         self,
         fixtures: Sequence[tuple[dict[str, Any], dict[str, Any]]],
-        query: NBAMarketQuery,
         context: RetrievalContext,
     ) -> list[_DetailResult]:
         """Fetch details with bounded workers and deterministic result order."""
 
-        del query
         executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.detail_concurrency, len(fixtures))
         )
@@ -889,6 +887,8 @@ class DabbleAdapter:
                 tuple(components),
                 value,
                 status.value,
+                market.variant,
+                market.variant_label,
             )
         return market_key, market, selection
 
@@ -944,6 +944,7 @@ class DabbleAdapter:
             market.status,
             (market.status_label or "").casefold(),
             market.variant,
+            market.variant_label,
             market.scoring_period,
             market.starts_at,
             market.updated_at,
