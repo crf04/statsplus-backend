@@ -34,10 +34,6 @@ from app.providers.dfs import (
     RetrievalContext,
     SnapshotStatus,
 )
-from app.services.dfs_snapshot_cache import (
-    ProviderSnapshotCache,
-    ProviderSnapshotCacheCoordinator,
-)
 from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
     BoardTelemetryEvent,
@@ -56,8 +52,6 @@ __all__ = [
     "ProviderFailureReason",
     "ProviderOutcome",
     "ProviderOutcomeStatus",
-    "ProviderSnapshotCache",
-    "ProviderSnapshotCacheCoordinator",
 ]
 
 # CoverageCode is a closed shared vocabulary. Keep the board's semantic
@@ -336,21 +330,9 @@ class DFSBoardService:
             [str, ProviderSnapshotProvider], ProviderSnapshotProvider
         ]
         | None = None,
-        cache_decorator: Callable[
-            [str, ProviderSnapshotProvider], ProviderSnapshotProvider
-        ]
-        | None = None,
-        cache_coordinator: Any | None = None,
     ) -> None:
         registry = self._build_registry(provider_registry)
-        supplied_decorators = tuple(
-            value
-            for value in (snapshot_cache, cache_decorator, cache_coordinator)
-            if value is not None
-        )
-        if len(supplied_decorators) > 1:
-            raise ValueError("provide only one DFS snapshot cache decorator")
-        decorator = supplied_decorators[0] if supplied_decorators else None
+        decorator = snapshot_cache
         if decorator is not None:
             decorate = getattr(decorator, "decorate", None)
             if callable(decorate):

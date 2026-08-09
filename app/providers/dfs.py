@@ -1145,6 +1145,7 @@ class RetrievalContext:
 
     deadline: datetime | str
     request_id: str | None = None
+    cache_status: str = "disabled"
 
     def __post_init__(self) -> None:
         deadline = normalize_timestamp(self.deadline)
@@ -1156,6 +1157,13 @@ class RetrievalContext:
                 raise ValueError("retrieval request_id is invalid")
         object.__setattr__(self, "deadline", deadline)
         object.__setattr__(self, "request_id", request_id)
+        if self.cache_status not in {"hit", "miss", "disabled", "stale", "error"}:
+            raise ValueError("retrieval cache_status is invalid")
+
+    def with_cache_status(self, status: str) -> "RetrievalContext":
+        """Return this request context with its cache state for provider telemetry."""
+
+        return RetrievalContext(self.deadline, self.request_id, status)
 
     def remaining_seconds(self, *, now: datetime | str | None = None) -> float:
         """Return non-negative seconds left in the absolute retrieval budget."""
@@ -1214,33 +1222,6 @@ class ProviderSnapshotProvider(Protocol):
         context: RetrievalContext,
     ) -> ProviderSnapshot:
         """Retrieve one complete or partial snapshot for the semantic query."""
-
-
-def serialize_provider_snapshot(snapshot: ProviderSnapshot) -> str:
-    """Serialize a cache-safe snapshot through the versioned cache contract."""
-
-    from app.services.dfs_snapshot_cache import serialize_provider_snapshot as serialize
-
-    return serialize(snapshot)
-
-
-def deserialize_provider_snapshot(
-    payload: str | bytes | bytearray,
-    *,
-    expected_contract_version: str | None = None,
-) -> ProviderSnapshot:
-    """Decode and validate one cache-safe serialized snapshot."""
-
-    from app.services.dfs_snapshot_cache import deserialize_provider_snapshot as deserialize
-
-    return deserialize(payload, expected_contract_version=expected_contract_version)
-
-
-class ProviderSnapshotSerializer:
-    """Stable object seam for tests and infrastructure adapters."""
-
-    serialize = staticmethod(serialize_provider_snapshot)
-    deserialize = staticmethod(deserialize_provider_snapshot)
 
 
 __all__ = [

@@ -60,7 +60,6 @@ from app.providers.dfs_transport import (
     run_bounded,
 )
 from app.utils.telemetry import (
-    CACHE_DISABLED,
     PROVIDER_DABBLE,
     ProviderResponseError,
     provider_normalization_call,
@@ -492,7 +491,7 @@ class DabbleAdapter:
             with provider_normalization_call(
                 PROVIDER_DABBLE,
                 "snapshot_normalization",
-                cache_status=CACHE_DISABLED,
+                cache_status=context.cache_status,
                 request_id=context.request_id,
             ):
                 normalization = run_bounded(
@@ -962,7 +961,7 @@ class DabbleAdapter:
             with provider_normalization_call(
                 PROVIDER_DABBLE,
                 "snapshot_normalization",
-                cache_status=CACHE_DISABLED,
+                cache_status=context.cache_status,
                 request_id=context.request_id,
             ):
                 raise self._failure_response(failure)
