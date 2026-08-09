@@ -3,7 +3,6 @@ from flask import Blueprint, request, jsonify
 
 from ..errors import (
     InvalidInputError,
-    OperationFailedError,
     ProviderUnavailableError,
     ResourceNotFoundError,
     route_error_boundary,
@@ -15,6 +14,7 @@ from ._service_proxy import CurrentAppService
 player_bp = Blueprint('players', __name__)
 
 player_service = CurrentAppService("player")
+player_jobs_service = CurrentAppService("data_refresh_jobs")
 
 @player_bp.route('', methods=['GET'])
 @require_auth_optional
@@ -47,9 +47,7 @@ def get_player_profile():
 
 @player_bp.route('/fetch', methods=['PUT'])
 @require_admin
-@route_error_boundary("Failed to store player data.")
+@route_error_boundary("Failed to schedule the player data refresh.")
 def fetch_players():
-    success = player_service.store_player_information()
-    if success:
-        return jsonify({'message': 'Player data processed and stored successfully'})
-    raise OperationFailedError("Failed to store player data.")
+    job_state = player_jobs_service.start("fetch_players")
+    return jsonify(job_state), 202

@@ -1,12 +1,22 @@
-import asyncio
+"""Game-log HTTP adapter.
+
+The route parses query parameters into one typed :class:`GameLogQuery` and
+calls the synchronous :meth:`GameService.get_filtered_logs` directly: Flask
+serves requests with worker threads, so no event loop is created per request
+(#10).  Malformed filters raise a 400 ``invalid_input`` response; provider
+timeouts keep the documented 503 ``provider_unavailable`` contract.
+"""
+
 import requests
-from flask import Blueprint, request
+from flask import Blueprint, jsonify, request
+from pydantic import ValidationError
 
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
+from ..models.game_logs import GameLogQuery
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -14,57 +24,59 @@ from ._service_proxy import CurrentAppService
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
 
+
 game_service = CurrentAppService("game")
 
 
-def _parse_game_log_filters() -> tuple[str, dict]:
-    """Parse game-log query parameters into the service contract."""
+def _default_season() -> str:
+    """The season used when a request omits ``season_filter``."""
+    return game_service.settings.nba.current_season
+
+
+def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
+    """Parse game-log query parameters into one typed :class:`GameLogQuery`."""
 
     player_name = request.args.get("player_name")
     if not player_name:
         raise InvalidInputError("player_name is required.")
 
-    try:
-        minutes_values = request.args.get("minutes_filter", "0,48").split(",")
-        if len(minutes_values) != 2:
-            raise ValueError("minutes_filter must contain two values")
+    filters = {
+        "season_filter": request.args.get("season_filter", _default_season()),
+        "minutes_filter": request.args.get("minutes_filter", "0,48"),
+        "players_on": request.args.getlist("players_on[]"),
+        "players_off": request.args.getlist("players_off[]"),
+        "date_filter": request.args.get("date_filter"),
+        "teams_against": request.args.getlist("teams_against[]"),
+        "rank_filter": request.args.getlist("rank_filter[]"),
+        "location_filter": request.args.get("location_filter", "Both"),
+        "game_filter": request.args.get("game_filter"),
+        "playstyle_range": [
+            request.args.get("playstyle_RTG_min", "0"),
+            request.args.get("playstyle_RTG_max", "200"),
+        ],
+        # Keep repeated ``self_filters[STAT]`` parameters as ordered pairs;
+        # collapsing them into a dict would silently drop same-stat bounds.
+        "self_filters": [
+            (key[len("self_filters[") : -1], value)
+            for key, value in request.args.items(multi=True)
+            if key.startswith("self_filters[") and key.endswith("]")
+        ],
+    }
 
-        filter_params = {
-            "minutes_filter": tuple(map(int, minutes_values)),
-            "players_on": request.args.getlist("players_on[]"),
-            "players_off": request.args.getlist("players_off[]"),
-            "date_filter": request.args.get("date_filter"),
-            "teams_against": request.args.getlist("teams_against[]"),
-            "rank_filter": request.args.getlist("rank_filter[]"),
-            "location_filter": request.args.get("location_filter", "Both"),
-            "game_filter": request.args.get("game_filter"),
-            "season_filter": request.args.get(
-                "season_filter", game_service.settings.nba.current_season
-            ),
-            "playstyle_range": [
-                float(request.args.get("playstyle_RTG_min", "0")),
-                float(request.args.get("playstyle_RTG_max", "200")),
-            ],
-            "self_filters": {
-                key[13:-1]: list(map(float, value.split(",")))
-                for key, value in request.args.items()
-                if key.startswith("self_filters[") and key.endswith("]")
-            },
-        }
-    except (TypeError, ValueError) as error:
+    try:
+        return player_name, GameLogQuery(**filters)
+    except ValidationError as error:
         raise InvalidInputError(
             "One or more game log filters are invalid.", detail=error
         ) from error
-
-    return player_name, filter_params
 
 
 @game_bp.route('/game_logs', methods=['GET'])
 @require_auth
 def get_game_logs():
+    player_name, query = _parse_game_log_filters()
     try:
-        player_name, filter_params = _parse_game_log_filters()
-        return asyncio.run(game_service.get_filtered_logs(player_name, filter_params))
+        result = game_service.get_filtered_logs(player_name, query)
     except requests.exceptions.Timeout as error:
         raise ProviderUnavailableError(
             "The upstream stats provider timed out. Please try again shortly.",
@@ -80,3 +92,4 @@ def get_game_logs():
                 "The requested player was not found.", detail=error
             ) from error
         raise InvalidInputError("The game log request is invalid.", detail=error) from error
+    return jsonify(result)

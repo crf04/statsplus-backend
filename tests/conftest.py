@@ -94,6 +94,29 @@ def dependencies(runtime_settings, mock_db_engine):
         name: Mock(name=f"{name}_service")
         for name in ("game", "player", "team", "data", "nl", "user")
     }
+    services["data_refresh_jobs"] = Mock(name="data_refresh_jobs_service")
+    services["provider_health"] = Mock(name="provider_health_service")
+    services["provider_health"].check_database.return_value = {
+        "status": "healthy",
+        "dialect": "sqlite",
+        "driver": "pysqlite",
+    }
+    services["provider_health"].check_nba_api.return_value = {
+        "status": "healthy",
+        "provider": "nba_stats",
+    }
+    services["provider_health"].check_pbp_api.return_value = {
+        "status": "healthy",
+        "provider": "pbp_stats",
+    }
+    services["provider_health"].detailed.return_value = {
+        "status": "healthy",
+        "checks": {
+            "database": {"status": "healthy"},
+            "nba_api": {"status": "healthy", "provider": "nba_stats"},
+            "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
+        },
+    }
     for service in services.values():
         service.settings = runtime_settings
     services["player"].get_all_players.return_value = []

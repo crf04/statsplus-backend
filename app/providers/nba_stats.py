@@ -20,11 +20,10 @@ from typing import Any, Protocol
 
 import pandas as pd
 from nba_api.stats import endpoints
-from requests import exceptions as requests_exceptions
 
-from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.utils.nba_api_config import get_nba_stats_timeout
+from app.services.nba_stats_adapter import NBAStatsAdapter as _InstrumentedNBAStatsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +305,7 @@ def normalize_archetype_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
     return _normalize_game_logs(raw_frame, preserve_player_id=True)
 
 
-class NBAStatsAdapter:
+class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
     """Concrete :class:`NBAStatsProvider` backed by ``nba_api``.
 
     ``nba_api`` calls ``stats.nba.com`` directly.  This adapter owns the
@@ -324,7 +323,7 @@ class NBAStatsAdapter:
         *,
         endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
-        self.settings = settings or get_runtime_settings()
+        super().__init__(settings=settings)
         self._endpoint_factory = (
             endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
         )
@@ -338,8 +337,9 @@ class NBAStatsAdapter:
     ) -> pd.DataFrame:
         """Fetch and normalize one player's regular-season game logs."""
 
-        return self._fetch_game_logs(
+        return self._get_normalized_game_logs(
             normalize=normalize_player_game_logs,
+            operation="player_game_logs",
             player_id_nullable=player_id,
             season_nullable=season,
             season_type_nullable=season_type,
@@ -355,58 +355,37 @@ class NBAStatsAdapter:
     ) -> pd.DataFrame:
         """Fetch normalized logs for archetype members against one opponent."""
 
-        frame = self._fetch_game_logs(
+        frame = self._get_normalized_game_logs(
             normalize=normalize_archetype_game_logs,
+            operation="player_gamelogs_against",
             season_nullable=season,
             season_type_nullable=season_type,
             opp_team_id_nullable=opponent_team_id,
         )
         return frame[frame["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
-    def _fetch_game_logs(
+    def _get_normalized_game_logs(
         self,
         *,
+        operation: str,
         normalize: Callable[[pd.DataFrame], pd.DataFrame],
         **endpoint_kwargs: Any,
     ) -> pd.DataFrame:
-        """Call ``PlayerGameLogs`` and apply one centralized error contract."""
+        """Run the game-log endpoint through the shared instrumented seam."""
 
-        timeout = get_nba_stats_timeout(self.settings)
-        try:
-            endpoint = self._endpoint_factory(timeout=timeout, **endpoint_kwargs)
-            data_frames = endpoint.get_data_frames()
-            if not isinstance(data_frames, Sequence) or not data_frames:
-                raise _provider_response_error(
-                    "The NBA Stats provider returned no game-log data.",
-                    detail="get_data_frames() returned no frames",
-                )
-            return normalize(data_frames[0])
-        except ProviderUnavailableError:
-            raise
-        except requests_exceptions.Timeout as error:
-            logger.warning("NBA Stats provider request timed out: %s", error)
-            raise _provider_response_error(
-                "The upstream stats provider timed out. Please try again shortly.",
-                detail=error,
-            ) from error
-        except (
-            requests_exceptions.RequestException,
-            ConnectionError,
-            TimeoutError,
-            OSError,
-        ) as error:
-            logger.warning("NBA Stats provider request failed: %s", error)
-            raise _provider_response_error(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
-        except Exception as error:
-            # Endpoint-library errors and response parsing failures do not
-            # share a stable public exception type.  Keep those details out of
-            # the HTTP response while preserving the centralized error code.
-            logger.warning("NBA Stats provider response failed: %s", error)
-            raise _provider_response_error(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
+        def build(timeout: float) -> object:
+            return self._endpoint_factory(timeout=timeout, **endpoint_kwargs)
+
+        # Validate the normalized contract inside the provider telemetry
+        # context.  ``run_endpoint`` returns the raw frame after validation so
+        # callers still receive the canonical provider-facing columns.
+        frame = self.run_endpoint(
+            operation,
+            build,
+            required_columns=REQUIRED_GAME_LOG_COLUMNS,
+            validator=normalize,
+        )
+        return normalize(frame)
 
 
 __all__ = [

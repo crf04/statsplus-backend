@@ -18,6 +18,7 @@ from app.errors import (
 )
 from app.config.settings import RuntimeSettings
 from app.dependencies import get_dependencies
+from app.services.user_service import UserService as UserService
 
 from .firebase_admin import get_firebase_app, verify_firebase_token
 

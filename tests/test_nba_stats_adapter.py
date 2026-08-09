@@ -1,26 +1,42 @@
-"""Offline contract tests for the NBA Stats provider boundary."""
+"""Concurrency and timeout tests for the bounded NBA Stats adapter (#10).
 
-from __future__ import annotations
+The game-log flow now runs as a synchronous Flask/threaded workload with all
+``stats.nba.com`` calls funnelled through :class:`NBAStatsAdapter`.  These tests
+prove that the provider callers explicitly enforce the configured
+``NBA_STATS_MAX_CONCURRENCY`` bound and reuse the configured timeout.
+"""
 
-import asyncio
+import threading
+import time
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import requests
+from nba_api.stats import endpoints
 from nba_api.stats.endpoints.playergamelogs import PlayerGameLogs
 from sqlalchemy import create_engine
 
-from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.config.settings import (
+    AuthenticationSettings,
+    CacheSettings,
+    DatabaseSettings,
+    NBASeasonSettings,
+    ProviderSettings,
+    RuntimeSettings,
+)
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import (
     DERIVED_GAME_LOG_COLUMNS,
-    NBAStatsAdapter,
+    NBAStatsAdapter as InjectedNBAStatsAdapter,
     REQUIRED_GAME_LOG_COLUMNS,
     normalize_archetype_game_logs,
     normalize_player_game_logs,
 )
+from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
 from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
@@ -47,6 +63,379 @@ def _test_settings() -> RuntimeSettings:
     )
 
 
+class _ConcurrencyProbe:
+    """Tracks how many fake provider calls are in flight at once."""
+
+    def __init__(self, hold: float = 0.1):
+        self._lock = threading.Lock()
+        self._hold = hold
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+
+    def run(self, fn):
+        with self._lock:
+            self.calls += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self._hold)
+            return fn()
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+def _probe_endpoint(probe):
+    class _ProbePlayerGameLogs:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_data_frames(self, *args, **kwargs):
+            frame = probe.run(
+                lambda: pd.DataFrame(
+                    {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                )
+            )
+            return [frame]
+
+    return _ProbePlayerGameLogs
+
+
+def _settings(max_concurrency: int, timeout: float = 1.0) -> RuntimeSettings:
+    return RuntimeSettings(
+        environment="testing",
+        providers=ProviderSettings(
+            nba_stats_timeout_seconds=timeout,
+            nba_stats_max_concurrency=max_concurrency,
+        ),
+    )
+
+
+def test_adapter_exposes_configured_bound():
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=3))
+
+    assert adapter.max_concurrency == 3
+    assert adapter.timeout == 1.0
+
+
+def test_adapter_enforces_concurrency_bound_with_concurrent_calls(monkeypatch):
+    probe = _ConcurrencyProbe(hold=0.1)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=2))
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        _probe_endpoint(probe),
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(adapter.fetch_player_game_logs, player_id, "2024-25")
+            for player_id in range(8)
+        ]
+        frames = [future.result() for future in futures]
+
+    assert probe.calls == 8
+    assert probe.max_active <= 2
+    assert len(frames) == 8
+    assert all(isinstance(frame, pd.DataFrame) for frame in frames)
+
+
+def test_http_game_log_requests_share_gate_across_app_service_instances(monkeypatch):
+    """Prove the advertised worker bound at the Flask HTTP seam."""
+    from app import create_app
+    from app.routes import game_routes
+    from app.routes._service_proxy import CurrentAppService
+
+    # Some earlier route tests replace attributes on the module-level proxy.
+    # Use a fresh proxy so this process-wide concurrency test exercises only
+    # the dependency graphs assembled below.
+    monkeypatch.setattr(game_routes, "game_service", CurrentAppService("game"))
+
+    probe = _ConcurrencyProbe(hold=0.05)
+    settings = RuntimeSettings(
+        environment="testing",
+        database=DatabaseSettings(),
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        providers=ProviderSettings(nba_stats_max_concurrency=2),
+        nba={"current_season": "2024-25"},
+    )
+
+    class ProbePlayerGameLogs:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            def frame():
+                values = {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                values.update(
+                    {
+                        "GAME_DATE": ["2024-01-01"],
+                        "PLAYER_NAME": ["LeBron James"],
+                        "MATCHUP": ["BOS vs. LAL"],
+                        "MIN": [30],
+                        "PTS": [25],
+                        "REB": [8],
+                        "AST": [7],
+                        "FGM": [9],
+                        "FGA": [16],
+                        "FG3M": [3],
+                        "FG3A": [7],
+                        "FTM": [4],
+                        "FTA": [5],
+                        "NBA_FANTASY_PTS": [44.2],
+                    }
+                )
+                return pd.DataFrame(values)
+
+            return [probe.run(frame)]
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs, "PlayerGameLogs", ProbePlayerGameLogs
+    )
+
+    # Separate apps create separate GameService/NBAStatsAdapter instances,
+    # while the shared process setting gives both adapters one semaphore.
+    apps = []
+    for _ in range(2):
+        service = GameService(
+            create_engine("sqlite://"),
+            redis_client=False,
+            settings=settings,
+            nba_stats_adapter=InjectedNBAStatsAdapter(settings=settings),
+        )
+        monkeypatch.setattr(service, "get_player_id", lambda name: 2544)
+        dependencies = SimpleNamespace(settings=settings, game_service=service)
+        apps.append(
+            create_app(
+                {
+                    "RUNTIME_SETTINGS": settings,
+                    "DEPENDENCIES": dependencies,
+                    "TESTING": True,
+                    "SKIP_FIREBASE_INIT": True,
+                    "SKIP_TABLE_CREATE": True,
+                }
+            )
+        )
+
+    def request(app):
+        with app.test_client() as client:
+            return client.get(
+                "/api/games/game_logs?player_name=LeBron%20James"
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = [
+            future.result()
+            for future in (
+                pool.submit(request, apps[index % len(apps)])
+                for index in range(8)
+            )
+        ]
+
+    assert all(response.status_code == 200 for response in responses)
+    assert probe.calls == 8
+    assert probe.max_active <= settings.providers.nba_stats_max_concurrency
+    service_adapters = [
+        app.extensions["request_services"]["game"].nba_stats for app in apps
+    ]
+    assert service_adapters[0]._bound is service_adapters[1]._bound
+
+
+def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
+    captured = {}
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1, timeout=7.5))
+
+    def fake_endpoint(**kwargs):
+        captured.update(kwargs)
+        return FakeEndpoint()
+
+    class FakeEndpoint:
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
+                )
+            ]
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: fake_endpoint(**kwargs),
+    )
+
+    adapter.fetch_player_game_logs("123", "2024-25")
+
+    assert captured["timeout"] == 7.5
+    assert captured["player_id_nullable"] == "123"
+    assert captured["season_nullable"] == "2024-25"
+
+
+def test_adapter_propagates_provider_timeout(monkeypatch):
+    import requests
+
+    def timed_out_endpoint(**kwargs):
+        raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
+
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: timed_out_endpoint(**kwargs),
+    )
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        adapter.fetch_player_game_logs("123", "2024-25")
+
+
+class _SimpleNamespace:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _StatusResponse:
+    """Fake endpoint that exposes ``nba_response.status_code`` only."""
+
+    def __init__(self, status_code):
+        self.nba_response = _SimpleNamespace(status_code=status_code)
+
+    def get_data_frames(self):
+        if self.nba_response.status_code >= 400:
+            raise AssertionError("run_endpoint must raise before parsing")
+        return [
+            pd.DataFrame({column: [1] for column in GAME_LOG_REQUIRED_COLUMNS})
+        ]
+
+
+def test_adapter_records_upstream_status_on_provider_event(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    def fake_endpoint(**kwargs):
+        return _StatusResponse(200)
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: fake_endpoint(**kwargs),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs("123", "2024-25")
+    events = telemetry.get_recorded_provider_events()
+    assert events
+    assert events[-1]["operation"] == "player_game_logs"
+    assert events[-1]["status_code"] == 200
+    assert events[-1]["outcome"] == telemetry.OUTCOME_SUCCESS
+
+
+def test_non_cache_operation_defaults_to_disabled(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: _StatusResponse(200),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs("123", "2024-25")
+
+    assert telemetry.get_recorded_provider_events()[-1]["cache_status"] == (
+        telemetry.CACHE_DISABLED
+    )
+
+
+def test_cache_aware_calls_record_explicit_miss_and_hit(monkeypatch):
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: _StatusResponse(200),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    adapter.fetch_player_game_logs(
+        "123", "2024-25", cache_status=telemetry.CACHE_MISS
+    )
+    adapter.record_cache_hit("player_game_logs")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[-2]["cache_status"] == telemetry.CACHE_MISS
+    assert events[-1]["cache_status"] == telemetry.CACHE_HIT
+
+
+def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
+    import requests
+
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    def error_endpoint(**kwargs):
+        return _StatusResponse(503)
+
+    monkeypatch.setattr(
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        lambda *args, **kwargs: error_endpoint(**kwargs),
+    )
+
+    from app.utils import telemetry
+
+    telemetry.clear_recorded_provider_events()
+    with pytest.raises(requests.exceptions.HTTPError):
+        adapter.fetch_player_game_logs("123", "2024-25")
+
+    events = telemetry.get_recorded_provider_events()
+    assert events[-1]["status_code"] == 503
+    assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+
+
+@pytest.mark.parametrize(
+    "frame, required_columns, malformed",
+    [
+        (pd.DataFrame({"GAME_ID": [], "PTS": []}), ("GAME_ID", "PTS"), False),
+        (pd.DataFrame({"GAME_ID": ["1"]}), ("GAME_ID", "PTS"), True),
+    ],
+)
+def test_adapter_classifies_empty_or_invalid_schema_as_malformed(
+    monkeypatch, frame, required_columns, malformed
+):
+    from app.utils import telemetry
+
+    class Endpoint:
+        def get_data_frames(self):
+            return [frame]
+
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    telemetry.clear_recorded_provider_events()
+
+    if malformed:
+        with pytest.raises(telemetry.ProviderResponseError):
+            adapter.run_endpoint(
+                "health_probe",
+                lambda timeout: Endpoint(),
+                required_columns=required_columns,
+            )
+    else:
+        result = adapter.run_endpoint(
+            "health_probe",
+            lambda timeout: Endpoint(),
+            required_columns=required_columns,
+        )
+        assert result.empty
+
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["outcome"] == (
+        telemetry.OUTCOME_MALFORMED if malformed else telemetry.OUTCOME_SUCCESS
+    )
 def test_recorded_provider_fixture_is_normalized_across_schema_drift():
     raw_frame = _recorded_provider_frame()
 
@@ -214,7 +603,7 @@ def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):
         nba_stats_adapter=fake,
     )
 
-    logs, next_team = asyncio.run(service._get_game_logs("LeBron James", "2025-26"))
+    logs, next_team = service._get_game_logs("LeBron James", "2025-26")
 
     assert next_team is None
     assert list(logs["PRA"]) == [47, 48, 40, 37, 48, 39]

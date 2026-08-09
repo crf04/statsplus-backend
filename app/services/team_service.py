@@ -1,18 +1,19 @@
 import pandas as pd
 from nba_api.stats.static import teams
-from nba_api.stats.endpoints import (
-    LeagueDashTeamStats, 
-    LeagueDashOppPtShot,
-    LeagueDashTeamShotLocations
-)
-from ..utils.nba_api_config import get_nba_stats_timeout
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.models.catalogs import SHOOTING_TYPES
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 
 class TeamService:
-    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        settings: RuntimeSettings | None = None,
+        nba_stats_provider: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
-        
+        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
     def get_all_teams(self):
         team = teams.get_teams()
         team_names = [d['full_name'] for d in team]
@@ -43,18 +44,13 @@ class TeamService:
             df = self._fetch_opp_shooting_zone_data(date) if date else self._fetch_data_from_table('opp_shooting_zone')
         elif category == 'Shooting Type':
             combined_df = pd.DataFrame()
-            types = ['Catch and Shoot', 'Pullups', 'Less Than 10 ft']
+            types = SHOOTING_TYPES
 
             for shooting_type in types:
                 if date:
                     df = self._fetch_opp_shooting_data(shooting_type, date)
                 else:
-                    name_map = {
-                        'Catch and Shoot': 'catch_and_shoot',
-                        'Pullups': 'pullups',
-                        'Less Than 10 ft': 'less_than_10_ft',
-                    }
-                    df = self._fetch_data_from_table(name_map[shooting_type])
+                    df = self._fetch_data_from_table(shooting_type.replace(' ', '_').lower())
                 if date:
                     df['FG2A_RANK'] = df['FG2A'].rank(method='min', ascending=True)
                     df['FG3A_RANK'] = df['FG3A'].rank(method='min', ascending=True)
@@ -87,12 +83,12 @@ class TeamService:
         return team_stats
 
     def _fetch_opp_shooting_data(self, type, date_filter=None):
-        return LeagueDashOppPtShot(
-            general_range_nullable=type,
-            date_from_nullable=date_filter,
+        return self.nba_stats.fetch_opponent_shot_chart(
+            type,
+            date_filter,
             per_mode_simple='PerGame',
-            timeout=get_nba_stats_timeout(self.settings),
-        ).get_data_frames()[0]
+            league_id='00',
+        )
     
 
     def _fetch_data_from_table(self, table_name):
@@ -103,23 +99,18 @@ class TeamService:
             return pd.read_sql(query, conn)
 
     def _fetch_opponent_data(self, date_filter=None):
-        response = LeagueDashTeamStats(
-            measure_type_detailed_defense='Opponent',
+        return self.nba_stats.fetch_opponent_team_stats(
+            date_filter,
             per_mode_detailed='Per48',
-            date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(self.settings),
+            league_id='00',
         )
-        return response.get_data_frames()[0]
 
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
-        response = LeagueDashTeamShotLocations(
-            distance_range='By Zone',
-            measure_type_simple='Opponent',
+        opp_zone_df = self.nba_stats.fetch_opponent_shooting_zone(
+            date_filter,
             per_mode_detailed='PerGame',
-            date_from_nullable=date_filter,
-            timeout=get_nba_stats_timeout(self.settings),
+            league_id='00',
         )
-        opp_zone_df = response.get_data_frames()[0]
         opp_zone_df.columns = ['_'.join(filter(None, col)).strip() for col in opp_zone_df.columns]
         
         columns = [a for a in opp_zone_df.columns if 'OPP' in a and 'PCT' not in a and 'Backcourt' not in a]

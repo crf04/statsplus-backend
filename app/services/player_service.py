@@ -1,8 +1,8 @@
 import pandas as pd
 import logging
 import requests
+from collections.abc import Callable
 from nba_api.stats.static import players
-from nba_api.stats.endpoints import PlayerDashPtShots
 from rapidfuzz import process, fuzz
 from typing import Optional
 from ..errors import (
@@ -11,9 +11,10 @@ from ..errors import (
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..utils.nba_api_config import get_nba_stats_timeout
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
+from app.services.progress import RefreshProgress
+from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
@@ -26,22 +27,16 @@ class PlayerService:
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
-        self.nba_stats_provider = (
-            nba_stats_provider
-            if nba_stats_provider is not None
-            else NBAStatsAdapter(settings=self.settings)
-        )
+        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
 
     def get_all_players(self):
         """Fetch list of all players from database"""
         try:
             df = self._fetch_data_from_table('player_play_types')
             return df['PLAYER_NAME'].values.tolist()
-        except Exception:
-            # Surface the failure to the route so a broken database returns 500
-            # instead of an empty list that is indistinguishable from no players.
-            logger.exception("Error fetching players")
-            raise
+        except Exception as e:
+            logger.error("Error fetching players: %s", e)
+            return []
 
     def get_player_profile(self, player_name, category, opp_team=None):
         """
@@ -144,7 +139,10 @@ class PlayerService:
         """Get player shooting type data"""
         player_team = self._fetch_data_from_table('player_team_table')
         team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = PlayerDashPtShots(player_id=self.get_player_id(player_name), team_id = int(team_id), per_mode_simple = 'PerGame', timeout=get_nba_stats_timeout(self.settings)).get_data_frames()[1]
+        df = self.nba_stats.fetch_player_shot_chart(
+            self.get_player_id(player_name),
+            int(team_id),
+        )
         df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
         df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
         df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
@@ -162,16 +160,14 @@ class PlayerService:
             team_dict = pd.DataFrame(self._get_teams())
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
             
-            # Get game logs through the app-owned NBA Stats adapter.  The
-            # adapter owns endpoint construction, timeout, normalization, and
-            # provider error translation.
-            gl = self.nba_stats_provider.get_archetype_game_logs(
+            # Get normalized cluster game logs through the app-owned provider.
+            gl = self.nba_stats.get_archetype_game_logs(
                 player_ids=player_ids,
                 opponent_team_id=int(team_id),
                 season=self.settings.nba.current_season,
             )
-            
-            # Process the normalized cluster logs returned by the adapter.
+
+            # The provider applies the cluster-member filter at its seam.
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             
@@ -194,8 +190,6 @@ class PlayerService:
                                'FTM/36MIN_DIFF', 'FTA/36MIN_DIFF', 'PTS/36MIN_DIFF', 'TOV/36MIN_DIFF']]
 
             return merged_df.to_dict(orient='records')
-        except AppError:
-            raise
         except Exception as e:
             logger.error("Error getting archetype gamelogs: %s", e)
             return []
@@ -211,17 +205,31 @@ class PlayerService:
             logger.error("Error getting archetype players: %s", e)
             return []
 
-    def store_player_information(self):
-        """Store basic player information in database"""
-        try:
-            player_dict = players.get_players()
-            player_df = pd.DataFrame.from_dict(player_dict)
-            player_df.to_sql('player_information', self.engine, 
-                           if_exists='replace', index=False)
-            return True
-        except Exception as e:
-            logger.error("Error storing player information: %s", e)
-            return False
+    def store_player_information(
+        self,
+        *,
+        progress_callback: Callable | None = None,
+        publication_fence: PublicationFence | None = None,
+    ):
+        """Store basic player information in database.
+
+        Fetching completes before the table is replaced, so a provider failure
+        leaves the existing player list untouched.
+        """
+        progress = RefreshProgress(progress_callback)
+        progress.fetch("Fetching player information")
+        player_dict = players.get_players()
+        player_df = pd.DataFrame.from_dict(player_dict)
+        progress.transform("Transforming player information")
+        from app.services.table_publisher import AtomicTablePublisher
+
+        progress.publish("Publishing player information")
+        AtomicTablePublisher(self.engine).publish(
+            {"player_information": player_df},
+            publication_fence=publication_fence,
+        )
+        progress.complete()
+        return True
 
     def get_player_id(self, player_name):
         """Get player ID from database"""

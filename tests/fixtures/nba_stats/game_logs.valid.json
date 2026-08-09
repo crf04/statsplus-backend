@@ -1,0 +1,65 @@
+{
+  "resource": "playergamelogs",
+  "parameters": {
+    "LeagueID": "00",
+    "PlayerID": "203500",
+    "PerMode": "Totals",
+    "Season": "2024-25",
+    "SeasonType": "Regular Season"
+  },
+  "resultSets": [
+    {
+      "name": "PlayerGameLogs",
+      "headers": [
+        "SEASON_YEAR",
+        "PLAYER_ID",
+        "PLAYER_NAME",
+        "TEAM_ABBREVIATION",
+        "GAME_ID",
+        "GAME_DATE",
+        "MATCHUP",
+        "MIN",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "PTS",
+        "REB",
+        "AST"
+      ],
+      "rowSet": [
+        [
+          "2024-25",
+          "203500",
+          "LeBron James",
+          "LAL",
+          "0022400001",
+          "2024-11-27",
+          "LAL vs. OKC",
+          27,
+          9,
+          17,
+          52.9,
+          24,
+          7,
+          8
+        ],
+        [
+          "2024-25",
+          "203500",
+          "LeBron James",
+          "LAL",
+          "0022400002",
+          "2024-11-29",
+          "LAL vs. WAS",
+          35,
+          11,
+          19,
+          57.9,
+          29,
+          6,
+          10
+        ]
+      ]
+    }
+  ]
+}

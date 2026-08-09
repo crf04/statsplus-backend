@@ -168,8 +168,8 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     with first_app.test_request_context(
         "/api/games/game_logs?player_name=LeBron%20James"
     ):
-        _, first_filters = game_routes._parse_game_log_filters()
-        assert first_filters["season_filter"] == "2030-31"
+        _, first_query = game_routes._parse_game_log_filters()
+        assert first_query.season_filter == "2030-31"
         assert game_routes.game_service.settings is first_settings
 
         assert isinstance(user_routes.user_service, CurrentAppService)
@@ -179,8 +179,8 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     with second_app.test_request_context(
         "/api/games/game_logs?player_name=LeBron%20James"
     ):
-        _, second_filters = game_routes._parse_game_log_filters()
-        assert second_filters["season_filter"] == "2040-41"
+        _, second_query = game_routes._parse_game_log_filters()
+        assert second_query.season_filter == "2040-41"
         assert game_routes.game_service.settings is second_settings
 
         second_user_service = user_routes.user_service._resolve()

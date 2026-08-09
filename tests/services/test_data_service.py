@@ -276,25 +276,21 @@ def test_per36_failure_is_reported(service, monkeypatch):
 
 
 def test_update_all_data_reports_success_when_every_step_passes(service, monkeypatch):
-    steps = [
-        "store_player_information", "process_opponent_scoring",
-        "store_player_per36_stats", "process_and_store_team_data",
-        "process_opp_shooting", "process_opp_shooting_zone", "process_playstyles",
-        "process_player_zone", "fetch_PBP_data", "process_assist_data",
-    ]
-    for step in steps:
-        monkeypatch.setattr(service, step, lambda *a, **k: True)
+    monkeypatch.setattr(
+        service,
+        "_collect_all_frames",
+        lambda: {"player_information": pd.DataFrame([{"id": 1}])},
+    )
+    monkeypatch.setattr(service.publisher, "publish", lambda *args, **kwargs: None)
 
     assert service.update_all_data() is True
 
 
 def test_update_all_data_reports_failure_when_a_step_raises(service, monkeypatch):
-    monkeypatch.setattr(service, "store_player_information", lambda: True)
-
     def boom():
         raise RuntimeError("provider exploded")
 
-    monkeypatch.setattr(service, "process_opponent_scoring", boom)
+    monkeypatch.setattr(service, "_collect_all_frames", boom)
 
     assert service.update_all_data() is False
 

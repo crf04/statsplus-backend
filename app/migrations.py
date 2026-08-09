@@ -17,8 +17,10 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    inspect,
     insert,
     select,
+    text,
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.sql import func
@@ -55,14 +57,73 @@ _schema_migrations = Table(
 
 
 def _create_users_table(connection: Connection) -> None:
-    """Create all SQLAlchemy models registered by the application."""
-    from app.models import Base
+    """Create the application-owned ``users`` table."""
+    from app.models.user import User
 
-    Base.metadata.create_all(connection)
+    User.__table__.create(connection, checkfirst=True)
+
+
+def _create_data_refresh_jobs_table(connection: Connection) -> None:
+    """Create the durable ``data_refresh_jobs`` table."""
+    from app.models.job import DataRefreshJob
+
+    DataRefreshJob.__table__.create(connection, checkfirst=True)
+
+
+def _upgrade_data_refresh_jobs_queue(connection: Connection) -> None:
+    """Add lease metadata to databases created by migration 002.
+
+    Migration 002 created the first version of the table.  ``ALTER TABLE`` is
+    used here instead of recreating it so existing queued/running rows and the
+    partial active-operation index survive an upgrade.  Fresh databases see
+    all columns in the model-created table and therefore simply skip the
+    additions.
+    """
+    table_name = "data_refresh_jobs"
+    existing = {
+        column["name"]
+        for column in inspect(connection).get_columns(table_name)
+    }
+    additions = {
+        "request_id": "VARCHAR(128)",
+        "lease_owner": "VARCHAR(128)",
+        "lease_expires_at": "TIMESTAMP WITH TIME ZONE"
+        if connection.dialect.name == "postgresql"
+        else "DATETIME",
+        "heartbeat_at": "TIMESTAMP WITH TIME ZONE"
+        if connection.dialect.name == "postgresql"
+        else "DATETIME",
+        "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    preparer = connection.dialect.identifier_preparer
+    quoted_table = preparer.quote(table_name)
+    for name, type_sql in additions.items():
+        if name in existing:
+            continue
+        connection.execute(
+            text(
+                f"ALTER TABLE {quoted_table} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            )
+        )
+
+    # Old application databases may have had the table but not the index
+    # (e.g. an interrupted 002 migration).  Keep the same database-enforced
+    # duplicate-operation guarantee on every supported dialect.
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_data_refresh_jobs_active_operation "
+            f"ON {quoted_table} (operation) "
+            "WHERE status IN ('queued', 'running')"
+        )
+    )
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
+    Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
+    Migration(3, "003_durable_data_refresh_queue", _upgrade_data_refresh_jobs_queue),
 )
 
 

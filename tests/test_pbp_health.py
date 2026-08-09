@@ -23,11 +23,7 @@ class HealthyProvider:
 def test_pbp_health_names_the_provider(client, monkeypatch) -> None:
     from app.routes import health_routes
 
-    monkeypatch.setattr(
-        health_routes,
-        "_build_pbp_stats_provider",
-        lambda: HealthyProvider(),
-    )
+    monkeypatch.setattr(health_routes, "_build_pbp_stats_provider", HealthyProvider)
 
     response = client.get("/api/health/pbp-stats")
 
@@ -36,23 +32,20 @@ def test_pbp_health_names_the_provider(client, monkeypatch) -> None:
     assert response.get_json()["test_type"] == "totals"
 
 
-def test_old_nba_api_health_url_is_preserved_as_deprecated_alias(
-    client, monkeypatch
-) -> None:
+def test_nba_api_health_remains_a_distinct_provider_signal(client, monkeypatch) -> None:
     from app.routes import health_routes
 
-    monkeypatch.setattr(
-        health_routes,
-        "_build_pbp_stats_provider",
-        lambda: HealthyProvider(),
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            health_routes.health_service,
+            "check_nba_api",
+            lambda: {"status": "healthy", "provider": "nba_stats"},
+        )
 
     response = client.get("/api/health/nba-api")
 
     assert response.status_code == 200
-    assert response.get_json()["provider"] == "PBP Stats"
-    assert response.headers["Deprecation"] == "true"
-    assert "/api/health/pbp-stats" in response.headers["Warning"]
+    assert response.get_json()["provider"] == "nba_stats"
 
 
 def test_pbp_health_provider_failure_uses_central_error_contract(
@@ -87,16 +80,15 @@ def test_pbp_health_provider_failure_uses_central_error_contract(
 def test_detailed_health_reports_pbp_stats_check(client, monkeypatch) -> None:
     from app.routes import health_routes
 
-    monkeypatch.setattr(
-        health_routes,
-        "_check_database_connection",
-        lambda: {"status": "healthy", "dialect": "sqlite", "driver": "pysqlite"},
-    )
-    monkeypatch.setattr(
-        health_routes,
-        "_check_pbp_stats_connectivity",
-        lambda: HealthyProvider().health_check(),
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(health_routes.health_service, "detailed", lambda: {
+            "status": "healthy",
+            "checks": {
+                "database": {"status": "healthy", "dialect": "sqlite", "driver": "pysqlite"},
+                "nba_api": {"status": "healthy", "provider": "nba_stats"},
+                "pbp_stats": HealthyProvider().health_check(),
+            },
+        })
 
     response = client.get("/api/health/detailed")
 

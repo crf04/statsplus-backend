@@ -18,6 +18,8 @@ from typing import Any, ClassVar, ParamSpec, TypeVar
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
+from app.utils.telemetry import ProviderResponseError, record_application_failure
+
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +231,14 @@ class OperationFailedError(AppError):
     default_message = "The requested operation could not be completed."
 
 
+class DuplicateOperationError(AppError):
+    """A requested operation conflicts with one that is already active."""
+
+    status_code = 409
+    code = "duplicate_active_operation"
+    default_message = "An identical operation is already running or queued."
+
+
 def route_error_boundary(
     safe_message: str,
     *,
@@ -248,6 +258,12 @@ def route_error_boundary(
         def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
             try:
                 return handler(*args, **kwargs)
+            except ProviderResponseError as error:
+                # A provider seam has already recorded the malformed event.
+                # Translate it at the HTTP boundary so the public contract is
+                # the same safe 503 used for provider timeouts and HTTP
+                # failures, without incrementing application-failure metrics.
+                raise ProviderUnavailableError(detail=error) from error
             except AppError:
                 raise
             except Exception as error:
@@ -271,6 +287,11 @@ def register_error_handlers(app: Flask) -> None:
     def handle_app_error(error: AppError):  # type: ignore[no-untyped-def]
         _log_application_error(error)
 
+        # Provider failures are counted at the provider seams; the central
+        # handler must not double count them as application failures.
+        if error.code != "provider_unavailable":
+            record_application_failure(error.code)
+
         return _error_response(error.code, error.public_message, error.status_code)
 
     @app.errorhandler(HTTPException)
@@ -289,6 +310,8 @@ def register_error_handlers(app: Flask) -> None:
             app_error = AppError(detail=error.description)
 
         _log_application_error(app_error, http_status=error.code)
+        if (error.code or 0) >= 500:
+            record_application_failure(f"http_{error.code or 0}")
         return _error_response(
             app_error.code,
             app_error.public_message,
@@ -301,6 +324,8 @@ def register_error_handlers(app: Flask) -> None:
 
         if isinstance(error, HTTPException):
             return handle_http_error(error)
+        if isinstance(error, ProviderResponseError):
+            return handle_app_error(ProviderUnavailableError(detail=error))
 
         app_error = AppError(detail=error)
         return handle_app_error(app_error)

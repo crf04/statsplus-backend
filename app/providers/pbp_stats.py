@@ -17,9 +17,9 @@ from typing import Any, Protocol, runtime_checkable
 import pandas as pd
 import requests
 
-from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.utils.nba_api_config import get_shared_nba_session
+from app.services.pbp_stats_adapter import PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class PBPStatsProvider(Protocol):
         """Check the provider using the totals endpoint."""
 
 
-class PBPStatsAdapter:
+class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
     """Concrete PBP Stats adapter backed by the shared requests session."""
 
     BASE_URL = "https://api.pbpstats.com/get-totals/nba"
@@ -67,8 +67,7 @@ class PBPStatsAdapter:
         from the NBA Stats timeout used by ``nba_api``.
         """
 
-        self.settings = settings or get_runtime_settings()
-        self.session = session or get_shared_nba_session(self.settings)
+        super().__init__(settings=settings, session=session)
 
     @property
     def timeout(self) -> tuple[float, float]:

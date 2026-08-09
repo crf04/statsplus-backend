@@ -1,0 +1,34 @@
+{
+  "multi_row_table_data": [
+    {
+      "Name": "LeBron James",
+      "Season": "2024-25",
+      "Team": "LAL",
+      "GP": 30,
+      "Assists": 20,
+      "AssistPoints": 40,
+      "TwoPtAssists": 220,
+      "ThreePtAssists": 140,
+      "Arc3Assists": 60,
+      "Corner3Assists": 25,
+      "AtRimAssists": 180,
+      "ShortMidRangeAssists": 90,
+      "LongMidRangeAssists": 50
+    },
+    {
+      "Name": "Stephen Curry",
+      "Season": "2024-25",
+      "Team": "GSW",
+      "GP": 29,
+      "Assists": 18,
+      "AssistPoints": 36,
+      "TwoPtAssists": 140,
+      "ThreePtAssists": 80,
+      "Arc3Assists": 30,
+      "Corner3Assists": 15,
+      "AtRimAssists": 95,
+      "ShortMidRangeAssists": 45,
+      "LongMidRangeAssists": 20
+    }
+  ]
+}

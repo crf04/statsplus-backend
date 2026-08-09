@@ -5,6 +5,7 @@ This file maps the existing API structure to enable natural language processing.
 Based on analysis of the existing GameService.get_filtered_logs method.
 """
 
+from app.models.catalogs import SUPPORTED_TEAM_FILTERS
 from .settings import current_nba_season
 
 CURRENT_SEASON = current_nba_season()
@@ -35,12 +36,7 @@ ENDPOINT_SCHEMAS = {
             "teams_against": {
                 "type": "list",
                 "description": "List of team filter types (maps to filter_teams function)",
-                "valid_filters": [
-                    "OPP_PTS", "OPP_REB", "OPP_AST", "OPP_STOCKS", "OPP_FTA", "OPP_TOV", "OPP_BLK", "OPP_STL", "OPP_FG3M", "OPP_FG3A", "OPP_FTA",
-                    "C&S 3s", "C&S PTS", "C&S 3A", "PU 2s", "PU 3s", "PU PTS",
-                    "Transition", "Isolation", "PRBallHandler", "PRRollMan", "OffRebound",
-                    "Spotup", "Cut", "Handoff", "OffScreen", "Misc", "Postup"
-                ]
+                "valid_filters": list(SUPPORTED_TEAM_FILTERS),
             },
             "rank_filter": {
                 "type": "list",
@@ -67,8 +63,8 @@ ENDPOINT_SCHEMAS = {
                 "description": "Players that must NOT be playing in filtered games"
             },
             "self_filters": {
-                "type": "dict",
-                "description": "Custom statistical filters on player's own stats, e.g. 'points > 10' or 'rebounds > 5'"
+                "type": "list",
+                "description": "Ordered custom statistical filters; multiple entries may target the same stat, e.g. 'points >= 20' and 'points < 30'"
             }
         }
     },

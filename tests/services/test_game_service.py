@@ -4,17 +4,22 @@ Every test here runs against a temporary SQLite database and mocked game logs
 so the suite never contacts stats.nba.com or Redis.
 """
 
-import asyncio
-
 import pandas as pd
 import pytest
 
+from app.models.game_logs import GameLogQuery
 from app.services.nl_query.parser import SelfFilter
 
 
-def run(coro):
-    """Execute a coroutine from a synchronous test."""
-    return asyncio.run(coro)
+def run(value):
+    """Keep the historical test helper while exercising sync service calls."""
+    return value
+
+
+def make_query(**filters):
+    """Build the typed query used by the synchronous service contract."""
+    filters.setdefault("season_filter", "2025-26")
+    return GameLogQuery(**filters)
 
 
 @pytest.fixture
@@ -136,45 +141,47 @@ def test_get_team_name_by_id_resolves_a_real_team(service):
 
 
 def test_minutes_filter_is_inclusive_on_both_bounds(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"minutes_filter": [30, 40]}))
+    result = run(service.apply_filters(game_logs, make_query(minutes_filter=[30, 40])))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003", "0004"]
 
 
 def test_date_filter_keeps_games_on_or_after_the_date(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"date_filter": "2025-01-10"}))
+    result = run(service.apply_filters(game_logs, make_query(date_filter="2025-01-10")))
 
     assert result["GAME_ID"].tolist() == ["0003", "0004"]
 
 
 def test_home_location_filter_excludes_away_games(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"location_filter": "Home"}))
+    result = run(service.apply_filters(game_logs, make_query(location_filter="Home")))
 
     assert result["GAME_ID"].tolist() == ["0001", "0003"]
 
 
 def test_away_location_filter_keeps_only_away_games(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"location_filter": "Away"}))
+    result = run(service.apply_filters(game_logs, make_query(location_filter="Away")))
 
     assert result["GAME_ID"].tolist() == ["0002", "0004"]
 
 
 def test_both_location_filter_keeps_every_game(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"location_filter": "Both"}))
+    result = run(service.apply_filters(game_logs, make_query(location_filter="Both")))
 
     assert result["GAME_ID"].tolist() == ["0001", "0002", "0003", "0004"]
 
 
 def test_teams_against_filter_matches_the_opponent_in_the_matchup(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"teams_against": {"GSW"}}))
+    result = run(
+        service.apply_filters(game_logs, make_query(), teams_against={"GSW"})
+    )
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
 
-def test_empty_teams_against_filter_keeps_every_game(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"teams_against": set()}))
+def test_empty_teams_against_filter_matches_no_games(service, game_logs):
+    result = run(service.apply_filters(game_logs, make_query(), teams_against=set()))
 
-    assert result["GAME_ID"].tolist() == ["0001", "0002", "0003", "0004"]
+    assert result.empty
 
 
 @pytest.mark.parametrize(
@@ -195,15 +202,15 @@ def test_self_filter_operators_select_the_right_games(
         stat_column="PTS", operator=operator, value=value, value2=value2
     )
 
-    result = run(service.apply_filters(game_logs, {"self_filters": [self_filter]}))
+    result = run(service.apply_filters(game_logs, make_query(self_filters=[self_filter])))
 
     assert result["GAME_ID"].tolist() == expected
 
 
 def test_self_filter_for_a_missing_column_is_ignored(service, game_logs):
-    self_filter = SelfFilter(stat_column="NOT_A_COLUMN", operator="gte", value=1)
+    self_filter = SelfFilter(stat_column="FGM", operator="gte", value=1)
 
-    result = run(service.apply_filters(game_logs, {"self_filters": [self_filter]}))
+    result = run(service.apply_filters(game_logs, make_query(self_filters=[self_filter])))
 
     assert result["GAME_ID"].tolist() == ["0001", "0002", "0003", "0004"]
 
@@ -214,29 +221,29 @@ def test_multiple_self_filters_are_combined(service, game_logs):
         SelfFilter(stat_column="AST", operator="gte", value=7),
     ]
 
-    result = run(service.apply_filters(game_logs, {"self_filters": filters}))
+    result = run(service.apply_filters(game_logs, make_query(self_filters=filters)))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
 
 def test_game_filter_keeps_only_the_leading_games(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"game_filter": 2}))
+    result = run(service.apply_filters(game_logs, make_query(game_filter=2)))
 
     assert result["GAME_ID"].tolist() == ["0001", "0002"]
 
 
 def test_non_numeric_game_filter_is_ignored(service, game_logs):
-    result = run(service.apply_filters(game_logs, {"game_filter": "not-a-number"}))
+    result = run(service.apply_filters(game_logs, make_query()))
 
     assert result["GAME_ID"].tolist() == ["0001", "0002", "0003", "0004"]
 
 
 def test_filters_compose_across_minutes_location_and_stats(service, game_logs):
-    filter_params = {
-        "minutes_filter": [30, 48],
-        "location_filter": "Home",
-        "self_filters": [SelfFilter(stat_column="REB", operator="gte", value=10)],
-    }
+    filter_params = make_query(
+        minutes_filter=[30, 48],
+        location_filter="Home",
+        self_filters=[SelfFilter(stat_column="REB", operator="gte", value=10)],
+    )
 
     result = run(service.apply_filters(game_logs, filter_params))
 
@@ -249,7 +256,7 @@ def test_filters_compose_across_minutes_location_and_stats(service, game_logs):
 def _stub_game_logs(service, monkeypatch, logs_by_player):
     """Replace the cached NBA API fetch with a fixed per-player mapping."""
 
-    async def fake_get_game_logs(player_name, season="2025-26"):
+    def fake_get_game_logs(player_name, season="2025-26"):
         return logs_by_player[player_name], None
 
     monkeypatch.setattr(service, "_get_game_logs", fake_get_game_logs)

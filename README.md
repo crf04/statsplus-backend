@@ -6,8 +6,8 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 
 - Flask app factory with blueprints for players, teams, games, data refreshes, health checks, users, and natural-language queries.
 - Bundled SQLite demo database, `nba_play_types.db`, so the project can run immediately after install.
-- NBA data integrations through the injectable NBA Stats game-log adapter
-  (`nba_api` → `stats.nba.com`) and pbpstats endpoints.
+- NBA data integrations through the injectable, instrumented NBA Stats adapter
+  (`nba_api` → `stats.nba.com`) and the shared-session PBP Stats adapter.
 - Deterministic NLP parsing with spaCy, aliases, fuzzy matching, date parsing, and optional OpenAI fallback.
 - Firebase Admin authentication for protected routes, with an explicit local-only bypass for credential-free development.
 - Optional Redis-backed caching for NBA API responses.
@@ -72,8 +72,8 @@ the most important variables:
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
-| `NBA_API_TIMEOUT_CONNECT` | No | `10`; PBP Stats connect timeout in seconds |
-| `NBA_API_TIMEOUT_READ` | No | `30`; PBP Stats response timeout in seconds |
+| `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
+| `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
@@ -133,21 +133,36 @@ curl http://localhost:5000/api/players
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
 ```
 
-`GET /api/health/pbp-stats` and `/api/health/detailed` call the external PBP
-Stats totals endpoint used by refreshes, so they can fail if the network or
-upstream API is unavailable. The existing `/api/health/nba-api` URL remains a
-deprecated alias and returns the same PBP Stats result.
+`GET /api/health/nba-api` checks `stats.nba.com`; `GET /api/health/pbp-api`
+checks `api.pbpstats.com`; and `/api/health/detailed` reports both providers
+under distinct `nba_api` and `pbp_stats` keys. These endpoints can fail if the
+network or either upstream API is unavailable.
+
+The app factory assembles one `ApplicationDependencies` graph containing the
+database, cache, provider adapters, services, durable refresh coordinator, and
+health service. Routes resolve those injected objects from the active app;
+tests can replace the graph with the `DEPENDENCIES` override. CORS uses exact
+origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` as the local
+default); production requires an explicit allow-list.
+
+Every response carries an `X-Request-ID` used to correlate a request, its
+provider calls, and its logs; safe inbound values are echoed, otherwise one is
+generated. Every call to `stats.nba.com` (via `nba_api`) and
+`api.pbpstats.com` is recorded as one sanitized provider event with outcome,
+duration, retry count, cache status, and HTTP status — operator counters and
+recent events are available on the admin-only `GET /api/data/telemetry`.
 
 Live requests to `stats.nba.com` use a 10-second timeout by default. If that
 provider times out, game-log requests return `503 Service Unavailable` instead
 of exposing a generic internal-server error. Override the timeout with
 `NBA_STATS_TIMEOUT_SECONDS` when needed.
 
-PBP Stats requests use separate connect/read timeouts and safe-request retries.
-Both `/api/health/pbp-stats` and the admin PBP refresh endpoints use the
-`PBPStatsProvider` adapter, which normalizes totals responses and translates
-timeouts, unavailable responses, and malformed payloads into
-`provider_unavailable` (`503`).
+`NBA_STATS_MAX_CONCURRENCY` bounds in-flight NBA Stats provider calls per
+worker process: all adapters in one worker share the configured gate, while
+each Gunicorn worker has its own gate. The maximum calls the whole application
+can issue at once is workers × `NBA_STATS_MAX_CONCURRENCY` (the Procfile runs
+4 workers, so up to 4 × the bound). This is a per-process bound, not a
+cluster-global lock.
 
 Application failures use a documented structured JSON error response with
 stable category codes, including `invalid_input`, `resource_not_found`,
@@ -217,13 +232,31 @@ curl -X PUT http://localhost:5000/api/data/player_PBP \
   -H "Authorization: Bearer <firebase-admin-token>"
 curl -X PUT http://localhost:5000/api/data/opponent_PBP \
   -H "Authorization: Bearer <firebase-admin-token>"
+curl -X PUT http://localhost:5000/api/players/fetch \
+  -H "Authorization: Bearer <firebase-admin-token>"
 curl http://localhost:5000/api/data/fetch_playtypes \
   -H "Authorization: Bearer <firebase-admin-token>"
-curl -X PUT http://localhost:5000/api/players/fetch \
+curl http://localhost:5000/api/data/jobs/<job_id> \
+  -H "Authorization: Bearer <firebase-admin-token>"
+curl http://localhost:5000/api/data/telemetry \
   -H "Authorization: Bearer <firebase-admin-token>"
 ```
 
-Refresh endpoints call external NBA/PBP APIs and may replace local tables. They require an admin claim. The bundled database is enough for exploring read-only routes.
+Refresh endpoints schedule durable jobs: they return `202 Accepted` with a
+`job_id`, and the refresh runs afterward; poll
+`GET /api/data/jobs/<job_id>` (admin-only) for status. They call external
+NBA/PBP APIs and may replace local tables. The bundled database is enough for
+exploring read-only routes. Jobs are stored in the application database and
+claimed with expiring leases by the app-scoped dispatcher, so queued work and
+work abandoned by a crashed process can be recovered after restart. Operation
+names and request IDs are persisted; executable handlers are registered at app
+startup. `progress` moves through fetch/transform/publish phases and remains
+safe to retry after a failed attempt. Execution is at-least-once: an expired
+lease may rerun a handler. Every claim has an `attempt_count` fencing token;
+the publisher renews that token inside the same database transaction as the
+live-table swap, so stale attempts cannot overwrite a newer publication. This
+fences publication but does not cancel provider calls that were already in
+flight when the lease expired.
 
 See [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md) for endpoint details and [docs/NLP_SYSTEM.md](docs/NLP_SYSTEM.md) for the natural-language pipeline.
 
@@ -251,15 +284,22 @@ Run the same lint and test gate used by CI:
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
 
+Live provider-contract tests hit the real providers and are excluded from the
+default gate (registered `live` marker). Opt in explicitly:
+
+```bash
+LIVE_CONTRACT_TESTS=true python -m pytest -m live
+```
+
 ## Project map
 
 ```text
 app/
   __init__.py              Flask app factory and blueprint registration
-  dependencies.py         Application dependency assembly and test injection
   routes/                  HTTP route handlers
-  services/                Business logic, NBA data calls, NL/LLM services
-  services/nl_query/       Natural-language query parser
+  providers/               Injectable NBA Stats and PBP Stats seams
+  services/                Business logic, refresh queue, NL/LLM services
+  services/nl_query/       Deterministic parser and typed query models
   utils/                   Auth, database, cache, date, and helper utilities
 docs/
   ARCHITECTURE.md          Runtime interfaces, data sources, and test seams
@@ -288,7 +328,6 @@ gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 100
 For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
-- Set `CORS_ALLOWED_ORIGINS` to every deployed frontend origin as a comma-separated exact allowlist (for example, `https://stats.example.com`). Do not use `*`; production startup rejects the local default when this setting is omitted.
 - Set Firebase credentials so protected and admin routes enforce real tokens and claims.
 - Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.

@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, g, request
 from flask_cors import CORS
 
 from app.config.settings import (
@@ -14,6 +14,7 @@ from app.config.settings import (
     load_settings,
     set_runtime_settings,
 )
+from app.utils.request_id import HEADER_NAME, resolve_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
     CORS(app, origins=settings.cors.allowed_origins, always_send=False)
 
+    _register_request_headers(app)
     _initialize_dependencies(app)
     _assemble_dependencies(app)
     _register_error_handlers(app)
@@ -54,19 +56,62 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     return app
 
 
+def _register_request_headers(app: Flask) -> None:
+    """Correlate every request with one safe ID and echo it to callers."""
+
+    @app.before_request
+    def bind_request_id() -> None:
+        g.request_id = resolve_request_id(request.headers.get(HEADER_NAME))
+
+    @app.after_request
+    def attach_request_id(response):  # type: ignore[no-untyped-def]
+        request_id = getattr(g, "request_id", None)
+        if not request_id:
+            request_id = resolve_request_id(request.headers.get(HEADER_NAME))
+        response.headers.setdefault(HEADER_NAME, request_id)
+        return response
+
+
 def _assemble_dependencies(app: Flask) -> None:
     """Construct or accept the one dependency graph used by all routes."""
 
     supplied_dependencies = app.config.get("DEPENDENCIES")
     if supplied_dependencies is not None:
         app.extensions["dependencies"] = supplied_dependencies
+        _expose_legacy_service_aliases(app, supplied_dependencies)
         return
 
     from app.dependencies import build_dependencies
 
-    app.extensions["dependencies"] = build_dependencies(
+    dependencies = build_dependencies(
         app.extensions["runtime_settings"]
     )
+    app.extensions["dependencies"] = dependencies
+    _expose_legacy_service_aliases(app, dependencies)
+
+
+def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
+    """Expose read-only aliases for older diagnostics without lazy factories.
+
+    Route code resolves ``app.extensions['dependencies']`` exclusively.  The
+    alias is retained for existing operational/tests integrations that inspect
+    the assembled graph directly.
+    """
+
+    app.extensions["request_services"] = {
+        name: getattr(dependencies, f"{name}_service")
+        for name in (
+            "game",
+            "player",
+            "team",
+            "data",
+            "nl",
+            "user",
+            "data_refresh_jobs",
+            "provider_health",
+        )
+        if hasattr(dependencies, f"{name}_service")
+    }
 
 
 def _initialize_dependencies(app: Flask) -> None:
@@ -86,6 +131,7 @@ def _initialize_dependencies(app: Flask) -> None:
             initialize_firebase_admin(app.extensions["runtime_settings"])
         except Exception as error:
             logger.warning("Firebase Admin initialization skipped: %s", error)
+
 
 
 def _register_blueprints(app: Flask) -> None:
