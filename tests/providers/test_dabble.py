@@ -6,7 +6,7 @@ import copy
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -193,6 +193,83 @@ def test_session_factory_keeps_non_thread_safe_clients_out_of_concurrent_use():
         session for session in sessions if isinstance(session, GuardedSession)
     ]
     assert len(detail_sessions) >= 3
+
+
+def test_serialized_session_drops_queued_detail_calls_after_deadline():
+    """Queued injected-session calls must not start upstream work late."""
+
+    fixtures = _payload("fixtures.valid.json")
+    details: dict[str, dict[str, object]] = {}
+    for index in range(3):
+        fixture = copy.deepcopy(fixtures["data"][0])
+        fixture["id"] = f"fixture-{index + 1}"
+        if index == 0:
+            fixtures["data"][0] = fixture
+        else:
+            fixtures["data"].append(fixture)
+
+        detail = _payload("fixture_details.valid.json")
+        detail_data = detail["sportFixtureDetail"]
+        detail_data["id"] = fixture["id"]
+        detail_data["playerProps"] = [
+            copy.deepcopy(detail_data["playerProps"][0])
+        ]
+        detail_data["playerProps"][0]["marketId"] = f"market-{index + 1}"
+        detail_data["playerProps"][0]["selectionId"] = f"selection-{index + 1}"
+        details[fixture["id"]] = detail
+
+    first_detail_started = threading.Event()
+    release_first_detail = threading.Event()
+    all_detail_calls_started = threading.Event()
+    detail_calls: list[str] = []
+
+    class BlockingSession:
+        headers: dict[str, str] = {}
+
+        def get(self, url: str, **kwargs: object) -> FakeResponse:
+            del kwargs
+            if "/details/" not in url:
+                if url.endswith("/competitions"):
+                    return FakeResponse(_payload("competitions.valid.json"))
+                return FakeResponse(fixtures)
+
+            fixture_id = url.rsplit("/", 1)[-1]
+            detail_calls.append(fixture_id)
+            if len(detail_calls) == 1:
+                first_detail_started.set()
+                release_first_detail.wait(timeout=1.0)
+            elif len(detail_calls) == 3:
+                all_detail_calls_started.set()
+            return FakeResponse(details[fixture_id])
+
+    session = BlockingSession()
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=0.2)
+    context = RetrievalContext(deadline=deadline, request_id="serialized-deadline")
+    outcome: dict[str, BaseException | object] = {}
+
+    def retrieve() -> None:
+        try:
+            outcome["snapshot"] = DabbleAdapter(
+                session=session,
+                detail_concurrency=3,
+            ).get_snapshot(NBAMarketQuery(), context)
+        except BaseException as error:
+            outcome["error"] = error
+
+    thread = threading.Thread(target=retrieve)
+    thread.start()
+    assert first_detail_started.wait(timeout=1.0)
+    thread.join(timeout=1.0)
+    try:
+        assert not thread.is_alive()
+        assert isinstance(outcome.get("error"), ProviderUnavailableError)
+    finally:
+        release_first_detail.set()
+        thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert not all_detail_calls_started.wait(timeout=0.25)
+    assert len(detail_calls) == 1
 
 
 def test_missing_provider_ids_are_retained_as_null_without_fabrication():

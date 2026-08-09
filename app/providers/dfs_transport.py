@@ -30,6 +30,7 @@ _Result = TypeVar("_Result")
 _FailureFactory = Callable[[str, Exception], Exception]
 _Worker = Callable[["_RequestResult"], None]
 _ResultObserver = Callable[["_RequestResult", float], None]
+_Preparation = Callable[[float], Callable[[], None] | None]
 
 # A Requests timeout is advisory to the implementation supplied by the
 # caller.  A bounded set of daemon workers gives us a hard caller-side escape
@@ -80,6 +81,7 @@ def _run_request(
     now: Callable[[], datetime],
     parse: Callable[[Any], _Result],
     invalid_json_message: str,
+    request_get: Callable[..., Any] | None = None,
 ) -> None:
     """Run the complete potentially blocking response pipeline in a daemon."""
 
@@ -88,10 +90,11 @@ def _run_request(
         # increment to this request's result as it happens so a caller that
         # reaches its deadline can report progress before this worker finishes.
         set_retry_progress_callback(result.record_retry_progress)
+        get = request_get or session.get
         if params is None:
-            response = session.get(url, timeout=timeout)
+            response = get(url, timeout=timeout)
         else:
-            response = session.get(url, params=params, timeout=timeout)
+            response = get(url, params=params, timeout=timeout)
         result.status_code = getattr(response, "status_code", None)
         context.ensure_active(now=now())
         response.raise_for_status()
@@ -134,6 +137,7 @@ def _run_bounded(
     worker_name: str,
     deadline_message: str = "provider retrieval deadline exceeded",
     observe_result: _ResultObserver | None = None,
+    prepare: _Preparation | None = None,
 ) -> _RequestResult:
     """Own one bounded worker lifecycle for every provider pipeline.
 
@@ -151,21 +155,43 @@ def _run_bounded(
     remaining = context.remaining_seconds(now=current)
     monotonic_deadline = monotonic_start + remaining
     retry_baseline = current_retry_count()
-    slot_wait = max(0.0, monotonic_deadline - time.monotonic())
-    if not _request_slots.acquire(timeout=slot_wait):
-        raise DeadlineExceededError(deadline_message)
-
-    result = _RequestResult()
+    prepared_release: Callable[[], None] | None = None
+    slot_acquired = False
     try:
+        if prepare is not None:
+            # A provider-specific serialized client can wait for its own
+            # access before this caller reserves a shared transport slot.
+            # The absolute monotonic deadline is intentionally separate from
+            # Requests' (connect, read) timeout tuple.
+            prepared_release = prepare(monotonic_deadline)
+        if time.monotonic() >= monotonic_deadline:
+            raise DeadlineExceededError(deadline_message)
+        slot_wait = max(0.0, monotonic_deadline - time.monotonic())
+        if not _request_slots.acquire(timeout=slot_wait):
+            raise DeadlineExceededError(deadline_message)
+        slot_acquired = True
+
+        result = _RequestResult()
+
+        def run_prepared(holder: _RequestResult) -> None:
+            try:
+                worker(holder)
+            finally:
+                if prepared_release is not None:
+                    prepared_release()
+
         worker_thread = threading.Thread(
-            target=worker,
+            target=run_prepared,
             args=(result,),
             daemon=True,
             name=worker_name,
         )
         worker_thread.start()
     except BaseException:
-        _request_slots.release()
+        if slot_acquired:
+            _request_slots.release()
+        if prepared_release is not None:
+            prepared_release()
         raise
 
     def observe() -> None:
@@ -271,6 +297,31 @@ def request_json(
             request_id=context.request_id,
         ) as tracker:
 
+            request_lease: Any | None = None
+            acquire_request = getattr(session, "acquire_request", None)
+
+            def prepare_request(deadline: float) -> Callable[[], None] | None:
+                """Acquire an optional serialized client before transport slots."""
+
+                nonlocal request_lease
+                if not callable(acquire_request):
+                    return None
+                request_lease = acquire_request(deadline)
+                release = getattr(request_lease, "release", None)
+                request = getattr(request_lease, "get", None)
+                if not callable(release) or not callable(request):
+                    if callable(release):
+                        release()
+                    raise TypeError("request lease must expose get() and release()")
+                return release
+
+            def get_request(url_value: str, **kwargs: Any) -> Any:
+                """Use the lease when a session supplies the safe contract."""
+
+                if request_lease is None:
+                    return session.get(url_value, **kwargs)
+                return request_lease.get(url_value, **kwargs)
+
             def observe_result(result: _RequestResult, _deadline: float) -> None:
                 """Move worker-only response facts into telemetry."""
 
@@ -289,10 +340,12 @@ def request_json(
                     now,
                     parse,
                     invalid_json_message,
+                    request_get=get_request,
                 ),
                 worker_name=f"statsplus-{provider}-request",
                 deadline_message=f"{provider} retrieval deadline exceeded",
                 observe_result=observe_result,
+                prepare=prepare_request,
             )
             return result.value
     except DeadlineExceededError as error:

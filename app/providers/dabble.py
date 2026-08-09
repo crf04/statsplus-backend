@@ -14,6 +14,7 @@ import copy
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -161,9 +162,53 @@ class _SerializedSession:
         self._session = session
         self._get_lock = threading.Lock()
 
+    def acquire_request(self, deadline: float) -> "_SerializedSessionLease":
+        """Reserve serialized access until the transport request completes.
+
+        ``deadline`` is an absolute monotonic timestamp supplied by the
+        transport seam.  It is deliberately separate from Requests' HTTP
+        timeout tuple so queued callers can abandon lock acquisition before
+        they reserve a transport slot or begin upstream work.
+        """
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._get_lock.acquire(timeout=remaining):
+            raise DeadlineExceededError("provider retrieval deadline exceeded")
+        if time.monotonic() >= deadline:
+            self._get_lock.release()
+            raise DeadlineExceededError("provider retrieval deadline exceeded")
+        return _SerializedSessionLease(self, deadline)
+
     def get(self, url: str, **kwargs: Any) -> Any:
         with self._get_lock:
             return self._session.get(url, **kwargs)
+
+
+class _SerializedSessionLease:
+    """One deadline-bounded serialized access reservation."""
+
+    def __init__(self, owner: _SerializedSession, deadline: float) -> None:
+        self._owner = owner
+        self._deadline = deadline
+        self._released = False
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        if self._released:
+            raise RuntimeError("serialized session lease is released")
+        if time.monotonic() >= self._deadline:
+            self.release()
+            raise DeadlineExceededError("provider retrieval deadline exceeded")
+        try:
+            return self._owner._session.get(url, **kwargs)
+        finally:
+            # Match ``_SerializedSession.get``: response decoding and
+            # provider parsing must not hold the shared-session lock.
+            self.release()
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._owner._get_lock.release()
 
 
 class _ThreadLocalSession:
