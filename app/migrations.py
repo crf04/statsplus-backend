@@ -142,9 +142,10 @@ def _create_athlete_catalog_tables(connection: Connection) -> None:
 
 
 def _create_athlete_mapping_tables(connection: Connection) -> None:
-    """Create provider athlete mapping state, decisions, and rejections."""
+    """Create mapping state, decisions, decision candidates, and rejections."""
     from app.models.athlete_mapping import (
         AthleteMappingDecision,
+        AthleteMappingDecisionCandidate,
         AthleteMappingLock,
         AthleteMappingRejection,
         ProviderAthleteMapping,
@@ -152,6 +153,9 @@ def _create_athlete_mapping_tables(connection: Connection) -> None:
 
     ProviderAthleteMapping.__table__.create(connection, checkfirst=True)
     AthleteMappingDecision.__table__.create(connection, checkfirst=True)
+    # The candidate table references the decision it belongs to, so it is
+    # created after the decision table.
+    AthleteMappingDecisionCandidate.__table__.create(connection, checkfirst=True)
     AthleteMappingRejection.__table__.create(connection, checkfirst=True)
     AthleteMappingLock.__table__.create(connection, checkfirst=True)
 

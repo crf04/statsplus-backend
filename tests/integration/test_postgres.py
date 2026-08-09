@@ -10,6 +10,7 @@ never be dropped by a test run.
 """
 
 import os
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -212,3 +213,167 @@ def test_user_round_trip_preserves_the_serialized_shape(user_service):
     assert payload["is_active"] is True
     assert isinstance(payload["created_at"], str)
     assert isinstance(payload["last_login"], str)
+
+
+# --- provider athlete mappings --------------------------------------------
+
+
+@pytest.fixture
+def mapping_engine(postgres_url):
+    """Provide a migrated Postgres database for the mapping repository."""
+    from sqlalchemy import insert
+
+    from app.migrations import run_migrations
+    from app.models.athlete_catalog import AthleteCatalog
+
+    engine = create_engine(postgres_url)
+    Base.metadata.drop_all(engine)
+    # The bookkeeping table is not part of the model metadata, so it is dropped
+    # explicitly; a leftover row would otherwise skip the migration.
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(AthleteCatalog.__table__),
+            [
+                {
+                    "season": "2024-25",
+                    "player_id": player_id,
+                    "display_name": name,
+                    "roster_status": "active",
+                    "is_active": True,
+                    "is_active_for_season": True,
+                    "team_id": 1610612747,
+                    "team_name": "Los Angeles Lakers",
+                    "team_abbreviation": "LAL",
+                    "published_at": datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+                }
+                for player_id, name in ((15, "Nikola Jokic"), (23, "LeBron James"))
+            ],
+        )
+
+    yield engine
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _mapping_resolution(name="Nikola Jokic", provider_id="pp-15", rows=None):
+    from app.providers.dfs import AthleteEvidence, TeamEvidence
+    from app.services.athlete_resolver import AthleteResolver
+
+    rows = rows or [
+        {
+            "season": "2024-25",
+            "player_id": 15,
+            "display_name": "Nikola Jokic",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+    ]
+
+    class _Catalog:
+        def get_catalog(self, season, *, active_only=False):
+            return rows
+
+    return AthleteResolver(_Catalog()).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id=provider_id,
+            name=name,
+            team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+        ),
+        "2024-25",
+    )
+
+
+def test_athlete_mapping_round_trip_on_postgres(mapping_engine):
+    """Mapping state, decisions, and candidates must round-trip on Postgres."""
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    repository = AthleteMappingRepository(mapping_engine)
+
+    automatic = repository.persist_auto_decision(_mapping_resolution())
+    assert automatic.state == "auto"
+    assert automatic.persisted is True
+
+    ambiguous_rows = [
+        {
+            "season": "2024-25",
+            "player_id": player_id,
+            "display_name": "LeBron James",
+            "roster_status": "active",
+            "is_active": True,
+            "is_active_for_season": True,
+            "team_id": 1610612747,
+            "team_name": "Los Angeles Lakers",
+            "team_abbreviation": "LAL",
+        }
+        for player_id in (15, 23)
+    ]
+    repository.record_resolution(
+        _mapping_resolution(
+            name="LeBron James", provider_id="pp-77", rows=ambiguous_rows
+        )
+    )
+
+    unresolved = repository.list_unresolved(provider="prizepicks")
+    assert [item.provider_athlete_id for item in unresolved] == ["pp-77"]
+    assert [
+        candidate.canonical_player_id for candidate in unresolved[0].candidates
+    ] == [15, 23]
+    assert unresolved[0].provider_team_canonical_id == 1610612747
+
+    approved = repository.approve(
+        "prizepicks",
+        "pp-77",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="reviewed source identity",
+    )
+    assert approved.mapping.canonical_player_id == 23
+    # The identity is decided, so it leaves the operator queue.
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+    repository.reject(
+        "prizepicks",
+        "pp-15",
+        operator_id="ops@example.com",
+        reason="provider identity is not trusted",
+    )
+    assert repository.is_rejected("prizepicks", "pp-15")
+    assert repository.clear_rejection(
+        "prizepicks", "pp-15", operator_id="ops@example.com", reason="new evidence"
+    )
+    assert repository.is_rejected("prizepicks", "pp-15") is False
+
+
+def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine):
+    """The duplicate lock row must not abort the surrounding transaction.
+
+    PostgreSQL aborts a transaction whose failed savepoint is still open, so a
+    second writer for the same identity would fail every later statement.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    repository = AthleteMappingRepository(mapping_engine)
+    resolution = _mapping_resolution()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(repository.persist_auto_decision, [resolution] * 4)
+        )
+
+    assert sum(result.persisted for result in results) == 1
+    assert len(repository.list_mappings()) == 1
+    assert len(repository.history(provider="prizepicks")) == 1

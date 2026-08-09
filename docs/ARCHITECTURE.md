@@ -89,6 +89,9 @@ resolution. The shared model retains nullable provider identity and typed
 source evidence, exact decimal thresholds and modifiers, original labels,
 coverage, and complete/partial status. Adapters exclude ineligible offerings
 without guessing missing facts; they expose no provider-specific public routes.
+`NBAMarketQuery` rejects a non-canonical season before any provider call: the
+two-digit end year must be the calendar year after the four-digit start year,
+so `2024-99` fails at construction rather than reaching an adapter.
 
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
@@ -377,15 +380,23 @@ inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
 non-matches. `AthleteMappingRepository` persists one current
 `provider_athlete_mappings` row per provider identity, an append-only
 `athlete_mapping_decisions` audit log, and durable
-`athlete_mapping_rejections` suppressions. Provider names and team IDs,
-names, and abbreviations are retained as typed evidence.
+`athlete_mapping_rejections` suppressions. Provider names, provider team IDs,
+canonical team IDs, names, and abbreviations are retained as typed evidence, so
+an ID-only team conflict keeps both the provider and the candidate side.
 
 Ambiguous, inactive-only, unmatched, and team-conflict evidence never becomes
 current mapping state, but each is retained as one durable typed observation
 in the decision log under the same idempotency key, so repeated board reads
 add nothing and `scripts/athlete_mappings.py list` can show what an operator
-still has to decide. Repository reads and writes translate `SQLAlchemyError`
-to `AthleteMappingPersistenceError` (defined in
+still has to decide. The canonical athletes such an observation could not
+choose between are stored as typed
+`athlete_mapping_decision_candidates` rows keyed by decision, not as an opaque
+blob, and a changed candidate set is a new observation rather than a suppressed
+repeat. `list` reports the latest decision per provider identity and includes
+it only while that decision is still unresolved, so a later automatic, manual,
+or rejection decision removes the identity from the queue. Repository reads and
+operator writes (approve, override, reject, and clear) translate
+`SQLAlchemyError` to `AthleteMappingPersistenceError` (defined in
 `app.services.athlete_mapping_errors`), and the resolver translates the same
 failure from a catalog read. That single type is what the DFS Board isolates;
 it never catches broad exceptions and still returns usable markets.
@@ -400,6 +411,11 @@ approve/override/reject/clear actions require an identity and reason; approve
 and override also accept and retain provider name and team evidence, keeping
 the previously observed evidence when none is supplied. Active rejections
 suppress future automatic mappings until explicitly cleared.
+The per-identity lock row is inserted inside a savepoint that is always left
+before a duplicate `IntegrityError` is handled, so PostgreSQL releases the
+failed savepoint instead of leaving the surrounding transaction aborted;
+`tests/integration/test_postgres.py` covers that concurrency path against a
+real database when `TEST_DATABASE_URL` is set.
 Migration 006 also creates a per-identity lock table and database checks for
 closed mapping states, the closed decision-state set, active-state coherence,
 and cleared-rejection coherence. Those checks compare booleans with
@@ -443,12 +459,13 @@ independent from Athlete Catalog freshness and defaults to 72 hours through
 `scripts/refresh_event_catalog.py` with one or more explicit seasons; each
 season is independent and the command exits nonzero if any season fails.
 
-Migration 006 creates the provider athlete mapping, append-only decision, and
-durable rejection tables. Operators use
+Migration 006 creates the provider athlete mapping, append-only decision,
+decision candidate, and durable rejection tables. Operators use
 `scripts/athlete_mappings.py` for
 read-only listing, dry runs, audited approve/override/reject/clear actions,
-and history. `list` reports current mappings, active rejections, and the
-latest unresolved observation per provider identity. These commands require an
+and history. `list` reports current mappings, active rejections, and every
+identity whose latest decision is still unresolved, with the candidates an
+operator has to choose between. These commands require an
 explicit writable database URL and never contact a provider.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run

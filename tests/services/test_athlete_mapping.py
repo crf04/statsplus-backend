@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, inspect, insert
+from sqlalchemy import create_engine, event, inspect, insert
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
@@ -187,6 +187,7 @@ def test_migration_006_creates_mapping_tables(tmp_path):
     assert {
         "provider_athlete_mappings",
         "athlete_mapping_decisions",
+        "athlete_mapping_decision_candidates",
         "athlete_mapping_rejections",
     }.issubset(inspect(engine).get_table_names())
 
@@ -513,6 +514,240 @@ def test_repository_read_failures_are_translated_at_the_boundary():
         repository.history()
     with pytest.raises(AthleteMappingPersistenceError):
         repository.list_unresolved()
+
+
+def test_repository_write_failures_are_translated_at_the_boundary():
+    class BrokenEngine:
+        url = "sqlite:///unreachable.sqlite3"
+
+        def begin(self):
+            raise SQLAlchemyError("connection pool exhausted")
+
+    repository = AthleteMappingRepository(BrokenEngine())
+
+    with pytest.raises(AthleteMappingPersistenceError):
+        repository.approve(
+            "prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why"
+        )
+    with pytest.raises(AthleteMappingPersistenceError):
+        repository.override(
+            "prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why"
+        )
+    with pytest.raises(AthleteMappingPersistenceError):
+        repository.reject("prizepicks", "pp-15", operator_id="ops", reason="why")
+    with pytest.raises(AthleteMappingPersistenceError):
+        repository.clear_rejection(
+            "prizepicks", "pp-15", operator_id="ops", reason="why"
+        )
+
+
+def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable(
+    mapping_db,
+):
+    """The duplicate insert must be caught after ``begin_nested`` exits.
+
+    PostgreSQL aborts the surrounding transaction if the failed savepoint is
+    still open, so every later statement in the same transaction would fail.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    with repository._transaction("prizepicks", "pp-15"):
+        pass
+
+    savepoints: list[str] = []
+    event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
+    event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
+    event.listen(
+        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
+    )
+
+    # The lock row now exists, so this transaction takes the duplicate path.
+    with repository._transaction("prizepicks", "pp-15") as connection:
+        # A released savepoint would leave PostgreSQL's transaction aborted, so
+        # the failed insert must be rolled back to the savepoint instead.
+        assert savepoints == ["begin", "rollback"]
+        assert connection.in_nested_transaction() is False
+        assert connection.in_transaction() is True
+        connection.execute(
+            insert(AthleteMappingDecision.__table__).values(
+                provider="prizepicks",
+                provider_athlete_id="pp-15",
+                decision_state="unmatched",
+                created_at=now,
+            )
+        )
+
+    assert len(repository.history(provider="prizepicks")) == 1
+
+
+def test_later_resolution_removes_an_identity_from_unresolved(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    ambiguous = _resolver(
+        rows=[_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+        "2024-25",
+    )
+    repository.record_resolution(ambiguous)
+    assert [item.provider_athlete_id for item in repository.list_unresolved()] == ["pp-77"]
+
+    repository.record_resolution(
+        _resolver(rows=[_catalog_row(23, "LeBron James")]).resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+            "2024-25",
+        )
+    )
+
+    assert repository.list_unresolved() == []
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_a_later_manual_decision_removes_an_identity_from_unresolved(mapping_db, action):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(
+        _resolver(rows=[_catalog_row(15, "LeBron James", active=False)]).resolve(
+            "prizepicks",
+            AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+            "2024-25",
+        )
+    )
+    assert repository.list_unresolved()
+
+    if action == "approve":
+        repository.approve(
+            "prizepicks",
+            "pp-77",
+            15,
+            season="2024-25",
+            operator_id="ops@example.com",
+            reason="reviewed source identity",
+        )
+    else:
+        repository.reject(
+            "prizepicks",
+            "pp-77",
+            operator_id="ops@example.com",
+            reason="provider identity is not trusted",
+        )
+
+    assert repository.list_unresolved() == []
+
+
+def test_id_only_team_conflict_retains_both_team_sides(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolution = _resolver(
+        rows=[_catalog_row(23, "LeBron James", team_id=1610612747)]
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(
+            provider_id="pp-23",
+            name="LeBron James",
+            team=TeamEvidence(canonical_id=1610612764),
+        ),
+        "2024-25",
+    )
+    assert resolution.state is MappingResolutionState.TEAM_CONFLICT
+
+    repository.record_resolution(resolution)
+
+    observation = repository.list_unresolved(provider="prizepicks")[0]
+    assert observation.decision_state == "team_conflict"
+    assert observation.provider_team_canonical_id == 1610612764
+    assert observation.canonical_team_id == 1610612747
+    assert observation.to_dict()["provider_team_canonical_id"] == 1610612764
+
+
+def test_manual_decisions_retain_canonical_team_evidence(mapping_db):
+    engine, _ = mapping_db
+    repository = AthleteMappingRepository(engine)
+
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=AthleteEvidence(
+            provider_id="pp-15",
+            name="Nikola Jokic",
+            team=TeamEvidence(provider_id="pp-den", canonical_id=1610612743),
+        ),
+    )
+
+    assert result.mapping.provider_team_canonical_id == 1610612743
+    assert result.decision.provider_team_canonical_id == 1610612743
+
+
+@pytest.mark.parametrize(
+    ("rows", "state", "expected"),
+    [
+        (
+            [_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")],
+            "ambiguous",
+            [(15, True), (23, True)],
+        ),
+        (
+            [_catalog_row(15, "LeBron James", active=False)],
+            "inactive_only",
+            [(15, False)],
+        ),
+    ],
+)
+def test_unresolved_candidates_are_durable_and_typed(mapping_db, rows, state, expected):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolution = _resolver(rows=rows).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-77", name="LeBron James"),
+        "2024-25",
+    )
+
+    repository.record_resolution(resolution)
+
+    observation = repository.list_unresolved(provider="prizepicks")[0]
+    assert observation.decision_state == state
+    assert [
+        (candidate.canonical_player_id, candidate.is_active_for_season)
+        for candidate in observation.candidates
+    ] == expected
+    assert observation.candidates[0].canonical_name == "LeBron James"
+    assert observation.candidates[0].canonical_team_abbreviation == "LAL"
+    assert observation.to_dict()["candidates"][0]["canonical_player_id"] == expected[0][0]
+    assert repository.history(provider="prizepicks")[-1].candidates == observation.candidates
+
+
+def test_a_changed_candidate_set_is_recorded_as_a_new_observation(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    evidence = AthleteEvidence(provider_id="pp-77", name="LeBron James")
+    first_rows = [_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
+    second_rows = first_rows + [_catalog_row(31, "LeBron James")]
+
+    repository.record_resolution(
+        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+    repeated = repository.record_resolution(
+        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+    changed = repository.record_resolution(
+        _resolver(rows=second_rows).resolve("prizepicks", evidence, "2024-25")
+    )
+
+    assert repeated.persisted is False
+    assert changed.persisted is True
+    observation = repository.list_unresolved(provider="prizepicks")[0]
+    assert [candidate.canonical_player_id for candidate in observation.candidates] == [
+        15,
+        23,
+        31,
+    ]
 
 
 # -- DFS board acceptance ------------------------------------------------

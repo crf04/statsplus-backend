@@ -57,6 +57,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "event_catalog_refreshes",
             "provider_athlete_mappings",
             "athlete_mapping_decisions",
+            "athlete_mapping_decision_candidates",
             "athlete_mapping_rejections",
             "athlete_mapping_locks",
         ]
@@ -192,6 +193,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "event_catalog_refreshes",
             "provider_athlete_mappings",
             "athlete_mapping_decisions",
+            "athlete_mapping_decision_candidates",
             "athlete_mapping_rejections",
             "athlete_mapping_locks",
         ]

@@ -172,9 +172,11 @@ python scripts/athlete_mappings.py dry-run \
 ```
 
 Automatic decisions are idempotent and retain provider name/team evidence.
-`list` also reports the latest ambiguous, inactive-only, unmatched, or
-team-conflict observation per provider identity, so unresolved evidence is
-visible instead of silently dropped. Manual approve, override, reject, and
+`list` also reports every provider identity whose latest decision is still
+ambiguous, inactive-only, unmatched, or team-conflict, together with the
+canonical candidates that observation could not choose between, so unresolved
+evidence is visible instead of silently dropped. A later automatic or operator
+decision removes the identity from that list. Manual approve, override, reject, and
 clear commands require `--operator` and `--reason`; approve and override
 accept the same `--name` and `--team-*` evidence options as `dry-run` and
 retain them on the mapping and in the audit log. Rejected identities stay

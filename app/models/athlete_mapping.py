@@ -7,7 +7,17 @@ the append-only decision log records every automatic or operator action.
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.sql import expression
 
 from . import Base
@@ -63,6 +73,7 @@ class ProviderAthleteMapping(Base):
 
     provider_name = Column(String(255), nullable=True)
     provider_team_id = Column(String(128), nullable=True)
+    provider_team_canonical_id = Column(Integer, nullable=True)
     provider_team_name = Column(String(255), nullable=True)
     provider_team_abbreviation = Column(String(16), nullable=True)
 
@@ -111,6 +122,7 @@ class AthleteMappingDecision(Base):
 
     provider_name = Column(String(255), nullable=True)
     provider_team_id = Column(String(128), nullable=True)
+    provider_team_canonical_id = Column(Integer, nullable=True)
     provider_team_name = Column(String(255), nullable=True)
     provider_team_abbreviation = Column(String(16), nullable=True)
 
@@ -130,6 +142,31 @@ class AthleteMappingDecision(Base):
             "provider_athlete_id",
             "created_at",
         ),
+    )
+
+
+class AthleteMappingDecisionCandidate(Base):
+    """One canonical athlete an unresolved observation could not choose between.
+
+    Ambiguous and inactive-only evidence is only actionable if the operator can
+    see which catalog rows were considered, so the candidates are stored as
+    typed rows rather than as an opaque blob on the decision.
+    """
+
+    __tablename__ = "athlete_mapping_decision_candidates"
+
+    decision_id = Column(
+        Integer,
+        ForeignKey("athlete_mapping_decisions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    canonical_player_id = Column(Integer, primary_key=True)
+    canonical_name = Column(String(255), nullable=True)
+    canonical_team_id = Column(Integer, nullable=True)
+    canonical_team_name = Column(String(255), nullable=True)
+    canonical_team_abbreviation = Column(String(16), nullable=True)
+    is_active_for_season = Column(
+        Boolean, nullable=False, default=False, server_default=expression.false()
     )
 
 
@@ -180,6 +217,7 @@ __all__ = [
     "MAPPING_DECISION_STATES",
     "MAPPING_STATES",
     "AthleteMappingDecision",
+    "AthleteMappingDecisionCandidate",
     "AthleteMappingRejection",
     "AthleteMappingLock",
     "ProviderAthleteMapping",

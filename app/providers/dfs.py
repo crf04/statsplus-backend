@@ -1233,13 +1233,33 @@ class NBAMarketQuery:
             raise ValueError("the shared provider query supports pregame markets only")
         season = self.season
         if season is not None:
-            if not isinstance(season, str) or not re.fullmatch(r"\d{4}-\d{2}", season.strip()):
-                raise ValueError("query season must be in YYYY-YY form")
-            season = season.strip()
+            season = self._canonical_season(season)
         object.__setattr__(self, "sport", sport)
         object.__setattr__(self, "league", league)
         object.__setattr__(self, "season", season)
         object.__setattr__(self, "market_statuses", statuses)
+
+    @staticmethod
+    def _canonical_season(season: Any) -> str:
+        """Require one canonical NBA season before any provider is called.
+
+        The two-digit end year must be the calendar year after the four-digit
+        start year, so a shape-valid but impossible label such as ``2024-99``
+        is rejected here rather than reaching a provider.  This mirrors
+        ``app.providers.nba_stats.validate_canonical_season``, which this
+        contract module cannot import without pulling ``nba_api`` into every
+        DFS consumer.
+        """
+
+        if not isinstance(season, str):
+            raise ValueError("query season must be in YYYY-YY form")
+        value = season.strip()
+        match = re.fullmatch(r"(\d{4})-(\d{2})", value)
+        if match is None:
+            raise ValueError("query season must be in YYYY-YY form")
+        if int(match.group(2)) != (int(match.group(1)) + 1) % 100:
+            raise ValueError("query season must span consecutive calendar years")
+        return value
 
 @runtime_checkable
 class ProviderSnapshotProvider(Protocol):

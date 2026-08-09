@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from app.errors import InvalidConfigurationError
 from app.models.athlete_mapping import (
     AthleteMappingDecision,
+    AthleteMappingDecisionCandidate,
     AthleteMappingLock,
     AthleteMappingRejection,
     ProviderAthleteMapping,
@@ -50,8 +51,12 @@ UNRESOLVED_OBSERVATION_STATES = frozenset(
 )
 
 
-def _translate_read_failures(method):
-    """Translate storage failures at the repository boundary."""
+def _translate_storage_failures(method):
+    """Translate storage failures at the repository boundary.
+
+    Every public read and operator write presents one failure type, so callers
+    never have to know that SQLAlchemy is the storage layer.
+    """
 
     @wraps(method)
     def wrapper(*args: Any, **kwargs: Any):
@@ -118,6 +123,7 @@ class ProviderAthleteMappingRecord:
     canonical_team_abbreviation: str | None
     provider_name: str | None
     provider_team_id: str | None
+    provider_team_canonical_id: int | None
     provider_team_name: str | None
     provider_team_abbreviation: str | None
     conflict_canonical_player_id: int | None
@@ -139,12 +145,35 @@ class ProviderAthleteMappingRecord:
             "canonical_team_abbreviation": self.canonical_team_abbreviation,
             "provider_name": self.provider_name,
             "provider_team_id": self.provider_team_id,
+            "provider_team_canonical_id": self.provider_team_canonical_id,
             "provider_team_name": self.provider_team_name,
             "provider_team_abbreviation": self.provider_team_abbreviation,
             "conflict_canonical_player_id": self.conflict_canonical_player_id,
             "conflict_canonical_name": self.conflict_canonical_name,
             "first_seen_at": self.first_seen_at,
             "last_seen_at": self.last_seen_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MappingCandidateRecord:
+    """One canonical athlete an unresolved observation could not choose."""
+
+    canonical_player_id: int
+    canonical_name: str | None
+    canonical_team_id: int | None
+    canonical_team_name: str | None
+    canonical_team_abbreviation: str | None
+    is_active_for_season: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "canonical_player_id": self.canonical_player_id,
+            "canonical_name": self.canonical_name,
+            "canonical_team_id": self.canonical_team_id,
+            "canonical_team_name": self.canonical_team_name,
+            "canonical_team_abbreviation": self.canonical_team_abbreviation,
+            "is_active_for_season": self.is_active_for_season,
         }
 
 
@@ -164,11 +193,13 @@ class MappingDecisionRecord:
     canonical_team_abbreviation: str | None
     provider_name: str | None
     provider_team_id: str | None
+    provider_team_canonical_id: int | None
     provider_team_name: str | None
     provider_team_abbreviation: str | None
     operator_id: str | None
     reason: str | None
     created_at: str
+    candidates: tuple[MappingCandidateRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,11 +215,13 @@ class MappingDecisionRecord:
             "canonical_team_abbreviation": self.canonical_team_abbreviation,
             "provider_name": self.provider_name,
             "provider_team_id": self.provider_team_id,
+            "provider_team_canonical_id": self.provider_team_canonical_id,
             "provider_team_name": self.provider_team_name,
             "provider_team_abbreviation": self.provider_team_abbreviation,
             "operator_id": self.operator_id,
             "reason": self.reason,
             "created_at": self.created_at,
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
 
 
@@ -287,7 +320,7 @@ class AthleteMappingRepository:
 
     # -- reads -------------------------------------------------------------
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def get_mapping(
         self, provider: str, provider_athlete_id: str
     ) -> ProviderAthleteMappingRecord | None:
@@ -309,7 +342,7 @@ class AthleteMappingRepository:
         mapping = self.get_mapping(provider, provider_athlete_id)
         return mapping if mapping is not None and mapping.is_active else None
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def get_rejection(
         self, provider: str, provider_athlete_id: str
     ) -> MappingRejectionRecord | None:
@@ -329,7 +362,7 @@ class AthleteMappingRepository:
         rejection = self.get_rejection(provider, provider_athlete_id)
         return bool(rejection and rejection.is_active)
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def list_mappings(
         self,
         *,
@@ -350,7 +383,7 @@ class AthleteMappingRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._mapping_record(row) for row in rows if row is not None]
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def list_rejections(
         self,
         *,
@@ -371,7 +404,7 @@ class AthleteMappingRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._rejection_record(row) for row in rows if row is not None]
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def history(
         self,
         *,
@@ -395,26 +428,25 @@ class AthleteMappingRepository:
             statement = statement.limit(limit)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
-        return [self._decision_record(row) for row in rows if row is not None]
+            return self._decision_records(connection, rows)
 
-    @_translate_read_failures
+    @_translate_storage_failures
     def list_unresolved(
         self,
         *,
         provider: str | None = None,
     ) -> list[MappingDecisionRecord]:
-        """Return the latest unresolved observation per provider identity.
+        """Return each identity whose latest decision is still unresolved.
 
         Ambiguous, inactive-only, unmatched, and team-conflict evidence never
         becomes current mapping state, so the durable audit rows are the only
-        record an operator can act on.
+        record an operator can act on.  The latest decision per identity is
+        chosen first, so a later automatic, manual, or rejection decision
+        removes the identity from the operator's queue.
         """
 
-        statement = select(AthleteMappingDecision.__table__).where(
-            AthleteMappingDecision.decision_state.in_(
-                sorted(state.value for state in UNRESOLVED_OBSERVATION_STATES)
-            )
-        )
+        unresolved = {state.value for state in UNRESOLVED_OBSERVATION_STATES}
+        statement = select(AthleteMappingDecision.__table__)
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
             statement = statement.where(
@@ -423,11 +455,15 @@ class AthleteMappingRepository:
         statement = statement.order_by(AthleteMappingDecision.id)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
-        latest: dict[tuple[str, str], MappingDecisionRecord] = {}
-        for row in rows:
-            record = self._decision_record(row)
-            latest[(record.provider, record.provider_athlete_id)] = record
-        return [latest[key] for key in sorted(latest)]
+            latest: dict[tuple[str, str], Mapping[str, Any]] = {}
+            for row in rows:
+                latest[(row["provider"], row["provider_athlete_id"])] = row
+            pending = [
+                latest[key]
+                for key in sorted(latest)
+                if latest[key]["decision_state"] in unresolved
+            ]
+            return self._decision_records(connection, pending)
 
     # -- automatic board observations -------------------------------------
 
@@ -557,7 +593,7 @@ class AthleteMappingRepository:
                 MappingResolutionState.AUTO.value,
                 decision is not None,
                 mapping=self._mapping_record(mapping),
-                decision=self._decision_record(decision),
+                decision=self._decision_result(connection, decision),
             )
 
     def _persist_unresolved_observation(
@@ -582,11 +618,11 @@ class AthleteMappingRepository:
                 now=now,
                 idempotency_key=self._idempotency_key(resolution),
             )
-        return MappingPersistenceResult(
-            resolution.state.value,
-            decision is not None,
-            decision=self._decision_record(decision),
-        )
+            return MappingPersistenceResult(
+                resolution.state.value,
+                decision is not None,
+                decision=self._decision_result(connection, decision),
+            )
 
     def record_resolution(
         self,
@@ -662,6 +698,7 @@ class AthleteMappingRepository:
             .values(
                 provider_name=values["provider_name"],
                 provider_team_id=values["provider_team_id"],
+                provider_team_canonical_id=values["provider_team_canonical_id"],
                 provider_team_name=values["provider_team_name"],
                 provider_team_abbreviation=values["provider_team_abbreviation"],
                 mapping_state=MappingResolutionState.MAPPING_CONFLICT.value,
@@ -688,11 +725,12 @@ class AthleteMappingRepository:
             MappingResolutionState.MAPPING_CONFLICT.value,
             decision is not None,
             mapping=self._mapping_record(mapping),
-            decision=self._decision_record(decision),
+            decision=self._decision_result(connection, decision),
         )
 
     # -- operator actions --------------------------------------------------
 
+    @_translate_storage_failures
     def approve(
         self,
         provider: str,
@@ -715,6 +753,7 @@ class AthleteMappingRepository:
             provider_evidence=provider_evidence,
         )
 
+    @_translate_storage_failures
     def override(
         self,
         provider: str,
@@ -737,6 +776,7 @@ class AthleteMappingRepository:
             provider_evidence=provider_evidence,
         )
 
+    @_translate_storage_failures
     def reject(
         self,
         provider: str,
@@ -811,13 +851,14 @@ class AthleteMappingRepository:
                 now=now,
             )
             mapping = self._select_mapping(connection, provider, provider_id)
-        return MappingPersistenceResult(
-            MappingResolutionState.REJECTED.value,
-            True,
-            mapping=self._mapping_record(mapping),
-            decision=self._decision_record(decision),
-        )
+            return MappingPersistenceResult(
+                MappingResolutionState.REJECTED.value,
+                True,
+                mapping=self._mapping_record(mapping),
+                decision=self._decision_result(connection, decision),
+            )
 
+    @_translate_storage_failures
     def clear_rejection(
         self,
         provider: str,
@@ -946,12 +987,12 @@ class AthleteMappingRepository:
                 now=now,
             )
             mapping = self._select_mapping(connection, provider, provider_id)
-        return MappingPersistenceResult(
-            state.value,
-            True,
-            mapping=self._mapping_record(mapping),
-            decision=self._decision_record(decision),
-        )
+            return MappingPersistenceResult(
+                state.value,
+                True,
+                mapping=self._mapping_record(mapping),
+                decision=self._decision_result(connection, decision),
+            )
 
     # -- SQL helpers -------------------------------------------------------
 
@@ -1021,13 +1062,14 @@ class AthleteMappingRepository:
 
         provider, provider_id = self._resolution_key(resolution)
         canonical = resolution.canonical_athlete
+        decision_state = state or resolution.state.value
         values = self._resolution_values(resolution)
         values.pop("season", None)
         values.update(
             provider=provider,
             provider_athlete_id=provider_id,
             requested_season=resolution.season,
-            decision_state=state or resolution.state.value,
+            decision_state=decision_state,
             canonical_player_id=(canonical.player_id if canonical else None),
             canonical_name=(canonical.display_name if canonical else None),
             canonical_team_id=(canonical.team_id if canonical else None),
@@ -1038,7 +1080,43 @@ class AthleteMappingRepository:
             idempotency_key=idempotency_key,
             created_at=now,
         )
-        return self._insert_decision_values(connection, **values)
+        decision = self._insert_decision_values(connection, **values)
+        unresolved = {value.value for value in UNRESOLVED_OBSERVATION_STATES}
+        if decision is not None and decision_state in unresolved:
+            self._insert_candidates(
+                connection, int(decision["id"]), resolution.candidates
+            )
+        return decision
+
+    @staticmethod
+    def _insert_candidates(
+        connection: Connection,
+        decision_id: int,
+        candidates: tuple[CanonicalAthlete, ...],
+    ) -> None:
+        """Retain the candidates an operator has to choose between.
+
+        Only observations that established no canonical identity carry
+        candidates; a decided mapping already names its canonical athlete.
+        """
+
+        if not candidates:
+            return
+        connection.execute(
+            insert(AthleteMappingDecisionCandidate.__table__),
+            [
+                {
+                    "decision_id": decision_id,
+                    "canonical_player_id": candidate.player_id,
+                    "canonical_name": candidate.display_name,
+                    "canonical_team_id": candidate.team_id,
+                    "canonical_team_name": candidate.team_name,
+                    "canonical_team_abbreviation": candidate.team_abbreviation,
+                    "is_active_for_season": candidate.is_active_for_season,
+                }
+                for candidate in candidates
+            ],
+        )
 
     @staticmethod
     def _insert_decision_values(
@@ -1055,6 +1133,7 @@ class AthleteMappingRepository:
         canonical_team_abbreviation: str | None = None,
         provider_name: str | None = None,
         provider_team_id: str | None = None,
+        provider_team_canonical_id: int | None = None,
         provider_team_name: str | None = None,
         provider_team_abbreviation: str | None = None,
         operator_id: str | None = None,
@@ -1074,6 +1153,7 @@ class AthleteMappingRepository:
             "canonical_team_abbreviation": canonical_team_abbreviation,
             "provider_name": provider_name,
             "provider_team_id": provider_team_id,
+            "provider_team_canonical_id": provider_team_canonical_id,
             "provider_team_name": provider_team_name,
             "provider_team_abbreviation": provider_team_abbreviation,
             "operator_id": operator_id,
@@ -1127,6 +1207,9 @@ class AthleteMappingRepository:
             canonical_team_abbreviation=(canonical.team_abbreviation if canonical else existing.get("canonical_team_abbreviation")),
             provider_name=(evidence_values or existing).get("provider_name"),
             provider_team_id=(evidence_values or existing).get("provider_team_id"),
+            provider_team_canonical_id=(evidence_values or existing).get(
+                "provider_team_canonical_id"
+            ),
             provider_team_name=(evidence_values or existing).get("provider_team_name"),
             provider_team_abbreviation=(evidence_values or existing).get("provider_team_abbreviation"),
             operator_id=operator_id,
@@ -1169,6 +1252,7 @@ class AthleteMappingRepository:
             ),
             "provider_name": evidence.name,
             "provider_team_id": team.provider_id if team else None,
+            "provider_team_canonical_id": team.canonical_id if team else None,
             "provider_team_name": team.name if team else None,
             "provider_team_abbreviation": team.abbreviation if team else None,
         }
@@ -1179,6 +1263,7 @@ class AthleteMappingRepository:
         return {
             "provider_name": existing.get("provider_name"),
             "provider_team_id": existing.get("provider_team_id"),
+            "provider_team_canonical_id": existing.get("provider_team_canonical_id"),
             "provider_team_name": existing.get("provider_team_name"),
             "provider_team_abbreviation": existing.get("provider_team_abbreviation"),
         }
@@ -1191,6 +1276,7 @@ class AthleteMappingRepository:
         return {
             "provider_name": evidence.name,
             "provider_team_id": team.provider_id if team else None,
+            "provider_team_canonical_id": team.canonical_id if team else None,
             "provider_team_name": team.name if team else None,
             "provider_team_abbreviation": team.abbreviation if team else None,
         }
@@ -1243,6 +1329,11 @@ class AthleteMappingRepository:
             "provider_team_canonical_id": team.canonical_id if team else None,
             "provider_team_name": team.name if team else None,
             "provider_team_abbreviation": team.abbreviation if team else None,
+            # A changed candidate set is different evidence for an operator to
+            # review, so it must not be suppressed as a repeated observation.
+            "candidates": sorted(
+                candidate.player_id for candidate in resolution.candidates
+            ),
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1265,6 +1356,7 @@ class AthleteMappingRepository:
             canonical_team_abbreviation=row["canonical_team_abbreviation"],
             provider_name=row["provider_name"],
             provider_team_id=row["provider_team_id"],
+            provider_team_canonical_id=row["provider_team_canonical_id"],
             provider_team_name=row["provider_team_name"],
             provider_team_abbreviation=row["provider_team_abbreviation"],
             conflict_canonical_player_id=row["conflict_canonical_player_id"],
@@ -1273,8 +1365,66 @@ class AthleteMappingRepository:
             last_seen_at=_iso(row["last_seen_at"]) or "",
         )
 
+    @classmethod
+    def _decision_result(
+        cls,
+        connection: Connection,
+        row: Mapping[str, Any] | None,
+    ) -> MappingDecisionRecord | None:
+        """Build one decision record with its durable candidates."""
+
+        if row is None:
+            return None
+        candidates = cls._select_candidates(connection, [int(row["id"])])
+        return cls._decision_record(row, candidates.get(int(row["id"]), ()))
+
+    @classmethod
+    def _decision_records(
+        cls,
+        connection: Connection,
+        rows: Any,
+    ) -> list[MappingDecisionRecord]:
+        rows = [row for row in rows if row is not None]
+        candidates = cls._select_candidates(connection, [int(row["id"]) for row in rows])
+        return [
+            cls._decision_record(row, candidates.get(int(row["id"]), ())) for row in rows
+        ]
+
     @staticmethod
-    def _decision_record(row: Mapping[str, Any] | None) -> MappingDecisionRecord | None:
+    def _select_candidates(
+        connection: Connection,
+        decision_ids: list[int],
+    ) -> dict[int, tuple[MappingCandidateRecord, ...]]:
+        if not decision_ids:
+            return {}
+        rows = connection.execute(
+            select(AthleteMappingDecisionCandidate.__table__)
+            .where(AthleteMappingDecisionCandidate.decision_id.in_(decision_ids))
+            .order_by(
+                AthleteMappingDecisionCandidate.decision_id,
+                AthleteMappingDecisionCandidate.canonical_player_id,
+            )
+        ).mappings().all()
+        candidates: dict[int, tuple[MappingCandidateRecord, ...]] = {}
+        for row in rows:
+            decision_id = int(row["decision_id"])
+            candidates[decision_id] = candidates.get(decision_id, ()) + (
+                MappingCandidateRecord(
+                    canonical_player_id=int(row["canonical_player_id"]),
+                    canonical_name=row["canonical_name"],
+                    canonical_team_id=row["canonical_team_id"],
+                    canonical_team_name=row["canonical_team_name"],
+                    canonical_team_abbreviation=row["canonical_team_abbreviation"],
+                    is_active_for_season=bool(row["is_active_for_season"]),
+                ),
+            )
+        return candidates
+
+    @staticmethod
+    def _decision_record(
+        row: Mapping[str, Any] | None,
+        candidates: tuple[MappingCandidateRecord, ...] = (),
+    ) -> MappingDecisionRecord | None:
         if row is None:
             return None
         return MappingDecisionRecord(
@@ -1290,11 +1440,13 @@ class AthleteMappingRepository:
             canonical_team_abbreviation=row["canonical_team_abbreviation"],
             provider_name=row["provider_name"],
             provider_team_id=row["provider_team_id"],
+            provider_team_canonical_id=row["provider_team_canonical_id"],
             provider_team_name=row["provider_team_name"],
             provider_team_abbreviation=row["provider_team_abbreviation"],
             operator_id=row["operator_id"],
             reason=row["reason"],
             created_at=_iso(row["created_at"]) or "",
+            candidates=candidates,
         )
 
     @staticmethod
@@ -1318,6 +1470,7 @@ __all__ = [
     "UNRESOLVED_OBSERVATION_STATES",
     "AthleteMappingRepository",
     "AthleteMappingPersistenceError",
+    "MappingCandidateRecord",
     "MappingDecisionRecord",
     "MappingPersistenceResult",
     "MappingRejectionRecord",

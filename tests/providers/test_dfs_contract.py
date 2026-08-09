@@ -500,6 +500,19 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
             )
 
 
+@pytest.mark.parametrize(
+    "season", ["2024-99", "2024-24", "2024-26", "2024-2025", "24-25", "not-a-season"]
+)
+def test_market_query_rejects_a_noncanonical_season_before_any_provider_call(season):
+    with pytest.raises(ValueError, match="season"):
+        NBAMarketQuery(season=season)
+
+
+@pytest.mark.parametrize("season", ["2024-25", " 2024-25 ", "2099-00"])
+def test_market_query_accepts_canonical_consecutive_seasons(season):
+    assert NBAMarketQuery(season=season).season == season.strip()
+
+
 def test_provider_snapshot_protocol_is_the_single_adapter_seam():
     class FakeProvider:
         def get_snapshot(self, query, context):

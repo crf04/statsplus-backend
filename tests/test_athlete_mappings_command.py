@@ -201,7 +201,13 @@ def test_cli_list_reports_unresolved_and_ambiguous_observations(tmp_path, capsys
     }
     assert observations["pp-ambiguous"]["decision_state"] == "ambiguous"
     assert observations["pp-ambiguous"]["provider_name"] == "Nikola Jokic"
+    # The operator can only choose between candidates that are shown.
+    assert [
+        candidate["canonical_player_id"]
+        for candidate in observations["pp-ambiguous"]["candidates"]
+    ] == [15, 23]
     assert observations["pp-unknown"]["decision_state"] == "unmatched"
+    assert observations["pp-unknown"]["candidates"] == []
     assert listed["mappings"] == []
 
 
