@@ -15,6 +15,8 @@ from app.providers.dfs import (
     AthleteEvidence,
     CompetitionEvidence,
     CoverageCode,
+    CoverageRecordExcluded,
+    CoverageRecordMalformed,
     EventEvidence,
     LeagueEvidence,
     MarketStatus,
@@ -26,18 +28,18 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     _SnapshotMarketCollector,
+    _RecordCoverageAccumulator,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
     _build_snapshot,
     normalize_market_variant,
-    normalize_coverage_code,
+    normalize_market_status,
 )
 from app.providers.dfs_transport import request_json
 from app.providers.dfs_normalization import (
     display_number,
     is_ineligible_event_status,
-    normalize_status,
     optional_text,
     required_identifier,
     required_number,
@@ -69,17 +71,12 @@ class _MalformedPage(MalformedProviderResponseError):
     """The whole PrizePicks page cannot be interpreted safely."""
 
 
-class _MalformedRecord(MalformedProviderResponseError):
+class _MalformedRecord(CoverageRecordMalformed):
     """One PrizePicks record cannot be represented safely."""
 
 
-class _ExcludedRecord(Exception):
+class _ExcludedRecord(CoverageRecordExcluded):
     """One valid upstream record is outside the requested board scope."""
-
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-        super().__init__(reason)
-
 
 @dataclass(frozen=True, slots=True)
 class _PageResult:
@@ -327,52 +324,27 @@ class PrizePicksAdapter:
             "meta.total_count",
         )
 
-        markets: list[PlayerProjectionMarket] = []
-        warning_codes: list[CoverageCode] = []
-        skipped_reasons: list[CoverageCode] = []
-        diagnostic_details: list[str] = []
-        skipped_count = 0
-        malformed_count = 0
-        eligible_count = 0
-        normalized_count = 0
-        for row in rows:
-            try:
-                market = cls._normalize_projection(
-                    row,
-                    resources=resources,
-                    expected_sport=expected_sport,
-                    allowed_statuses=allowed_statuses,
-                )
-            except _ExcludedRecord as error:
-                skipped_count += 1
-                skipped_reasons.append(CoverageCode(error.reason))
-            except _MalformedRecord as error:
-                skipped_count += 1
-                malformed_count += 1
-                warning_codes.append(CoverageCode.MALFORMED_RECORD)
-                detail = str(error) or CoverageCode.MALFORMED_RECORD.value
-                skipped_reasons.append(
-                    normalize_coverage_code(
-                        detail,
-                        default=CoverageCode.MALFORMED_RECORD,
-                    )
-                )
-                diagnostic_details.append(detail)
-            else:
-                eligible_count += 1
-                normalized_count += 1
-                markets.append(market)
+        records = _RecordCoverageAccumulator()
+        records.extend(
+            rows,
+            lambda value: cls._normalize_projection(
+                value,
+                resources=resources,
+                expected_sport=expected_sport,
+                allowed_statuses=allowed_statuses,
+            ),
+        )
 
         return _PageResult(
-            markets=tuple(markets),
-            fetched_count=len(rows),
-            eligible_count=eligible_count,
-            normalized_count=normalized_count,
-            skipped_count=skipped_count,
-            warning_codes=tuple(dict.fromkeys(warning_codes)),
-            skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
-            diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
-            malformed_count=malformed_count,
+            markets=tuple(records.markets),
+            fetched_count=records.fetched_count,
+            eligible_count=records.eligible_count,
+            normalized_count=records.normalized_count,
+            skipped_count=records.skipped_count,
+            warning_codes=records.warning_values(),
+            skipped_reasons=records.skipped_values(),
+            diagnostic_details=records.diagnostic_values(),
+            malformed_count=records.malformed_count,
             current_page=current_page,
             total_pages=total_pages,
             expected_total=expected_total,
@@ -414,9 +386,10 @@ class PrizePicksAdapter:
         if league_name.casefold() != expected_sport.casefold():
             raise _ExcludedRecord("non_nba_market")
         raw_status = cls._record_text(attributes, "status")
-        status = normalize_status(raw_status)
-        if status is None:
-            raise _ExcludedRecord("ineligible_status")
+        try:
+            status = normalize_market_status(raw_status).value
+        except ValueError as error:
+            raise _ExcludedRecord("ineligible_status") from error
         if status not in allowed_statuses:
             raise _ExcludedRecord("status_filter")
 

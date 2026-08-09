@@ -33,6 +33,7 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
     normalize_market_variant,
+    normalize_market_status,
     normalize_selection_direction,
 )
 
@@ -79,7 +80,7 @@ def test_selection_direction_normalization_is_closed_and_retains_original_label(
     assert normalized.original_label == label
 
 
-def test_threshold_keeps_exact_decimal_and_displayed_value():
+def test_threshold_keeps_exact_decimal_and_source_value():
     threshold = MarketThreshold(
         value="25.500",
         unit="points",
@@ -88,7 +89,7 @@ def test_threshold_keeps_exact_decimal_and_displayed_value():
 
     assert threshold.value == Decimal("25.500")
     assert threshold.original_value == "25.500 pts"
-    assert threshold.displayed_value == "25.500 pts"
+    assert not hasattr(threshold, "displayed_value")
 
     with pytest.raises((AttributeError, TypeError)):
         threshold.value = Decimal("26")  # type: ignore[misc]
@@ -107,6 +108,7 @@ def test_selection_modifier_is_decimal_evidence_not_a_payout():
     assert modifier.scope == "selection"
     assert modifier.label == "1.000x"
     assert not hasattr(modifier, "payout")
+    assert not hasattr(modifier, "original_label")
 
 
 def test_selection_modifier_can_preserve_a_missing_provider_label():
@@ -120,7 +122,7 @@ def test_selection_modifier_can_preserve_a_missing_provider_label():
     assert modifier.kind == "multiplier"
     assert modifier.scope == "selection"
     assert modifier.label is None
-    assert modifier.original_label is None
+    assert not hasattr(modifier, "original_label")
 
 
 def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
@@ -153,8 +155,8 @@ def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
     appearance = AppearanceEvidence(
         provider_id="appearance-1", appearance_type="Player", label="LeBron James"
     )
-    assert appearance.appearance_id == "appearance-1"
-    assert appearance.type == "Player"
+    assert appearance.provider_id == "appearance-1"
+    assert appearance.appearance_type == "Player"
     assert appearance.label == "LeBron James"
     assert event.status_label == "scheduled"
     assert event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc)
@@ -176,6 +178,8 @@ def test_market_and_selection_keep_typed_evidence_and_closed_labels():
     assert selection.direction is SelectionDirection.HIGHER
     assert selection.direction_label == "Over"
     assert selection.decimal_price == Decimal("1.91")
+    assert not hasattr(selection, "provider_id")
+    assert not hasattr(selection, "status_label")
 
     assert CompetitionEvidence(provider_id="competition-1", label="NBA").label == "NBA"
     assert LeagueEvidence(provider_id=None, label="NBA").label == "NBA"
@@ -209,6 +213,33 @@ def test_player_projection_market_preserves_evidence_and_uses_exact_threshold():
     assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.threshold.value == Decimal("25.50")
     assert market.selections[0].selection_id is None
+    assert not hasattr(market, "provider_market_id")
+    assert not hasattr(market, "period")
+
+
+def test_contract_models_expose_only_canonical_count_and_timestamp_fields():
+    coverage = CoverageEvidence(
+        fetched_count=1,
+        eligible_count=1,
+        normalized_count=1,
+        skipped_count=0,
+    )
+    assert coverage.fetched_count == 1
+    assert coverage.eligible_count == 1
+    assert coverage.normalized_count == 1
+    assert coverage.skipped_count == 0
+    for alias in ("fetched", "eligible", "normalized", "skipped"):
+        assert not hasattr(coverage, alias)
+
+    snapshot = ProviderSnapshot(
+        provider="prizepicks",
+        status=SnapshotStatus.COMPLETE,
+        markets=(),
+        coverage=coverage,
+        retrieved_at="2026-08-09T16:30:00Z",
+    )
+    assert snapshot.retrieved_at.isoformat() == "2026-08-09T16:30:00+00:00"
+    assert not hasattr(snapshot, "fetched_at")
 
 
 def test_snapshot_deduplicates_agreeing_source_identity_and_retains_coverage():
@@ -298,7 +329,8 @@ def test_partial_snapshot_requires_usable_market_and_known_incomplete_work():
         ),
         retrieved_at="2026-08-09T16:30:00Z",
     )
-    assert partial.is_partial
+    assert partial.status is SnapshotStatus.PARTIAL
+    assert not hasattr(partial, "is_partial")
 
     with pytest.raises(ValueError, match="at least one market"):
         ProviderSnapshot(
@@ -323,7 +355,8 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
         deadline="2026-08-09T16:30:10-05:00",
         request_id="request-1",
     )
-    assert context.deadline_at == datetime(2026, 8, 9, 21, 30, 10, tzinfo=timezone.utc)
+    assert context.deadline == datetime(2026, 8, 9, 21, 30, 10, tzinfo=timezone.utc)
+    assert not hasattr(context, "deadline_at")
     assert context.remaining_seconds(
         now=datetime(2026, 8, 9, 16, 30, 5, tzinfo=timezone(timedelta(hours=-5)))
     ) == 5
@@ -370,6 +403,30 @@ def test_coverage_codes_are_closed_and_diagnostic_details_are_separate():
         CoverageEvidence(warning_codes=("duplicate_source_identitiy",))
     with pytest.raises(ValueError, match="known CoverageCode"):
         CoverageEvidence(skipped_reasons=("provider-specific detail",))
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("active", MarketStatus.AVAILABLE),
+        ("pre_game", MarketStatus.AVAILABLE),
+        ("pregame", MarketStatus.AVAILABLE),
+        ("paused", MarketStatus.SUSPENDED),
+    ],
+)
+def test_market_status_normalization_is_the_single_authority(
+    label: str,
+    expected: MarketStatus,
+):
+    normalized = normalize_market_status(label)
+
+    assert normalized.value is expected
+    assert normalized.original_label == label
+
+
+def test_unknown_market_status_is_not_guessed():
+    with pytest.raises(ValueError, match="eligible"):
+        normalize_market_status("provider-specific-status")
 
 
 def test_dfs_module_exports_only_contract_symbols():

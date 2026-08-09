@@ -7,13 +7,13 @@ the immutable snapshot models returned by adapters.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
 from decimal import Decimal, InvalidOperation
 from math import isfinite
-from typing import Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from app.utils.request_id import is_valid_request_id
 
@@ -127,6 +127,9 @@ def normalize_market_status(label: str | MarketStatus | None) -> NormalizedLabel
         "available": MarketStatus.AVAILABLE,
         "active": MarketStatus.AVAILABLE,
         "open": MarketStatus.AVAILABLE,
+        "pre_game": MarketStatus.AVAILABLE,
+        "pre-game": MarketStatus.AVAILABLE,
+        "pregame": MarketStatus.AVAILABLE,
         "suspended": MarketStatus.SUSPENDED,
         "paused": MarketStatus.SUSPENDED,
     }
@@ -194,13 +197,6 @@ class MarketThreshold:
         object.__setattr__(self, "value", decimal)
         object.__setattr__(self, "unit", unit)
 
-    @property
-    def displayed_value(self) -> str | None:
-        """Alias for the provider's original displayed threshold value."""
-
-        return self.original_value
-
-
 @dataclass(frozen=True, slots=True)
 class SelectionModifier:
     """Provider-defined selection adjustment, never an entry payout."""
@@ -228,13 +224,6 @@ class SelectionModifier:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "label", label)
-
-    @property
-    def original_label(self) -> str | None:
-        """Alias used by normalized-label consumers."""
-
-        return self.label
-
 
 def normalize_timestamp(value: datetime | str | None) -> datetime | None:
     """Return an aware timestamp in UTC; never assume a timezone."""
@@ -295,13 +284,6 @@ class TeamEvidence:
         object.__setattr__(self, "name", name or None)
         object.__setattr__(self, "abbreviation", abbreviation or None)
 
-    @property
-    def label(self) -> str | None:
-        """The original provider team label, when supplied."""
-
-        return self.name
-
-
 @dataclass(frozen=True, slots=True)
 class AthleteEvidence:
     """Provider and canonical evidence for one NBA athlete."""
@@ -327,13 +309,6 @@ class AthleteEvidence:
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "name", name or None)
 
-    @property
-    def label(self) -> str | None:
-        """The original provider athlete label, when supplied."""
-
-        return self.name
-
-
 @dataclass(frozen=True, slots=True)
 class AppearanceEvidence:
     """Provider evidence for the appearance that owns a market line."""
@@ -357,19 +332,6 @@ class AppearanceEvidence:
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "appearance_type", appearance_type or None)
         object.__setattr__(self, "label", label or None)
-
-    @property
-    def appearance_id(self) -> str | None:
-        """Alias clarifying that ``provider_id`` is the upstream ID."""
-
-        return self.provider_id
-
-    @property
-    def type(self) -> str | None:
-        """The provider's appearance type label."""
-
-        return self.appearance_type
-
 
 @dataclass(frozen=True, slots=True)
 class EventEvidence:
@@ -571,19 +533,6 @@ class Selection:
         object.__setattr__(self, "american_price", american_price)
         object.__setattr__(self, "decimal_price", decimal_price)
 
-    @property
-    def provider_id(self) -> str | None:
-        """Alias clarifying that ``selection_id`` is upstream evidence."""
-
-        return self.selection_id
-
-    @property
-    def status_label(self) -> str | None:
-        """The original provider selection status label."""
-
-        return self.status
-
-
 @dataclass(frozen=True, slots=True)
 class PlayerProjectionMarket:
     """One normalized NBA player projection market."""
@@ -680,19 +629,6 @@ class PlayerProjectionMarket:
             return None
         return self.provider, self.market_id
 
-    @property
-    def provider_market_id(self) -> str | None:
-        """Alias clarifying that ``market_id`` is upstream evidence."""
-
-        return self.market_id
-
-    @property
-    def period(self) -> ScoringPeriod:
-        """Return the normalized scoring period enum."""
-
-        return ScoringPeriod(self.scoring_period)
-
-
 class SnapshotStatus(str, Enum):
     """Whether a provider retrieval completed all expected upstream work."""
 
@@ -769,6 +705,123 @@ class MalformedProviderResponseError(ValueError):
     """A provider payload cannot be represented without losing facts."""
 
 
+class CoverageRecordExcluded(Exception):
+    """A valid source record is outside the shared adapter scope."""
+
+    def __init__(self, code: CoverageCode | str) -> None:
+        self.code = normalize_coverage_code(code)
+        super().__init__(self.code.value)
+
+
+class CoverageRecordMalformed(MalformedProviderResponseError):
+    """A source record is malformed, with typed coverage and diagnostic detail."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: CoverageCode | str | None = None,
+    ) -> None:
+        if not isinstance(detail, str) or not detail.strip():
+            raise ValueError("malformed record detail must be a non-empty string")
+        resolved_code = (
+            normalize_coverage_code(detail, default=CoverageCode.MALFORMED_RECORD)
+            if code is None
+            else normalize_coverage_code(code)
+        )
+        self.code = resolved_code
+        self.detail = detail
+        super().__init__(detail)
+
+
+class _RecordCoverageAccumulator:
+    """Account for normalized records consistently across provider adapters."""
+
+    def __init__(self, *, malformed_is_eligible: bool = False) -> None:
+        self.markets: list[Any] = []
+        self.fetched_count = 0
+        self.eligible_count = 0
+        self.normalized_count = 0
+        self.skipped_count = 0
+        self.malformed_count = 0
+        self.warning_codes: list[CoverageCode] = []
+        self.skipped_reasons: list[CoverageCode] = []
+        self.diagnostic_details: list[str] = []
+        self._malformed_is_eligible = malformed_is_eligible
+
+    def add(
+        self,
+        record: Any,
+        normalize: Callable[[Any], Any],
+        *,
+        on_success: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Normalize one record and retain typed coverage evidence."""
+
+        self.fetched_count += 1
+        try:
+            normalized = normalize(record)
+        except CoverageRecordExcluded as error:
+            self._exclude(error)
+            return
+        except CoverageRecordMalformed as error:
+            self._malformed(error, count_as_eligible=self._malformed_is_eligible)
+            return
+
+        self.eligible_count += 1
+        self.normalized_count += 1
+        try:
+            if on_success is None:
+                self.markets.append(normalized)
+            else:
+                on_success(normalized)
+        except CoverageRecordMalformed as error:
+            self._malformed(error, count_as_eligible=False)
+
+    def extend(
+        self,
+        records: Iterable[Any],
+        normalize: Callable[[Any], Any],
+        *,
+        on_success: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Account for records in source order using the shared row policy."""
+
+        for record in records:
+            self.add(record, normalize, on_success=on_success)
+
+    def _exclude(self, error: CoverageRecordExcluded) -> None:
+        self.skipped_count += 1
+        if error.code not in self.skipped_reasons:
+            self.skipped_reasons.append(error.code)
+
+    def _malformed(
+        self,
+        error: CoverageRecordMalformed,
+        *,
+        count_as_eligible: bool,
+    ) -> None:
+        self.skipped_count += 1
+        self.malformed_count += 1
+        if count_as_eligible:
+            self.eligible_count += 1
+        if CoverageCode.MALFORMED_RECORD not in self.warning_codes:
+            self.warning_codes.append(CoverageCode.MALFORMED_RECORD)
+        if error.code not in self.skipped_reasons:
+            self.skipped_reasons.append(error.code)
+        if error.detail not in self.diagnostic_details:
+            self.diagnostic_details.append(error.detail)
+
+    def warning_values(self) -> tuple[CoverageCode, ...]:
+        return tuple(self.warning_codes)
+
+    def skipped_values(self) -> tuple[CoverageCode, ...]:
+        return tuple(self.skipped_reasons)
+
+    def diagnostic_values(self) -> tuple[str, ...]:
+        return tuple(self.diagnostic_details)
+
+
 @dataclass(frozen=True, slots=True)
 class CoverageEvidence:
     """Counts and completion evidence for one provider retrieval."""
@@ -822,25 +875,6 @@ class CoverageEvidence:
         if self.pagination_complete is False or self.fanout_complete is False:
             return False
         return self.expected_total is None or self.fetched_count >= self.expected_total
-
-    @property
-    def fetched(self) -> int:
-        """Short alias for callers that use count nouns."""
-
-        return self.fetched_count
-
-    @property
-    def eligible(self) -> int:
-        return self.eligible_count
-
-    @property
-    def normalized(self) -> int:
-        return self.normalized_count
-
-    @property
-    def skipped(self) -> int:
-        return self.skipped_count
-
 
 @dataclass(frozen=True, slots=True)
 class ProviderSnapshot:
@@ -900,17 +934,6 @@ class ProviderSnapshot:
         object.__setattr__(self, "markets", tuple(deduplicated))
         object.__setattr__(self, "retrieved_at", retrieved_at)
         object.__setattr__(self, "contract_version", self.contract_version.strip())
-
-    @property
-    def fetched_at(self) -> datetime:
-        """Alias for clients that call the retrieval timestamp fetched_at."""
-
-        return self.retrieved_at
-
-    @property
-    def is_partial(self) -> bool:
-        return self.status is SnapshotStatus.PARTIAL
-
 
 class _SnapshotMarketCollector:
     """Collect normalized markets with exact source-identity semantics."""
@@ -1006,9 +1029,9 @@ def _build_snapshot(
         pagination_complete=pagination_complete,
         fanout_complete=fanout_complete,
         expected_total=expected_total,
-        warning_codes=tuple(warning_codes),
-        skipped_reasons=tuple(skipped_reasons),
-        diagnostic_details=tuple(diagnostic_details),
+        warning_codes=tuple(dict.fromkeys(warning_codes)),
+        skipped_reasons=tuple(dict.fromkeys(skipped_reasons)),
+        diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
     )
     return ProviderSnapshot(
         provider=provider,
@@ -1040,12 +1063,6 @@ class RetrievalContext:
                 raise ValueError("retrieval request_id is invalid")
         object.__setattr__(self, "deadline", deadline)
         object.__setattr__(self, "request_id", request_id)
-
-    @property
-    def deadline_at(self) -> datetime:
-        """Alias used by adapters that name the absolute timestamp explicitly."""
-
-        return self.deadline
 
     def remaining_seconds(self, *, now: datetime | str | None = None) -> float:
         """Return non-negative seconds left in the absolute retrieval budget."""

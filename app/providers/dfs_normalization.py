@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.providers.dfs import MarketStatus, MarketThreshold, normalize_timestamp
+from app.providers.dfs import MarketThreshold, normalize_timestamp
 
 
 def optional_text(value: Any) -> str | None:
@@ -71,17 +71,6 @@ def validate_timestamp(value: Any, field: str) -> None:
         raise ValueError(str(error)) from error
 
 
-def normalize_status(label: str) -> MarketStatus | None:
-    """Normalize the shared eligible market statuses."""
-
-    normalized = label.strip().casefold().replace("-", "_")
-    if normalized in {"active", "open", "available", "pre_game", "pregame"}:
-        return MarketStatus.AVAILABLE
-    if normalized in {"suspended", "paused"}:
-        return MarketStatus.SUSPENDED
-    return None
-
-
 def is_ineligible_event_status(label: str) -> bool:
     """Recognize event states that are outside the pregame snapshot."""
 
@@ -92,7 +81,6 @@ def is_ineligible_event_status(label: str) -> bool:
 __all__ = [
     "display_number",
     "is_ineligible_event_status",
-    "normalize_status",
     "optional_text",
     "required_identifier",
     "required_number",

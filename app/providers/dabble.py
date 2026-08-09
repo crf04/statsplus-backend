@@ -28,13 +28,12 @@ from app.providers.dfs import (
     AthleteEvidence,
     CompetitionEvidence,
     CoverageCode,
-    CoverageEvidence,
-    DeadlineExceededError,
+    CoverageRecordExcluded,
+    CoverageRecordMalformed,
     EventEvidence,
     LeagueEvidence,
     MarketThreshold,
     MarketVariant,
-    MalformedProviderResponseError,
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
@@ -42,21 +41,20 @@ from app.providers.dfs import (
     ScoringPeriod,
     Selection,
     SelectionModifier,
-    SnapshotStatus,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
     normalize_market_status,
     normalize_coverage_code,
+    _RecordCoverageAccumulator,
+    _build_snapshot,
 )
 from app.providers.dfs_normalization import optional_text
-from app.providers.dfs_transport import bounded_timeout
+from app.providers.dfs_transport import request_json
 from app.utils.telemetry import (
-    CACHE_DISABLED,
     PROVIDER_DABBLE,
     ProviderResponseError,
     increment_retry_count,
-    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,17 +169,12 @@ class _DabbleRequestFailure(Exception):
         super().__init__(reason)
 
 
-class _MalformedRecord(MalformedProviderResponseError):
+class _MalformedRecord(CoverageRecordMalformed):
     """One Dabble player-prop record cannot be represented safely."""
 
 
-class _ExcludedRecord(Exception):
+class _ExcludedRecord(CoverageRecordExcluded):
     """A valid source record outside the shared NBA player-market scope."""
-
-    def __init__(self, reason: CoverageCode | str) -> None:
-        self.reason = normalize_coverage_code(reason)
-        super().__init__(self.reason.value)
-
 
 @dataclass
 class _MarketAccumulator:
@@ -243,9 +236,7 @@ class DabbleAdapter:
         warning_codes: list[CoverageCode] = []
         skipped_reasons: list[CoverageCode] = []
         diagnostic_details: list[str] = []
-        fetched_count = 0
-        eligible_count = 0
-        normalized_count = 0
+        record_coverage = _RecordCoverageAccumulator(malformed_is_eligible=True)
         skipped_count = 0
         fanout_complete = True
         malformed_seen = False
@@ -276,9 +267,10 @@ class DabbleAdapter:
             raise self._unavailable(error) from error
 
         competitions = competitions_result.rows
-        skipped_count += competitions_result.skipped_count
         if competitions_result.skipped_count:
             warn(CoverageCode.MALFORMED_RECORD)
+            for _ in range(competitions_result.skipped_count):
+                skipped(CoverageCode.MALFORMED_RECORD)
             malformed_seen = True
         if not competitions and competitions_result.skipped_count:
             raise self._unavailable(
@@ -321,9 +313,10 @@ class DabbleAdapter:
                 skipped(CoverageCode.FIXTURE_LIST_FAILED, warning=False)
                 logger.warning("Dabble fixture list failed: %s", type(error).__name__)
                 continue
-            skipped_count += fixtures_result.skipped_count
             if fixtures_result.skipped_count:
                 warn(CoverageCode.MALFORMED_RECORD)
+                for _ in range(fixtures_result.skipped_count):
+                    skipped(CoverageCode.MALFORMED_RECORD)
                 malformed_seen = True
             for fixture in fixtures_result.rows:
                 if not self._fixture_matches_query(fixture):
@@ -349,27 +342,23 @@ class DabbleAdapter:
                 raise self._unavailable(
                     _DabbleRequestFailure("upstream_error", "fixture list")
                 )
-            coverage = CoverageEvidence(
-                fetched_count=fetched_count,
-                eligible_count=eligible_count,
-                normalized_count=normalized_count,
-                skipped_count=skipped_count,
-                pagination_complete=True,
-                fanout_complete=not malformed_seen,
-                warning_codes=tuple(warning_codes),
-                skipped_reasons=tuple(skipped_reasons),
-                diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
-            )
             if malformed_seen:
                 raise self._unavailable(
                     ProviderResponseError("Dabble returned no usable fixture data")
                 )
-            return ProviderSnapshot(
+            return _build_snapshot(
                 provider=self.PROVIDER_ID,
-                status=SnapshotStatus.COMPLETE,
                 markets=(),
-                coverage=coverage,
                 retrieved_at=retrieved_at,
+                fetched_count=record_coverage.fetched_count,
+                eligible_count=record_coverage.eligible_count,
+                normalized_count=record_coverage.normalized_count,
+                skipped_count=skipped_count + record_coverage.skipped_count,
+                pagination_complete=True,
+                fanout_complete=True,
+                warning_codes=warning_codes + record_coverage.warning_codes,
+                skipped_reasons=skipped_reasons + record_coverage.skipped_reasons,
+                diagnostic_details=diagnostic_details + record_coverage.diagnostic_details,
             )
 
         detail_results = self._fetch_details(fixtures, context)
@@ -398,50 +387,34 @@ class DabbleAdapter:
                 warn(CoverageCode.FIXTURE_MALFORMED)
                 skipped(CoverageCode.FIXTURE_MALFORMED, warning=False)
                 continue
-            fetched_count += len(props)
-            for prop in props:
-                try:
-                    normalized = self._normalize_prop(
-                        prop,
-                        detail=detail,
-                        fixture=result.fixture,
-                        competition=result.competition,
-                        query=query,
-                    )
-                except _ExcludedRecord as error:
-                    skipped(error.reason)
-                    continue
-                except (ProviderResponseError, _MalformedRecord) as error:
-                    eligible_count += 1
-                    skipped(CoverageCode.MALFORMED_RECORD, warning=True)
-                    diagnostic_details.append(str(error))
-                    malformed_seen = True
-                    fanout_complete = False
-                    logger.warning(
-                        "Dabble prop normalization failed: %s",
-                        type(error).__name__,
-                    )
-                    continue
-                eligible_count += 1
-                normalized_count += 1
-                try:
-                    self._merge_normalized_prop(
-                        normalized,
-                        warning_codes,
-                        merged_markets,
-                        conflicted_market_keys,
-                    )
-                except MalformedProviderResponseError:
-                    skipped(CoverageCode.CONFLICTING_SOURCE_IDENTITY, warning=True)
-                    diagnostic_details.append(
-                        "repeated Dabble market identity has conflicting content"
-                    )
-                    malformed_seen = True
-                    fanout_complete = False
+            record_coverage.extend(
+                props,
+                lambda value: self._normalize_prop(
+                    value,
+                    detail=detail,
+                    fixture=result.fixture,
+                    competition=result.competition,
+                    query=query,
+                ),
+                on_success=lambda normalized: self._merge_normalized_prop(
+                    normalized,
+                    warning_codes,
+                    merged_markets,
+                    conflicted_market_keys,
+                ),
+            )
+
+            if record_coverage.malformed_count:
+                malformed_seen = True
+                fanout_complete = False
 
         if deadline_error or context.is_expired(now=self._now_utc()):
             raise self._unavailable(_DabbleRequestFailure("deadline_exceeded"))
 
+        skipped_count += record_coverage.skipped_count
+        warning_codes.extend(record_coverage.warning_codes)
+        skipped_reasons.extend(record_coverage.skipped_reasons)
+        diagnostic_details.extend(record_coverage.diagnostic_details)
         markets = merged_markets
 
         if not markets:
@@ -449,23 +422,19 @@ class DabbleAdapter:
                 raise self._unavailable(
                     ProviderResponseError("Dabble produced no usable markets")
                 )
-            coverage = CoverageEvidence(
-                fetched_count=fetched_count,
-                eligible_count=eligible_count,
-                normalized_count=normalized_count,
+            return _build_snapshot(
+                provider=self.PROVIDER_ID,
+                markets=(),
+                retrieved_at=retrieved_at,
+                fetched_count=record_coverage.fetched_count,
+                eligible_count=record_coverage.eligible_count,
+                normalized_count=record_coverage.normalized_count,
                 skipped_count=skipped_count,
                 pagination_complete=True,
                 fanout_complete=True,
-                warning_codes=tuple(warning_codes),
-                skipped_reasons=tuple(skipped_reasons),
-                diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
-            )
-            return ProviderSnapshot(
-                provider=self.PROVIDER_ID,
-                status=SnapshotStatus.COMPLETE,
-                markets=(),
-                coverage=coverage,
-                retrieved_at=retrieved_at,
+                warning_codes=warning_codes,
+                skipped_reasons=skipped_reasons,
+                diagnostic_details=diagnostic_details,
             )
 
         market_values = []
@@ -486,24 +455,19 @@ class DabbleAdapter:
                 )
             )
 
-        coverage = CoverageEvidence(
-            fetched_count=fetched_count,
-            eligible_count=eligible_count,
-            normalized_count=normalized_count,
+        return _build_snapshot(
+            provider=self.PROVIDER_ID,
+            markets=tuple(sorted(market_values, key=self._market_sort_key)),
+            retrieved_at=retrieved_at,
+            fetched_count=record_coverage.fetched_count,
+            eligible_count=record_coverage.eligible_count,
+            normalized_count=record_coverage.normalized_count,
             skipped_count=skipped_count,
             pagination_complete=True,
             fanout_complete=fanout_complete and not malformed_seen,
-            warning_codes=tuple(warning_codes),
-            skipped_reasons=tuple(skipped_reasons),
-            diagnostic_details=tuple(dict.fromkeys(diagnostic_details)),
-        )
-        status = SnapshotStatus.PARTIAL if not coverage.is_complete else SnapshotStatus.COMPLETE
-        return ProviderSnapshot(
-            provider=self.PROVIDER_ID,
-            status=status,
-            markets=tuple(sorted(market_values, key=self._market_sort_key)),
-            coverage=coverage,
-            retrieved_at=retrieved_at,
+            warning_codes=warning_codes,
+            skipped_reasons=skipped_reasons,
+            diagnostic_details=diagnostic_details,
         )
 
     def _merge_normalized_prop(
@@ -515,8 +479,11 @@ class DabbleAdapter:
     ) -> None:
         market_key, market, selection = normalized
         if market_key in conflicted_market_keys:
-            raise MalformedProviderResponseError(
-                "repeated Dabble market identity has conflicting content"
+            if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
+                warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
+            raise _MalformedRecord(
+                "repeated Dabble market identity has conflicting content",
+                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
         accumulator = merged_markets.get(market_key)
         if accumulator is None:
@@ -530,8 +497,11 @@ class DabbleAdapter:
             accumulator.conflict = True
             merged_markets.pop(market_key, None)
             conflicted_market_keys.add(market_key)
-            raise MalformedProviderResponseError(
-                "repeated Dabble market identity has conflicting content"
+            if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
+                warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
+            raise _MalformedRecord(
+                "repeated Dabble market identity has conflicting content",
+                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
 
         selection_key = self._selection_key(selection)
@@ -543,8 +513,11 @@ class DabbleAdapter:
             accumulator.conflict = True
             merged_markets.pop(market_key, None)
             conflicted_market_keys.add(market_key)
-            raise MalformedProviderResponseError(
-                "repeated Dabble selection identity has conflicting content"
+            if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
+                warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
+            raise _MalformedRecord(
+                "repeated Dabble selection identity has conflicting content",
+                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
             )
         if CoverageCode.DUPLICATE_SOURCE_IDENTITY not in warning_codes:
             warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
@@ -787,7 +760,7 @@ class DabbleAdapter:
         if not normalized_stats:
             raise _MalformedRecord("Dabble player prop stats are empty")
 
-        value, displayed_value = self._decimal_source(prop.get("value"), "value")
+        value, source_value = self._decimal_source(prop.get("value"), "value")
         line_type = prop.get("lineType")
         if not isinstance(line_type, str) or not line_type.strip():
             raise _MalformedRecord("Dabble lineType is malformed")
@@ -869,7 +842,7 @@ class DabbleAdapter:
                 threshold=MarketThreshold(
                     value=value,
                     unit="count",
-                    original_value=displayed_value,
+                    original_value=source_value,
                 ),
                 status=status.value,
                 status_label=(
@@ -1029,57 +1002,40 @@ class DabbleAdapter:
         parser: Callable[[Any], Any],
         params: dict[str, Any] | None = None,
     ) -> Any:
-        try:
-            timeout = self._timeout_for(context)
-            with provider_call(
-                PROVIDER_DABBLE,
-                operation,
-                cache_status=CACHE_DISABLED,
-                request_id=context.request_id,
-            ) as tracker:
-                response = self.session.get(
-                    f"{self.BASE_URL}{path}",
-                    params=params,
-                    timeout=timeout,
-                )
-                tracker.status_code = getattr(response, "status_code", None)
-                context.ensure_active(now=self._now_utc())
-                response.raise_for_status()
-                try:
-                    payload = response.json()
-                except (TypeError, ValueError) as error:
-                    raise ProviderResponseError(
-                        "Dabble returned invalid JSON"
-                    ) from error
-                parsed = parser(payload)
-                context.ensure_active(now=self._now_utc())
-                return parsed
-        except ProviderResponseError:
-            raise
-        except DeadlineExceededError as error:
-            raise _DabbleRequestFailure("deadline_exceeded", error) from error
-        except requests.exceptions.Timeout as error:
-            raise _DabbleRequestFailure("timeout", error) from error
-        except requests.exceptions.HTTPError as error:
+        return request_json(
+            context=context,
+            session=self.session,
+            url=f"{self.BASE_URL}{path}",
+            params=params,
+            timeout=(self.connect_timeout_seconds, self.read_timeout_seconds),
+            now=self._now_utc,
+            provider=PROVIDER_DABBLE,
+            operation=operation,
+            parse=parser,
+            deadline_message="Dabble retrieval deadline exceeded.",
+            timeout_message="Dabble timed out while fetching lines.",
+            unavailable_message="Dabble could not be reached.",
+            invalid_json_message="Dabble returned invalid JSON",
+            failure_factory=self._request_failure,
+        )
+
+    @staticmethod
+    def _request_failure(reason: str, error: Exception) -> Exception:
+        if reason == "deadline_exceeded":
+            return _DabbleRequestFailure("deadline_exceeded", error)
+        if reason == "timeout":
+            return _DabbleRequestFailure("timeout", error)
+        if reason == "http_error":
             status_code = getattr(getattr(error, "response", None), "status_code", None)
-            reason = (
+            dabble_reason = (
                 "rate_limited"
                 if status_code == 429
                 else "access_denied"
                 if status_code in {401, 403}
                 else "upstream_error"
             )
-            raise _DabbleRequestFailure(reason, error) from error
-        except requests.exceptions.RequestException as error:
-            raise _DabbleRequestFailure("upstream_error", error) from error
-
-    def _timeout_for(self, context: RetrievalContext) -> tuple[float, float]:
-        return bounded_timeout(
-            context,
-            (self.connect_timeout_seconds, self.read_timeout_seconds),
-            now=self._now_utc(),
-            provider=self.PROVIDER_ID,
-        )
+            return _DabbleRequestFailure(dabble_reason, error)
+        return _DabbleRequestFailure("upstream_error", error)
 
     def _unavailable(self, error: Exception) -> ProviderUnavailableError:
         reason = getattr(error, "reason", "malformed_response")

@@ -21,6 +21,7 @@ from app.utils.telemetry import (
 )
 
 _Result = TypeVar("_Result")
+_FailureFactory = Callable[[str, Exception], Exception]
 
 
 def bounded_timeout(
@@ -55,6 +56,7 @@ def request_json(
     timeout_message: str,
     unavailable_message: str,
     invalid_json_message: str,
+    failure_factory: _FailureFactory | None = None,
 ) -> _Result:
     """Execute one instrumented JSON request under an absolute deadline."""
 
@@ -90,10 +92,20 @@ def request_json(
             context.ensure_active(now=now())
             return result
     except DeadlineExceededError as error:
+        if failure_factory is not None:
+            raise failure_factory("deadline_exceeded", error) from error
         raise ProviderUnavailableError(deadline_message, detail=error) from error
     except requests.exceptions.Timeout as error:
+        if failure_factory is not None:
+            raise failure_factory("timeout", error) from error
         raise ProviderUnavailableError(timeout_message, detail=error) from error
+    except requests.exceptions.HTTPError as error:
+        if failure_factory is not None:
+            raise failure_factory("http_error", error) from error
+        raise ProviderUnavailableError(unavailable_message, detail=error) from error
     except requests.exceptions.RequestException as error:
+        if failure_factory is not None:
+            raise failure_factory("request_error", error) from error
         raise ProviderUnavailableError(unavailable_message, detail=error) from error
 
 
