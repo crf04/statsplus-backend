@@ -246,6 +246,17 @@ def test_underdog_timeout_is_typed_provider_error() -> None:
         ).get_snapshot(_query(), _context())
 
 
+def test_malformed_underdog_payload_is_recorded_as_provider_failure() -> None:
+    with pytest.raises(ProviderUnavailableError):
+        UnderdogAdapter(
+            session=FakeSession(FakeResponse({}))
+        ).get_snapshot(_query(), _context("malformed-underdog"))
+
+    event = telemetry.get_recorded_provider_events()[0]
+    assert event["outcome"] == telemetry.OUTCOME_MALFORMED
+    assert event["request_id"] == "malformed-underdog"
+
+
 def test_underdog_does_not_hide_implementation_defects(monkeypatch) -> None:
     session = FakeSession(FakeResponse(_payload()))
     adapter = UnderdogAdapter(session=session)

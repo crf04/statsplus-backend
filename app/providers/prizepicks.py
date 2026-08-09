@@ -126,13 +126,10 @@ class PrizePicksAdapter:
 
         while page <= total_pages:
             try:
-                payload = self._request_page(
+                result = self._request_page(
                     context=context,
                     league_id=league_id,
                     page=page,
-                )
-                result = self._parse_page(
-                    payload,
                     expected_sport=query.league,
                     allowed_statuses=query.market_statuses,
                 )
@@ -222,7 +219,9 @@ class PrizePicksAdapter:
         context: RetrievalContext,
         league_id: int,
         page: int,
-    ) -> Any:
+        expected_sport: str,
+        allowed_statuses: tuple[MarketStatus | str, ...],
+    ) -> _PageResult:
         try:
             context.ensure_active()
             timeout = self._bounded_timeout(context)
@@ -245,11 +244,19 @@ class PrizePicksAdapter:
                 tracker.status_code = getattr(response, "status_code", None)
                 response.raise_for_status()
                 try:
-                    return response.json()
+                    payload = response.json()
                 except (TypeError, ValueError) as error:
                     raise ProviderResponseError(
                         "PrizePicks returned invalid JSON"
                     ) from error
+                try:
+                    return self._parse_page(
+                        payload,
+                        expected_sport=expected_sport,
+                        allowed_statuses=allowed_statuses,
+                    )
+                except _MalformedPage as error:
+                    raise ProviderResponseError(str(error)) from error
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "PrizePicks retrieval deadline exceeded.", detail=error
@@ -263,9 +270,7 @@ class PrizePicksAdapter:
                 "PrizePicks could not be reached.", detail=error
             ) from error
         except ProviderResponseError as error:
-            raise ProviderUnavailableError(
-                "PrizePicks returned an invalid response.", detail=error
-            ) from error
+            raise _MalformedPage(str(error)) from error
 
     def _bounded_timeout(self, context: RetrievalContext) -> tuple[float, float]:
         remaining = context.remaining_seconds()

@@ -697,13 +697,28 @@ class DabbleAdapter:
         if player_name is None:
             raise _ExcludedRecord("non_player_market")
 
-        status_label = prop.get("status") or detail.get("status") or fixture.get("status")
+        status_labels = tuple(
+            label
+            for label in (
+                prop.get("status"),
+                detail.get("status"),
+                fixture.get("status"),
+            )
+            if label is not None
+        )
+        status_label = next(iter(status_labels), None)
         try:
-            status = normalize_market_status(status_label)
+            normalized_statuses = tuple(
+                normalize_market_status(label) for label in status_labels
+            )
         except ValueError as error:
             raise _ExcludedRecord("ineligible_status") from error
-        if status.value.value not in query.market_statuses:
+        if not normalized_statuses or any(
+            status.value.value not in query.market_statuses
+            for status in normalized_statuses
+        ):
             raise _ExcludedRecord("ineligible_status")
+        status = normalized_statuses[0]
 
         source_sport = (
             detail.get("sportName")

@@ -225,6 +225,25 @@ def test_live_closed_and_settled_fixtures_are_excluded_with_coverage(status: str
     assert session.get.call_count == 2
 
 
+def test_live_fixture_detail_cannot_be_overridden_by_open_prop_status():
+    detail = _payload("fixture_details.valid.json")
+    detail["sportFixtureDetail"]["status"] = "Live"
+    detail["sportFixtureDetail"]["playerProps"][0]["status"] = "Open"
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(detail),
+    ]
+
+    snapshot = DabbleAdapter(session=session).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
+
+    assert snapshot.markets == ()
+    assert "ineligible_status" in snapshot.coverage.skipped_reasons
+
+
 def test_non_nba_competitions_are_excluded():
     competitions = _payload("competitions.valid.json")
     competitions["data"][0]["name"] = "NFL"

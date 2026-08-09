@@ -246,6 +246,17 @@ def test_prizepicks_first_page_timeout_is_typed_provider_error() -> None:
         ).get_snapshot(_query(), _context())
 
 
+def test_malformed_prizepicks_page_is_recorded_as_provider_failure() -> None:
+    with pytest.raises(ProviderUnavailableError):
+        PrizePicksAdapter(
+            session=FakeSession([FakeResponse({})])
+        ).get_snapshot(_query(), _context("malformed-prizepicks"))
+
+    event = telemetry.get_recorded_provider_events()[0]
+    assert event["outcome"] == telemetry.OUTCOME_MALFORMED
+    assert event["request_id"] == "malformed-prizepicks"
+
+
 def test_prizepicks_conflicting_duplicate_identity_is_malformed() -> None:
     first = _payload("projections.page1.valid.json")
     conflict = copy.deepcopy(first)

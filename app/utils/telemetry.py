@@ -29,6 +29,8 @@ from typing import Any, Callable
 
 import requests
 
+from app.utils.request_id import is_valid_request_id
+
 logger = logging.getLogger(__name__)
 
 PROVIDER_NBA_STATS = "nba_stats"
@@ -325,6 +327,8 @@ class ProviderTracker:
         cache_status: str = CACHE_MISS,
         request_id: str | None = None,
     ) -> None:
+        if request_id is not None and not is_valid_request_id(request_id):
+            raise ValueError("provider request_id is invalid")
         self.provider = provider
         self.operation = operation
         self.cache_status = cache_status

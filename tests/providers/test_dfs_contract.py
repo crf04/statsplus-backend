@@ -324,6 +324,13 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
     with pytest.raises(ValueError, match="pregame"):
         NBAMarketQuery(pregame_only=False)
 
+    for unsafe_request_id in ("contains spaces", "x" * 129, "line\nbreak"):
+        with pytest.raises(ValueError, match="request_id"):
+            RetrievalContext(
+                deadline="2026-08-09T16:30:10Z",
+                request_id=unsafe_request_id,
+            )
+
 
 def test_provider_snapshot_protocol_is_the_single_adapter_seam():
     class FakeProvider:

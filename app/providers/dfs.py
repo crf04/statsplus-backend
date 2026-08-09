@@ -16,6 +16,8 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
+from app.utils.request_id import is_valid_request_id
+
 
 class MarketVariant(str, Enum):
     """The reviewed set of market variants understood by the board."""
@@ -854,9 +856,8 @@ class RetrievalContext:
             raise ValueError("retrieval deadline is required")
         request_id = self.request_id
         if request_id is not None:
-            if not isinstance(request_id, str) or not request_id.strip():
-                raise ValueError("retrieval request_id must be a non-empty string or None")
-            request_id = request_id.strip()
+            if not is_valid_request_id(request_id):
+                raise ValueError("retrieval request_id is invalid")
         if not isinstance(self.telemetry, Mapping):
             raise ValueError("retrieval telemetry must be a mapping")
         telemetry = {

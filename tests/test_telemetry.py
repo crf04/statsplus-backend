@@ -80,6 +80,13 @@ def test_provider_call_uses_explicit_request_id_and_closed_dfs_catalog():
         telemetry.PROVIDER_PRIZEPICKS
     ]
 
+    with pytest.raises(ValueError, match="request_id"):
+        telemetry.provider_call(
+            telemetry.PROVIDER_UNDERDOG,
+            "get_snapshot",
+            request_id="unsafe request id",
+        )
+
 
 def test_event_outcome_distinguishes_timeout_http_and_malformed():
     with pytest.raises(requests.exceptions.ReadTimeout):

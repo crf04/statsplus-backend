@@ -104,9 +104,8 @@ class UnderdogAdapter:
 
         retrieved_at = datetime.now(timezone.utc)
         try:
-            payload = self._request_payload(context)
-            result = self._normalize_payload(
-                payload,
+            result = self._request_payload(
+                context,
                 expected_sport=query.sport,
                 allowed_statuses=query.market_statuses,
             )
@@ -164,7 +163,13 @@ class UnderdogAdapter:
             retrieved_at=retrieved_at,
         )
 
-    def _request_payload(self, context: RetrievalContext) -> Any:
+    def _request_payload(
+        self,
+        context: RetrievalContext,
+        *,
+        expected_sport: str,
+        allowed_statuses: tuple[MarketStatus | str, ...],
+    ) -> _PayloadResult:
         try:
             context.ensure_active()
             timeout = self._bounded_timeout(context)
@@ -178,11 +183,19 @@ class UnderdogAdapter:
                 tracker.status_code = getattr(response, "status_code", None)
                 response.raise_for_status()
                 try:
-                    return response.json()
+                    payload = response.json()
                 except (TypeError, ValueError) as error:
                     raise ProviderResponseError(
                         "Underdog returned invalid JSON"
                     ) from error
+                try:
+                    return self._normalize_payload(
+                        payload,
+                        expected_sport=expected_sport,
+                        allowed_statuses=allowed_statuses,
+                    )
+                except _MalformedPayload as error:
+                    raise ProviderResponseError(str(error)) from error
         except DeadlineExceededError as error:
             raise ProviderUnavailableError(
                 "Underdog retrieval deadline exceeded.", detail=error
@@ -196,9 +209,7 @@ class UnderdogAdapter:
                 "Underdog could not be reached.", detail=error
             ) from error
         except ProviderResponseError as error:
-            raise ProviderUnavailableError(
-                "Underdog returned an invalid response.", detail=error
-            ) from error
+            raise _MalformedPayload(str(error)) from error
 
     def _bounded_timeout(self, context: RetrievalContext) -> tuple[float, float]:
         remaining = context.remaining_seconds()
