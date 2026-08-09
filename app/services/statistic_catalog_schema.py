@@ -65,19 +65,21 @@ def load_definition(path: str | Path) -> Mapping[str, Any]:
 
 
 def validate_schema_version(definition: Mapping[str, Any]) -> int:
-    """Require exactly the schema version implemented by this application."""
+    """Require an explicit ``schema_version`` of exactly the implemented version.
 
-    version = definition.get("schema_version", definition.get("version"))
+    There is no ``version`` alias: one spelling keeps the document's declared
+    version unambiguous.
+    """
+
+    if "schema_version" not in definition:
+        raise StatisticDefinitionError(
+            f"schema_version is required and must be {SUPPORTED_SCHEMA_VERSION}"
+        )
+    version = definition["schema_version"]
     if isinstance(version, bool) or not isinstance(version, int) or version != SUPPORTED_SCHEMA_VERSION:
         raise StatisticDefinitionError(
             f"schema_version {version!r} is not implemented; supported version is {SUPPORTED_SCHEMA_VERSION}"
         )
-    if (
-        "schema_version" in definition
-        and "version" in definition
-        and definition["schema_version"] != definition["version"]
-    ):
-        raise StatisticDefinitionError("schema_version and version conflict")
     return version
 
 

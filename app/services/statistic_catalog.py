@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar
@@ -20,12 +19,18 @@ from typing import Any, ClassVar
 from app.providers.dfs import (
     MarketThreshold,
     PlayerProjectionMarket,
-    ScoringPeriod,
     StatisticEvidence,
     normalize_scoring_period,
 )
-from app.domain.statistics import MatchState, StatisticMatch
+from app.domain.statistics import (
+    MatchReason,
+    MatchState,
+    ScoringPeriod,
+    StatisticMatch,
+    StatisticUnit,
+)
 from app.services.statistic_catalog_schema import (
+    SUPPORTED_SCHEMA_VERSION,
     StatisticDefinitionError,
     load_definition,
     validate_schema_version,
@@ -38,6 +43,22 @@ SUPPORTED_STATISTIC_PROVIDERS: tuple[str, ...] = (
     "underdog",
 )
 
+# The complete schema-v1 field vocabulary.  It is intentionally closed: an
+# undocumented alias for a documented field would let two spellings of the
+# same reviewed fact disagree in the definition document.
+_DOCUMENT_FIELDS = frozenset({"schema_version", "component_order", "statistics"})
+_STATISTIC_FIELDS = frozenset(
+    {
+        "id",
+        "label",
+        "unit",
+        "scoring_periods",
+        "components",
+        "provider_mappings",
+        "comparable",
+    }
+)
+
 
 class StatisticCatalogError(ValueError):
     """A statistic definition cannot safely be loaded or resolved."""
@@ -47,17 +68,6 @@ class StatisticCatalogSchemaError(StatisticCatalogError):
     """The version-controlled statistic definition has an invalid schema."""
 
 
-class StatisticUnit(str, Enum):
-    """Units reviewed for catalog definitions."""
-
-    COUNT = "count"
-    DECIMAL = "decimal"
-    MINUTES = "minutes"
-    PERCENTAGE = "percentage"
-    POINTS = "points"
-
-
-_UNIT_VALUES = frozenset(unit.value for unit in StatisticUnit)
 _IDENTIFIER_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
 
 
@@ -108,13 +118,15 @@ def _provider(value: Any, *, field_name: str = "provider") -> str:
 
 
 def _period(value: Any, *, field_name: str) -> ScoringPeriod:
+    """Read one definition scoring period from the exact closed vocabulary."""
+
     if isinstance(value, ScoringPeriod):
         normalized = value
     elif isinstance(value, str):
         try:
             normalized = ScoringPeriod(value.strip().casefold())
         except ValueError:
-            normalized = normalize_scoring_period(value).value
+            normalized = ScoringPeriod.UNKNOWN
     else:
         normalized = ScoringPeriod.UNKNOWN
     if normalized is ScoringPeriod.UNKNOWN:
@@ -126,22 +138,15 @@ def _period(value: Any, *, field_name: str) -> ScoringPeriod:
 
 def _unit(value: Any, *, field_name: str) -> StatisticUnit:
     if isinstance(value, StatisticUnit):
-        normalized = value
-    elif isinstance(value, str):
-        normalized_value = value.strip().casefold().replace(" ", "_")
-        try:
-            normalized = StatisticUnit(normalized_value)
-        except ValueError as error:
-            raise StatisticCatalogSchemaError(
-                f"{field_name} contains an invalid statistic unit {value!r}"
-            ) from error
-    else:
+        return value
+    if not isinstance(value, str):
         raise StatisticCatalogSchemaError(f"{field_name} must be a string unit")
-    if normalized.value not in _UNIT_VALUES:  # pragma: no cover - enum guard
+    try:
+        return StatisticUnit(value.strip().casefold().replace(" ", "_"))
+    except ValueError as error:
         raise StatisticCatalogSchemaError(
             f"{field_name} contains an invalid statistic unit {value!r}"
-        )
-    return normalized
+        ) from error
 
 
 def _as_nonempty_list(value: Any, *, field_name: str) -> tuple[Any, ...]:
@@ -156,25 +161,21 @@ def _mapping_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
     if isinstance(value, str):
         return (_label(value, field_name=field_name),)
     if isinstance(value, Mapping):
-        allowed = {"label", "labels", "alias", "aliases"}
-        unknown = set(value) - allowed
+        unknown = set(value) - {"label", "labels"}
         if unknown:
             raise StatisticCatalogSchemaError(
                 f"{field_name} contains unsupported mapping fields: {sorted(unknown)}"
             )
-        values: list[Any] = []
-        for key in ("label", "labels", "alias", "aliases"):
-            if key not in value:
-                continue
-            candidate = value[key]
-            if key in {"label", "alias"}:
-                values.append(candidate)
-            else:
-                values.extend(
-                    _as_nonempty_list(candidate, field_name=f"{field_name}.{key}")
-                )
-        if not values:
-            raise StatisticCatalogSchemaError(f"{field_name} must contain a label")
+        if len(value) != 1:
+            raise StatisticCatalogSchemaError(
+                f"{field_name} must contain exactly one of label or labels"
+            )
+        if "label" in value:
+            values: list[Any] = [value["label"]]
+        else:
+            values = list(
+                _as_nonempty_list(value["labels"], field_name=f"{field_name}.labels")
+            )
         return tuple(_label(candidate, field_name=field_name) for candidate in values)
     if isinstance(value, (list, tuple)):
         if not value:
@@ -191,36 +192,6 @@ def _mapping_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
 def _provider_mappings(value: Any, *, field_name: str) -> dict[str, tuple[str, ...]]:
     if value is None:
         return {}
-    if isinstance(value, (list, tuple)):
-        mappings: dict[str, tuple[str, ...]] = {}
-        for index, item in enumerate(value):
-            if not isinstance(item, Mapping):
-                raise StatisticCatalogSchemaError(
-                    f"{field_name}[{index}] must be an object"
-                )
-            allowed = {"provider", "label", "labels", "alias", "aliases"}
-            unknown = set(item) - allowed
-            if unknown or "provider" not in item:
-                raise StatisticCatalogSchemaError(
-                    f"{field_name}[{index}] requires provider and labels"
-                )
-            provider = _provider(
-                item["provider"], field_name=f"{field_name}[{index}].provider"
-            )
-            if provider in mappings:
-                raise StatisticCatalogSchemaError(
-                    f"duplicate provider mapping identity for {provider!r}"
-                )
-            labels = _mapping_labels(
-                {
-                    key: item[key]
-                    for key in ("label", "labels", "alias", "aliases")
-                    if key in item
-                },
-                field_name=f"{field_name}[{index}]",
-            )
-            mappings[provider] = labels
-        return mappings
     if not isinstance(value, Mapping):
         raise StatisticCatalogSchemaError(f"{field_name} must be an object by provider")
     mappings: dict[str, tuple[str, ...]] = {}
@@ -346,7 +317,7 @@ class StatisticCatalog:
     """Immutable catalog built from one validated definition document."""
 
     statistics: tuple[CanonicalStatistic, ...]
-    version: int = 1
+    version: int = SUPPORTED_SCHEMA_VERSION
     by_id: Mapping[str, CanonicalStatistic] = field(init=False)
     mappings: tuple[StatisticMapping, ...] = field(init=False)
     _label_index: Mapping[tuple[str, str], CanonicalStatistic] = field(
@@ -358,9 +329,13 @@ class StatisticCatalog:
     )
 
     def __post_init__(self) -> None:
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+        if (
+            isinstance(self.version, bool)
+            or not isinstance(self.version, int)
+            or self.version != SUPPORTED_SCHEMA_VERSION
+        ):
             raise StatisticCatalogSchemaError(
-                "statistic catalog version must be a positive integer"
+                f"statistic catalog version must be exactly {SUPPORTED_SCHEMA_VERSION}"
             )
         statistics = tuple(self.statistics)
         if not statistics:
@@ -429,10 +404,6 @@ class StatisticCatalog:
         return cls.load(cls.DEFAULT_PATH)
 
     @classmethod
-    def default(cls) -> "StatisticCatalog":
-        return cls.load_default()
-
-    @classmethod
     def load(cls, path: str | Path) -> "StatisticCatalog":
         """Load and validate one YAML definition document."""
 
@@ -486,28 +457,25 @@ class StatisticResolver:
 
     def resolve(
         self,
-        provider: str | PlayerProjectionMarket,
+        provider: str,
         label: str | StatisticEvidence | None = None,
         *,
-        scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME,
-        period: ScoringPeriod | str | None = None,
+        scoring_period: ScoringPeriod | str | None = None,
         unit: str | None = None,
         components: Sequence[str] | None = None,
         evidence: StatisticEvidence | None = None,
     ) -> StatisticMatch:
-        """Resolve one label, retaining the exact provider evidence."""
+        """Resolve one label, retaining the exact provider evidence.
 
-        if isinstance(provider, PlayerProjectionMarket) and label is None and evidence is None:
-            return self.resolve_market(provider)
+        Omitted period evidence stays ``UNKNOWN``; a canonical identity always
+        requires an explicit reviewed scoring period from the provider.
+        """
+
         if isinstance(label, StatisticEvidence):
             if evidence is not None:
                 raise TypeError("statistic evidence was supplied twice")
             evidence = label
             label = evidence.label
-        if period is not None:
-            if scoring_period is not None and scoring_period is not ScoringPeriod.FULL_GAME:
-                raise TypeError("use scoring_period or period, not both")
-            scoring_period = period
 
         normalized_provider = provider.strip().casefold() if isinstance(provider, str) else ""
         if evidence is None:
@@ -527,13 +495,21 @@ class StatisticResolver:
                     components=source_components,
                 )
         period = _runtime_period(scoring_period)
-        if not source_label or period is ScoringPeriod.UNKNOWN:
+        if not source_label:
             return self._unmapped(
                 evidence,
                 provider=normalized_provider,
                 scoring_period=period,
                 unit=unit,
-                reason="unknown_statistic_or_scoring_period",
+                reason=MatchReason.MISSING_STATISTIC_LABEL,
+            )
+        if period is ScoringPeriod.UNKNOWN:
+            return self._unmapped(
+                evidence,
+                provider=normalized_provider,
+                scoring_period=period,
+                unit=unit,
+                reason=MatchReason.UNKNOWN_SCORING_PERIOD,
             )
         canonical = self.catalog._label_index.get(
             (normalized_provider, _label_key(source_label))
@@ -544,7 +520,7 @@ class StatisticResolver:
                 provider=normalized_provider,
                 scoring_period=period,
                 unit=unit,
-                reason="unknown_provider_label",
+                reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
             )
         if period not in canonical.scoring_periods:
             return self._unmapped(
@@ -552,7 +528,7 @@ class StatisticResolver:
                 provider=normalized_provider,
                 scoring_period=period,
                 unit=unit,
-                reason="unsupported_scoring_period",
+                reason=MatchReason.UNSUPPORTED_SCORING_PERIOD,
             )
         if unit is not None and _runtime_unit(unit) != canonical.unit:
             return self._unmapped(
@@ -560,7 +536,7 @@ class StatisticResolver:
                 provider=normalized_provider,
                 scoring_period=period,
                 unit=unit,
-                reason="unit_mismatch",
+                reason=MatchReason.UNIT_MISMATCH,
             )
         if source_components:
             try:
@@ -582,7 +558,7 @@ class StatisticResolver:
                     provider=normalized_provider,
                     scoring_period=period,
                     unit=unit,
-                    reason="component_mismatch",
+                    reason=MatchReason.COMPONENT_MISMATCH,
                 )
         return StatisticMatch(
             state=MatchState.CANONICAL,
@@ -590,7 +566,7 @@ class StatisticResolver:
             canonical=canonical,
             provider=normalized_provider,
             scoring_period=period,
-            unit=canonical.unit.value,
+            unit=canonical.unit,
         )
 
     def resolve_evidence(
@@ -598,15 +574,13 @@ class StatisticResolver:
         provider: str,
         evidence: StatisticEvidence,
         *,
-        scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME,
-        period: ScoringPeriod | str | None = None,
+        scoring_period: ScoringPeriod | str | None = None,
         unit: str | None = None,
     ) -> StatisticMatch:
         return self.resolve(
             provider,
             evidence.label,
             scoring_period=scoring_period,
-            period=period,
             unit=unit,
             components=evidence.components,
             evidence=evidence,
@@ -632,14 +606,14 @@ class StatisticResolver:
         provider: str,
         scoring_period: ScoringPeriod,
         unit: str | None,
-        reason: str,
+        reason: MatchReason,
     ) -> StatisticMatch:
         return StatisticMatch(
             state=MatchState.UNMAPPED,
             evidence=evidence,
             provider=provider or None,
             scoring_period=scoring_period,
-            unit=unit,
+            unit=_runtime_unit(unit) if unit is not None else None,
             reason=reason,
         )
 
@@ -675,14 +649,7 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(definition, Mapping):
         raise StatisticCatalogSchemaError("definition must be an object")
-    allowed = {
-        "schema_version",
-        "version",
-        "component_order",
-        "statistics",
-        "canonical_statistics",
-    }
-    unknown = set(definition) - allowed
+    unknown = set(definition) - _DOCUMENT_FIELDS
     if unknown:
         raise StatisticCatalogSchemaError(
             f"unsupported top-level fields: {sorted(unknown)}"
@@ -691,57 +658,24 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
         version = validate_schema_version(definition)
     except StatisticDefinitionError as error:
         raise StatisticCatalogSchemaError(str(error)) from error
-    raw_statistics = definition.get(
-        "statistics", definition.get("canonical_statistics")
+    raw_statistics = _as_nonempty_list(
+        definition.get("statistics"), field_name="statistics"
     )
-    raw_statistics = _as_nonempty_list(raw_statistics, field_name="statistics")
 
     parsed: list[CanonicalStatistic] = []
     for index, raw_statistic in enumerate(raw_statistics):
         if not isinstance(raw_statistic, Mapping):
             raise StatisticCatalogSchemaError(f"statistics[{index}] must be an object")
-        allowed_statistic = {
-            "id",
-            "canonical_id",
-            "label",
-            "display_name",
-            "name",
-            "unit",
-            "periods",
-            "scoring_periods",
-            "period",
-            "components",
-            "ordered_components",
-            "provider_mappings",
-            "mappings",
-            "provider_labels",
-            "comparable",
-            "comparison_allowed",
-        }
-        unknown_statistic = set(raw_statistic) - allowed_statistic
+        unknown_statistic = set(raw_statistic) - _STATISTIC_FIELDS
         if unknown_statistic:
             raise StatisticCatalogSchemaError(
                 f"statistics[{index}] has unsupported fields: {sorted(unknown_statistic)}"
             )
-        statistic_id = raw_statistic.get(
-            "id", raw_statistic.get("canonical_id")
-        )
-        display_label = raw_statistic.get(
-            "label", raw_statistic.get("display_name", raw_statistic.get("name"))
-        )
-        periods = raw_statistic.get(
-            "scoring_periods",
-            raw_statistic.get("periods", raw_statistic.get("period")),
-        )
-        components = raw_statistic.get(
-            "components", raw_statistic.get("ordered_components")
-        )
-        mappings = raw_statistic.get(
-            "provider_mappings",
-            raw_statistic.get(
-                "mappings", raw_statistic.get("provider_labels")
-            ),
-        )
+        statistic_id = raw_statistic.get("id")
+        display_label = raw_statistic.get("label")
+        periods = raw_statistic.get("scoring_periods")
+        components = raw_statistic.get("components")
+        mappings = raw_statistic.get("provider_mappings")
         if (
             statistic_id is None
             or display_label is None
@@ -780,9 +714,7 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
                 provider_mappings=_provider_mappings(
                     mappings, field_name=f"statistics[{index}].provider_mappings"
                 ),
-                comparable=raw_statistic.get(
-                    "comparable", raw_statistic.get("comparison_allowed", True)
-                ),
+                comparable=raw_statistic.get("comparable", True),
             )
         )
 
@@ -816,7 +748,9 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "CanonicalStatistic",
+    "MatchReason",
     "MatchState",
+    "ScoringPeriod",
     "StatisticCatalog",
     "StatisticCatalogError",
     "StatisticCatalogSchemaError",

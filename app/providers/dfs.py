@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from app.domain.statistics import MatchState, StatisticMatch
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 
 from app.utils.request_id import is_valid_request_id
 
@@ -42,17 +42,6 @@ class MarketStatus(str, Enum):
 
     AVAILABLE = "available"
     SUSPENDED = "suspended"
-
-
-class ScoringPeriod(str, Enum):
-    """Reviewed scoring periods; unknown provider labels remain evidence."""
-
-    FULL_GAME = "full_game"
-    FIRST_HALF = "first_half"
-    SECOND_HALF = "second_half"
-    FIRST_QUARTER = "first_quarter"
-    SECOND_QUARTER = "second_quarter"
-    UNKNOWN = "unknown"
 
 
 EnumValue = TypeVar("EnumValue", bound=Enum)

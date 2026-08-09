@@ -1,17 +1,37 @@
 """Typed, immutable statistic matching values shared by providers and services.
 
-This module deliberately has no provider or catalog imports.  Providers can
-therefore carry a resolved match without introducing an import cycle; the
-catalog remains the sole authority that creates canonical matches.
+This module deliberately has no provider or catalog imports.  It owns the
+closed vocabularies a statistic match is built from — scoring periods, units,
+states, and unmapped reasons — so providers can carry a resolved match without
+introducing an import cycle; the catalog remains the sole authority that
+creates canonical matches.
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    from app.providers.dfs import ScoringPeriod
+
+class ScoringPeriod(str, Enum):
+    """Reviewed scoring periods; unknown provider labels remain evidence."""
+
+    FULL_GAME = "full_game"
+    FIRST_HALF = "first_half"
+    SECOND_HALF = "second_half"
+    FIRST_QUARTER = "first_quarter"
+    SECOND_QUARTER = "second_quarter"
+    UNKNOWN = "unknown"
+
+
+class StatisticUnit(str, Enum):
+    """Closed unit vocabulary reviewed for catalog definitions."""
+
+    COUNT = "count"
+    DECIMAL = "decimal"
+    MINUTES = "minutes"
+    PERCENTAGE = "percentage"
+    POINTS = "points"
 
 
 class MatchState(str, Enum):
@@ -19,6 +39,18 @@ class MatchState(str, Enum):
 
     CANONICAL = "canonical"
     UNMAPPED = "unmapped"
+
+
+class MatchReason(str, Enum):
+    """Closed vocabulary explaining why a match is unmapped."""
+
+    MISSING_STATISTIC_EVIDENCE = "missing_statistic_evidence"
+    MISSING_STATISTIC_LABEL = "missing_statistic_label"
+    UNKNOWN_SCORING_PERIOD = "unknown_scoring_period"
+    UNKNOWN_PROVIDER_LABEL = "unknown_provider_label"
+    UNSUPPORTED_SCORING_PERIOD = "unsupported_scoring_period"
+    UNIT_MISMATCH = "unit_mismatch"
+    COMPONENT_MISMATCH = "component_mismatch"
 
 
 @runtime_checkable
@@ -51,23 +83,36 @@ class StatisticMatch:
         evidence: StatisticEvidenceLike,
         canonical: CanonicalStatisticLike | None = None,
         provider: str | None = None,
-        scoring_period: ScoringPeriod | str,
-        unit: str | None = None,
-        reason: str | None = None,
+        scoring_period: ScoringPeriod,
+        unit: StatisticUnit | None = None,
+        reason: MatchReason | None = None,
     ) -> None:
         if not isinstance(state, MatchState):
             raise TypeError("statistic match state must be a MatchState")
         if not isinstance(evidence, StatisticEvidenceLike):
             raise TypeError("statistic match evidence must be StatisticEvidence")
+        if not isinstance(scoring_period, ScoringPeriod):
+            raise TypeError("statistic match scoring_period must be a ScoringPeriod")
+        if unit is not None and not isinstance(unit, StatisticUnit):
+            raise TypeError("statistic match unit must be a StatisticUnit or None")
+        if reason is not None and not isinstance(reason, MatchReason):
+            raise TypeError("statistic match reason must be a MatchReason or None")
         if state is MatchState.CANONICAL:
             if not isinstance(canonical, CanonicalStatisticLike):
                 raise ValueError("canonical statistic matches require a canonical statistic")
-        elif canonical is not None:
-            raise ValueError("unmapped statistic matches cannot carry a canonical statistic")
+            if scoring_period is ScoringPeriod.UNKNOWN:
+                raise ValueError(
+                    "canonical statistic matches require an explicit scoring period"
+                )
+            if reason is not None:
+                raise ValueError("canonical statistic matches cannot carry a reason")
+        else:
+            if canonical is not None:
+                raise ValueError("unmapped statistic matches cannot carry a canonical statistic")
+            if reason is None:
+                raise ValueError("unmapped statistic matches require a reason")
         if provider is not None and (not isinstance(provider, str) or not provider.strip()):
             raise ValueError("statistic match provider must be a non-empty string or None")
-        if reason is not None and (not isinstance(reason, str) or not reason.strip()):
-            raise ValueError("statistic match reason must be a non-empty string or None")
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "evidence", evidence)
         object.__setattr__(self, "canonical", canonical)
@@ -119,3 +164,14 @@ class StatisticMatch:
         return self.state is MatchState.CANONICAL and bool(
             self.canonical is not None and self.canonical.comparable
         )
+
+
+__all__ = [
+    "CanonicalStatisticLike",
+    "MatchReason",
+    "MatchState",
+    "ScoringPeriod",
+    "StatisticEvidenceLike",
+    "StatisticMatch",
+    "StatisticUnit",
+]

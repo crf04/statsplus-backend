@@ -19,7 +19,7 @@ from app.providers.dfs import (
     SnapshotStatus,
     StatisticEvidence,
 )
-from app.domain.statistics import StatisticMatch
+from app.domain.statistics import MatchReason, StatisticMatch, StatisticUnit
 from app.services.dfs_board import DFSBoardService
 from app.services.statistic_catalog import (
     CanonicalStatistic,
@@ -133,9 +133,10 @@ def test_aliases_are_explicit_and_unknown_labels_are_not_guessed() -> None:
     }
     resolver = StatisticCatalog.from_mapping(definition).resolver
 
-    assert resolver.resolve("dabble", "pts").state is MatchState.CANONICAL
-    assert resolver.resolve("dabble", "Points").state is MatchState.UNMAPPED
-    assert resolver.resolve("dabble", "PTS+REB").state is MatchState.UNMAPPED
+    full_game = ScoringPeriod.FULL_GAME
+    assert resolver.resolve("dabble", "pts", scoring_period=full_game).state is MatchState.CANONICAL
+    assert resolver.resolve("dabble", "Points", scoring_period=full_game).state is MatchState.UNMAPPED
+    assert resolver.resolve("dabble", "PTS+REB", scoring_period=full_game).state is MatchState.UNMAPPED
 
 
 def test_unknown_period_specific_and_provider_fantasy_labels_are_unmapped() -> None:
@@ -167,7 +168,10 @@ def test_unknown_period_specific_and_provider_fantasy_labels_are_unmapped() -> N
         is MatchState.UNMAPPED
     )
     assert (
-        resolver.resolve("new-provider", "Points").state is MatchState.UNMAPPED
+        resolver.resolve(
+            "new-provider", "Points", scoring_period=ScoringPeriod.FULL_GAME
+        ).state
+        is MatchState.UNMAPPED
     )
 
 
@@ -279,14 +283,198 @@ def test_catalog_rejects_unimplemented_schema_versions(schema_version: int) -> N
         StatisticCatalog.from_mapping(definition)
 
 
+def _schema_v1_definition() -> dict:
+    return {
+        "schema_version": 1,
+        "component_order": ["points"],
+        "statistics": [
+            {
+                "id": "points",
+                "label": "Points",
+                "unit": "count",
+                "scoring_periods": ["full_game"],
+                "components": ["points"],
+                "provider_mappings": {"dabble": ["points"]},
+            }
+        ],
+    }
+
+
+def test_schema_version_is_required_and_has_no_version_alias() -> None:
+    without_version = _schema_v1_definition()
+    del without_version["schema_version"]
+    with pytest.raises(StatisticCatalogError, match="schema_version"):
+        StatisticCatalog.from_mapping(without_version)
+
+    aliased = _schema_v1_definition()
+    del aliased["schema_version"]
+    aliased["version"] = 1
+    with pytest.raises(StatisticCatalogError, match="schema_version|unsupported top-level"):
+        StatisticCatalog.from_mapping(aliased)
+
+    duplicated = _schema_v1_definition()
+    duplicated["version"] = 1
+    with pytest.raises(StatisticCatalogError, match="unsupported top-level"):
+        StatisticCatalog.from_mapping(duplicated)
+
+
+@pytest.mark.parametrize(
+    "rename",
+    [
+        ("statistics", "canonical_statistics"),
+        ("component_order", "components_order"),
+    ],
+)
+def test_definition_rejects_undocumented_top_level_aliases(rename: tuple[str, str]) -> None:
+    definition = _schema_v1_definition()
+    definition[rename[1]] = definition.pop(rename[0])
+
+    with pytest.raises(StatisticCatalogError, match="unsupported top-level|statistics"):
+        StatisticCatalog.from_mapping(definition)
+
+
+@pytest.mark.parametrize(
+    "rename",
+    [
+        ("id", "canonical_id"),
+        ("label", "display_name"),
+        ("label", "name"),
+        ("scoring_periods", "period"),
+        ("scoring_periods", "periods"),
+        ("components", "ordered_components"),
+        ("provider_mappings", "provider_labels"),
+        ("provider_mappings", "mappings"),
+    ],
+)
+def test_definition_rejects_undocumented_statistic_field_aliases(
+    rename: tuple[str, str],
+) -> None:
+    definition = _schema_v1_definition()
+    statistic = definition["statistics"][0]
+    statistic[rename[1]] = statistic.pop(rename[0])
+
+    with pytest.raises(StatisticCatalogError, match="unsupported fields"):
+        StatisticCatalog.from_mapping(definition)
+
+
+def test_definition_rejects_undocumented_comparable_alias_and_mapping_alias() -> None:
+    comparison_alias = _schema_v1_definition()
+    comparison_alias["statistics"][0]["comparison_allowed"] = False
+    with pytest.raises(StatisticCatalogError, match="unsupported fields"):
+        StatisticCatalog.from_mapping(comparison_alias)
+
+    mapping_alias = _schema_v1_definition()
+    mapping_alias["statistics"][0]["provider_mappings"] = {
+        "dabble": {"aliases": ["points"]}
+    }
+    with pytest.raises(StatisticCatalogError, match="unsupported mapping fields"):
+        StatisticCatalog.from_mapping(mapping_alias)
+
+    conflicting_mapping = _schema_v1_definition()
+    conflicting_mapping["statistics"][0]["provider_mappings"] = {
+        "dabble": {"label": "points", "labels": ["pts"]}
+    }
+    with pytest.raises(StatisticCatalogError, match="label or labels"):
+        StatisticCatalog.from_mapping(conflicting_mapping)
+
+
+def test_typed_catalog_construction_requires_schema_version_one() -> None:
+    statistic = CanonicalStatistic(
+        id="points",
+        label="Points",
+        unit="count",
+        scoring_periods=(ScoringPeriod.FULL_GAME,),
+        components=("points",),
+    )
+
+    assert StatisticCatalog(statistics=(statistic,)).version == 1
+    for version in (2, 0, -1, True, "1"):
+        with pytest.raises(StatisticCatalogError, match="version"):
+            StatisticCatalog(statistics=(statistic,), version=version)  # type: ignore[arg-type]
+
+
+def test_resolver_defaults_omitted_period_evidence_to_unknown() -> None:
+    resolver = StatisticCatalog.load_default().resolver
+
+    match = resolver.resolve("prizepicks", "Points", unit="count")
+
+    assert match.state is MatchState.UNMAPPED
+    assert match.scoring_period is ScoringPeriod.UNKNOWN
+    assert match.reason is MatchReason.UNKNOWN_SCORING_PERIOD
+    assert match.canonical is None
+    assert match.evidence.label == "Points"
+
+
+def test_resolver_requires_explicit_full_game_evidence_for_canonical_matches() -> None:
+    resolver = StatisticCatalog.load_default().resolver
+
+    for period in (None, ScoringPeriod.UNKNOWN, "unknown", "made-up-period"):
+        assert (
+            resolver.resolve("prizepicks", "Points", scoring_period=period).state
+            is MatchState.UNMAPPED
+        )
+    assert (
+        resolver.resolve(
+            "prizepicks", "Points", scoring_period=ScoringPeriod.FULL_GAME
+        ).state
+        is MatchState.CANONICAL
+    )
+    assert (
+        resolver.resolve("prizepicks", "Points", scoring_period="full game").state
+        is MatchState.CANONICAL
+    )
+
+
+def test_resolver_reports_closed_reasons_for_each_unmapped_outcome() -> None:
+    resolver = StatisticCatalog.load_default().resolver
+    full_game = ScoringPeriod.FULL_GAME
+
+    assert (
+        resolver.resolve("prizepicks", None, scoring_period=full_game).reason
+        is MatchReason.MISSING_STATISTIC_LABEL
+    )
+    assert (
+        resolver.resolve("prizepicks", "made-up", scoring_period=full_game).reason
+        is MatchReason.UNKNOWN_PROVIDER_LABEL
+    )
+    assert (
+        resolver.resolve(
+            "prizepicks", "Points", scoring_period=ScoringPeriod.FIRST_HALF
+        ).reason
+        is MatchReason.UNSUPPORTED_SCORING_PERIOD
+    )
+    assert (
+        resolver.resolve(
+            "prizepicks", "Points", scoring_period=full_game, unit="minutes"
+        ).reason
+        is MatchReason.UNIT_MISMATCH
+    )
+    assert (
+        resolver.resolve(
+            "prizepicks",
+            "Points",
+            scoring_period=full_game,
+            unit="count",
+            components=("rebounds",),
+        ).reason
+        is MatchReason.COMPONENT_MISMATCH
+    )
+
+
 def test_statistic_match_is_typed_immutable_and_validates_state_coherence() -> None:
     evidence = StatisticEvidence(label="Points")
     with pytest.raises(TypeError):
-        StatisticMatch(state="unmapped", evidence=evidence, scoring_period=ScoringPeriod.FULL_GAME)  # type: ignore[arg-type]
+        StatisticMatch(
+            state="unmapped",  # type: ignore[arg-type]
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
+        )
     unmapped = StatisticMatch(
         state=MatchState.UNMAPPED,
         evidence=evidence,
         scoring_period=ScoringPeriod.FULL_GAME,
+        reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
     )
     with pytest.raises(AttributeError):
         unmapped.state = MatchState.CANONICAL
@@ -296,7 +484,49 @@ def test_statistic_match_is_typed_immutable_and_validates_state_coherence() -> N
             evidence=evidence,
             canonical=StatisticCatalog.load_default().by_id["points"],
             scoring_period=ScoringPeriod.FULL_GAME,
+            reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
         )
+
+
+def test_statistic_match_closes_period_unit_and_reason_vocabularies() -> None:
+    evidence = StatisticEvidence(label="Points")
+
+    for invalid in (
+        {"scoring_period": "full_game"},
+        {"unit": "count"},
+        {"reason": "unknown_provider_label"},
+    ):
+        arguments = {
+            "scoring_period": ScoringPeriod.FULL_GAME,
+            "reason": MatchReason.UNKNOWN_PROVIDER_LABEL,
+            **invalid,
+        }
+        with pytest.raises(TypeError):
+            StatisticMatch(state=MatchState.UNMAPPED, evidence=evidence, **arguments)
+
+    with pytest.raises(ValueError):
+        StatisticMatch(
+            state=MatchState.UNMAPPED,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+        )
+    with pytest.raises(ValueError):
+        StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            canonical=StatisticCatalog.load_default().by_id["points"],
+            scoring_period=ScoringPeriod.UNKNOWN,
+        )
+
+    match = StatisticMatch(
+        state=MatchState.UNMAPPED,
+        evidence=evidence,
+        scoring_period=ScoringPeriod.UNKNOWN,
+        unit=StatisticUnit.COUNT,
+        reason=MatchReason.UNKNOWN_SCORING_PERIOD,
+    )
+    assert match.unit is StatisticUnit.COUNT
+    assert match.reason is MatchReason.UNKNOWN_SCORING_PERIOD
 
 
 def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() -> None:
@@ -417,5 +647,17 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
     market = board.unmapped_markets[0]
     assert market.statistic is None
     assert market.statistic_match.state is MatchState.UNMAPPED
-    assert market.statistic_match.reason == "missing_statistic_evidence"
+    assert market.statistic_match.reason is MatchReason.MISSING_STATISTIC_EVIDENCE
     assert board.resolved_markets[0].market_id == "missing-stat"
+
+    # The unmapped match is attached during snapshot resolution, so it is
+    # visible on the board's snapshots and not only on ``resolved_markets``.
+    snapshot_market = board.snapshots[0].markets[0]
+    assert snapshot_market.market_id == "missing-stat"
+    assert snapshot_market.statistic is None
+    assert snapshot_market.statistic_match is not None
+    assert snapshot_market.statistic_match.state is MatchState.UNMAPPED
+    assert snapshot_market.statistic_match.reason is MatchReason.MISSING_STATISTIC_EVIDENCE
+    assert snapshot_market.statistic_match.provider == "dabble"
+    with pytest.raises(AttributeError):
+        snapshot_market.statistic_match.state = MatchState.CANONICAL

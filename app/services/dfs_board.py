@@ -36,7 +36,7 @@ from app.providers.dfs import (
     SnapshotStatus,
     StatisticEvidence,
 )
-from app.domain.statistics import MatchState, StatisticMatch
+from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
@@ -121,23 +121,6 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
             names.append(name)
             seen.add(name)
     return tuple(names)
-
-
-def _ensure_statistic_match(market: PlayerProjectionMarket) -> PlayerProjectionMarket:
-    """Expose an explicit unmapped result even when a provider omitted evidence."""
-
-    if market.statistic_match is not None:
-        return market
-    return replace(
-        market,
-        statistic_match=StatisticMatch(
-            state=MatchState.UNMAPPED,
-            evidence=StatisticEvidence(),
-            provider=market.provider,
-            scoring_period=market.scoring_period,
-            reason="missing_statistic_evidence",
-        ),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,9 +308,7 @@ class DFSBoard:
         """Flatten usable snapshots after statistic resolution."""
 
         return tuple(
-            _ensure_statistic_match(market)
-            for snapshot in self.snapshots
-            for market in snapshot.markets
+            market for snapshot in self.snapshots for market in snapshot.markets
         )
 
     @property
@@ -593,7 +574,20 @@ class DFSBoardService:
         resolved_markets: list[PlayerProjectionMarket] = []
         for market in snapshot.markets:
             if market.statistic is None:
-                resolved_markets.append(market)
+                # A provider that omitted statistic evidence stays visible as
+                # an explicit unmapped match on the snapshot itself.
+                resolved_markets.append(
+                    replace(
+                        market,
+                        statistic_match=StatisticMatch(
+                            state=MatchState.UNMAPPED,
+                            evidence=StatisticEvidence(),
+                            provider=market.provider,
+                            scoring_period=market.scoring_period,
+                            reason=MatchReason.MISSING_STATISTIC_EVIDENCE,
+                        ),
+                    )
+                )
                 continue
             match = self.statistic_resolver.resolve_market(market)
             evidence = market.statistic
