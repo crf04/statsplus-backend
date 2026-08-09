@@ -32,6 +32,7 @@ from app.services.athlete_mapping_errors import (
     AthleteMappingPersistenceError,
 )
 from app.services.athlete_resolver import (
+    CLAIMING_MAPPING_STATES,
     WITHDRAWN_CLAIM_STATES,
     AthleteResolution,
     AthleteResolver,
@@ -65,24 +66,21 @@ _WITHDRAWING_OBSERVATION_STATES = (
     MappingResolutionState.UNMATCHED,
 )
 
+#: Decision states whose candidates an operator still has to choose between.
+#: An unresolved observation established no canonical identity, and a mapping
+#: conflict established one nobody may rely on: both leave the athletes the
+#: evidence named as the only actionable record of what has to be reviewed.
+_CANDIDATE_DECISION_STATES = frozenset(
+    {state.value for state in UNRESOLVED_OBSERVATION_STATES}
+    | {MappingResolutionState.MAPPING_CONFLICT.value}
+)
+
 #: Mapping states an operator established and a board observation may not
 #: supersede.
 _MANUAL_MAPPING_STATES = frozenset(
     {
         MappingResolutionState.MANUAL_APPROVED.value,
         MappingResolutionState.MANUAL_OVERRIDE.value,
-    }
-)
-
-#: Mapping states that still assert a canonical claim for the identity.  Only
-#: these may hand a stored mapping to a caller that compares athletes; every
-#: other governed state means the identity is suppressed, disputed, or
-#: withdrawn, and must fail closed with no canonical athlete at all.
-CLAIMING_MAPPING_STATES = frozenset(
-    {
-        MappingResolutionState.AUTO,
-        MappingResolutionState.MANUAL_APPROVED,
-        MappingResolutionState.MANUAL_OVERRIDE,
     }
 )
 
@@ -1614,13 +1612,21 @@ class AthleteMappingRepository:
         is the decision, not a conflict -- so a stale automatic candidate must
         never undo it.  Evidence the governed decision does contradict is
         evidence nobody reviewed, and still fails closed.
+
+        A contradiction asserts several evidences at once, and any one of them
+        the operator never reviewed unseats the approval, so all of them are
+        compared.  One of a snapshot's contradicting markets may well report
+        exactly the approved athlete; letting that one answer for the identity
+        would leave the mapping active on evidence the very same read disputes,
+        and which market was listed first would decide.
         """
 
         if resolution is None:
             return True
         governed = cls._latest_manual_decision(connection, provider, provider_id) or mapping
-        return AthleteResolver._manual_evidence_conflicts(
-            governed, resolution.provider_evidence
+        return any(
+            AthleteResolver._manual_evidence_conflicts(governed, evidence)
+            for evidence in resolution.asserted_evidence
         )
 
     @staticmethod
@@ -1893,8 +1899,7 @@ class AthleteMappingRepository:
             created_at=now,
         )
         decision = self._insert_decision_values(connection, **values)
-        unresolved = {value.value for value in UNRESOLVED_OBSERVATION_STATES}
-        if decision is not None and decision_state in unresolved:
+        if decision is not None and decision_state in _CANDIDATE_DECISION_STATES:
             self._insert_candidates(
                 connection, int(decision["id"]), resolution.candidates
             )
@@ -1908,8 +1913,10 @@ class AthleteMappingRepository:
     ) -> None:
         """Retain the candidates an operator has to choose between.
 
-        Only observations that established no canonical identity carry
-        candidates; a decided mapping already names its canonical athlete.
+        Only observations whose canonical identity is still open carry
+        candidates -- unresolved evidence that established none, and a conflict
+        whose canonical side is exactly what is disputed.  A decided mapping
+        already names its canonical athlete.
         """
 
         if not candidates:
@@ -2076,6 +2083,13 @@ class AthleteMappingRepository:
         A resolver that starts from an existing conflict row carries no
         canonical athlete, so writing it again would only clear the retained
         conflict candidate and append a duplicate decision.
+
+        Evidence the read simply does not carry is not a difference: one market
+        of a snapshot may report a team another omits, and reading the same
+        snapshot again in another order would otherwise overwrite the row with
+        the sparser observation and append a conflict per read.  Only a fact
+        the read actually asserts is compared, so a repeat is a read that adds
+        nothing the row does not already record.
         """
 
         if existing is None or resolution.canonical_athlete is not None:
@@ -2084,7 +2098,7 @@ class AthleteMappingRepository:
             return False
         values = cls._resolution_values(resolution)
         return all(
-            existing[field] == values[field]
+            values[field] is None or existing[field] == values[field]
             for field in (
                 "provider_name",
                 "provider_team_id",
@@ -2182,6 +2196,24 @@ class AthleteMappingRepository:
                     for candidate in resolution.candidates
                 ),
                 key=lambda candidate: candidate[0],
+            ),
+            # A contradiction is fingerprinted by everything it contradicts,
+            # not only the evidence it happened to be recorded on, and sorting
+            # it keeps a snapshot that lists the same markets in another order
+            # the same observation rather than a new one.
+            "contradictory_evidence": sorted(
+                (
+                    [
+                        item.name,
+                        item.canonical_id,
+                        item.team.provider_id if item.team else None,
+                        item.team.canonical_id if item.team else None,
+                        item.team.name if item.team else None,
+                        item.team.abbreviation if item.team else None,
+                    ]
+                    for item in resolution.contradictory_evidence
+                ),
+                key=lambda item: [str(value) for value in item],
             ),
         }
         return hashlib.sha256(

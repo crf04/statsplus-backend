@@ -2898,13 +2898,331 @@ def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(
     query = NBAMarketQuery(season="2024-25")
 
     service.get_board(query)
+    established = [
+        decision.decision_state
+        for decision in repository.history(
+            provider="prizepicks", provider_athlete_id="pp-15"
+        )
+    ]
     repeated = service.get_board(query)
 
     (outcome,) = repeated.mapping_outcomes
     assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
     # The contradiction is one durable observation, not one per market or read.
+    assert established[-1] == "mapping_conflict"
+    assert established.count("mapping_conflict") == 1
     decisions = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
-    assert [decision.decision_state for decision in decisions] == ["mapping_conflict"]
+    assert [decision.decision_state for decision in decisions] == established
+
+
+def _approve_nikola(repository: AthleteMappingRepository) -> None:
+    """Govern pp-15 as Nikola on exactly the evidence the operator reviewed."""
+
+    repository.approve(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+    )
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_board_fails_closed_when_a_snapshot_contradicts_a_manual_mapping(
+    mapping_db, swapped
+):
+    """A governed identity is disputed by the whole snapshot, not its first market."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_nikola(repository)
+    markets = (_market(), _market(name="LeBron James", market_id="m-pp-15-alt"))
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    # One market still reports the approved athlete, but another reports one
+    # the operator never reviewed, so the approval no longer covers the
+    # identity whichever market the provider listed first.
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    assert repository.get_mapping("prizepicks", "pp-15").mapping_state == "mapping_conflict"
+
+
+@pytest.mark.parametrize(
+    ("case", "governed"),
+    [
+        ("unmatched_name", False),
+        ("different_athlete", False),
+        ("conflicting_team", False),
+        # A manual mapping is only disputed by evidence the operator never
+        # reviewed, and team evidence the catalog contradicts is theirs to keep.
+        ("unmatched_name", True),
+        ("different_athlete", True),
+    ],
+)
+def test_board_records_one_conflict_for_a_reordered_repeated_snapshot(
+    mapping_db, case, governed
+):
+    """Reordering the same contradictory markets observes nothing new."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    if governed:
+        _approve_nikola(repository)
+    markets = _contradictory_markets(case)
+    query = NBAMarketQuery(season="2024-25")
+
+    _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(query)
+    established = repository.get_mapping("prizepicks", "pp-15").to_dict()
+    reordered = _board_service(
+        _snapshot(*reversed(markets)),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(query)
+
+    (outcome,) = reordered.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    # The contradiction is one observation of the identity, so the reordered
+    # read leaves the same durable row and appends nothing to the audit.
+    assert repository.get_mapping("prizepicks", "pp-15").to_dict() == established
+    decisions = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [decision.decision_state for decision in decisions][-1:] == [
+        "mapping_conflict"
+    ]
+    assert [decision.decision_state for decision in decisions].count(
+        "mapping_conflict"
+    ) == 1
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_a_contradictory_snapshot_keeps_both_canonical_sides_to_review(
+    mapping_db, swapped
+):
+    """The conflict an operator has to resolve names every athlete it saw."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = (_market(), _market(name="LeBron James", market_id="m-pp-15-alt"))
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (queued,) = repository.list_conflicts()
+    assert queued.mapping.provider_athlete_id == "pp-15"
+    decision = queued.latest_decision
+    assert decision.decision_state == "mapping_conflict"
+    assert [candidate.canonical_player_id for candidate in decision.candidates] == [
+        15,
+        23,
+    ]
+    assert decision.provider_name in {"Nikola Jokic", "LeBron James"}
+    (recorded,) = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    assert [candidate.canonical_player_id for candidate in recorded.candidates] == [
+        15,
+        23,
+    ]
+
+
+def test_a_governed_contradiction_keeps_the_approved_athlete_to_review(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_nikola(repository)
+
+    _board_service(
+        _snapshot(_market(), _market(name="LeBron James", market_id="m-pp-15-alt")),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (queued,) = repository.list_conflicts()
+    # The approved athlete is the canonical side the disputed markets named,
+    # and the operator keeps it alongside the mapping's own claim.
+    assert queued.mapping.canonical_player_id == 15
+    assert [
+        candidate.canonical_player_id for candidate in queued.latest_decision.candidates
+    ] == [15]
+
+
+def _identified_market(
+    *,
+    canonical_id: int | None = None,
+    team: TeamEvidence | None = None,
+    market_id: str = "m-pp-15-alt",
+) -> PlayerProjectionMarket:
+    """One market for pp-15 carrying explicitly chosen identity evidence."""
+
+    return PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id=market_id,
+        athlete=AthleteEvidence(
+            provider_id="pp-15",
+            canonical_id=canonical_id,
+            name="Nikola Jokic",
+            team=team,
+        ),
+        statistic=StatisticEvidence(provider_id="pts"),
+        threshold=MarketThreshold(value="20.5", unit="points"),
+        status=MarketStatus.AVAILABLE,
+    )
+
+
+def _compatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
+    """Two markets whose evidence only ever adds facts about one athlete."""
+
+    if case == "canonical_id":
+        return (_market(), _identified_market(canonical_id=15))
+    if case == "team_absent":
+        return (
+            _market(),
+            _identified_market(
+                team=TeamEvidence(
+                    provider_id="pp-lal",
+                    canonical_id=1610612747,
+                    name="Los Angeles Lakers",
+                    abbreviation="LAL",
+                )
+            ),
+        )
+    if case == "team_canonical_id":
+        return (
+            _identified_market(
+                team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"
+            ),
+            _identified_market(team=TeamEvidence(provider_id="pp-lal")),
+        )
+    if case == "team_abbreviation":
+        return (
+            _identified_market(
+                team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"
+            ),
+            _identified_market(team=TeamEvidence(name="Los Angeles Lakers")),
+        )
+    return (
+        _identified_market(team=TeamEvidence(provider_id="pp-lal"), market_id="m-pp-15"),
+        _identified_market(team=TeamEvidence(abbreviation="LAL")),
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "canonical_id",
+        "team_absent",
+        "team_canonical_id",
+        "team_abbreviation",
+        "team_provider_id",
+    ],
+)
+@pytest.mark.parametrize("swapped", [False, True])
+def test_board_maps_an_identity_whose_markets_only_add_evidence(
+    mapping_db, case, swapped
+):
+    """Evidence one market omits is not evidence that names another athlete."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _compatible_markets(case)
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.AUTO
+    assert outcome.canonical_player_id == 15
+    assert repository.get_active_mapping("prizepicks", "pp-15").canonical_player_id == 15
+    assert repository.list_conflicts() == []
+
+
+def _incompatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
+    """Two markets that assert different values for one comparable fact."""
+
+    if case == "canonical_id":
+        return (
+            _identified_market(canonical_id=15, market_id="m-pp-15"),
+            _identified_market(canonical_id=23),
+        )
+    if case == "team_canonical_id":
+        return (
+            _identified_market(
+                team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"
+            ),
+            _identified_market(team=TeamEvidence(canonical_id=1610612738)),
+        )
+    if case == "team_abbreviation":
+        return (
+            _identified_market(
+                team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"
+            ),
+            _identified_market(team=TeamEvidence(abbreviation="BOS")),
+        )
+    if case == "team_name":
+        return (
+            _identified_market(
+                team=TeamEvidence(name="Los Angeles Lakers"), market_id="m-pp-15"
+            ),
+            _identified_market(team=TeamEvidence(name="Boston Celtics")),
+        )
+    return (
+        _identified_market(team=TeamEvidence(provider_id="pp-lal"), market_id="m-pp-15"),
+        _identified_market(team=TeamEvidence(provider_id="pp-bos")),
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "canonical_id",
+        "team_canonical_id",
+        "team_abbreviation",
+        "team_name",
+        "team_provider_id",
+    ],
+)
+@pytest.mark.parametrize("swapped", [False, True])
+def test_board_still_fails_closed_on_disagreeing_comparable_evidence(
+    mapping_db, case, swapped
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    markets = _incompatible_markets(case)
+    if swapped:
+        markets = tuple(reversed(markets))
+
+    board = _board_service(
+        _snapshot(*markets),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    ).get_board(NBAMarketQuery(season="2024-25"))
+
+    (outcome,) = board.mapping_outcomes
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
 
 
 def test_board_keeps_every_observation_that_names_no_provider_identity(mapping_db):
@@ -2951,7 +3269,7 @@ def test_board_reports_the_rejection_that_governs_a_repeated_identity(mapping_db
     assert outcome.canonical_player_id is None
 
 
-def test_board_reports_the_manual_mapping_a_contradictory_snapshot_ended_in(mapping_db):
+def test_board_disputes_a_manual_mapping_a_contradictory_snapshot_raced(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolved = []
@@ -2960,7 +3278,7 @@ def test_board_reports_the_manual_mapping_a_contradictory_snapshot_ended_in(mapp
         resolved.append(None)
         if len(resolved) != 3:
             return
-        # An operator approves the identity the snapshot just conflicted over.
+        # An operator approves the identity the snapshot is contradicting.
         repository.approve(
             "prizepicks",
             "pp-15",
@@ -2981,14 +3299,16 @@ def test_board_reports_the_manual_mapping_a_contradictory_snapshot_ended_in(mapp
         race,
     )
 
-    # The identity conflicted mid-snapshot and was governed again before it
-    # ended, so the board reports the mapping that is actually durable now.
+    # The approval landed before the snapshot was written, but it was made on
+    # the Nikola evidence alone.  The same read also reports LeBron under that
+    # identity, which nobody reviewed, so the identity fails closed instead of
+    # lending the operator's decision to the athlete they never saw.
     (outcome,) = board.mapping_outcomes
-    assert outcome.state is MappingResolutionState.MANUAL_APPROVED
-    assert outcome.canonical_player_id == 15
-    active = repository.get_active_mapping("prizepicks", "pp-15")
-    assert active is not None
-    assert active.mapping_state == "manual_approved"
+    assert outcome.state is MappingResolutionState.MAPPING_CONFLICT
+    assert outcome.mapping is None
+    assert outcome.canonical_player_id is None
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    assert repository.get_mapping("prizepicks", "pp-15").mapping_state == "mapping_conflict"
 
 
 def _reused_identity_auto(

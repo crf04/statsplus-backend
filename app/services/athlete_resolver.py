@@ -52,6 +52,19 @@ WITHDRAWN_CLAIM_STATES = frozenset(
 )
 
 
+#: Resolution states that still assert a canonical claim for the identity.
+#: Only these may hand a stored mapping to a caller that compares athletes;
+#: every other governed state means the identity is suppressed, disputed, or
+#: withdrawn, and must fail closed with no canonical athlete at all.
+CLAIMING_MAPPING_STATES = frozenset(
+    {
+        MappingResolutionState.AUTO,
+        MappingResolutionState.MANUAL_APPROVED,
+        MappingResolutionState.MANUAL_OVERRIDE,
+    }
+)
+
+
 #: Latin letters that Unicode decomposition cannot reduce to ASCII because the
 #: stroke, bar, or ligature is part of the letter rather than a combining mark.
 #: Only these documented substitutions are applied; nothing here is an alias,
@@ -116,6 +129,15 @@ class AthleteResolution:
     canonical_athlete: CanonicalAthlete | None = None
     candidates: tuple[CanonicalAthlete, ...] = ()
     reason: str | None = None
+    #: Every distinct provider evidence one observation of this identity
+    #: carried, when the observation is a contradiction the identity cannot be
+    #: resolved from.  A single board read can report the same provider athlete
+    #: ID under two different athletes, and the contradiction is the whole set
+    #: rather than any one of them: governance has to be rechecked against all
+    #: of it, or which market happened to be listed first would decide.  Empty
+    #: for every observation that asserts one athlete, whose evidence is
+    #: ``provider_evidence`` alone.
+    contradictory_evidence: tuple[AthleteEvidence, ...] = ()
     #: When the provider observation behind this result was retrieved, in UTC.
     #: It is the provider's own instant, never a persistence time, so a slow
     #: read that lands after a later decision can still be recognized as older
@@ -137,17 +159,32 @@ class AthleteResolution:
         candidates = tuple(self.candidates)
         if any(not isinstance(candidate, CanonicalAthlete) for candidate in candidates):
             raise ValueError("mapping candidates must be CanonicalAthlete values")
+        contradictory = tuple(self.contradictory_evidence)
+        if any(not isinstance(item, AthleteEvidence) for item in contradictory):
+            raise ValueError("contradictory evidence must be AthleteEvidence values")
         if state is MappingResolutionState.AUTO and self.canonical_athlete is None:
             raise ValueError("auto resolution requires a canonical athlete")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "season", season)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "contradictory_evidence", contradictory)
         object.__setattr__(self, "observed_at", normalize_timestamp(self.observed_at))
 
     @property
     def provider_athlete_id(self) -> str | None:
         return self.provider_evidence.provider_id
+
+    @property
+    def asserted_evidence(self) -> tuple[AthleteEvidence, ...]:
+        """Every provider evidence this observation asserts about the identity.
+
+        One evidence for an ordinary observation, and the whole contradictory
+        set for a fail-closed one, so a governance check reads the same thing
+        the board actually observed rather than the representative it recorded.
+        """
+
+        return self.contradictory_evidence or (self.provider_evidence,)
 
     @property
     def canonical_player_id(self) -> int | None:
@@ -764,6 +801,7 @@ class AthleteResolver:
 
 
 __all__ = [
+    "CLAIMING_MAPPING_STATES",
     "WITHDRAWN_CLAIM_STATES",
     "AthleteResolution",
     "AthleteResolver",

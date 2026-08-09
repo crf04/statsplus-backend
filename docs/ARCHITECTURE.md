@@ -399,7 +399,10 @@ observation could not choose between are stored as typed
 `athlete_mapping_decision_candidates` rows keyed by decision, not as an opaque
 blob, and changed candidate evidence — a different player, name, team ID, team
 name, abbreviation, or season-active flag — is a new observation rather than a
-suppressed repeat.
+suppressed repeat. A `mapping_conflict` decision keeps its candidates the same
+way: its canonical side is exactly what is disputed, so the athletes the
+conflicting evidence named stay actionable in `history` and in the conflict
+review queue instead of being dropped as a decided identity's would be.
 
 Inactive-only, ambiguous, and claim-withdrawing unmatched evidence do change an
 existing mapping, because the identity cannot stay comparable while the board
@@ -490,14 +493,27 @@ they disagree about the athlete's name, canonical ID, or team evidence — after
 the same accent/case/punctuation normalization resolution uses, so equivalent
 spellings are not a disagreement — the identity fails closed on the
 contradiction itself as one `mapping_conflict` reasoned
-`contradictory_provider_evidence`, recorded on the first observed evidence with
-every athlete the markets named as a candidate. Resolving those markets in turn
-would let their arrival order decide the identity, because each is judged
-against what the previous one stored: an unmatched or team-conflicting market
-followed by an exactly matching one would map automatically while the reverse
-order promoted a conflict. Contradicted evidence therefore never enters a
-canonical comparison in any market order, and the repeated markets and repeated
-board reads append no further decision. Later evidence that disagrees with
+`contradictory_provider_evidence`, carrying every athlete the markets named as
+a candidate. Disagreement is judged by merging what the markets actually
+assert, fact by fact and at the same team tiers resolution compares: a market
+that omits the canonical ID or the team, or names the team at a weaker tier
+than another does, describes the same athlete more sparsely rather than a
+different one, so only a fact whose value changed contradicts. Which evidence
+the conflict is *recorded on*, and the order of its candidates, come from
+sorting the observations rather than from the provider's listing order, and the
+whole contradicting set is rechecked against a governing manual decision — one
+market reporting exactly the approved athlete cannot answer for a read that
+also reports another. Resolving those markets in turn would instead let their
+arrival order decide the identity, because each is judged against what the
+previous one stored: an unmatched or team-conflicting market followed by an
+exactly matching one would map automatically while the reverse order promoted a
+conflict. Markets that agree about the athlete may still disagree about whether
+it may be claimed — one reporting no team where another reports one the catalog
+contradicts — so an identity's claims are written before its objections and the
+objection is what stands. Contradicted evidence therefore never enters a
+canonical comparison in any market order, and repeated markets, repeated board
+reads, and a repeat that lists the same markets in another order all append no
+further decision and leave the same durable row. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve
@@ -545,7 +561,8 @@ disagreement is the decision — so a stale automatic candidate cannot undo it.
 Observation order cannot stand in for the comparison either: a read taken after
 a decision may still carry evidence the operator never reviewed. Evidence the
 governed decision does contradict is evidence nobody reviewed, and still
-promotes a conflict.
+promotes a conflict — and a conflict asserts every evidence it contradicts, so
+all of it is compared and any single uncovered market unseats the approval.
 Ordering fences the other case — a read from *before* the governing decision.
 Each `ProviderSnapshot` is temporally coherent, so the board carries its
 `retrieved_at` through the resolver onto the typed resolution and into the
