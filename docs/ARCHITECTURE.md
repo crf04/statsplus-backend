@@ -23,13 +23,14 @@ registers handlers that return the documented `{ "error": { "code", "message"
 } }` shape. Optional `detail` values are logged for operators and never sent
 to clients.
 
-Route modules expose lazy service handles rather than constructing services at
-import time. A handle resolves its service from the active app's
-`app.extensions["request_services"]` registry, passing that app's canonical
-`RuntimeSettings` object into the constructor. Tests can patch the handle
-exposed by the route module—for example,
-`app.routes.game_routes.game_service`—or instantiate a service directly with a
-temporary or mocked engine.
+`app.dependencies.build_dependencies()` is the single production assembly
+point for the database engine, cache client, providers, services, durable job
+coordinator, and provider-health service. The app factory constructs that graph
+once and stores it in `app.extensions["dependencies"]`. Route modules contain
+read-only handles that resolve objects from the active app; importing a route
+never selects a database, connects to Redis, initializes Firebase, or loads a
+parser. Tests can provide a complete replacement graph through the
+`DEPENDENCIES` app-factory override without patching module globals.
 
 ## Data-source seams
 
@@ -38,8 +39,8 @@ The app reads from three distinct sources:
 | Source | Access path | Expected behavior |
 | --- | --- | --- |
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
-| NBA Stats | `nba_api` → `stats.nba.com` | Live game logs and selected team/player data; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
-| PBP Stats | shared `requests.Session` → `api.pbpstats.com` | Play-by-play aggregates and the PBP-specific health probe |
+| NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
+| PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
@@ -49,6 +50,10 @@ Runtime configuration is loaded and validated once by
 `app.config.settings.load_settings()`. The resulting typed `RuntimeSettings`
 object is attached to the app and passed into request services; see
 [SETTINGS.md](SETTINGS.md) for the field and environment-variable contract.
+The app factory configures Flask-CORS from `RuntimeSettings.cors`; it never
+falls back to a wildcard origin. Local development uses the explicit
+`http://localhost:3000` default, while production requires
+`CORS_ALLOWED_ORIGINS`.
 
 ## Provider telemetry and correlation IDs
 
@@ -92,6 +97,29 @@ GET /api/games/game_logs
   → local/database and request filters
   → serialized logs and averages
 ```
+
+### NBA Stats game-log adapter
+
+`app.providers.nba_stats.NBAStatsProvider` is the injectable interface for
+live game logs:
+
+```python
+class NBAStatsProvider(Protocol):
+    def get_player_game_logs(
+        self, *, player_id: int, season: str,
+        season_type: str = "Regular Season",
+    ) -> pandas.DataFrame: ...
+
+    def get_archetype_game_logs(
+        self, *, player_ids: Sequence[int], opponent_team_id: int,
+        season: str, season_type: str = "Regular Season",
+    ) -> pandas.DataFrame: ...
+```
+
+The production adapter owns endpoint construction, timeout, concurrency,
+telemetry, response normalization, and provider error translation. Tests inject
+the protocol into `GameService` or `PlayerService` rather than patching
+`nba_api`.
 
 Natural-language query:
 
@@ -146,6 +174,20 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+PBP Stats:
+
+```text
+GET /api/health/pbp-stats or PUT /api/data/*_PBP
+  → injected PBPStatsProvider
+  → shared requests.Session with PBP-specific connect/read timeouts and retries
+  → validate multi_row_table_data and normalize to a dataframe
+  → ProviderUnavailableError on timeout, unavailable, or malformed responses
+```
+
+`DataService` and `ProviderHealthService` receive the same app-owned provider
+instances from `ApplicationDependencies`; they do not create duplicate
+providers or perform provider calls in route modules.
+
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and
@@ -163,7 +205,8 @@ validator must not be used to repair the fixture.
 ## Test seams
 
 - App and route behavior: use the `app` and `client` fixtures in `tests/conftest.py`.
-- Route/service interaction: patch the module-level service on the route module.
+- Route/service interaction: replace methods on the dependency graph supplied
+  through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `PBPTotalsAdapter.parse_totals`) with no network.
 - `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
@@ -175,7 +218,7 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 
 ## Known seams to improve incrementally
 
-- The lazy request-service registry keeps app-factory isolation explicit while
+- The app-scoped dependency graph keeps app-factory isolation explicit while
   avoiding database, Redis, and parser initialization during route imports.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs

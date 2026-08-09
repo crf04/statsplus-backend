@@ -28,9 +28,11 @@ def test_database_healthcheck(client):
 
 
 def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
-    client, monkeypatch
+    client, dependencies, monkeypatch
 ):
     from app.services import nba_stats_adapter
+    from app.providers.nba_stats import NBAStatsAdapter
+    from app.services.provider_health_service import ProviderHealthService
     from app.utils import telemetry
 
     class FailingResponse:
@@ -51,6 +53,13 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
         def get_data_frames(self):
             raise AssertionError("health probe must fail on status before parsing")
 
+    dependencies.provider_health_service = ProviderHealthService(
+        dependencies.engine,
+        settings=dependencies.settings,
+        nba_stats=NBAStatsAdapter(settings=dependencies.settings),
+        pbp_stats=dependencies.pbp_stats_provider,
+    )
+
     telemetry.clear_recorded_provider_events()
 
     response = client.get("/api/health/nba-api")
@@ -66,8 +75,11 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
     assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
 
 
-def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
+def test_pbp_health_has_distinct_provider_signal(client, dependencies, monkeypatch):
     from app.services import provider_health_service
+    from app.providers.nba_stats import NBAStatsAdapter
+    from app.services.pbp_stats_adapter import PBPTotalsAdapter
+    from app.services.provider_health_service import ProviderHealthService
     from app.utils import telemetry
 
     class FailingResponse:
@@ -85,6 +97,15 @@ def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
         "get_shared_nba_session",
         lambda settings: FailingSession(),
     )
+    dependencies.provider_health_service = ProviderHealthService(
+        dependencies.engine,
+        settings=dependencies.settings,
+        nba_stats=NBAStatsAdapter(settings=dependencies.settings),
+        pbp_stats=PBPTotalsAdapter(
+            settings=dependencies.settings,
+            session=FailingSession(),
+        ),
+    )
     telemetry.clear_recorded_provider_events()
 
     response = client.get("/api/health/pbp-api")
@@ -101,18 +122,19 @@ def test_pbp_health_has_distinct_provider_signal(client, monkeypatch):
 def test_detailed_health_reports_both_providers(client, monkeypatch):
     from app.routes import health_routes
 
-    monkeypatch.setattr(
-        health_routes.health_service,
-        "detailed",
-        lambda: {
-            "status": "healthy",
-            "checks": {
-                "database": {"status": "healthy"},
-                "nba_api": {"status": "healthy", "provider": "nba_stats"},
-                "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
+    with client.application.app_context():
+        monkeypatch.setattr(
+            health_routes.health_service,
+            "detailed",
+            lambda: {
+                "status": "healthy",
+                "checks": {
+                    "database": {"status": "healthy"},
+                    "nba_api": {"status": "healthy", "provider": "nba_stats"},
+                    "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
+                },
             },
-        },
-    )
+        )
 
     response = client.get("/api/health/detailed")
 
@@ -149,7 +171,12 @@ def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeyp
             "next_game": None,
         }
 
-    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            fake_get_filtered_logs,
+        )
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
@@ -174,7 +201,12 @@ def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
     def timed_out(*args, **kwargs):
         raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
 
-    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", timed_out)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            timed_out,
+        )
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
@@ -192,11 +224,12 @@ def test_nl_query_endpoint_can_be_exercised_with_mocked_service(client, monkeypa
     from app.routes import nl_routes
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
-    monkeypatch.setattr(
-        nl_routes.nl_service,
-        "process_query",
-        lambda query: {"query": query, "parsed_by": "test"},
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            nl_routes.nl_service,
+            "process_query",
+            lambda query: {"query": query, "parsed_by": "test"},
+        )
 
     response = client.post("/api/nl-query", json={"query": "LeBron last 10 games"})
 

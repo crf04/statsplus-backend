@@ -19,6 +19,7 @@ import os
 from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -27,6 +28,7 @@ LOCAL_ENVIRONMENTS = frozenset({"development", "testing", "test", "local"})
 SUPPORTED_ENVIRONMENTS = frozenset({*LOCAL_ENVIRONMENTS, "staging", "production"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000",)
 
 
 class ConfigurationError(ValueError):
@@ -42,7 +44,9 @@ def current_nba_season(today: date | None = None) -> str:
     """
 
     current_date = today or date.today()
-    start_year = current_date.year if current_date.month >= 10 else current_date.year - 1
+    start_year = (
+        current_date.year if current_date.month >= 10 else current_date.year - 1
+    )
     return f"{start_year}-{str(start_year + 1)[-2:]}"
 
 
@@ -125,6 +129,96 @@ class LLMSettings(BaseModel):
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
+def _normalize_cors_origin(value: Any) -> str:
+    """Validate and normalize one exact browser origin."""
+
+    if not isinstance(value, str):
+        raise ValueError("CORS_ALLOWED_ORIGINS entries must be strings")
+
+    origin = value.strip()
+    if not origin or "*" in origin:
+        raise ValueError(
+            "CORS_ALLOWED_ORIGINS must contain explicit http:// or https:// origins"
+        )
+
+    parsed = urlsplit(origin)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"CORS_ALLOWED_ORIGINS contains an invalid origin: {value!r}")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(f"CORS_ALLOWED_ORIGINS contains an invalid origin: {value!r}")
+    if parsed.path not in {"", "/"}:
+        raise ValueError(
+            f"CORS_ALLOWED_ORIGINS contains an origin with a path: {value!r}"
+        )
+
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(
+            f"CORS_ALLOWED_ORIGINS contains an invalid port: {value!r}"
+        ) from error
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"CORS_ALLOWED_ORIGINS contains an invalid origin: {value!r}")
+
+    hostname = hostname.lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
+    port_suffix = f":{port}" if port and port != default_port else ""
+    return f"{parsed.scheme.lower()}://{hostname}{port_suffix}"
+
+
+def _parse_cors_origins(value: Any) -> tuple[str, ...]:
+    """Parse a comma-separated or JSON-list origin setting."""
+
+    if value is None:
+        return DEFAULT_LOCAL_CORS_ORIGINS
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must be comma-separated origins or a JSON list"
+                ) from error
+        else:
+            value = text.split(",")
+
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValueError(
+            "CORS_ALLOWED_ORIGINS must be comma-separated origins or a JSON list"
+        )
+
+    origins: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        normalized = _normalize_cors_origin(item)
+        if normalized not in seen:
+            origins.append(normalized)
+            seen.add(normalized)
+
+    if not origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain at least one origin")
+    return tuple(origins)
+
+
+class CORSSettings(BaseModel):
+    """Exact browser origins allowed to make cross-origin requests."""
+
+    model_config = ConfigDict(frozen=True)
+
+    allowed_origins: tuple[str, ...] = Field(default=DEFAULT_LOCAL_CORS_ORIGINS)
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def validate_allowed_origins(cls, value: Any) -> tuple[str, ...]:
+        return _parse_cors_origins(value)
+
+
 class NBASeasonSettings(BaseModel):
     """NBA season defaults shared by game-log and NL request paths."""
 
@@ -144,6 +238,7 @@ class RuntimeSettings(BaseModel):
     cache: CacheSettings = Field(default_factory=CacheSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
     port: int = Field(default=5000, ge=1, le=65535)
     debug: bool = True
@@ -203,14 +298,18 @@ class _EnvironmentReader:
         try:
             return int(value)
         except (TypeError, ValueError) as error:
-            raise ConfigurationError(f"{name} must be an integer, got {value!r}") from error
+            raise ConfigurationError(
+                f"{name} must be an integer, got {value!r}"
+            ) from error
 
     def decimal(self, name: str, default: float, *aliases: str) -> float:
         value = self.raw(name, default, *aliases)
         try:
             return float(value)
         except (TypeError, ValueError) as error:
-            raise ConfigurationError(f"{name} must be a number, got {value!r}") from error
+            raise ConfigurationError(
+                f"{name} must be a number, got {value!r}"
+            ) from error
 
 
 def _build_settings(
@@ -244,9 +343,7 @@ def _build_settings(
         ProviderSettings,
         nba_stats_timeout_seconds=reader.decimal("NBA_STATS_TIMEOUT_SECONDS", 10.0),
         nba_stats_max_concurrency=reader.integer("NBA_STATS_MAX_CONCURRENCY", 10),
-        pbp_connect_timeout_seconds=reader.decimal(
-            "NBA_API_TIMEOUT_CONNECT", 10.0
-        ),
+        pbp_connect_timeout_seconds=reader.decimal("NBA_API_TIMEOUT_CONNECT", 10.0),
         pbp_read_timeout_seconds=reader.decimal("NBA_API_TIMEOUT_READ", 30.0),
         pbp_max_retries=reader.integer("NBA_API_MAX_RETRIES", 3),
         pbp_pool_connections=reader.integer("NBA_API_POOL_CONNECTIONS", 10),
@@ -268,6 +365,11 @@ def _build_settings(
         enable_fallback=requested_llm_fallback and bool(api_key),
         confidence_threshold=reader.decimal("LLM_CONFIDENCE_THRESHOLD", 0.7),
     )
+    cors_origins = reader.raw("CORS_ALLOWED_ORIGINS")
+    cors = _validated_model(
+        CORSSettings,
+        **({"allowed_origins": cors_origins} if cors_origins is not None else {}),
+    )
 
     try:
         settings = RuntimeSettings(
@@ -277,6 +379,7 @@ def _build_settings(
             cache=cache,
             providers=providers,
             llm=llm,
+            cors=cors,
             nba=_validated_model(NBASeasonSettings),
             port=reader.integer("PORT", 5000),
             debug=reader.boolean("FLASK_DEBUG", True),
@@ -287,9 +390,14 @@ def _build_settings(
             f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
             for issue in error.errors()
         )
-        raise ConfigurationError(f"Invalid runtime configuration: {problems}") from error
+        raise ConfigurationError(
+            f"Invalid runtime configuration: {problems}"
+        ) from error
 
-    _validate_environment_requirements(settings)
+    _validate_environment_requirements(
+        settings,
+        cors_origins_configured=cors_origins is not None,
+    )
     return settings
 
 
@@ -308,11 +416,26 @@ def _validated_model(model_type: type[BaseModel], **values: Any) -> BaseModel:
         ) from error
 
 
-def _validate_environment_requirements(settings: RuntimeSettings) -> None:
+def _validate_environment_requirements(
+    settings: RuntimeSettings,
+    *,
+    cors_origins_configured: bool | None = None,
+) -> None:
     """Enforce settings that are required for a safe production process."""
 
     errors: list[str] = []
     if settings.environment == "production":
+        if cors_origins_configured is None:
+            cors_origins_configured = (
+                settings.cors.allowed_origins != DEFAULT_LOCAL_CORS_ORIGINS
+            )
+        if (
+            not cors_origins_configured
+            or settings.cors.allowed_origins == DEFAULT_LOCAL_CORS_ORIGINS
+        ):
+            errors.append(
+                "CORS_ALLOWED_ORIGINS must be set to an explicit production allowlist"
+            )
         if settings.database.url == DEFAULT_SQLITE_URL:
             errors.append("DATABASE_URL must be set to a production database URL")
 
@@ -323,9 +446,10 @@ def _validate_environment_requirements(settings: RuntimeSettings) -> None:
                 "Firebase credentials are required in production "
                 "(FIREBASE_SERVICE_ACCOUNT_JSON/PATH or the three individual fields)"
             )
-        elif settings.auth.firebase_service_account_path and not Path(
+        elif (
             settings.auth.firebase_service_account_path
-        ).is_file():
+            and not Path(settings.auth.firebase_service_account_path).is_file()
+        ):
             errors.append(
                 "FIREBASE_SERVICE_ACCOUNT_PATH must point to an existing file in production"
             )
@@ -334,7 +458,9 @@ def _validate_environment_requirements(settings: RuntimeSettings) -> None:
             try:
                 parsed = json.loads(settings.auth.firebase_service_account_json)
                 if not isinstance(parsed, dict):
-                    errors.append("FIREBASE_SERVICE_ACCOUNT_JSON must contain a JSON object")
+                    errors.append(
+                        "FIREBASE_SERVICE_ACCOUNT_JSON must contain a JSON object"
+                    )
                 else:
                     missing = sorted(
                         {"project_id", "private_key", "client_email"} - parsed.keys()
@@ -349,7 +475,10 @@ def _validate_environment_requirements(settings: RuntimeSettings) -> None:
                     f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON ({error.msg})"
                 )
 
-    if settings.auth.firebase_admin_disabled and settings.environment not in LOCAL_ENVIRONMENTS:
+    if (
+        settings.auth.firebase_admin_disabled
+        and settings.environment not in LOCAL_ENVIRONMENTS
+    ):
         errors.append(
             "FIREBASE_ADMIN_DISABLED=true is allowed only in local development or testing"
         )
@@ -404,6 +533,7 @@ def get_runtime_settings() -> RuntimeSettings:
 __all__ = [
     "AuthenticationSettings",
     "CacheSettings",
+    "CORSSettings",
     "ConfigurationError",
     "DatabaseSettings",
     "LLMSettings",
@@ -411,6 +541,7 @@ __all__ = [
     "ProviderSettings",
     "RuntimeSettings",
     "current_nba_season",
+    "DEFAULT_LOCAL_CORS_ORIGINS",
     "get_runtime_settings",
     "load_settings",
     "set_runtime_settings",

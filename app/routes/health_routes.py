@@ -9,17 +9,13 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify
 
+from app.dependencies import get_dependencies
 from app.errors import AppError, ProviderUnavailableError
-from ._service_proxy import (
-    CurrentAppService,
-    build_provider_health_service,
-)
+from ._service_proxy import CurrentAppService
 
 
 health_bp = Blueprint("health", __name__, url_prefix="/api/health")
-health_service = CurrentAppService(
-    "provider_health", build_provider_health_service
-)
+health_service = CurrentAppService("provider_health")
 
 
 @health_bp.route("/db", methods=["GET"])
@@ -68,13 +64,40 @@ def nba_api_health():
 def pbp_stats_health():
     """Return the PBP Stats provider health signal."""
 
-    result = health_service.check_pbp_api()
+    result = _check_pbp_stats_connectivity()
     if result.get("status") != "healthy":
         raise ProviderUnavailableError(
             "The PBP Stats health check failed.",
             detail=result.get("error") or result,
         )
     return jsonify(result), 200
+
+
+def _build_pbp_stats_provider():
+    """Resolve the app-owned PBP provider for focused health tests/integrations."""
+
+    return get_dependencies().pbp_stats_provider
+
+
+def _check_pbp_stats_connectivity(provider=None):
+    """Run the PBP totals health probe through the app-scoped health seam."""
+
+    if provider is None:
+        provider = _build_pbp_stats_provider()
+    if hasattr(provider, "health_check"):
+        try:
+            result = provider.health_check()
+            if isinstance(result, dict):
+                return result
+        except ProviderUnavailableError as error:
+            return {"status": "unhealthy", "error": error.public_message}
+    return health_service.check_pbp_api()
+
+
+def _check_database_connection():
+    """Compatibility helper delegating to the injected health service."""
+
+    return health_service.check_database()
 
 
 __all__ = [

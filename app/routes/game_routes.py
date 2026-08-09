@@ -17,7 +17,6 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from ..models.game_logs import GameLogQuery
-from ..services.game_service import GameService
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -26,11 +25,7 @@ from ._service_proxy import CurrentAppService
 game_bp = Blueprint('games', __name__)
 
 
-def _build_game_service(engine, settings):
-    return GameService(engine, settings=settings)
-
-
-game_service = CurrentAppService("game", _build_game_service)
+game_service = CurrentAppService("game")
 
 
 def _default_season() -> str:

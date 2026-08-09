@@ -12,17 +12,22 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
 class PlayerService:
-    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        settings: RuntimeSettings | None = None,
+        nba_stats_provider: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
-        self.nba_stats = NBAStatsAdapter(settings=self.settings)
+        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -155,14 +160,14 @@ class PlayerService:
             team_dict = pd.DataFrame(self._get_teams())
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
             
-            # Get game logs
-            gl = self.nba_stats.fetch_player_gamelogs_against(
-                int(team_id),
-                self.settings.nba.current_season,
+            # Get normalized cluster game logs through the app-owned provider.
+            gl = self.nba_stats.get_archetype_game_logs(
+                player_ids=player_ids,
+                opponent_team_id=int(team_id),
+                season=self.settings.nba.current_season,
             )
-            
-            # Filter and process game logs
-            gl = gl[gl["PLAYER_ID"].isin(player_ids)]
+
+            # The provider applies the cluster-member filter at its seam.
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             

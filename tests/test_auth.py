@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +24,9 @@ def _make_app(decorator, **config: Any) -> Flask:
     app.config["TESTING"] = True
     app.config.update(config)
     register_error_handlers(app)
+    app.extensions["dependencies"] = SimpleNamespace(
+        user_service=_FakeUserService()
+    )
 
     @app.get("/protected")
     @decorator
@@ -134,6 +138,9 @@ def test_local_bypass_is_rejected_without_an_explicit_local_environment(monkeypa
         FLASK_ENV=None,
     )
     register_error_handlers(app)
+    app.extensions["dependencies"] = SimpleNamespace(
+        user_service=_FakeUserService()
+    )
 
     @app.get("/protected")
     @auth.require_auth
@@ -170,6 +177,10 @@ def test_optional_auth_uses_shared_user_sync_mapping(monkeypatch):
         def create_or_update_user(self, user_data):
             return {"id": user_data["uid"]}
 
+    app.extensions["dependencies"] = SimpleNamespace(
+        user_service=_RecordingUserService()
+    )
+
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
     monkeypatch.setattr(
         auth,
@@ -180,8 +191,6 @@ def test_optional_auth_uses_shared_user_sync_mapping(monkeypatch):
             "name": "Optional User",
         },
     )
-    monkeypatch.setattr(auth, "UserService", _RecordingUserService)
-
     response = app.test_client().get(
         "/optional", headers={"Authorization": "Bearer optional-token"}
     )
@@ -208,14 +217,16 @@ def test_optional_auth_ignores_user_sync_failures(monkeypatch):
         def create_or_update_user(self, user_data):
             raise RuntimeError("database unavailable")
 
+    app.extensions["dependencies"] = SimpleNamespace(
+        user_service=_FailingUserService()
+    )
+
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
     monkeypatch.setattr(
         auth,
         "verify_firebase_token",
         lambda token: {"uid": "optional-2", "email": "optional@example.com"},
     )
-    monkeypatch.setattr(auth, "UserService", _FailingUserService)
-
     response = app.test_client().get(
         "/optional", headers={"Authorization": "Bearer optional-token"}
     )
@@ -233,7 +244,6 @@ def test_require_admin_rejects_authenticated_non_admin(monkeypatch):
         "verify_firebase_token",
         lambda token: {"uid": "user-1", "email": "user@example.com", "role": "viewer"},
     )
-    monkeypatch.setattr(auth, "UserService", _FakeUserService)
 
     response = app.test_client().get(
         "/protected", headers={"Authorization": "Bearer test-token"}
@@ -265,7 +275,6 @@ def test_require_admin_allows_supported_firebase_admin_claims(monkeypatch, claim
         "verify_firebase_token",
         lambda token: {"uid": "admin-1", "email": "admin@example.com", **claims},
     )
-    monkeypatch.setattr(auth, "UserService", _FakeUserService)
 
     response = app.test_client().get(
         "/protected", headers={"Authorization": "Bearer admin-token"}

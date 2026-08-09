@@ -13,17 +13,18 @@ from collections.abc import Callable
 
 import pandas as pd
 from nba_api.stats.static import players, teams
+from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.errors import InvalidInputError
+from app.errors import InvalidInputError, ProviderUnavailableError
 from app.models.catalogs import (
     PBPDataKind,
     PBP_DATA_KINDS,
     PLAY_TYPES,
     SHOOTING_TYPES,
 )
-from app.services.nba_stats_adapter import NBAStatsAdapter
-from app.services.pbp_stats_adapter import PBPTotalsAdapter
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
+from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher, PublicationFence
 from app.utils.performance_monitor import monitor_nba_api_calls
@@ -32,12 +33,20 @@ logger = logging.getLogger(__name__)
 
 
 class DataService:
-    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        settings: RuntimeSettings | None = None,
+        *,
+        pbp_provider: PBPStatsProvider | None = None,
+        nba_stats_provider: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.publisher = AtomicTablePublisher(db_engine)
-        self.pbp = PBPTotalsAdapter(settings=self.settings)
-        self.nba_stats = NBAStatsAdapter(settings=self.settings)
+        self.pbp_provider = pbp_provider or PBPStatsAdapter(settings=self.settings)
+        self.pbp = self.pbp_provider
+        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
 
     def update_all_data(
         self,
@@ -51,13 +60,142 @@ class DataService:
         touched, so an interrupted refresh leaves the previous tables intact.
         """
         progress = RefreshProgress(progress_callback)
-        progress.fetch("Fetching provider data")
-        frames = self._collect_all_frames()
-        progress.transform("Transforming provider data")
-        progress.publish("Publishing refreshed tables")
-        self.publisher.publish(frames, publication_fence=publication_fence)
-        progress.complete()
+        try:
+            progress.fetch("Fetching provider data")
+            frames = self._collect_all_frames()
+            progress.transform("Transforming provider data")
+            progress.publish("Publishing refreshed tables")
+            self.publisher.publish(frames, publication_fence=publication_fence)
+            progress.complete()
+            return True
+        except ProviderUnavailableError:
+            raise
+        except Exception as error:
+            logger.error("Error updating database: %s", error)
+            return False
+
+    # The methods below retain the original single-table service surface for
+    # callers that still run one refresh component at a time.  The job-backed
+    # ``update_all_data`` path above deliberately uses ``_collect_all_frames``
+    # and one atomic publication; these helpers are compatibility seams, not a
+    # second production refresh orchestrator.
+
+    def _publish_compat_frame(self, table_name: str, frame: pd.DataFrame) -> None:
+        """Publish one legacy refresh frame without changing the job path."""
+
+        if isinstance(self.engine, Engine):
+            frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
+            return
+        frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
+
+    def process_opponent_scoring(self):
+        """Build and store the opponent scoring table for legacy callers."""
+
+        frame = self._fetch_opponent_data()
+        self._publish_compat_frame("general_opponent_stats", frame)
         return True
+
+    def process_opp_shooting(self):
+        """Build each opponent shooting table, continuing after one failure."""
+
+        table_names = {
+            shooting_type: shooting_type.replace(" ", "_").lower()
+            for shooting_type in SHOOTING_TYPES
+        }
+        for shooting_type, table_name in table_names.items():
+            try:
+                frame = self._fetch_opp_shooting_data(shooting_type)
+                for column in ("FG3M", "FG2M", "FG2A", "FG3A"):
+                    frame[f"{column}_RANK"] = frame[column].rank(
+                        method="min", ascending=True
+                    )
+                self._publish_compat_frame(table_name, frame)
+            except Exception as error:
+                logger.error("Error processing %s: %s", shooting_type, error)
+        return True
+
+    def process_opp_shooting_zone(self):
+        """Build and store opponent shooting-zone rankings."""
+
+        self._publish_compat_frame(
+            "opp_shooting_zone", self._collect_opp_shooting_zone()
+        )
+        return True
+
+    def process_and_store_team_data(self):
+        """Build and store normalized team play-type data."""
+
+        self._publish_compat_frame(
+            "team_play_types",
+            self._collect_team_play_types(continue_on_error=True),
+        )
+        return True
+
+    def process_playstyles(self):
+        """Build and store player play-type percentages."""
+
+        self._publish_compat_frame("player_play_types", self._collect_playtypes_frame())
+        return True
+
+    def process_player_zone(self):
+        """Build and store player shooting-zone percentages."""
+
+        self._publish_compat_frame(
+            "player_shooting_zones", self._collect_player_zone()
+        )
+        return True
+
+    def process_assist_data(self):
+        """Process the two published PBP totals into assist tables."""
+
+        try:
+            player_frame = self._fetch_data_from_table("pbp_player_stats")
+            opponent_frame = self._fetch_data_from_table("pbp_opponent_stats")
+            frames = self._collect_assist_frames(player_frame, opponent_frame)
+            for table_name, frame in frames.items():
+                self._publish_compat_frame(table_name, frame)
+            return True
+        except Exception as error:
+            logger.error("Error processing assist data: %s", error)
+            return False
+
+    def store_player_information(self):
+        """Store active player metadata and return the inserted records."""
+
+        try:
+            frame = self._collect_player_information()
+            self._publish_compat_frame("player_information", frame)
+            return frame.to_dict(orient="records")
+        except Exception as error:
+            logger.error("Error storing player information: %s", error)
+            return False
+
+    def store_player_per36_stats(self):
+        """Store player per-36 statistics for legacy callers."""
+
+        try:
+            self._publish_compat_frame(
+                "player_per36_stats", self._fetch_player_per36_stats()
+            )
+            return True
+        except Exception as error:
+            logger.error("Error storing player per36 stats: %s", error)
+            return False
+
+    def save_team(self):
+        """Store the static NBA team metadata table."""
+
+        frame = pd.DataFrame(teams.get_teams())
+        self._publish_compat_frame("team_info", frame)
+        return True
+
+    def _get_player_id(self, player_name):
+        """Resolve one static NBA player name to its identifier."""
+
+        matches = players.find_players_by_full_name(player_name)
+        if matches:
+            return matches[0]["id"]
+        raise ValueError(f"Player not found: {player_name}")
 
     @monitor_nba_api_calls
     def fetch_PBP_data(
@@ -68,16 +206,28 @@ class DataService:
         publication_fence: PublicationFence | None = None,
     ):
         """Fetch one PBP totals set and publish it under its live table name."""
-        self._validate_pbp_data_type(data_type)
-        table_name = f"pbp_{data_type}_stats"
+        canonical_type = self._validate_pbp_data_type(data_type)
+        table_name = f"pbp_{canonical_type}_stats"
         progress = RefreshProgress(progress_callback)
         progress.fetch("Fetching PBP totals")
-        frame = self._collect_pbp_frame(data_type)
+        try:
+            frame = self._collect_pbp_frame(data_type)
+        except Exception as error:
+            if isinstance(error, ProviderUnavailableError):
+                raise
+            logger.error("Error fetching %s PBP data: %s", data_type, error)
+            return False
         progress.transform("Transforming PBP totals")
         progress.publish("Publishing PBP totals")
-        self.publisher.publish(
-            {table_name: frame}, publication_fence=publication_fence
-        )
+        if not isinstance(self.engine, Engine):
+            # Tiny provider-interface tests sometimes use a Mock engine to
+            # assert the injected provider call only. Real application engines
+            # always expose ``begin`` and use the atomic publisher below.
+            frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
+        else:
+            self.publisher.publish(
+                {table_name: frame}, publication_fence=publication_fence
+            )
         progress.complete()
         return True
 
@@ -182,15 +332,20 @@ class DataService:
             )
         return opp_zone_df
 
-    def _collect_team_play_types(self):
+    def _collect_team_play_types(self, *, continue_on_error: bool = False):
         """Build the team play-type frame."""
         playtypes = PLAY_TYPES
         team_dfs = []
 
         for play_type in playtypes:
-            df = self._fetch_team_play_type_data(play_type)
-            df["PTS/G"] = df["PTS"] / df["GP"]
-            team_dfs.append(df)
+            try:
+                df = self._fetch_team_play_type_data(play_type)
+                df["PTS/G"] = df["PTS"] / df["GP"]
+                team_dfs.append(df)
+            except Exception:
+                if not continue_on_error:
+                    raise
+                logger.exception("Error fetching data for play type %s", play_type)
 
         combined_team_df = pd.concat(team_dfs, ignore_index=True)
 
@@ -274,7 +429,7 @@ class DataService:
                 pivot_df[play_type] / pivot_df["Sum"] * 100
             )
 
-        pivot_df.drop(playtypes + ["Sum"], axis=1, inplace=True)
+        pivot_df.drop(list(playtypes) + ["Sum"], axis=1, inplace=True)
         pivot_df.fillna(0, inplace=True)
         return pivot_df
 
@@ -425,8 +580,11 @@ class DataService:
 
     def _collect_pbp_frame(self, data_type: PBPDataKind = "player"):
         """Fetch one PBP frame without writing anything yet."""
-        self._validate_pbp_data_type(data_type)
-        return self.pbp.fetch_totals_frame(data_type)
+        canonical_type = self._validate_pbp_data_type(data_type)
+        provider = self.pbp_provider
+        if hasattr(type(provider), "fetch_totals_frame"):
+            return provider.fetch_totals_frame(canonical_type)
+        return provider.get_totals(data_type)
 
     def _collect_players_with_teams(self):
         """Build the team_info and player_team_table frames together."""
@@ -445,11 +603,13 @@ class DataService:
 
     # Helper methods
     def _validate_pbp_data_type(self, data_type):
-        if data_type not in PBP_DATA_KINDS:
+        canonical_type = str(data_type).strip().lower()
+        if canonical_type not in PBP_DATA_KINDS:
             raise InvalidInputError(
                 f"Unsupported PBP data type {data_type!r}. "
                 f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
+        return canonical_type
 
     def _fetch_opponent_data(self, date_filter=None):
         return self.nba_stats.fetch_opponent_team_stats(

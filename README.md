@@ -6,7 +6,8 @@ Flask API for NBA player stats, game logs, team context, and natural-language st
 
 - Flask app factory with blueprints for players, teams, games, data refreshes, health checks, users, and natural-language queries.
 - Bundled SQLite demo database, `nba_play_types.db`, so the project can run immediately after install.
-- NBA data integrations through `nba_api` and pbpstats endpoints.
+- NBA data integrations through the injectable, instrumented NBA Stats adapter
+  (`nba_api` → `stats.nba.com`) and the shared-session PBP Stats adapter.
 - Deterministic NLP parsing with spaCy, aliases, fuzzy matching, date parsing, and optional OpenAI fallback.
 - Firebase Admin authentication for protected routes, with an explicit local-only bypass for credential-free development.
 - Optional Redis-backed caching for NBA API responses.
@@ -70,6 +71,10 @@ the most important variables:
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
+| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
+| `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
+| `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
+| `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |
@@ -132,6 +137,13 @@ curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category
 checks `api.pbpstats.com`; and `/api/health/detailed` reports both providers
 under distinct `nba_api` and `pbp_stats` keys. These endpoints can fail if the
 network or either upstream API is unavailable.
+
+The app factory assembles one `ApplicationDependencies` graph containing the
+database, cache, provider adapters, services, durable refresh coordinator, and
+health service. Routes resolve those injected objects from the active app;
+tests can replace the graph with the `DEPENDENCIES` override. CORS uses exact
+origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` as the local
+default); production requires an explicit allow-list.
 
 Every response carries an `X-Request-ID` used to correlate a request, its
 provider calls, and its logs; safe inbound values are echoed, otherwise one is
@@ -285,8 +297,9 @@ LIVE_CONTRACT_TESTS=true python -m pytest -m live
 app/
   __init__.py              Flask app factory and blueprint registration
   routes/                  HTTP route handlers
-  services/                Business logic, NBA data calls, NL/LLM services
-  services/nl_query/       Parser, mapper, executor, validators
+  providers/               Injectable NBA Stats and PBP Stats seams
+  services/                Business logic, refresh queue, NL/LLM services
+  services/nl_query/       Deterministic parser and typed query models
   utils/                   Auth, database, cache, date, and helper utilities
 docs/
   ARCHITECTURE.md          Runtime interfaces, data sources, and test seams

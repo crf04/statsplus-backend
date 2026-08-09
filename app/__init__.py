@@ -45,10 +45,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     if config_overrides:
         app.config.update(config_overrides)
 
-    CORS(app)
+    CORS(app, origins=settings.cors.allowed_origins, always_send=False)
 
     _register_request_headers(app)
     _initialize_dependencies(app)
+    _assemble_dependencies(app)
     _register_error_handlers(app)
     _register_blueprints(app)
 
@@ -71,6 +72,48 @@ def _register_request_headers(app: Flask) -> None:
         return response
 
 
+def _assemble_dependencies(app: Flask) -> None:
+    """Construct or accept the one dependency graph used by all routes."""
+
+    supplied_dependencies = app.config.get("DEPENDENCIES")
+    if supplied_dependencies is not None:
+        app.extensions["dependencies"] = supplied_dependencies
+        _expose_legacy_service_aliases(app, supplied_dependencies)
+        return
+
+    from app.dependencies import build_dependencies
+
+    dependencies = build_dependencies(
+        app.extensions["runtime_settings"]
+    )
+    app.extensions["dependencies"] = dependencies
+    _expose_legacy_service_aliases(app, dependencies)
+
+
+def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
+    """Expose read-only aliases for older diagnostics without lazy factories.
+
+    Route code resolves ``app.extensions['dependencies']`` exclusively.  The
+    alias is retained for existing operational/tests integrations that inspect
+    the assembled graph directly.
+    """
+
+    app.extensions["request_services"] = {
+        name: getattr(dependencies, f"{name}_service")
+        for name in (
+            "game",
+            "player",
+            "team",
+            "data",
+            "nl",
+            "user",
+            "data_refresh_jobs",
+            "provider_health",
+        )
+        if hasattr(dependencies, f"{name}_service")
+    }
+
+
 def _initialize_dependencies(app: Flask) -> None:
     """Initialize optional runtime dependencies without making imports fail."""
     if not app.config.get("SKIP_TABLE_CREATE", False):
@@ -89,23 +132,6 @@ def _initialize_dependencies(app: Flask) -> None:
         except Exception as error:
             logger.warning("Firebase Admin initialization skipped: %s", error)
 
-    # Construct one app-scoped queue coordinator with the complete registered
-    # operation set.  The route proxies use this same extension, while the
-    # defensive guard keeps read-only/demo and explicitly schema-less test apps
-    # bootable.
-    if not app.config.get("SKIP_TABLE_CREATE", False):
-        try:
-            from app.services.job_service import build_data_refresh_job_service
-            from app.utils.db import get_engine, is_demo_database_url
-
-            settings = app.extensions["runtime_settings"]
-            if not is_demo_database_url(settings.database.url):
-                engine = get_engine(settings)
-                app.extensions.setdefault("request_services", {})[
-                    "data_refresh_jobs"
-                ] = build_data_refresh_job_service(engine, settings)
-        except Exception as error:
-            logger.warning("Data refresh queue initialization skipped: %s", error)
 
 
 def _register_blueprints(app: Flask) -> None:

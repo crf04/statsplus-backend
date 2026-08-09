@@ -5,9 +5,8 @@ This module sets up the SQLAlchemy declarative base and provides
 the foundation for ORM models.
 """
 
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from app.config.settings import get_runtime_settings
 from app.utils.db import get_engine, is_demo_database_url
 import logging

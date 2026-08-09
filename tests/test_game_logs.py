@@ -180,22 +180,15 @@ def test_repeated_same_stat_filters_survive_legacy_normalization_and_filtering(
 ):
     """Conjunctions retain both bounds when they target the same stat."""
 
-    from app.services.nl_query.executor import QueryExecutor
     from app.services.nl_query.parser import SelfFilter as ParsedSelfFilter
 
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
-    executor = object.__new__(QueryExecutor)
-    executor.settings = RuntimeSettings(
-        environment="testing",
-        nba=NBASeasonSettings(current_season="2024-25"),
-    )
-    query = executor._convert_to_game_query(
-        {
-            "self_filters": [
-                ParsedSelfFilter(stat_column="PTS", operator="gte", value=20),
-                ParsedSelfFilter(stat_column="PTS", operator="lt", value=30),
-            ]
-        }
+    query = GameLogQuery(
+        season_filter="2024-25",
+        self_filters=[
+            ParsedSelfFilter(stat_column="PTS", operator="gte", value=20),
+            ParsedSelfFilter(stat_column="PTS", operator="lt", value=30),
+        ],
     )
 
     assert [(item.stat, item.operator.value, item.value) for item in query.self_filters] == [
@@ -358,7 +351,9 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
     assert result["averages"] == []
 
 
-def test_route_accepts_schema_valid_empty_provider_frame(client, monkeypatch):
+def test_route_accepts_schema_valid_empty_provider_frame(
+    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
+):
     """A real provider-shaped empty frame is a successful no-result query."""
 
     from app.routes import game_routes
@@ -371,18 +366,27 @@ def test_route_accepts_schema_valid_empty_provider_frame(client, monkeypatch):
         def record_cache_hit(self, operation):
             return None
 
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+    )
+    dependencies.game_service = service
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
         service = game_routes.game_service._resolve()
         monkeypatch.setattr(service, "get_player_id", lambda name: 1)
         monkeypatch.setattr(service, "nba_stats", EmptyNBAAdapter())
-    monkeypatch.setattr(
-        game_routes.game_service,
-        "get_filtered_logs",
-        lambda player_name, query: GameService.get_filtered_logs(
-            service, player_name, query
-        ),
-    )
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            lambda player_name, query: GameService.get_filtered_logs(
+                service, player_name, query
+            ),
+        )
 
     response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
@@ -411,7 +415,12 @@ def test_malformed_provider_response_is_safe_503_without_app_failure(
                 "malformed provider secret=do-not-return"
             )
 
-    monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", malformed)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            malformed,
+        )
 
     response = client.get("/api/games/game_logs?player_name=LeBron%20James")
 
@@ -480,9 +489,10 @@ def test_route_preserves_repeated_same_stat_self_filters(client, monkeypatch):
         }
 
     _stub_route_settings(monkeypatch)
-    monkeypatch.setattr(
-        game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+        )
 
     response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James"
@@ -545,9 +555,10 @@ def test_route_returns_arrays_from_typed_service(client, monkeypatch):
         }
 
     _stub_route_settings(monkeypatch)
-    monkeypatch.setattr(
-        game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+        )
 
     response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
@@ -611,9 +622,10 @@ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
         calls.append((args, kwargs))
         raise AssertionError("invalid game-log filters reached the service")
 
-    monkeypatch.setattr(
-        game_routes.game_service, "get_filtered_logs", service_must_not_run
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", service_must_not_run
+        )
 
     response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James&" + query_string

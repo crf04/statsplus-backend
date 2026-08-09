@@ -41,6 +41,7 @@ import requests
 from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.errors import ProviderUnavailableError
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
     CACHE_DISABLED,
@@ -217,12 +218,18 @@ def _response_status(endpoint: object) -> int | None:
 class NBAStatsAdapter:
     """Run NBA Stats provider calls under one explicit concurrency bound."""
 
-    def __init__(self, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        settings: RuntimeSettings | None = None,
+        *,
+        endpoint_factory: Callable[..., object] | None = None,
+    ):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
         self._concurrency_limit = self.settings.providers.nba_stats_max_concurrency
         self._bound = _shared_concurrency_bound(self._concurrency_limit)
         self._last_status_code: int | None = None
+        self._endpoint_factory = endpoint_factory
 
     @property
     def max_concurrency(self) -> int:
@@ -328,6 +335,76 @@ class NBAStatsAdapter:
                 f"expected one of {sorted(NBA_STATS_OPERATIONS)}."
             )
         record_cached_provider_event(PROVIDER_NBA_STATS, operation, CACHE_HIT)
+
+    def get_player_game_logs(
+        self,
+        *,
+        player_id: int,
+        season: str,
+        season_type: str = "Regular Season",
+    ) -> pd.DataFrame:
+        """Return canonical game logs through the shared instrumented seam."""
+        from app.providers.nba_stats import normalize_player_game_logs
+
+        factory = self._endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
+        try:
+            frame = self.run_endpoint(
+                "player_game_logs",
+                lambda timeout: factory(
+                    player_id_nullable=player_id,
+                    season_nullable=season,
+                    season_type_nullable=season_type,
+                    timeout=timeout,
+                ),
+                required_columns=GAME_LOG_REQUIRED_COLUMNS,
+                validator=normalize_player_game_logs,
+            )
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError(
+                "The upstream stats provider timed out. Please try again shortly.",
+                detail=error,
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats provider is unavailable.", detail=error
+            ) from error
+        return normalize_player_game_logs(frame)
+
+    def get_archetype_game_logs(
+        self,
+        *,
+        player_ids: Iterable[int],
+        opponent_team_id: int,
+        season: str,
+        season_type: str = "Regular Season",
+    ) -> pd.DataFrame:
+        """Return normalized game logs filtered to a cluster's player IDs."""
+        from app.providers.nba_stats import normalize_archetype_game_logs
+
+        factory = self._endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
+        try:
+            frame = self.run_endpoint(
+                "player_gamelogs_against",
+                lambda timeout: factory(
+                    season_nullable=season,
+                    season_type_nullable=season_type,
+                    opp_team_id_nullable=opponent_team_id,
+                    timeout=timeout,
+                ),
+                required_columns=GAME_LOG_REQUIRED_COLUMNS,
+                validator=normalize_archetype_game_logs,
+            )
+        except requests.exceptions.Timeout as error:
+            raise ProviderUnavailableError(
+                "The upstream stats provider timed out. Please try again shortly.",
+                detail=error,
+            ) from error
+        except requests.exceptions.RequestException as error:
+            raise ProviderUnavailableError(
+                "The NBA Stats provider is unavailable.", detail=error
+            ) from error
+        normalized = normalize_archetype_game_logs(frame)
+        return normalized[normalized["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
     def fetch_player_game_logs(
         self,

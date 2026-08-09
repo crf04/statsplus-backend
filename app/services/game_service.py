@@ -27,6 +27,7 @@ from app.models.catalogs import (
     PULLUP_FILTERS,
 )
 from app.models.game_logs import GameLogQuery, GameLogResponse
+from app.providers.nba_stats import NBAStatsProvider
 from app.utils.cache_config import get_redis_client, set_cache_with_1am_expiry
 from app.utils.database_utils import nba_team_to_abbreviation
 from app.utils.tables import normalize_table_name
@@ -143,14 +144,20 @@ class GameService:
         'pullups', 'less_than_10_ft'
     }
 
-    def __init__(self, db_engine, redis_client=None, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        redis_client=None,
+        settings: RuntimeSettings | None = None,
+        nba_stats_adapter: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
 
         # Synchronous provider adapter that bounds concurrent stats.nba.com
         # calls with the configured NBA_STATS_MAX_CONCURRENCY limit (#10).
-        self.nba_stats = NBAStatsAdapter(settings=self.settings)
+        self.nba_stats = nba_stats_adapter or NBAStatsAdapter(settings=self.settings)
 
         # Initialize cache
         if redis_client is None:
@@ -252,9 +259,15 @@ class GameService:
         season = season or self.settings.nba.current_season
         player_id = self.get_player_id(player_name)
 
-        gamelogs = self.nba_stats.fetch_player_game_logs(
-            player_id, season, cache_status=cache_status
-        )
+        if hasattr(self.nba_stats, "fetch_player_game_logs"):
+            gamelogs = self.nba_stats.fetch_player_game_logs(
+                player_id, season, cache_status=cache_status
+            )
+        else:
+            gamelogs = self.nba_stats.get_player_game_logs(
+                player_id=player_id,
+                season=season,
+            )
 
         # Clean up columns
         drop_columns = [

@@ -1,23 +1,15 @@
 from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
-from ..services.data_service import DataService
 from ..utils.auth import require_admin
 from ..utils.telemetry import snapshot_metrics, snapshot_recent_events
-from ._service_proxy import CurrentAppService, build_data_refresh_job_service
+from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
 
-
-def _build_data_service(engine, settings):
-    return DataService(engine, settings=settings)
-
-
-data_service = CurrentAppService("data", _build_data_service)
-data_jobs_service = CurrentAppService(
-    "data_refresh_jobs", build_data_refresh_job_service
-)
+data_service = CurrentAppService("data")
+data_jobs_service = CurrentAppService("data_refresh_jobs")
 
 
 @data_bp.route('/update_database', methods=['POST'])

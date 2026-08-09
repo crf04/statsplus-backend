@@ -2,13 +2,18 @@ import pandas as pd
 from nba_api.stats.static import teams
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.models.catalogs import SHOOTING_TYPES
-from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 
 class TeamService:
-    def __init__(self, db_engine, settings: RuntimeSettings | None = None):
+    def __init__(
+        self,
+        db_engine,
+        settings: RuntimeSettings | None = None,
+        nba_stats_provider: NBAStatsProvider | None = None,
+    ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
-        self.nba_stats = NBAStatsAdapter(settings=self.settings)
+        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
     def get_all_teams(self):
         team = teams.get_teams()
         team_names = [d['full_name'] for d in team]

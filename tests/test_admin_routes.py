@@ -188,7 +188,12 @@ def test_data_mutation_routes_return_202_with_job_id(
     headers = _admin_auth(monkeypatch)
     fake = FakeJobService()
     monkeypatch.setattr(data_update_routes, "data_jobs_service", fake)
-    monkeypatch.setattr(data_update_routes.data_service, service_method, lambda *args: True)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            data_update_routes.data_service,
+            service_method,
+            lambda *args: True,
+        )
 
     response = getattr(client, method)(path, headers=headers)
 
@@ -203,11 +208,12 @@ def test_fetch_playtypes_returns_data(client, monkeypatch):
     from app.routes import data_update_routes
 
     headers = _admin_auth(monkeypatch)
-    monkeypatch.setattr(
-        data_update_routes.data_service,
-        "get_playtypes",
-        lambda: [{"play_type": "Transition"}],
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            data_update_routes.data_service,
+            "get_playtypes",
+            lambda: [{"play_type": "Transition"}],
+        )
 
     response = client.get("/api/data/fetch_playtypes", headers=headers)
 
@@ -221,11 +227,12 @@ def test_player_fetch_returns_202_job(client, monkeypatch):
     headers = _admin_auth(monkeypatch)
     fake = FakeJobService()
     monkeypatch.setattr(player_routes, "player_jobs_service", fake)
-    monkeypatch.setattr(
-        player_routes.player_service,
-        "store_player_information",
-        lambda: True,
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            player_routes.player_service,
+            "store_player_information",
+            lambda: True,
+        )
 
     response = client.put("/api/players/fetch", headers=headers)
 
@@ -269,11 +276,12 @@ def test_admin_stats_allows_admin_without_database_call(client, monkeypatch):
     from app.routes import user_routes
 
     headers = _admin_auth(monkeypatch)
-    monkeypatch.setattr(
-        user_routes.user_service,
-        "get_all_active_users_count",
-        lambda: 7,
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            user_routes.user_service,
+            "get_all_active_users_count",
+            lambda: 7,
+        )
 
     response = client.get("/api/user/admin/stats", headers=headers)
 

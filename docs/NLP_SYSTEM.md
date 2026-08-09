@@ -15,9 +15,6 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 
 - `app/services/nl_service.py`: Orchestrates NLP parsing, LLM fallback, and response formatting.
 - `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, seasons, and intent.
-- `app/services/nl_query/parameter_mapper.py`: Converts parsed components into route/service parameter shapes.
-- `app/services/nl_query/validators.py`: Validates parsed ranges and enum-like fields.
-- `app/services/nl_query/executor.py`: Executes mapped queries against the service layer.
 - `app/services/llm_service.py`: Wraps OpenAI calls, prompt loading, retries, and JSON response handling.
 - `prompts/system_prompt_optimized.txt`: LLM parsing instructions.
 

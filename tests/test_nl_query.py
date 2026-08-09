@@ -63,15 +63,7 @@ class TestBaseQueryParser(unittest.TestCase):
         for query, expected_player in test_cases:
             with self.subTest(query=query):
                 components = self.parser.parse(query)
-                # Note: Partial matching is an advanced feature that may need tuning
-                # For now, we just check that parsing doesn't fail
-                self.assertIsInstance(components, QueryComponents)
-                # If a player is found, it should be reasonable
-                if components.player_name:
-                    self.assertIn(components.player_name, [
-                        "LeBron James", "Stephen Curry", "Giannis Antetokounmpo", 
-                        "Kevin Durant", "Jayson Tatum", "Donovan Mitchell"
-                    ])
+                self.assertEqual(components.player_name, expected_player)
     
     def test_time_period_extraction(self):
         """Test extraction of time periods and game counts"""

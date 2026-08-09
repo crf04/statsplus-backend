@@ -741,7 +741,12 @@ def test_provider_failure_job_reports_sanitized_summary(job_app, monkeypatch):
     def fail_refresh():
         raise RuntimeError("stats.nba.com token=super-secret")
 
-    monkeypatch.setattr(data_update_routes.data_service, "update_all_data", fail_refresh)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            data_update_routes.data_service,
+            "update_all_data",
+            fail_refresh,
+        )
 
     response = client.post("/api/data/update_database", headers=headers)
     assert response.status_code == 202

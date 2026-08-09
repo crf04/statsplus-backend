@@ -144,7 +144,13 @@ def adapt_zero_arg_handler(handler: Callable[[], Any]) -> RefreshCallable:
     return wrapped
 
 
-def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCallable]:
+def build_default_refresh_handlers(
+    engine,
+    settings,
+    *,
+    data_service: Any | None = None,
+    player_service: Any | None = None,
+) -> Mapping[str, RefreshCallable]:
     """Build the complete operation registry for one application instance.
 
     The registry is assembled at app startup from stable operation names and
@@ -156,8 +162,8 @@ def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCall
     from app.services.data_service import DataService
     from app.services.player_service import PlayerService
 
-    data_service = DataService(engine, settings=settings)
-    player_service = PlayerService(engine, settings=settings)
+    data_service = data_service or DataService(engine, settings=settings)
+    player_service = player_service or PlayerService(engine, settings=settings)
 
     def player_pbp(
         *,
@@ -190,13 +196,24 @@ def build_default_refresh_handlers(engine, settings) -> Mapping[str, RefreshCall
     }
 
 
-def build_data_refresh_job_service(engine, settings) -> "DataRefreshJobService":
+def build_data_refresh_job_service(
+    engine,
+    settings,
+    *,
+    data_service: Any | None = None,
+    player_service: Any | None = None,
+) -> "DataRefreshJobService":
     """Build the canonical app-scoped durable refresh coordinator."""
 
     return DataRefreshJobService(
         engine,
         settings=settings,
-        handlers=build_default_refresh_handlers(engine, settings),
+        handlers=build_default_refresh_handlers(
+            engine,
+            settings,
+            data_service=data_service,
+            player_service=player_service,
+        ),
     )
 
 

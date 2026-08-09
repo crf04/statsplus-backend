@@ -7,6 +7,12 @@ on:
       - master
       - main
 
+# Superseded runs on the same ref are cancelled so a rapid series of pushes
+# does not queue redundant jobs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -46,3 +52,51 @@ jobs:
 
       - name: Run checks
         run: ./scripts/check.sh
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: statsplus
+          POSTGRES_PASSWORD: statsplus
+          POSTGRES_DB: statsplus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U statsplus"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Bootstrap development environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Run Postgres integration tests
+        # TEST_DATABASE_URL is deliberately separate from DATABASE_URL so these
+        # destructive tests can never touch a real application database.
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
+        run: .venv/bin/python -m pytest -m integration
