@@ -50,6 +50,15 @@ UNRESOLVED_OBSERVATION_STATES = frozenset(
     }
 )
 
+#: Mapping states an operator established and a board observation may not
+#: supersede.
+_MANUAL_MAPPING_STATES = frozenset(
+    {
+        MappingResolutionState.MANUAL_APPROVED.value,
+        MappingResolutionState.MANUAL_OVERRIDE.value,
+    }
+)
+
 
 def _translate_storage_failures(method):
     """Translate storage failures at the repository boundary.
@@ -501,27 +510,13 @@ class AthleteMappingRepository:
         fingerprint = self._idempotency_key(resolution)
 
         with self._transaction(provider, provider_id) as connection:
-            rejection = self._select_rejection(connection, provider, provider_id)
-            if rejection is not None and rejection["is_active"]:
-                mapping = self._select_mapping(connection, provider, provider_id)
-                return MappingPersistenceResult(
-                    MappingResolutionState.REJECTED.value,
-                    False,
-                    mapping=self._mapping_record(mapping),
-                )
+            governed = self._governing_decision(connection, provider, provider_id)
+            if governed is not None:
+                return governed
 
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if existing is not None:
                 state = str(existing["mapping_state"])
-                if state in {
-                    MappingResolutionState.MANUAL_APPROVED.value,
-                    MappingResolutionState.MANUAL_OVERRIDE.value,
-                } and existing["is_active"]:
-                    return MappingPersistenceResult(
-                        state,
-                        False,
-                        mapping=self._mapping_record(existing),
-                    )
                 if state == MappingResolutionState.MAPPING_CONFLICT.value:
                     return MappingPersistenceResult(
                         state,
@@ -572,10 +567,7 @@ class AthleteMappingRepository:
                     existing = self._select_mapping(connection, provider, provider_id)
                     if existing is None:
                         raise
-                    if existing["mapping_state"] in {
-                        MappingResolutionState.MANUAL_APPROVED.value,
-                        MappingResolutionState.MANUAL_OVERRIDE.value,
-                    }:
+                    if existing["mapping_state"] in _MANUAL_MAPPING_STATES:
                         return MappingPersistenceResult(
                             str(existing["mapping_state"]),
                             False,
@@ -612,6 +604,9 @@ class AthleteMappingRepository:
         provider, provider_id = self._resolution_key(resolution)
         now = _utc(observed_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
+            governed = self._governing_decision(connection, provider, provider_id)
+            if governed is not None:
+                return governed
             decision = self._insert_decision(
                 connection,
                 resolution,
@@ -646,6 +641,9 @@ class AthleteMappingRepository:
         provider, provider_id = self._resolution_key(resolution)
         now = _utc(observed_at or self._clock())
         with self._transaction(provider, provider_id) as connection:
+            governed = self._governing_decision(connection, provider, provider_id)
+            if governed is not None:
+                return governed
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
             if self._is_repeated_conflict(existing, resolution):
                 # The resolver read the conflict this row already records, so
@@ -685,16 +683,11 @@ class AthleteMappingRepository:
     ) -> MappingPersistenceResult:
         provider, provider_id = self._resolution_key(resolution)
         # The caller may have observed an older row.  Re-lock and re-read it
-        # immediately before writing so a newer manual decision wins.
-        current = self._select_mapping(connection, provider, provider_id, lock=True)
-        if current is not None and current["is_active"] and current["mapping_state"] in {
-            MappingResolutionState.MANUAL_APPROVED.value,
-            MappingResolutionState.MANUAL_OVERRIDE.value,
-        }:
-            return MappingPersistenceResult(
-                str(current["mapping_state"]), False, mapping=self._mapping_record(current)
-            )
-        existing = current or existing
+        # immediately before writing so a newer governed decision wins.
+        governed = self._governing_decision(connection, provider, provider_id)
+        if governed is not None:
+            return governed
+        existing = self._select_mapping(connection, provider, provider_id, lock=True) or existing
         values = self._resolution_values(resolution)
         connection.execute(
             update(ProviderAthleteMapping.__table__)
@@ -1015,6 +1008,42 @@ class AthleteMappingRepository:
             )
 
     # -- SQL helpers -------------------------------------------------------
+
+    def _governing_decision(
+        self,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> MappingPersistenceResult | None:
+        """Return the governed state a board observation must not supersede.
+
+        The resolver reads outside this serialized transaction, so its result
+        may already be stale: an operator can approve, override, or reject the
+        identity in between.  Re-reading the current mapping and rejection here,
+        immediately before any append or write, keeps a stale unresolved
+        observation from requeuing a decided identity and a stale conflict from
+        replacing an active rejection.
+        """
+
+        rejection = self._select_rejection(connection, provider, provider_id, lock=True)
+        mapping = self._select_mapping(connection, provider, provider_id, lock=True)
+        if rejection is not None and rejection["is_active"]:
+            return MappingPersistenceResult(
+                MappingResolutionState.REJECTED.value,
+                False,
+                mapping=self._mapping_record(mapping),
+            )
+        if (
+            mapping is not None
+            and mapping["is_active"]
+            and str(mapping["mapping_state"]) in _MANUAL_MAPPING_STATES
+        ):
+            return MappingPersistenceResult(
+                str(mapping["mapping_state"]),
+                False,
+                mapping=self._mapping_record(mapping),
+            )
+        return None
 
     @staticmethod
     def _select_mapping(

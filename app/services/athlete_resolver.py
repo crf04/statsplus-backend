@@ -266,6 +266,20 @@ class AthleteResolver:
         if not active_matches:
             retained = self._retained_identity(existing, rows, canonical_season)
             if retained is not None:
+                if self._team_conflicts(evidence.team, retained):
+                    # Preserving the canonical ID across a label change never
+                    # bypasses team validation: provider team evidence that
+                    # disagrees with the requested season's canonical row is a
+                    # conflict for an operator, not an automatic mapping.
+                    return self._result(
+                        normalized_provider,
+                        evidence,
+                        canonical_season,
+                        MappingResolutionState.MAPPING_CONFLICT,
+                        canonical=retained,
+                        candidates=(retained,),
+                        reason="mapping_conflict",
+                    )
                 return self._result(
                     normalized_provider,
                     evidence,
@@ -409,6 +423,14 @@ class AthleteResolver:
         evidence: AthleteEvidence,
         candidate: CanonicalAthlete,
     ) -> bool:
+        """Report whether an established mapping disagrees with this candidate.
+
+        Team evidence is judged by ``_team_conflicts`` against the candidate
+        for the *requested* season, never against the team a mapping recorded
+        for an earlier season, so a player who legitimately changes teams
+        between seasons is not read as conflicting evidence.
+        """
+
         if not existing or not bool(existing.get("is_active", False)):
             return False
         if str(existing.get("mapping_state", "")) != MappingResolutionState.AUTO.value:
@@ -418,23 +440,13 @@ class AthleteResolver:
             # The canonical player ID is the identity.  When it still agrees,
             # a changed official display name is a relabeling of the same NBA
             # player rather than disagreeing evidence.
-            if int(previous_player_id) != candidate.player_id:
-                return True
-        else:
-            previous_name = existing.get("provider_name")
-            if (
-                previous_name
-                and evidence.name
-                and normalize_athlete_name(previous_name)
-                != normalize_athlete_name(evidence.name)
-            ):
-                return True
-        previous_team_id = existing.get("canonical_team_id")
-        current_team_id = evidence.team.canonical_id if evidence.team else None
+            return int(previous_player_id) != candidate.player_id
+        previous_name = existing.get("provider_name")
         return bool(
-            previous_team_id is not None
-            and current_team_id is not None
-            and int(previous_team_id) != int(current_team_id)
+            previous_name
+            and evidence.name
+            and normalize_athlete_name(previous_name)
+            != normalize_athlete_name(evidence.name)
         )
 
     @staticmethod

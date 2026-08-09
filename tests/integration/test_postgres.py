@@ -407,6 +407,68 @@ def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine, pos
     assert len(reader.history(provider="prizepicks")) == 1
 
 
+def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(
+    mapping_engine, postgres_url
+):
+    """Governance wins over a stale board read when the two genuinely overlap.
+
+    The resolver reads outside the identity transaction, so its unmatched
+    result may already be obsolete by the time it is persisted. Each worker
+    owns its own engine, so the ordering is decided by the database rather than
+    by this process, and either order must end with the operator's decision.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.athlete_mapping_repository import AthleteMappingRepository
+
+    stale = _mapping_resolution(name="King James", provider_id="pp-77")
+    assert stale.state.value == "unmatched"
+    barrier = threading.Barrier(2, timeout=30)
+    engines = [create_engine(postgres_url) for _ in range(2)]
+
+    def _observe(engine):
+        repository = AthleteMappingRepository(engine)
+        barrier.wait()
+        return repository.record_resolution(stale)
+
+    def _approve(engine):
+        repository = AthleteMappingRepository(engine)
+        barrier.wait()
+        return repository.approve(
+            "prizepicks",
+            "pp-77",
+            23,
+            season="2024-25",
+            operator_id="ops@example.com",
+            reason="reviewed source identity",
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_observe, engines[0]),
+                executor.submit(_approve, engines[1]),
+            ]
+            for future in futures:
+                future.result(timeout=60)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    reader = AthleteMappingRepository(mapping_engine)
+    states = [
+        item.decision_state
+        for item in reader.history(provider="prizepicks", provider_athlete_id="pp-77")
+    ]
+    assert states[-1] == "manual_approved"
+    assert states.count("manual_approved") == 1
+    assert reader.list_unresolved(provider="prizepicks") == []
+    mapping = reader.get_active_mapping("prizepicks", "pp-77")
+    assert mapping is not None
+    assert mapping.mapping_state == "manual_approved"
+
+
 def test_repeated_state_after_a_different_observation_persists_on_postgres(mapping_engine):
     """Suppression is per transition on a real database as well as SQLite."""
     from app.services.athlete_mapping_repository import AthleteMappingRepository

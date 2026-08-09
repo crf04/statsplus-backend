@@ -405,7 +405,14 @@ automatic mapping's canonical player is still active for the season, an
 official display-name change on either the catalog or the provider side keeps
 that mapping (the canonical facts are re-read from the catalog row); a
 relabeled player never becomes unmatched or conflicting on the strength of the
-label alone. `list` reports the latest decision per provider identity and includes
+label alone. A retained identity still validates team evidence: provider team
+evidence that disagrees with the requested season's canonical row is a
+`mapping_conflict` that deactivates the mapping, not an automatic one. Team
+evidence is always compared with the candidate for the *requested* season
+rather than the team an earlier season's mapping recorded, so a player who
+legitimately changes teams between seasons keeps an active mapping for the new
+season while genuinely inconsistent current evidence still conflicts.
+`list` reports the latest decision per provider identity and includes
 it only while that decision is still unresolved, so a later automatic, manual,
 or rejection decision removes the identity from the queue. Repository reads and
 operator writes (approve, override, reject, and clear) translate
@@ -430,7 +437,12 @@ governed approve or override may select an inactive-only row; that choice is
 recorded explicitly in the audit as a decision candidate marked not active for
 the season. Active rejections suppress future automatic mappings until
 explicitly cleared, and a manual decision still wins over any later automatic
-read.
+read. Because the resolver reads outside the serialized identity transaction,
+its result may already be stale; the current mapping and rejection are re-read
+inside that transaction immediately before every automatic, unresolved, or
+conflict write, so a manual approve/override or an active rejection recorded in
+between wins: a stale unmatched observation cannot requeue a decided identity
+and a stale conflict cannot replace a rejection.
 The per-identity lock row is inserted inside a savepoint that is always left
 before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
