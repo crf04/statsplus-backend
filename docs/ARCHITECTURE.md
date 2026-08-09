@@ -400,17 +400,21 @@ blob, and changed candidate evidence — a different player, name, team ID, team
 name, abbreviation, or season-active flag — is a new observation rather than a
 suppressed repeat.
 
-Inactive-only evidence does change an existing automatic mapping, because the
-identity cannot stay comparable while the catalog lists its athlete as inactive
-for the requested season. The row becomes `inactive_only` and inactive, so no
-board comparison can reach it, while keeping the `canonical_player_id` it was
-mapped to: the claim is withdrawn, not retracted, and the observation with its
-candidates stays in the unresolved queue for the operator. A later observation
-of the same athlete, now active, maps the identity again with no conflict
-fields left behind; one naming a *different* athlete under the same provider ID
-is still a `mapping_conflict`, because a suspended claim is still a claim.
-Catalog inactivity alone never withdraws a manual mapping — an operator's
-decision is unseated only by the fail-closed conflict detection below.
+Inactive-only and ambiguous evidence do change an existing automatic mapping,
+because the identity cannot stay comparable while the board cannot say which
+canonical athlete it is: the catalog lists its athlete as inactive for the
+requested season, or it names two equally exact athletes and the observation
+chose neither. The row becomes `inactive_only` or `ambiguous` and inactive, so
+no board comparison can reach it, while keeping the `canonical_player_id` it
+was mapped to: the claim is withdrawn, not retracted, and the observation with
+its candidates stays in the unresolved queue for the operator. A later
+unambiguous observation of the same athlete maps the identity again with no
+conflict fields left behind; one naming a *different* athlete under the same
+provider ID is still a `mapping_conflict`, because a suspended claim is still a
+claim. Catalog inactivity or ambiguity alone never withdraws a manual mapping —
+an operator's decision is unseated only by the fail-closed conflict detection
+below, and approving or overriding the identity resolves the withdrawal and
+empties the queue.
 
 Identity is the canonical player ID, not a label. When an established
 automatic mapping's canonical player is still active for the season, an
@@ -517,7 +521,11 @@ observed, never when the observation was persisted; the persistence-time
 override is named `recorded_at` so the two cannot be confused. Inside the
 identity transaction an automatic, unresolved, or conflict write is compared
 against the newest governing instant for that identity — an operator
-decision's `created_at`, and the identity's observation clock, all UTC. That
+decision's `created_at`, and the identity's observation clock, all UTC. A read
+the operator's own mapping already covers runs through that transaction too: it
+appends no duplicate audit row and changes no mapping, but the provider did
+report the approved identity at that instant, so it raises the clock and a
+conflicting read taken earlier is fenced instead of unseating the mapping. That
 clock is a durable high-water mark on the identity's lock row, raised inside
 the same transaction whenever a read passes the fence. It cannot be derived
 from the decision log, because the log suppresses a repeated equivalent
@@ -541,11 +549,11 @@ test gives each worker its own engine and repository and releases them from a
 barrier — the overlap is resolved by the database, not by a shared lock.
 Migration 006 also creates a per-identity lock table — which carries that
 identity's observation clock — and database checks for
-closed mapping states (`auto`, `inactive_only`, `manual_approved`,
+closed mapping states (`ambiguous`, `auto`, `inactive_only`, `manual_approved`,
 `manual_override`, `mapping_conflict`, `rejected`), the closed decision-state
 set, active-state coherence — only `auto`, `manual_approved`, and
-`manual_override` may be active, and `inactive_only`, `mapping_conflict`, and
-`rejected` may not —
+`manual_override` may be active, and `ambiguous`, `inactive_only`,
+`mapping_conflict`, and `rejected` may not —
 cleared-rejection coherence — an active rejection carries no `cleared_at`,
 `cleared_by`, or `clear_reason`, and a cleared one carries all three — and
 conflict-column coherence: only a current `mapping_conflict` row may name a

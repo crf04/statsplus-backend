@@ -51,6 +51,17 @@ UNRESOLVED_OBSERVATION_STATES = frozenset(
     }
 )
 
+#: Unresolved observation states that also withdraw an automatic mapping from
+#: board comparisons.  An identity may not stay comparable while the board says
+#: which canonical athlete it is cannot be established from this evidence: the
+#: catalog lists the mapped athlete as inactive for the requested season, or it
+#: names two equally exact athletes.  The claim is suspended, not retracted, so
+#: the row keeps its canonical athlete and the observation keeps its candidates.
+_WITHDRAWING_OBSERVATION_STATES = (
+    MappingResolutionState.INACTIVE_ONLY,
+    MappingResolutionState.AMBIGUOUS,
+)
+
 #: Mapping states an operator established and a board observation may not
 #: supersede.
 _MANUAL_MAPPING_STATES = frozenset(
@@ -614,6 +625,8 @@ class AthleteMappingRepository:
                 return self._persist_unresolved_observation(
                     resolution, recorded_at=recorded_at
                 )
+            if resolution.state.value in _MANUAL_MAPPING_STATES:
+                return self._observe_governed_mapping(resolution)
             return MappingPersistenceResult(resolution.state.value, False)
         provider, provider_id = self._resolution_key(resolution)
         now = _utc(recorded_at or self._clock())
@@ -716,6 +729,43 @@ class AthleteMappingRepository:
                 decision=self._decision_result(connection, decision),
             )
 
+    def _observe_governed_mapping(
+        self,
+        resolution: AthleteResolution,
+    ) -> MappingPersistenceResult:
+        """Record that the board still observes the operator's own identity.
+
+        The resolver takes the operator's mapping for provider evidence that
+        agrees with it, so there is nothing to append and nothing to change:
+        the mapping already says this, and a duplicate audit row would only
+        repeat the decision the operator made.  The read itself is still news
+        about the identity, though -- the provider reported the approved
+        athlete at that instant -- so it runs through the same serialized
+        transaction as every other observation and raises the identity's
+        observation clock.  A conflicting read taken earlier is then recognized
+        as describing evidence the provider has since replaced, instead of
+        unseating a governed mapping on the strength of a stale read.
+        """
+
+        provider, provider_id = self._resolution_key(resolution)
+        with self._transaction(provider, provider_id) as connection:
+            stale = self._stale_observation(connection, provider, provider_id, resolution)
+            if stale is not None:
+                return stale
+            self._advance_observation_clock(connection, provider, provider_id, resolution)
+            # The governing state is re-read inside the lock: an operator may
+            # have rejected or remapped the identity while this read was in
+            # flight, and the caller is told what actually governs it now.
+            governed = self._governing_decision(connection, provider, provider_id)
+            if governed is not None:
+                return governed
+            mapping = self._select_mapping(connection, provider, provider_id, lock=True)
+            return MappingPersistenceResult(
+                resolution.state.value if mapping is None else str(mapping["mapping_state"]),
+                False,
+                mapping=self._mapping_record(mapping),
+            )
+
     def _persist_unresolved_observation(
         self,
         resolution: AthleteResolution,
@@ -726,13 +776,14 @@ class AthleteMappingRepository:
 
         No current mapping row is written because no canonical identity was
         established; the idempotency key keeps repeated board reads to one
-        durable observation per distinct evidence shape.  Two states do change
+        durable observation per distinct evidence shape.  Some states do change
         an existing automatic mapping, because an identity cannot stay mapped
         while the board says it should not be compared: team-conflict evidence
-        promotes it to a conflict for an operator to review, and inactive-only
-        evidence withdraws it from comparisons.  The candidates and evidence
-        stay on the appended observation either way, so the operator's
-        unresolved queue keeps everything the decision was made on.
+        promotes it to a conflict for an operator to review, and
+        ``_WITHDRAWING_OBSERVATION_STATES`` withdraw it from comparisons.  The
+        candidates and evidence stay on the appended observation either way, so
+        the operator's unresolved queue keeps everything the decision was made
+        on.
         """
 
         provider, provider_id = self._resolution_key(resolution)
@@ -745,8 +796,14 @@ class AthleteMappingRepository:
             if stale is not None:
                 return stale
             self._advance_observation_clock(connection, provider, provider_id, resolution)
-            if resolution.state is MappingResolutionState.INACTIVE_ONLY:
-                self._withdraw_inactive_mapping(connection, provider, provider_id, now=now)
+            if resolution.state in _WITHDRAWING_OBSERVATION_STATES:
+                self._withdraw_automatic_mapping(
+                    connection,
+                    provider,
+                    provider_id,
+                    state=resolution.state,
+                    now=now,
+                )
             if resolution.state is MappingResolutionState.TEAM_CONFLICT:
                 # The active mapping has to be read inside this serialized
                 # transaction.  A lookup taken before the lock can miss an
@@ -768,21 +825,23 @@ class AthleteMappingRepository:
                 decision=self._decision_result(connection, decision),
             )
 
-    def _withdraw_inactive_mapping(
+    def _withdraw_automatic_mapping(
         self,
         connection: Connection,
         provider: str,
         provider_id: str,
         *,
+        state: MappingResolutionState,
         now: datetime,
     ) -> None:
-        """Withdraw an automatic mapping the catalog no longer lists as active.
+        """Withdraw an automatic mapping this evidence can no longer support.
 
         The resolver found the athlete only as inactive for the requested
-        season, so the mapping must not reach a board comparison.  The row is
-        kept -- it is still the durable record of which canonical athlete this
-        provider identity was mapped to -- but it is deactivated, and its state
-        records why, so a later active observation can simply map it again.
+        season, or found two equally exact ones and could choose neither, so the
+        mapping must not reach a board comparison.  The row is kept -- it is
+        still the durable record of which canonical athlete this provider
+        identity was mapped to -- but it is deactivated, and its state records
+        why, so a later unambiguous observation can simply map it again.
 
         Only an automatic mapping is withdrawn.  An operator's decision is
         governed elsewhere and catalog inactivity alone is not the conflict
@@ -804,7 +863,7 @@ class AthleteMappingRepository:
                 )
             )
             .values(
-                mapping_state=MappingResolutionState.INACTIVE_ONLY.value,
+                mapping_state=state.value,
                 is_active=False,
                 # A withdrawal is not a disagreement between two canonical
                 # athletes, so the row names no conflict for an operator.

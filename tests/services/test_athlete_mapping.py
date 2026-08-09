@@ -283,7 +283,12 @@ def test_active_state_check_rejects_an_incoherent_row(mapping_db):
 
 @pytest.mark.parametrize(
     ("mapping_state", "is_active"),
-    [("auto", False), ("manual_approved", False), ("inactive_only", True)],
+    [
+        ("auto", False),
+        ("manual_approved", False),
+        ("inactive_only", True),
+        ("ambiguous", True),
+    ],
 )
 def test_active_state_check_rejects_an_incoherently_flagged_row(
     mapping_db, mapping_state, is_active
@@ -3202,3 +3207,325 @@ def test_catalog_inactivity_never_withdraws_a_manual_mapping(mapping_db):
     assert active is not None
     assert active.mapping_state == "manual_approved"
     assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def _manual_map_pp_15(
+    repository: AthleteMappingRepository, action: str, canonical_player_id: int = 15
+) -> None:
+    """Approve or override pp-15 on the evidence the operator reviewed."""
+
+    getattr(repository, action)(
+        "prizepicks",
+        "pp-15",
+        canonical_player_id,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=_approved_evidence(),
+    )
+
+
+def _agreeing_manual_observation(
+    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
+):
+    """A board read of the identity the operator already decided."""
+
+    return _resolver(repository=repository).resolve(
+        "prizepicks",
+        _approved_evidence(),
+        "2024-25",
+        observed_at=observed_at,
+    )
+
+
+@pytest.mark.parametrize("action", ["approve", "override"])
+def test_an_agreeing_manual_observation_advances_the_observation_clock(
+    mapping_db, action
+):
+    """A governed read is still a read: it changes nothing but the clock.
+
+    The operator's mapping stays exactly as it was and the audit gains no
+    duplicate, but the identity has demonstrably been observed at that instant,
+    so its high-water mark has to move.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _manual_map_pp_15(repository, action)
+    state = f"manual_{'approved' if action == 'approve' else 'override'}"
+
+    result = repository.record_resolution(
+        _agreeing_manual_observation(repository, observed_at=_OBSERVED_AFTER)
+    )
+
+    assert result.state == state
+    assert result.persisted is False
+    assert _observation_clock(engine, "pp-15") == _OBSERVED_AFTER
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == state
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic"
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == [state]
+
+
+def test_a_newer_agreeing_manual_read_fences_an_older_conflict(mapping_db):
+    """The provider has since reported the approved identity again.
+
+    A conflicting read taken before that later agreeing one describes evidence
+    the provider no longer reports, so landing it would unseat the operator's
+    mapping on stale evidence.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    resolver = _resolver(repository=repository)
+    _approve_pp_15(repository)
+    delayed = resolver.resolve(
+        "prizepicks",
+        _reused_identity_evidence(),
+        "2024-25",
+        observed_at=_OBSERVED_BETWEEN,
+    )
+    assert delayed.state is MappingResolutionState.MAPPING_CONFLICT
+    repository.record_resolution(
+        _agreeing_manual_observation(repository, observed_at=_OBSERVED_AFTER)
+    )
+
+    result = repository.record_resolution(delayed)
+
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    assert mapping.provider_name == "Nikola Jokic"
+    assert repository.list_conflicts() == []
+    assert [
+        item.decision_state
+        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+    ] == ["manual_approved"]
+
+
+def test_concurrent_agreeing_manual_reads_advance_the_clock_once(mapping_db):
+    """The governed no-op still runs inside the identity's own transaction."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_pp_15(repository)
+    observation = _agreeing_manual_observation(repository, observed_at=_OBSERVED_AFTER)
+    barrier = threading.Barrier(2)
+
+    def _record():
+        barrier.wait(timeout=5)
+        return repository.record_resolution(observation)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(_record), executor.submit(_record)]
+        for future in futures:
+            assert future.result(timeout=10).persisted is False
+
+    assert _observation_clock(engine, "pp-15") == _OBSERVED_AFTER
+    assert [item.decision_state for item in repository.history()] == ["manual_approved"]
+
+
+def test_an_agreeing_manual_read_without_an_instant_leaves_the_clock_alone(mapping_db):
+    """A caller that reports no retrieval time cannot be ordered."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_pp_15(repository)
+
+    result = repository.record_resolution(_agreeing_manual_observation(repository))
+
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    assert _observation_clock(engine, "pp-15") is None
+    assert [item.decision_state for item in repository.history()] == ["manual_approved"]
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+
+
+def _duplicate_name_resolution(
+    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
+):
+    """The requested season now lists two active athletes with one name."""
+
+    return _resolver(
+        rows=[
+            _catalog_row(15, "Nikola Jokić"),
+            _catalog_row(99, "Nikola Jokic", team_id=1610612743),
+        ],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+        observed_at=observed_at,
+    )
+
+
+def test_an_ambiguous_observation_withdraws_the_automatic_mapping(mapping_db):
+    """Evidence that names two athletes cannot keep one of them mapped.
+
+    The claim is suspended rather than retracted: the row stays as the durable
+    record, inactive so no comparison can reach it, while the candidates the
+    board could not choose between wait in the operator's queue.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    assert repository.record_resolution(_auto_resolution()).state == "auto"
+
+    result = repository.record_resolution(_duplicate_name_resolution(repository))
+
+    assert result.state == "ambiguous"
+    assert result.persisted is True
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.mapping_state == "ambiguous"
+    assert mapping.is_active is False
+    assert mapping.canonical_player_id == 15
+    assert mapping.conflict_canonical_player_id is None
+    queued = repository.list_unresolved(provider="prizepicks")
+    assert [item.decision_state for item in queued] == ["ambiguous"]
+    assert [candidate.canonical_player_id for candidate in queued[0].candidates] == [
+        15,
+        99,
+    ]
+    assert queued[0].provider_name == "Nikola Jokic"
+    assert repository.list_conflicts() == []
+    assert [mapping.provider_athlete_id for mapping in repository.list_mappings()] == [
+        "pp-15"
+    ]
+
+
+def test_a_repeated_ambiguous_observation_changes_nothing(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_duplicate_name_resolution(repository))
+
+    repeated = repository.record_resolution(_duplicate_name_resolution(repository))
+
+    assert repeated.state == "ambiguous"
+    assert repeated.persisted is False
+    assert [item.decision_state for item in repository.history()] == [
+        "auto",
+        "ambiguous",
+    ]
+
+
+def test_a_resolved_duplicate_name_maps_the_identity_again(mapping_db):
+    """Ambiguity suspends the claim; the same athlete reclaims it."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_duplicate_name_resolution(repository))
+
+    again = repository.record_resolution(_auto_resolution())
+
+    assert again.state == "auto"
+    assert again.persisted is True
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "auto"
+    assert active.canonical_player_id == 15
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_an_ambiguous_withdrawal_still_fences_a_different_canonical_athlete(mapping_db):
+    """A suspended claim is not an invitation to remap the identity."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_duplicate_name_resolution(repository))
+
+    resolved_elsewhere = _resolver(
+        rows=[_catalog_row(99, "Nikola Jokic", team_id=1610612747)],
+        repository=repository,
+    ).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
+        "2024-25",
+    )
+
+    assert resolved_elsewhere.state is MappingResolutionState.MAPPING_CONFLICT
+    result = repository.record_resolution(resolved_elsewhere)
+    assert result.state == "mapping_conflict"
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert mapping is not None
+    assert mapping.canonical_player_id == 15
+    assert mapping.conflict_canonical_player_id == 99
+
+
+def test_an_operator_resolves_an_ambiguous_withdrawal_by_approving_one_athlete(
+    mapping_db,
+):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.record_resolution(_duplicate_name_resolution(repository))
+
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        23,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="the duplicate names a different athlete",
+    )
+
+    assert result.mapping.mapping_state == "manual_approved"
+    assert result.mapping.is_active is True
+    assert result.mapping.canonical_player_id == 23
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_ambiguity_never_withdraws_a_manual_mapping(mapping_db):
+    """Only a governed conflict may unseat an operator's decision."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    _approve_pp_15(repository)
+    # Resolved without seeing the manual mapping, as a read in flight would be.
+    ambiguous = _duplicate_name_resolution(None)
+
+    result = repository.record_resolution(ambiguous)
+
+    assert result.state == "manual_approved"
+    assert result.persisted is False
+    active = repository.get_active_mapping("prizepicks", "pp-15")
+    assert active is not None
+    assert active.mapping_state == "manual_approved"
+    assert repository.list_unresolved(provider="prizepicks") == []
+
+
+def test_a_reused_provider_identity_conflicts_instead_of_reading_unmatched(mapping_db):
+    """Later evidence matching nothing is ordered by the established claim.
+
+    The provider stopped reporting the name that was mapped, so the identity
+    may have been reused.  It fails closed as a conflict rather than landing as
+    an unmatched observation beside a mapping that stays comparable.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+
+    reused = _resolver(repository=repository).resolve(
+        "prizepicks",
+        AthleteEvidence(provider_id="pp-15", name="Unlisted Prospect"),
+        "2024-25",
+    )
+
+    assert reused.state is MappingResolutionState.MAPPING_CONFLICT
+    assert repository.record_resolution(reused).state == "mapping_conflict"
+    assert repository.get_active_mapping("prizepicks", "pp-15") is None

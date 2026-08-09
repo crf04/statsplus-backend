@@ -40,6 +40,17 @@ class MappingResolutionState(str, Enum):
     REJECTION_CLEARED = "rejection_cleared"
 
 
+#: Mapping states that withdrew an automatic claim from board comparisons
+#: without retracting it.  The identity still belongs to the canonical athlete
+#: the row names.
+_WITHDRAWN_CLAIM_STATES = frozenset(
+    {
+        MappingResolutionState.INACTIVE_ONLY.value,
+        MappingResolutionState.AMBIGUOUS.value,
+    }
+)
+
+
 #: Latin letters that Unicode decomposition cannot reduce to ASCII because the
 #: stroke, bar, or ligature is part of the letter rather than a combining mark.
 #: Only these documented substitutions are applied; nothing here is an alias,
@@ -496,16 +507,18 @@ class AthleteResolver:
 
         An active automatic mapping does.  So does one withdrawn from
         comparisons because the catalog only lists its athlete as inactive for
-        the requested season: that withdrawal suspends the claim rather than
-        retracting it, so the identity still belongs to the canonical athlete it
-        was mapped to, and a later observation naming a different athlete under
-        the same provider ID is still a conflict rather than a silent remap.
+        the requested season, or because the catalog named two equally exact
+        athletes and the board could not choose: either withdrawal suspends the
+        claim rather than retracting it, so the identity still belongs to the
+        canonical athlete it was mapped to, and a later observation naming a
+        different athlete under the same provider ID is still a conflict rather
+        than a silent remap.
         """
 
         if not existing:
             return False
         state = str(existing.get("mapping_state", ""))
-        if state == MappingResolutionState.INACTIVE_ONLY.value:
+        if state in _WITHDRAWN_CLAIM_STATES:
             return True
         return state == MappingResolutionState.AUTO.value and bool(
             existing.get("is_active", False)
