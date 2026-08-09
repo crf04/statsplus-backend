@@ -1725,6 +1725,7 @@ class DabbleAdapter:
         return ProviderUnavailableError(
             "Dabble snapshot is currently unavailable.",
             detail=f"{status.value}: {type(diagnostic_error).__name__}",
+            provider_reason=status.value,
         )
 
     def _now_utc(self) -> datetime:

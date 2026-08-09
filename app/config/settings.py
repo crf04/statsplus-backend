@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from app.dfs_catalog import DFS_PROVIDER_NAMES, DFS_PROVIDER_NAME_SET
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_SQLITE_URL = "sqlite:///nba_play_types.db"
@@ -29,8 +31,7 @@ SUPPORTED_ENVIRONMENTS = frozenset({*LOCAL_ENVIRONMENTS, "staging", "production"
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000",)
-DFS_PROVIDER_NAMES = frozenset({"dabble", "prizepicks", "underdog"})
-DEFAULT_LOCAL_DFS_PROVIDERS = ("dabble", "prizepicks", "underdog")
+DEFAULT_LOCAL_DFS_PROVIDERS = DFS_PROVIDER_NAMES
 
 
 class ConfigurationError(ValueError):
@@ -114,9 +115,8 @@ class ProviderSettings(BaseModel):
     pbp_max_retries: int = Field(default=3, ge=0)
     pbp_pool_connections: int = Field(default=10, ge=1)
     pbp_pool_maxsize: int = Field(default=20, ge=1)
-    dfs_board_enabled: bool = False
     dfs_enabled_providers: tuple[str, ...] = ()
-    dfs_board_deadline_seconds: float = Field(default=15.0, gt=0)
+    dfs_board_deadline_seconds: float = Field(default=15.0, gt=0, le=15.0)
     dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
     dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
@@ -138,7 +138,7 @@ class ProviderSettings(BaseModel):
             provider = str(raw_provider).strip().casefold()
             if not provider:
                 continue
-            if provider not in DFS_PROVIDER_NAMES:
+            if provider not in DFS_PROVIDER_NAME_SET:
                 raise ValueError(
                     "DFS_ENABLED_PROVIDERS contains an unsupported provider: "
                     + provider
@@ -401,7 +401,6 @@ def _build_settings(
         pbp_max_retries=reader.integer("NBA_API_MAX_RETRIES", 3),
         pbp_pool_connections=reader.integer("NBA_API_POOL_CONNECTIONS", 10),
         pbp_pool_maxsize=reader.integer("NBA_API_POOL_MAXSIZE", 20),
-        dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
         dfs_enabled_providers=configured_dfs_providers,
         dfs_board_deadline_seconds=reader.decimal(
             "DFS_BOARD_DEADLINE_SECONDS", 15.0

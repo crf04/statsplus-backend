@@ -51,6 +51,9 @@ class TransportErrorPolicy:
 # interpreter alive during shutdown.
 _MAX_IN_FLIGHT_REQUESTS = 32
 _request_slots = threading.BoundedSemaphore(_MAX_IN_FLIGHT_REQUESTS)
+_MAX_CONNECT_TIMEOUT_SECONDS = 3.0
+_MAX_READ_TIMEOUT_SECONDS = 8.0
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class _RequestResult:
@@ -128,10 +131,7 @@ def _run_request(
                 raise
             result.status_code = getattr(response, "status_code", None)
             status_code = result.status_code
-            if attempt == 0 and (
-                status_code == 429
-                or isinstance(status_code, int) and 500 <= status_code <= 599
-            ):
+            if attempt == 0 and status_code in _RETRYABLE_STATUS_CODES:
                 increment_retry_count()
                 continue
             break
@@ -293,7 +293,10 @@ def bounded_timeout(
     if remaining <= 0:
         raise DeadlineExceededError(f"{provider} retrieval deadline exceeded")
     connect, read = timeout
-    return min(float(connect), remaining), min(float(read), remaining)
+    return (
+        min(float(connect), _MAX_CONNECT_TIMEOUT_SECONDS, remaining),
+        min(float(read), _MAX_READ_TIMEOUT_SECONDS, remaining),
+    )
 
 
 def request_json(

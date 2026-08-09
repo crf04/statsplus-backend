@@ -524,7 +524,9 @@ class UnderdogAdapter:
     @staticmethod
     def _invalid_response(detail: Any) -> ProviderUnavailableError:
         return ProviderUnavailableError(
-            "Underdog returned an invalid response.", detail=detail
+            "Underdog returned an invalid response.",
+            detail=detail,
+            provider_reason="malformed_response",
         )
 
 

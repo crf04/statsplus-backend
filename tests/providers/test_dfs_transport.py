@@ -133,9 +133,11 @@ class _RetrySequenceSession:
     def __init__(self, *responses: object) -> None:
         self.responses = list(responses)
         self.calls = 0
+        self.timeout_values: list[object] = []
 
     def get(self, url: str, **kwargs: object) -> _RetryResponse:
-        del url, kwargs
+        del url
+        self.timeout_values.append(kwargs.get("timeout"))
         self.calls += 1
         response = self.responses.pop(0)
         if isinstance(response, BaseException):
@@ -330,7 +332,7 @@ def test_retry_progress_is_recorded_when_worker_outlives_deadline() -> None:
     assert events[0]["retry_count"] == 1
 
 
-@pytest.mark.parametrize("first", [requests.exceptions.Timeout(), _RetryResponse({}, 429), _RetryResponse({}, 503)])
+@pytest.mark.parametrize("first", [requests.exceptions.Timeout(), _RetryResponse({}, 429), _RetryResponse({}, 500), _RetryResponse({}, 502), _RetryResponse({}, 503), _RetryResponse({}, 504)])
 def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
     session = _RetrySequenceSession(first, _RetryResponse({"ok": True}))
     context = RetrievalContext(
@@ -354,6 +356,42 @@ def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
     assert result == {"ok": True}
     assert session.calls == 2
     assert telemetry.get_recorded_provider_events()[-1]["retry_count"] == 1
+
+
+@pytest.mark.parametrize("status", [501, 505])
+def test_safe_get_does_not_retry_unreviewed_5xx_status(status: int) -> None:
+    session = _RetrySequenceSession(_RetryResponse({}, status), _RetryResponse({"late": True}))
+    with pytest.raises(ProviderUnavailableError):
+        request_json(
+            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            session=session,
+            url="https://example.test/snapshot",
+            params=None,
+            timeout=(30.0, 30.0),
+            now=lambda: datetime.now(timezone.utc),
+            provider="prizepicks",
+            operation="get_snapshot",
+            parse=lambda payload: payload,
+            error_policy=_TEST_TRANSPORT_POLICY,
+        )
+    assert session.calls == 1
+
+
+def test_transport_caps_injected_timeout_tuple() -> None:
+    session = _RetrySequenceSession(_RetryResponse({"ok": True}))
+    request_json(
+        context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=30)),
+        session=session,
+        url="https://example.test/snapshot",
+        params=None,
+        timeout=(30.0, 30.0),
+        now=lambda: datetime.now(timezone.utc),
+        provider="prizepicks",
+        operation="get_snapshot",
+        parse=lambda payload: payload,
+        error_policy=_TEST_TRANSPORT_POLICY,
+    )
+    assert session.timeout_values[0] == (3.0, 8.0)
 
 
 def test_safe_get_does_not_retry_access_denial_or_malformed_payload() -> None:

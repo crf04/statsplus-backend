@@ -657,7 +657,9 @@ class PrizePicksAdapter:
     @staticmethod
     def _invalid_response(detail: Any) -> ProviderUnavailableError:
         return ProviderUnavailableError(
-            "PrizePicks returned an invalid response.", detail=detail
+            "PrizePicks returned an invalid response.",
+            detail=detail,
+            provider_reason="malformed_response",
         )
 
     @staticmethod

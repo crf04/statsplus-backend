@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -21,6 +21,7 @@ from typing import Any, Callable
 import requests
 
 from app.config.settings import ConfigurationError, RuntimeSettings
+from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     CoverageCode,
@@ -36,7 +37,6 @@ from app.utils.telemetry import ProviderResponseError
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_DFS_PROVIDERS = ("dabble", "prizepicks", "underdog")
 DEFAULT_BOARD_DEADLINE_SECONDS = 15.0
 DEFAULT_BOARD_MAX_CONCURRENCY = 3
 
@@ -58,25 +58,6 @@ class ProviderFailureReason(str, Enum):
     ACCESS_DENIED = "access_denied"
     UPSTREAM_ERROR = "upstream_error"
     MALFORMED_RESPONSE = "malformed_response"
-
-
-class DFSProviderRegistry(Mapping[str, ProviderSnapshotProvider]):
-    """Immutable name-to-provider registry supplied to the board service."""
-
-    def __init__(self, providers: Mapping[str, ProviderSnapshotProvider]) -> None:
-        values = DFSBoardService._build_registry(providers)
-        self._values = MappingProxyType(
-            {name: values[name] for name in sorted(values)}
-        )
-
-    def __getitem__(self, key: str) -> ProviderSnapshotProvider:
-        return self._values[key]
-
-    def __iter__(self):
-        return iter(self._values)
-
-    def __len__(self) -> int:
-        return len(self._values)
 
 
 def _provider_name(value: Any) -> str:
@@ -167,12 +148,6 @@ class ProviderOutcome:
 
         return self.snapshot.coverage if self.snapshot is not None else None
 
-    @property
-    def failure_reason(self) -> ProviderFailureReason | None:
-        """Explicit alias for serializers that name the field fully."""
-
-        return self.reason
-
 
 @dataclass(frozen=True, slots=True)
 class DFSBoard:
@@ -214,12 +189,6 @@ class DFSBoard:
         object.__setattr__(self, "contract_version", self.contract_version.strip())
 
     @property
-    def outcomes(self) -> tuple[ProviderOutcome, ...]:
-        """Short alias used by internal callers."""
-
-        return self.provider_outcomes
-
-    @property
     def snapshots(self) -> tuple[ProviderSnapshot, ...]:
         """Usable snapshots, retaining each provider's coherent observation."""
 
@@ -228,14 +197,6 @@ class DFSBoard:
             for outcome in self.provider_outcomes
             if outcome.usable and outcome.snapshot is not None
         )
-
-    @property
-    def usable_snapshots(self) -> tuple[ProviderSnapshot, ...]:
-        return self.snapshots
-
-    @property
-    def provider_snapshots(self) -> tuple[ProviderSnapshot, ...]:
-        return self.snapshots
 
     @property
     def usable(self) -> bool:
@@ -249,58 +210,23 @@ class DFSBoardService:
 
     def __init__(
         self,
-        providers: Mapping[str, ProviderSnapshotProvider]
-        | Sequence[ProviderSnapshotProvider]
-        | None = None,
+        provider_registry: Mapping[str, ProviderSnapshotProvider],
         *,
-        provider_registry: Mapping[str, ProviderSnapshotProvider] | None = None,
-        enabled_provider_registry: Mapping[str, ProviderSnapshotProvider] | None = None,
-        enabled_providers: Mapping[str, ProviderSnapshotProvider]
-        | Iterable[str]
-        | None = None,
-        known_providers: Iterable[str] = SUPPORTED_DFS_PROVIDERS,
+        known_providers: Iterable[str] = DFS_PROVIDER_NAMES,
         max_concurrency: int = DEFAULT_BOARD_MAX_CONCURRENCY,
-        max_workers: int | None = None,
         deadline_seconds: float = DEFAULT_BOARD_DEADLINE_SECONDS,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
         settings: RuntimeSettings | None = None,
     ) -> None:
-        if enabled_provider_registry is not None:
-            if provider_registry is not None or providers is not None:
-                raise ValueError(
-                    "provide one of providers, provider_registry, or enabled_provider_registry"
-                )
-            provider_registry = enabled_provider_registry
-        if providers is not None and provider_registry is not None:
-            raise ValueError("provide providers or provider_registry, not both")
-        registry_input: Mapping[str, ProviderSnapshotProvider] | Sequence[ProviderSnapshotProvider]
-        registry_input = provider_registry if provider_registry is not None else (providers or {})
-        registry = self._build_registry(registry_input)
-
-        if isinstance(enabled_providers, Mapping):
-            if provider_registry is not None or providers is not None:
-                raise ValueError("enabled provider mapping cannot accompany a registry")
-            registry = self._build_registry(enabled_providers)
-            enabled = tuple(registry)
-        elif enabled_providers is None:
-            enabled = tuple(registry)
-        else:
-            enabled = _normalize_names(enabled_providers)
-
-        missing = tuple(name for name in enabled if name not in registry)
-        if missing:
-            raise ValueError(
-                "enabled DFS providers are not present in the injected registry: "
-                + ", ".join(missing)
-            )
+        registry = self._build_registry(provider_registry)
+        enabled = tuple(registry)
         if settings is not None and settings.environment == "production" and not enabled:
             raise ConfigurationError(
                 "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider in production"
             )
 
-        concurrency = max_workers if max_workers is not None else max_concurrency
-        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency < 1:
             raise ValueError("DFS board max_concurrency must be a positive integer")
         if not isinstance(deadline_seconds, (int, float)) or isinstance(deadline_seconds, bool):
             raise ValueError("DFS board deadline_seconds must be positive")
@@ -313,20 +239,14 @@ class DFSBoardService:
         )
         self.enabled_providers = tuple(sorted(enabled))
         self.disabled_providers = tuple(sorted(set(known) - set(self.enabled_providers)))
-        self.max_concurrency = min(concurrency, max(1, len(self.enabled_providers)))
-        self.deadline_seconds = float(deadline_seconds)
+        self.max_concurrency = min(max_concurrency, max(1, len(self.enabled_providers)))
+        self.deadline_seconds = min(float(deadline_seconds), DEFAULT_BOARD_DEADLINE_SECONDS)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic = monotonic or time.monotonic
 
-    @property
-    def enabled_provider_registry(self) -> Mapping[str, ProviderSnapshotProvider]:
-        """Alias exposing the injected registry as a read-only mapping."""
-
-        return self.provider_registry
-
     @staticmethod
     def _build_registry(
-        values: Mapping[str, ProviderSnapshotProvider] | Sequence[ProviderSnapshotProvider],
+        values: Mapping[str, ProviderSnapshotProvider],
     ) -> dict[str, ProviderSnapshotProvider]:
         if isinstance(values, Mapping):
             registry: dict[str, ProviderSnapshotProvider] = {}
@@ -339,15 +259,7 @@ class DFSBoardService:
                 registry[name] = provider
             return registry
 
-        registry = {}
-        for provider in values:
-            name = _provider_name(getattr(provider, "name", ""))
-            if not callable(getattr(provider, "get_snapshot", None)):
-                raise TypeError(f"DFS provider {name} must implement get_snapshot")
-            if name in registry:
-                raise ValueError(f"duplicate DFS provider {name}")
-            registry[name] = provider
-        return registry
+        raise TypeError("DFS provider registry must be a mapping")
 
     def get_board(
         self,
@@ -364,15 +276,22 @@ class DFSBoardService:
 
         if not isinstance(query, NBAMarketQuery):
             raise TypeError("query must be NBAMarketQuery")
+        generated_at = self._clock_utc()
         if context is None:
-            now = self._clock_utc()
             context = RetrievalContext(
-                deadline=now + timedelta(seconds=self.deadline_seconds)
+                deadline=generated_at + timedelta(seconds=self.deadline_seconds)
             )
         elif not isinstance(context, RetrievalContext):
             raise TypeError("context must be RetrievalContext")
-
-        generated_at = self._clock_utc()
+        # Adapters receive a child context so a caller cannot accidentally
+        # extend this board's absolute fifteen-second ceiling.
+        context = RetrievalContext(
+            deadline=min(
+                context.deadline,
+                generated_at + timedelta(seconds=self.deadline_seconds),
+            ),
+            request_id=context.request_id,
+        )
         start = self.monotonic()
         remaining = context.remaining_seconds(now=generated_at)
         board_deadline = start + remaining
@@ -416,8 +335,18 @@ class DFSBoardService:
             next_thread = next(iter(active.values()))[0]
             next_thread.join(timeout=wait_for)
 
-        deadline_reached = self._deadline_reached(context, board_deadline)
-        if pending or active or deadline_reached:
+        # A worker may publish a result in the same instant that the caller
+        # observes the deadline. Drain holders whose completion timestamp is
+        # at or before the boundary before assigning deadline failures.
+        for name in list(active):
+            thread, holder = active[name]
+            completed_at = holder.get("completed_at")
+            if completed_at is not None and completed_at <= board_deadline:
+                active.pop(name)
+                thread.join(timeout=0)
+                self._harvest(name, holder, outcomes)
+
+        if pending or active or self._deadline_reached(context, board_deadline):
             for name in pending:
                 outcomes[name] = ProviderOutcome(
                     provider=name,
@@ -492,10 +421,9 @@ class DFSBoardService:
             # The main thread re-raises defects from workers as soon as their
             # worker completes.  A late defect is isolated just like a late
             # provider result because the board deadline has already passed.
-            if self.monotonic() < board_deadline and not context.is_expired(
-                now=self._clock_utc()
-            ):
-                holder["exception"] = error
+            holder["exception"] = error
+        finally:
+            holder["completed_at"] = self.monotonic()
 
     @staticmethod
     def _harvest(
@@ -584,22 +512,22 @@ class DFSBoardService:
                 return ProviderFailureReason.UPSTREAM_ERROR
             if isinstance(candidate, requests.exceptions.Timeout):
                 return ProviderFailureReason.TIMEOUT
+            if isinstance(candidate, TimeoutError):
+                return ProviderFailureReason.TIMEOUT
 
-        detail_parts: list[str] = []
+        typed_reasons = {
+            "deadline_exceeded": ProviderFailureReason.DEADLINE_EXCEEDED,
+            "timeout": ProviderFailureReason.TIMEOUT,
+            "rate_limited": ProviderFailureReason.RATE_LIMITED,
+            "access_denied": ProviderFailureReason.ACCESS_DENIED,
+            "malformed": ProviderFailureReason.MALFORMED_RESPONSE,
+            "malformed_response": ProviderFailureReason.MALFORMED_RESPONSE,
+            "upstream_error": ProviderFailureReason.UPSTREAM_ERROR,
+        }
         for candidate in chain:
-            detail_parts.append(str(candidate))
-            candidate_detail = getattr(candidate, "detail", None)
-            if candidate_detail:
-                detail_parts.append(str(candidate_detail))
-        detail = " ".join(detail_parts).casefold()
-        if "deadline" in detail:
-            return ProviderFailureReason.DEADLINE_EXCEEDED
-        if "rate_limited" in detail or "rate limited" in detail or "429" in detail:
-            return ProviderFailureReason.RATE_LIMITED
-        if "access_denied" in detail or "access denied" in detail or "403" in detail:
-            return ProviderFailureReason.ACCESS_DENIED
-        if "malformed" in detail or "invalid response" in detail:
-            return ProviderFailureReason.MALFORMED_RESPONSE
+            typed_reason = typed_reasons.get(getattr(candidate, "provider_reason", None))
+            if typed_reason is not None:
+                return typed_reason
         return ProviderFailureReason.UPSTREAM_ERROR
 
     def _clock_utc(self) -> datetime:
@@ -620,22 +548,11 @@ class DFSBoardService:
         )
 
 
-# Names used by the design contract and by callers that prefer a shorter term.
-DFSBoardQuery = NBAMarketQuery
-BoardQuery = DFSBoardQuery
-ProviderRegistry = DFSProviderRegistry
-
-
 __all__ = [
-    "BoardQuery",
     "DEFAULT_BOARD_DEADLINE_SECONDS",
     "DFSBoard",
-    "DFSBoardQuery",
-    "DFSProviderRegistry",
     "DFSBoardService",
     "ProviderFailureReason",
     "ProviderOutcome",
     "ProviderOutcomeStatus",
-    "ProviderRegistry",
-    "SUPPORTED_DFS_PROVIDERS",
 ]

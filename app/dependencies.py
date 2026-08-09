@@ -9,6 +9,7 @@ from flask import current_app
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings
+from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,22 +66,21 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
         settings.providers.dfs_provider_read_timeout_seconds,
     )
     for provider_name in settings.providers.dfs_enabled_providers:
-        if provider_name == "dabble":
+        if provider_name == DFS_DABBLE:
             dfs_providers[provider_name] = DabbleAdapter(
                 connect_timeout_seconds=dfs_timeout[0],
                 read_timeout_seconds=dfs_timeout[1],
                 detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
             )
-        elif provider_name == "prizepicks":
+        elif provider_name == DFS_PRIZEPICKS:
             dfs_providers[provider_name] = PrizePicksAdapter(timeout=dfs_timeout)
-        elif provider_name == "underdog":
+        elif provider_name == DFS_UNDERDOG:
             dfs_providers[provider_name] = UnderdogAdapter(timeout=dfs_timeout)
         else:  # settings validation normally makes this unreachable
             raise ValueError(f"unsupported DFS provider {provider_name}")
 
     dfs_board_service = DFSBoardService(
-        providers=dfs_providers,
-        enabled_providers=settings.providers.dfs_enabled_providers,
+        provider_registry=dfs_providers,
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
         settings=settings,

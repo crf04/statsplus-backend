@@ -184,6 +184,16 @@ class ProviderUnavailableError(AppError):
         "An upstream provider is currently unavailable. Please try again later."
     )
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        provider_reason: str | None = None,
+    ) -> None:
+        self.provider_reason = provider_reason
+        super().__init__(message, detail=detail)
+
 
 class InvalidConfigurationError(AppError):
     """The server cannot safely operate with its current configuration."""

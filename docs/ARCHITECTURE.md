@@ -94,7 +94,9 @@ without guessing missing facts; they expose no provider-specific public routes.
 provider registry is injected explicitly; it never discovers or constructs
 providers while collecting. Enabled providers run concurrently behind one
 absolute `RetrievalContext` deadline (15 seconds by default), with at most
-three concurrent provider workers. A complete empty snapshot is usable, while
+three concurrent provider workers. The child context is capped at the lesser
+of the caller deadline and the configured deadline, never above 15 seconds. A
+complete empty snapshot is usable, while
 partial snapshots remain one coherent provider observation with their original
 `CoverageEvidence`; failed providers cannot remove usable snapshots from other
 providers. Expected upstream failures become sanitized `ProviderOutcome`
@@ -106,7 +108,7 @@ identity resolver, comparison builder, or statistic catalog.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a
-timeout, 429, or retryable 5xx response. Access-denied, ordinary 4xx, and
+timeout or one of HTTP 429, 500, 502, 503, or 504. Access-denied, ordinary 4xx, and
 malformed responses are not retried. Dabble fixture-detail fan-out remains
 bounded at three workers. Late daemon work is ignored after the board deadline
 and cannot alter the returned board.
