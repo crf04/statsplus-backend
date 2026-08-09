@@ -19,6 +19,7 @@ from app.providers.dfs import (
     SnapshotStatus,
     StatisticEvidence,
 )
+from app.domain.statistics import StatisticMatch
 from app.services.dfs_board import DFSBoardService
 from app.services.statistic_catalog import (
     CanonicalStatistic,
@@ -264,6 +265,40 @@ def test_catalog_file_load_failure_is_explicit(tmp_path) -> None:
         StatisticCatalog.load(definition_path)
 
 
+@pytest.mark.parametrize("schema_version", [2, 999, 0])
+def test_catalog_rejects_unimplemented_schema_versions(schema_version: int) -> None:
+    definition = {
+        "schema_version": schema_version,
+        "statistics": [{
+            "id": "points", "label": "Points", "unit": "count",
+            "scoring_periods": ["full_game"], "components": ["points"],
+        }],
+    }
+
+    with pytest.raises(StatisticCatalogError, match="schema_version.*(implemented|supported|1)"):
+        StatisticCatalog.from_mapping(definition)
+
+
+def test_statistic_match_is_typed_immutable_and_validates_state_coherence() -> None:
+    evidence = StatisticEvidence(label="Points")
+    with pytest.raises(TypeError):
+        StatisticMatch(state="unmapped", evidence=evidence, scoring_period=ScoringPeriod.FULL_GAME)  # type: ignore[arg-type]
+    unmapped = StatisticMatch(
+        state=MatchState.UNMAPPED,
+        evidence=evidence,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    with pytest.raises(AttributeError):
+        unmapped.state = MatchState.CANONICAL
+    with pytest.raises(ValueError):
+        StatisticMatch(
+            state=MatchState.UNMAPPED,
+            evidence=evidence,
+            canonical=StatisticCatalog.load_default().by_id["points"],
+            scoring_period=ScoringPeriod.FULL_GAME,
+        )
+
+
 def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() -> None:
     retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
 
@@ -354,3 +389,33 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
     assert unmapped.statistic.label == "Fantasy Points"
     assert unmapped.statistic_match.state is MatchState.UNMAPPED
     assert unmapped.statistic_match.provider_evidence.provider_id == "underdog-stat"
+
+
+def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
+    retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+    snapshot = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(PlayerProjectionMarket(provider="dabble", market_id="missing-stat"),),
+        coverage=CoverageEvidence(
+            fetched_count=1, eligible_count=1, normalized_count=1,
+            pagination_complete=True, fanout_complete=True,
+        ),
+        retrieved_at=retrieved_at,
+    )
+
+    class Provider:
+        def get_snapshot(self, query: NBAMarketQuery, context: RetrievalContext) -> ProviderSnapshot:
+            return snapshot
+
+    board = DFSBoardService(
+        provider_registry={"dabble": Provider()}, deadline_seconds=5
+    ).get_board(
+        NBAMarketQuery(),
+        RetrievalContext(deadline=datetime(2026, 8, 9, 20, 0, 5, tzinfo=timezone.utc)),
+    )
+    market = board.unmapped_markets[0]
+    assert market.statistic is None
+    assert market.statistic_match.state is MatchState.UNMAPPED
+    assert market.statistic_match.reason == "missing_statistic_evidence"
+    assert board.resolved_markets[0].market_id == "missing-stat"

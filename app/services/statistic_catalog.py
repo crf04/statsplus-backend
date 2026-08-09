@@ -17,14 +17,18 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-import yaml
-
 from app.providers.dfs import (
     MarketThreshold,
     PlayerProjectionMarket,
     ScoringPeriod,
     StatisticEvidence,
     normalize_scoring_period,
+)
+from app.domain.statistics import MatchState, StatisticMatch
+from app.services.statistic_catalog_schema import (
+    StatisticDefinitionError,
+    load_definition,
+    validate_schema_version,
 )
 
 
@@ -41,18 +45,6 @@ class StatisticCatalogError(ValueError):
 
 class StatisticCatalogSchemaError(StatisticCatalogError):
     """The version-controlled statistic definition has an invalid schema."""
-
-
-class MatchState(str, Enum):
-    """The deliberately small statistic resolution state vocabulary."""
-
-    CANONICAL = "canonical"
-    UNMAPPED = "unmapped"
-
-    # Descriptive aliases used by callers that refer to a resolved value as
-    # "matched" rather than "canonical".
-    MATCHED = "canonical"
-    MAPPED = "canonical"
 
 
 class StatisticUnit(str, Enum):
@@ -350,84 +342,6 @@ class StatisticMapping:
 
 
 @dataclass(frozen=True, slots=True)
-class StatisticMatch:
-    """A canonical or explicitly unmapped statistic resolution."""
-
-    state: MatchState | str
-    evidence: StatisticEvidence
-    canonical: CanonicalStatistic | None = None
-    provider: str | None = None
-    scoring_period: ScoringPeriod | str = ScoringPeriod.UNKNOWN
-    unit: str | None = None
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        try:
-            state = self.state if isinstance(self.state, MatchState) else MatchState(self.state)
-        except (TypeError, ValueError) as error:
-            raise ValueError("statistic match state must be canonical or unmapped") from error
-        if not isinstance(self.evidence, StatisticEvidence):
-            raise TypeError("statistic match evidence must be StatisticEvidence")
-        if state is MatchState.CANONICAL and not isinstance(self.canonical, CanonicalStatistic):
-            raise ValueError("canonical statistic matches require a canonical statistic")
-        if state is MatchState.UNMAPPED and self.canonical is not None:
-            raise ValueError("unmapped statistic matches cannot carry a canonical statistic")
-        provider = None
-        if self.provider is not None:
-            if not isinstance(self.provider, str) or not self.provider.strip():
-                raise ValueError("statistic match provider must be a non-empty string or None")
-            # Resolution keeps unfamiliar provider evidence visible as
-            # UNMAPPED. Catalog definitions themselves still accept only the
-            # three reviewed provider names.
-            provider = self.provider.strip().casefold()
-        period = _runtime_period(self.scoring_period)
-        object.__setattr__(self, "state", state)
-        object.__setattr__(self, "provider", provider)
-        object.__setattr__(self, "scoring_period", period)
-
-    @property
-    def match_state(self) -> MatchState:
-        return self.state
-
-    @property
-    def canonical_id(self) -> str | None:
-        return self.canonical.id if self.canonical is not None else None
-
-    @property
-    def canonical_statistic(self) -> CanonicalStatistic | None:
-        return self.canonical
-
-    @property
-    def statistic(self) -> CanonicalStatistic | None:
-        return self.canonical
-
-    @property
-    def status(self) -> MatchState:
-        return self.state
-
-    @property
-    def provider_evidence(self) -> StatisticEvidence:
-        return self.evidence
-
-    @property
-    def provider_label(self) -> str | None:
-        return self.evidence.label
-
-    @property
-    def original_label(self) -> str | None:
-        return self.evidence.label
-
-    @property
-    def is_comparable(self) -> bool:
-        return self.state is MatchState.CANONICAL and bool(
-            self.canonical is not None and self.canonical.comparable
-        )
-
-
-StatisticResolution = StatisticMatch
-
-
-@dataclass(frozen=True, slots=True)
 class StatisticCatalog:
     """Immutable catalog built from one validated definition document."""
 
@@ -524,34 +438,12 @@ class StatisticCatalog:
 
         definition_path = Path(path)
         try:
-            with definition_path.open("r", encoding="utf-8") as stream:
-                definition = yaml.load(stream, Loader=_UniqueKeyLoader)
-        except FileNotFoundError as error:
+            definition = load_definition(definition_path)
+        except StatisticDefinitionError as error:
             raise StatisticCatalogError(
-                f"statistic catalog definition was not found: {definition_path}"
-            ) from error
-        except (OSError, yaml.YAMLError, ValueError) as error:
-            raise StatisticCatalogError(
-                f"statistic catalog definition could not be loaded: {definition_path}"
+                str(error)
             ) from error
         return cls.from_mapping(definition, source=definition_path)
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> "StatisticCatalog":
-        return cls.load(path)
-
-    @classmethod
-    def load_from_file(cls, path: str | Path) -> "StatisticCatalog":
-        return cls.load(path)
-
-    @classmethod
-    def from_definition(
-        cls,
-        definition: Mapping[str, Any],
-        *,
-        source: str | Path | None = None,
-    ) -> "StatisticCatalog":
-        return cls.from_mapping(definition, source=source)
 
     @classmethod
     def from_mapping(
@@ -583,10 +475,6 @@ class StatisticCatalog:
 
     def resolve(self, *args: Any, **kwargs: Any) -> StatisticMatch:
         return self.resolver.resolve(*args, **kwargs)
-
-    def resolve_statistic(self, *args: Any, **kwargs: Any) -> StatisticMatch:
-        return self.resolve(*args, **kwargs)
-
 
 class StatisticResolver:
     """Resolve explicit provider evidence without semantic heuristics."""
@@ -637,7 +525,6 @@ class StatisticResolver:
                     canonical_id=evidence.canonical_id,
                     label=source_label,
                     components=source_components,
-                    match_state=getattr(evidence, "match_state", None),
                 )
         period = _runtime_period(scoring_period)
         if not source_label or period is ScoringPeriod.UNKNOWN:
@@ -725,23 +612,6 @@ class StatisticResolver:
             evidence=evidence,
         )
 
-    def resolve_statistic(
-        self,
-        provider: str,
-        evidence: StatisticEvidence,
-        *,
-        scoring_period: ScoringPeriod | str | None = ScoringPeriod.FULL_GAME,
-        period: ScoringPeriod | str | None = None,
-        unit: str | None = None,
-    ) -> StatisticMatch:
-        return self.resolve_evidence(
-            provider,
-            evidence,
-            scoring_period=scoring_period,
-            period=period,
-            unit=unit,
-        )
-
     def resolve_market(self, market: PlayerProjectionMarket) -> StatisticMatch:
         if not isinstance(market, PlayerProjectionMarket):
             raise TypeError("statistic resolver market must be PlayerProjectionMarket")
@@ -817,17 +687,10 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
         raise StatisticCatalogSchemaError(
             f"unsupported top-level fields: {sorted(unknown)}"
         )
-    version = definition.get("schema_version", definition.get("version"))
-    if version is None:
-        raise StatisticCatalogSchemaError("schema_version is required")
-    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-        raise StatisticCatalogSchemaError("schema_version must be a positive integer")
-    if (
-        "schema_version" in definition
-        and "version" in definition
-        and definition["schema_version"] != definition["version"]
-    ):
-        raise StatisticCatalogSchemaError("schema_version and version conflict")
+    try:
+        version = validate_schema_version(definition)
+    except StatisticDefinitionError as error:
+        raise StatisticCatalogSchemaError(str(error)) from error
     raw_statistics = definition.get(
         "statistics", definition.get("canonical_statistics")
     )
@@ -951,46 +814,19 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
     return {"statistics": tuple(parsed), "version": version}
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """PyYAML loader that does not discard duplicate mapping keys."""
-
-
-def _construct_unique_mapping(
-    loader: _UniqueKeyLoader, node: yaml.Node, deep: bool = False
-) -> dict[Any, Any]:
-    mapping: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
-            raise yaml.YAMLError(f"duplicate definition key {key!r}")
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
-
-
 __all__ = [
     "CanonicalStatistic",
     "MatchState",
-    "StatisticMatchState",
     "StatisticCatalog",
     "StatisticCatalogError",
     "StatisticCatalogSchemaError",
     "StatisticMapping",
     "StatisticMatch",
-    "StatisticResolution",
     "StatisticResolver",
     "StatisticUnit",
     "SUPPORTED_STATISTIC_PROVIDERS",
     "load_statistic_catalog",
 ]
-
-
-StatisticMatchState = MatchState
 
 
 def load_statistic_catalog(path: str | Path | None = None) -> StatisticCatalog:

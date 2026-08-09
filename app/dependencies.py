@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from flask import current_app
@@ -36,7 +38,12 @@ class ApplicationDependencies:
     statistic_catalog: Any | None = None
 
 
-def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
+def build_dependencies(
+    settings: RuntimeSettings,
+    *,
+    statistic_catalog_path: str | Path | None = None,
+    statistic_catalog_loader: Callable[[str | Path], Any] | None = None,
+) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
     from app.services.data_service import DataService
@@ -65,7 +72,16 @@ def build_dependencies(settings: RuntimeSettings) -> ApplicationDependencies:
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
     # route-import or request-time catalog side effects.
-    statistic_catalog = StatisticCatalog.load_default()
+    if statistic_catalog_loader is not None and statistic_catalog_path is None:
+        statistic_catalog = statistic_catalog_loader(StatisticCatalog.DEFAULT_PATH)
+    elif statistic_catalog_loader is not None:
+        statistic_catalog = statistic_catalog_loader(statistic_catalog_path)
+    elif statistic_catalog_path is not None:
+        statistic_catalog = StatisticCatalog.load(statistic_catalog_path)
+    else:
+        statistic_catalog = StatisticCatalog.load_default()
+    if not isinstance(statistic_catalog, StatisticCatalog):
+        raise TypeError("statistic catalog loader must return a StatisticCatalog")
 
     engine = get_engine(settings)
     redis_client = get_redis_client(settings) if settings.cache.enabled else None

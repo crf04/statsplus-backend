@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
+from app.domain.statistics import MatchState, StatisticMatch
+
 from app.utils.request_id import is_valid_request_id
 
 
@@ -381,7 +383,6 @@ class StatisticEvidence:
     canonical_id: str | None = None
     label: str | None = None
     components: tuple[str, ...] = ()
-    match_state: str | None = None
 
     def __post_init__(self) -> None:
         provider_id = _optional_identifier(
@@ -400,16 +401,10 @@ class StatisticEvidence:
             for component in self.components
             if isinstance(component, str) and component.strip()
         )
-        match_state = self.match_state
-        if match_state is not None and (
-            not isinstance(match_state, str) or not match_state.strip()
-        ):
-            raise ValueError("statistic match_state must be a non-empty string or None")
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "canonical_id", canonical_id)
         object.__setattr__(self, "label", label or None)
         object.__setattr__(self, "components", components)
-        object.__setattr__(self, "match_state", match_state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -566,7 +561,7 @@ class PlayerProjectionMarket:
     updated_at: datetime | str | None = None
     selections: tuple[Selection, ...] = ()
     appearance: AppearanceEvidence | None = None
-    statistic_match: Any | None = None
+    statistic_match: StatisticMatch | None = None
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -602,6 +597,10 @@ class PlayerProjectionMarket:
             self.statistic, StatisticEvidence
         ):
             raise ValueError("market statistic must be StatisticEvidence or None")
+        if self.statistic_match is not None and not isinstance(
+            self.statistic_match, StatisticMatch
+        ):
+            raise ValueError("market statistic_match must be StatisticMatch or None")
         if self.threshold is not None and not isinstance(self.threshold, MarketThreshold):
             raise ValueError("market threshold must be MarketThreshold or None")
         status = normalize_market_status(self.status)
@@ -631,12 +630,12 @@ class PlayerProjectionMarket:
         object.__setattr__(self, "selections", selections)
 
     @property
-    def statistic_match_state(self) -> str | None:
+    def statistic_match_state(self) -> MatchState | None:
         """Return the board resolver state while retaining source evidence."""
 
         if self.statistic_match is not None:
-            return getattr(self.statistic_match, "state", None)
-        return self.statistic.match_state if self.statistic is not None else None
+            return self.statistic_match.state
+        return None
 
     @property
     def source_identity(self) -> tuple[str, str] | None:

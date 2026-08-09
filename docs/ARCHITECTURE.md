@@ -160,13 +160,18 @@ provider `StatisticEvidence` and attaching a typed canonical or unmapped
 ### Statistic Catalog
 
 `app/config/statistic_catalog.yaml` is the version-controlled source of truth
-for the reviewed cross-provider statistic identities. `StatisticCatalog.load`
+for the reviewed cross-provider statistic identities. The
+`statistic_catalog_schema` loader owns YAML decoding and the implemented schema
+version; the shared `app.domain.statistics` module owns immutable typed match
+values, while the catalog service owns resolution. `StatisticCatalog.load`
 validates the document before constructing immutable `CanonicalStatistic`,
 `StatisticMapping`, and `StatisticMatch` objects. Application dependency
 assembly loads it before provider construction, so malformed schema, duplicate
 canonical identities, duplicate/conflicting provider labels, invalid periods or
 units, and inconsistent ordered components fail startup clearly. Route imports
-never load or mutate the catalog.
+never load or mutate the catalog. A market with absent statistic evidence is
+still visible at the board seam as an immutable `UNMAPPED` match with reason
+`missing_statistic_evidence`; raw provider snapshot identity remains unchanged.
 
 The initial catalog maps full-game points, rebounds, assists, three-pointers
 made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use

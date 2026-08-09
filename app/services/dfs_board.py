@@ -34,8 +34,10 @@ from app.providers.dfs import (
     ProviderSnapshotProvider,
     RetrievalContext,
     SnapshotStatus,
+    StatisticEvidence,
 )
-from app.services.statistic_catalog import MatchState, StatisticCatalog, StatisticResolver
+from app.domain.statistics import MatchState, StatisticMatch
+from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
     BoardTelemetryEvent,
@@ -119,6 +121,23 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
             names.append(name)
             seen.add(name)
     return tuple(names)
+
+
+def _ensure_statistic_match(market: PlayerProjectionMarket) -> PlayerProjectionMarket:
+    """Expose an explicit unmapped result even when a provider omitted evidence."""
+
+    if market.statistic_match is not None:
+        return market
+    return replace(
+        market,
+        statistic_match=StatisticMatch(
+            state=MatchState.UNMAPPED,
+            evidence=StatisticEvidence(),
+            provider=market.provider,
+            scoring_period=market.scoring_period,
+            reason="missing_statistic_evidence",
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +324,11 @@ class DFSBoard:
     def resolved_markets(self) -> tuple[PlayerProjectionMarket, ...]:
         """Flatten usable snapshots after statistic resolution."""
 
-        return tuple(market for snapshot in self.snapshots for market in snapshot.markets)
+        return tuple(
+            _ensure_statistic_match(market)
+            for snapshot in self.snapshots
+            for market in snapshot.markets
+        )
 
     @property
     def canonical_markets(self) -> tuple[PlayerProjectionMarket, ...]:
@@ -342,7 +365,7 @@ class DFSBoard:
         )
 
     @property
-    def statistic_matches(self) -> tuple[Any, ...]:
+    def statistic_matches(self) -> tuple[StatisticMatch, ...]:
         """Typed statistic matches retained alongside each resolved market."""
 
         return tuple(
@@ -584,12 +607,7 @@ class DFSBoardService:
                 if match.canonical is not None
                 else evidence.components
             )
-            resolved_evidence = replace(
-                evidence,
-                canonical_id=canonical_id,
-                components=components,
-                match_state=match.state,
-            )
+            resolved_evidence = replace(evidence, canonical_id=canonical_id, components=components)
             resolved_markets.append(
                 replace(
                     market,
