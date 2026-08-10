@@ -329,12 +329,16 @@ class NBASeasonSettings(BaseModel):
 
 
 class CatalogSettings(BaseModel):
-    """Independent freshness policies for canonical catalogs."""
+    """Independent freshness policies and reviewed matching windows."""
 
     model_config = ConfigDict(frozen=True)
 
     athlete_freshness_days: int = Field(default=7, ge=0)
     event_max_age_hours: float = Field(default=72.0, gt=0)
+    #: How far a provider's reported start time may sit from a scheduled NBA
+    #: game before the two are no longer evidence of the same event.  The
+    #: boundary itself is inside the window.
+    event_match_window_hours: float = Field(default=6.0, gt=0)
 
 
 class RuntimeSettings(BaseModel):
@@ -553,6 +557,9 @@ def _build_settings(
                 ),
                 event_max_age_hours=reader.decimal(
                     "EVENT_CATALOG_MAX_AGE_HOURS", 72.0
+                ),
+                event_match_window_hours=reader.decimal(
+                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", 6.0
                 ),
             ),
             port=reader.integer("PORT", 5000),

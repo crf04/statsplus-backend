@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -71,13 +72,14 @@ def test_routes_use_injected_dependencies_without_global_patching():
 
 
 def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monkeypatch):
-    """The one board service must carry all three reviewed features at once.
+    """The one board service must carry every reviewed feature at once.
 
-    Issue #24's cache seam, issue #26's governed mappings, and issue #29's
-    statistic catalog all assemble the same board service, so a wiring change
-    that keeps only some of them still leaves every focused unit test green.
+    Issue #24's cache seam, issue #26's governed athlete mappings, issue #29's
+    statistic catalog, and issue #28's governed event mappings all assemble the
+    same board service, so a wiring change that keeps only some of them still
+    leaves every focused unit test green.
     Pin the combination here: the board reads through the snapshot caches that
-    carry cache telemetry, holds the governed mapping collaborators, and
+    carry cache telemetry, holds both sets of governed mapping collaborators, and
     resolves statistics against the catalog the factory loaded.
     """
 
@@ -111,6 +113,16 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert board.athlete_mapping_repository is dependencies.athlete_mapping_repository
     assert dependencies.athlete_resolver is not None
     assert dependencies.athlete_mapping_repository is not None
+
+    assert board.event_resolver is dependencies.event_resolver
+    assert board.event_mapping_repository is dependencies.event_mapping_repository
+    assert dependencies.event_resolver is not None
+    assert dependencies.event_mapping_repository is not None
+    assert dependencies.event_catalog_service is not None
+    assert dependencies.event_resolver.catalog is dependencies.event_catalog_service
+    assert dependencies.event_resolver.match_window == timedelta(
+        hours=settings.catalog.event_match_window_hours
+    )
 
     assert isinstance(dependencies.statistic_catalog, StatisticCatalog)
     assert board.statistic_catalog is dependencies.statistic_catalog

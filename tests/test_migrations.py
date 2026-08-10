@@ -46,6 +46,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "005_create_event_catalog",
         "006_create_athlete_mappings",
         "007_create_athlete_mapping_contradictions",
+        "008_create_event_mappings",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -63,6 +64,12 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "athlete_mapping_decision_contradictions",
             "athlete_mapping_rejections",
             "athlete_mapping_locks",
+            "provider_event_mappings",
+            "event_mapping_decision_contradictions",
+            "event_mapping_decisions",
+            "event_mapping_decision_candidates",
+            "event_mapping_rejections",
+            "event_mapping_locks",
         ]
     )
     assert {
@@ -106,6 +113,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (5, "005_create_event_catalog"),
             (6, "006_create_athlete_mappings"),
             (7, "007_create_athlete_mapping_contradictions"),
+            (8, "008_create_event_mappings"),
         ]
 
 
@@ -127,6 +135,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "005_create_event_catalog",
         "006_create_athlete_mappings",
         "007_create_athlete_mapping_contradictions",
+        "008_create_event_mappings",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -202,6 +211,12 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "athlete_mapping_decision_contradictions",
             "athlete_mapping_rejections",
             "athlete_mapping_locks",
+            "provider_event_mappings",
+            "event_mapping_decision_contradictions",
+            "event_mapping_decisions",
+            "event_mapping_decision_candidates",
+            "event_mapping_rejections",
+            "event_mapping_locks",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -308,7 +323,10 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert first.applied == ("007_create_athlete_mapping_contradictions",)
+    assert first.applied == (
+        "007_create_athlete_mapping_contradictions",
+        "008_create_event_mappings",
+    )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
     with engine.connect() as connection:

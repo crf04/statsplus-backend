@@ -173,6 +173,32 @@ def _create_athlete_mapping_contradictions_table(connection: Connection) -> None
     AthleteMappingDecisionContradiction.__table__.create(connection, checkfirst=True)
 
 
+def _create_event_mapping_tables(connection: Connection) -> None:
+    """Create event mapping state, decisions, candidates, and rejections.
+
+    Migration 005 created the canonical event catalog these rows resolve
+    against; the mapping state itself is owned here rather than there, exactly
+    as migration 006 owns provider athlete mapping state.
+    """
+    from app.models.event_mapping import (
+        EventMappingDecision,
+        EventMappingDecisionCandidate,
+        EventMappingDecisionContradiction,
+        EventMappingLock,
+        EventMappingRejection,
+        ProviderEventMapping,
+    )
+
+    ProviderEventMapping.__table__.create(connection, checkfirst=True)
+    EventMappingDecision.__table__.create(connection, checkfirst=True)
+    # The candidate and contradiction tables reference the decision they belong
+    # to, so they are created after the decision table.
+    EventMappingDecisionCandidate.__table__.create(connection, checkfirst=True)
+    EventMappingDecisionContradiction.__table__.create(connection, checkfirst=True)
+    EventMappingRejection.__table__.create(connection, checkfirst=True)
+    EventMappingLock.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -185,6 +211,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "007_create_athlete_mapping_contradictions",
         _create_athlete_mapping_contradictions_table,
     ),
+    Migration(8, "008_create_event_mappings", _create_event_mapping_tables),
 )
 
 

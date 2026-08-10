@@ -157,11 +157,14 @@ providers. Expected upstream failures become sanitized `ProviderOutcome`
 reason codes (`timeout`, `deadline_exceeded`, `rate_limited`,
 `access_denied`, `upstream_error`, or `malformed_response`), while unexpected
 implementation defects propagate. Results and disabled-provider metadata are
-sorted deterministically. The collector does not resolve athlete/event
-identity or build comparison groups. Before returning a board it does apply
+sorted deterministically. The collector does not build comparison groups.
+Before returning a board it does apply
 the injected immutable Statistic Catalog to each market, preserving the
 provider `StatisticEvidence` and attaching a typed canonical or unmapped
-`MatchState`.
+`MatchState`, and — when the governed mapping collaborators are injected — it
+observes each market's athlete and event evidence through the resolvers
+described below, reporting the governed outcomes on `board.mapping_outcomes` and
+`board.event_mapping_outcomes` without ever removing a market.
 
 ### Statistic Catalog
 
@@ -638,6 +641,125 @@ and `scripts/migrate.py` creates the current checks on any target. The operator
 CLI never runs migrations implicitly; run `scripts/migrate.py` explicitly
 first.
 
+### Provider event mappings
+
+`EventResolver.resolve(provider, evidence, season)` accepts one typed provider
+`EventEvidence` value and an explicit requested season;
+`resolve_market(market, season)` is the board-facing spelling. Resolution asks
+one question — which single scheduled NBA game does this evidence identify? —
+and answers it only from canonical home and away teams plus schedule proximity.
+Both sides must resolve to a canonical NBA team, from the provider's canonical
+team ID or from a tricode or team name that unambiguously names one team in the
+season's schedule; a label two canonical teams answer to is not identifying
+evidence. The matchup label is retained evidence and is never parsed into
+teams, so a provider that reports no team evidence resolves no event rather
+than a guessed one. Home and away are compared in the orientation the provider
+reported, so a reversed matchup is `unmatched` reasoned `home_away_mismatch`
+rather than the same game described another way. The provider's start time must
+sit within `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default six) of the scheduled
+tip-off, and the boundary is inside the window: exactly six hours matches, one
+second more does not. Exactly one candidate is automatically qualifying; two
+equally admissible games are `ambiguous` and none is `unmatched`. Provider event
+IDs, canonical claims, matchup labels, start times, status labels, and both
+sides' team IDs, names, and abbreviations are retained as typed evidence beside
+the canonical result, and each candidate records its signed distance from the
+provider's start time.
+
+`EventMappingRepository` persists one current `provider_event_mappings` row per
+provider identity, an append-only `event_mapping_decisions` audit log, typed
+`event_mapping_decision_candidates`, durable `event_mapping_rejections`
+suppressions, and a per-identity lock row carrying that identity's observation
+clock. Governance is the one established for athletes and behaves identically:
+active-mapping precedence, append-only decisions suppressed only for a repeated
+*consecutive* observation, per-identity serialization with the lock row inserted
+inside a savepoint that is left before a duplicate `IntegrityError` is handled,
+`observed_at` fencing of a read taken before the newest governing instant, and
+one documented failure type — `EventMappingPersistenceError`, defined in
+`app.services.event_mapping_errors` — for every repository read and operator
+write plus the resolver's catalog read. That single type is what the DFS Board
+isolates; it never catches broad exceptions and still returns usable markets.
+The board contradiction machinery is shared where it is genuinely identical:
+`_contradicts` and `_contradictory_identities` in `app.services.dfs_board` take
+the fact vocabulary and tier chains as parameters, so athletes compare a name,
+a canonical ID, and one team while events compare a canonical claim, a start
+time, and two independent home/away sides. An event conflict records both
+sides of what it disputes: the canonical games the markets named as typed
+`event_mapping_decision_candidates`, and every provider evidence the
+observation asserted as typed `event_mapping_decision_contradictions`, because
+the decision row itself carries only the representative evidence.
+
+The provider's own canonical event claim (`EventEvidence.canonical_id`) decides
+whether two markets contradict each other, so it is durable evidence like the
+rest: `provider_canonical_event_id` is written onto the mapping row, the
+decision row, and each contradiction row, is part of the idempotency
+fingerprint, and is operable from the CLI. The repository is composed with the
+same configured `EVENT_MAPPING_MATCH_WINDOW_HOURS` the resolver uses, and every
+in-lock recheck of a governed decision compares start times with it; re-reading
+settings inside the transaction would let a configuration change land
+mid-decision, and falling back to the reviewed default would accept evidence a
+narrower configuration has already called a different fixture.
+
+Two rules are specific to events. A durable mapping is created only when a
+stable upstream event identity exists: a market with teams and a start time but
+no provider event ID resolves to a canonical game for the current board — the
+resolution reports it and `BoardEventMappingOutcome.canonical_event_id` answers
+with it — while `EventResolution.is_durable` is false, so no mapping row, audit
+row, rejection, or lock row is keyed on a fabricated identity and the next read
+reevaluates the evidence from scratch. And a replaced NBA game ID never inherits
+a mapping. When the season's schedule no longer lists the game a claim names,
+the identity becomes `replacement_pending` and inactive while keeping the game
+it was mapped to, whether the new evidence points at exactly one replacement
+(`replacement_event_identity`), at several (`ambiguous_replacement_event`), or at
+none (`replaced_event_absent`). The queue names the withdrawn claim as a
+candidate marked no longer scheduled beside every nearby replacement, and only
+an operator approve or override resolves it.
+
+`ambiguous`, `unmatched`, and `replacement_pending` withdraw a claim from board
+comparisons without retracting it: the row keeps its `canonical_event_id`,
+becomes inactive, and records why the identity is out of comparisons now, so a
+later unambiguous observation maps it again with no conflict left behind.
+Evidence that resolves to a *different* scheduled game under an established
+claim is a `mapping_conflict` that deactivates the mapping and stops its use
+pending review, as is provider evidence that contradicts a governed manual
+decision — a changed home or away team at the strongest tier both sides carry,
+a changed provider canonical event claim, or a start time no longer within the
+reviewed window of the approved one. Each of those is compared only when both
+the mapping and the new evidence assert it, so a claim, team identity, or start
+time one side simply omits is sparse evidence rather than a contradiction and
+stays compatible. A reschedule inside the window is the same game and not a
+conflict. Operator precedence protects a governed mapping from automatic
+*overwrite*, not from fail-closed conflict detection, and approving or
+overriding again restores the manual state and clears the conflict column.
+Missing or older-than-allowed Event Catalog data yields
+`event_catalog_unavailable`: the normalized markets stay visible on the board
+with no event comparison identity, and nothing is recorded, because there is
+nothing to compare against yet. Freshness gates a governed identity too — an
+active `manual_approved` or `manual_override` is withheld and left untouched
+while the catalog is unusable, rather than lending an operator's decision to
+evidence no schedule can place.
+
+`DFSBoardService` receives the resolver and repository by injection and reports
+`board.event_mapping_outcomes`. One board read resolves every market before it
+writes anything: markets sharing one `(provider, provider_event_id)` are one
+observation of one fixture, so compatible markets are combined into a single
+durable observation carrying every fact any of them reported and resolved as a
+whole, while markets that disagree about the fixture fail closed as one
+`mapping_conflict` reasoned `contradictory_provider_evidence`. Repeated reads,
+repeated markets, and a reordered repeat of one snapshot all leave the same
+durable row and append no further decision. Both the merge and the conflict
+order the observations by every field of the evidence they carry, not only by
+the facts that identify the fixture, so markets that agree about the game while
+spelling its label, status, end time, or update instant differently still yield
+one combined observation that does not depend on the provider's listing order.
+Catalog freshness gates the board read as it gates a single resolution: when the
+season's catalog is missing or over-age, the whole group stays
+`event_catalog_unavailable` with no canonical identity — neither merged nor
+promoted to a conflict — so a disagreement between markets queues nothing
+against an operator's standing decision, the mapping row and its history are
+untouched, and every normalized market stays on the board. The disagreement is
+withheld rather than resolved away, and fails closed as a conflict again on the
+next read with a usable catalog.
+
 PBP Stats:
 
 ```text
@@ -667,8 +789,8 @@ Migration 005 creates the writable `event_catalog` and
 `event_catalog_refreshes` tables. Migrations are applied in order. Event
 refreshes upsert by NBA game ID in one transaction without replacing the
 table; omitted historical rows remain available and replacement IDs remain
-distinct. Event/competition mapping state belongs to #28; provider-athlete
-mapping state is owned by migration 006 below. Event freshness is
+distinct. Provider event mapping state is owned by migration 008 below, and
+provider-athlete mapping state by migration 006. Event freshness is
 independent from Athlete Catalog freshness and defaults to 72 hours through
 `EVENT_CATALOG_MAX_AGE_HOURS`. Operators use
 `scripts/refresh_event_catalog.py` with one or more explicit seasons; each
@@ -700,6 +822,33 @@ report each decision's `contradictory_evidence` alongside its candidates, so an
 operator reviews everything the markets asserted rather than the one evidence
 the conflict happened to be recorded on. These commands require an
 explicit writable database URL and never contact a provider.
+
+Migration 008 creates the provider event mapping, append-only decision,
+decision candidate, decision contradiction, durable rejection, and per-identity
+lock tables (`provider_event_mappings`, `event_mapping_decisions`,
+`event_mapping_decision_candidates`,
+`event_mapping_decision_contradictions`, `event_mapping_rejections`, and
+`event_mapping_locks`). Its database checks mirror migration 006's for the event
+vocabulary: the closed mapping-state set (`ambiguous`, `auto`,
+`manual_approved`, `manual_override`, `mapping_conflict`, `rejected`,
+`replacement_pending`, `unmatched`), the closed decision-state set, active-state
+coherence — only `auto`, `manual_approved`, and `manual_override` may be active
+— cleared-rejection coherence, and conflict-column coherence, so a row that has
+left `mapping_conflict` may not keep naming a conflicting game. The boolean
+literals are `true`/`false`, so the checks are valid on PostgreSQL as well as
+SQLite, and the candidate and contradiction rows are `ON DELETE CASCADE`
+children of their decision, each keyed by it and ordered by the deterministic
+evidence order the observation was recorded in. Migration 008 is applied by
+model-driven creates, so re-running it is a no-op on a database that already
+has the tables. `tests/integration/test_postgres.py` exercises the schema, the
+cascade, the savepoint/row-lock concurrency, and the idempotency and manual
+precedence rules against a real PostgreSQL database when `TEST_DATABASE_URL` is
+set, and is skipped otherwise so the default suite stays offline.
+Operators use `scripts/event_mappings.py` for read-only listing, dry
+runs, audited approve/override/reject/clear actions, and history, with the same
+writable-URL requirement and no provider contact; the command builds the
+catalog read seam with a provider that refuses every call, so it is offline by
+construction.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
