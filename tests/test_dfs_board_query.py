@@ -99,6 +99,73 @@ def test_a_repeated_season_is_refused(settings):
         parse(settings, season=["2024-25", "2023-24"])
 
 
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "providers",
+        "market_statuses",
+        "canonical_athlete_ids",
+        "canonical_event_ids",
+        "canonical_statistic_ids",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "   ", ",", ",,"])
+def test_a_supplied_but_empty_filter_is_refused(settings, parameter, value):
+    """An empty filter narrows nothing, so it is a 400 rather than a default.
+
+    Silently reading ``providers=`` as "every provider" would answer a request
+    the caller did not make with a whole unfiltered board.
+    """
+
+    with pytest.raises(InvalidInputError) as error:
+        parse(settings, **{parameter: value})
+
+    assert parameter in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "value", ["dabble,", ",dabble", "dabble,,prizepicks", "dabble, ,prizepicks"]
+)
+def test_an_empty_csv_member_is_refused(settings, value):
+    with pytest.raises(InvalidInputError) as error:
+        parse(settings, providers=value)
+
+    assert "providers" in str(error.value)
+
+
+def test_an_empty_repeated_value_is_refused_beside_a_real_one(settings):
+    with pytest.raises(InvalidInputError):
+        parse(settings, providers=["dabble", ""])
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_supplied_but_empty_season_is_refused(settings, value):
+    with pytest.raises(InvalidInputError) as error:
+        parse(settings, season=value)
+
+    assert "season" in str(error.value)
+
+
+def test_a_repeated_identity_is_accepted_once(settings):
+    """Duplicates are a redundant way to name one identity, not an error."""
+
+    request = parse(
+        settings,
+        providers=["dabble,dabble", "dabble"],
+        canonical_athlete_ids="203999,203999",
+    )
+
+    assert request.filters.providers == ("dabble",)
+    assert request.filters.canonical_athlete_ids == (203999,)
+
+
+def test_surrounding_whitespace_is_trimmed_from_a_real_value(settings):
+    request = parse(settings, providers=" dabble , prizepicks ", season=" 2024-25 ")
+
+    assert request.filters.providers == ("dabble", "prizepicks")
+    assert request.query.season == "2024-25"
+
+
 def test_an_unbounded_identity_list_is_refused(settings):
     values = [str(index) for index in range(MAX_FILTER_VALUES + 1)]
 

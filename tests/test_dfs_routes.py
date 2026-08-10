@@ -213,15 +213,26 @@ def test_supported_filters_narrow_the_board(make_board_client):
         "canonical_athlete_ids=jokic",
         "season=not-a-season",
         "athlete_name=jokic",
+        "providers=",
+        "providers=,",
+        "providers=dabble,",
+        "market_statuses=",
+        "canonical_athlete_ids=",
+        "canonical_event_ids=",
+        "canonical_statistic_ids=",
+        "season=",
+        "season=%20",
     ],
 )
 def test_an_invalid_filter_uses_the_shared_400_contract(make_board_client, query):
-    client, _ = make_board_client()
+    client, providers = make_board_client()
 
     response = client.get(f"/api/dfs/board?{query}", headers=AUTH)
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_input"
+    # An unparsable request never becomes an unfiltered board read.
+    assert all(provider.calls == 0 for provider in providers.values())
 
 
 # -- outcomes --------------------------------------------------------------

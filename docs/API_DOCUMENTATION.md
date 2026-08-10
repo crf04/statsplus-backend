@@ -476,7 +476,8 @@ provider. Startup fails if the flag is set without a provider registry.
 Every filter names an exact identity the board itself established. There is no
 fuzzy or partial name filter. Values may repeat (`providers=dabble&providers=underdog`)
 or be comma-separated (`providers=dabble,underdog`), and at most 100 values are
-accepted per filter.
+accepted per filter. Surrounding whitespace is trimmed, and naming one identity
+twice (`providers=dabble,dabble`) is accepted and collapsed to one.
 
 | Parameter | Type | Meaning |
 | --- | --- | --- |
@@ -490,6 +491,13 @@ accepted per filter.
 Any other query parameter, an unsupported vocabulary value, an unparsable
 identity, or a non-canonical season returns `400 invalid_input` in the shared
 error shape. A misspelled filter is refused rather than ignored.
+
+A supplied filter is never widened back to "no filter". An empty value or an
+empty member of a comma-separated list is `400 invalid_input` too — `providers=`,
+`providers=,`, `providers=dabble,`, `market_statuses=`, a blank canonical ID, and
+`season=` are all refused, and none of them calls a provider or reads a
+database. Omit the parameter entirely to accept the unfiltered board or the
+default season.
 
 ### Response semantics
 
