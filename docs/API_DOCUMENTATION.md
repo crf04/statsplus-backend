@@ -556,10 +556,15 @@ so an unchanged board revalidates as `304` rather than resending a board that
 differs only in how long ago it was read. Send the tag back verbatim in
 `If-None-Match`.
 
-An authenticated board is never shared: responses carry
-`Cache-Control: private, no-cache, max-age=0, must-revalidate`,
-`Vary: Authorization`, and `X-Content-Type-Options: nosniff`. `X-Request-ID` and
-the same cache headers are present on `304` responses too.
+An authenticated board is never shared. *Every* response from this route —
+`200`, `304`, `400`, `401`, `404`, `503`, and a centrally handled `500` alike —
+carries `Cache-Control: private, no-cache, max-age=0, must-revalidate`,
+`Vary: Authorization`, `X-Content-Type-Options: nosniff`, and `X-Request-ID`, so
+no failure for one caller can be served from a shared cache to another. `Vary`
+is added rather than replaced, so a `Vary: Origin` from CORS survives beside it.
+
+`ETag` is the exception: it identifies one board, so it appears on `200` and
+`304` only and never on a failure.
 
 ### Executable response fixtures
 

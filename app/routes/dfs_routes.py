@@ -43,8 +43,31 @@ def dfs_board():
     return _board_response(representation)
 
 
+@dfs_bp.after_request
+def _private_board_response(response):
+    """Make every board response one caller's alone, whatever its status.
+
+    A 400, a 404, a 503, and a centrally handled 500 are as specific to the
+    authenticated caller as the board is, and each of them is produced by a
+    different layer -- the parser, the publication gate, the error handlers.
+    Stating the policy once, at the blueprint that owns this route, is the only
+    way none of them can be published without it, and keeps every other
+    blueprint's caching untouched.
+
+    An entity tag is deliberately not set here: it identifies one board, and a
+    failure is not a board a caller could revalidate.
+    """
+
+    response.headers["Cache-Control"] = BOARD_CACHE_CONTROL
+    # Added rather than assigned, so a Vary another layer states -- CORS naming
+    # Origin, say -- is preserved beside this one.
+    response.vary.add("Authorization")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def _board_response(representation):
-    """One board representation as a private, conditional HTTP response."""
+    """One board representation as a conditional HTTP response."""
 
     if representation.is_not_modified:
         response = current_app.response_class(status=304)
@@ -54,9 +77,6 @@ def _board_response(representation):
     # The tag is weak because it identifies the board's stated facts rather
     # than the exact bytes of one reading of them.
     response.set_etag(representation.etag, weak=True)
-    response.headers["Cache-Control"] = BOARD_CACHE_CONTROL
-    response.headers["Vary"] = "Authorization"
-    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 

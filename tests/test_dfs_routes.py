@@ -465,6 +465,89 @@ def test_a_board_event_carries_no_identity_or_upstream_text(
 # -- conditional requests and headers --------------------------------------
 
 
+def assert_private(response) -> None:
+    """Every board response belongs to one caller and no shared cache."""
+
+    assert response.headers["Cache-Control"] == (
+        "private, no-cache, max-age=0, must-revalidate"
+    )
+    assert "public" not in response.headers["Cache-Control"]
+    assert "Authorization" in response.headers["Vary"]
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Request-ID"]
+
+
+@pytest.mark.parametrize(
+    ("query", "headers", "settings_kwargs", "status"),
+    [
+        ("", AUTH, {}, 200),
+        ("?providers=", AUTH, {}, 400),
+        ("?athlete_name=jokic", AUTH, {}, 400),
+        ("", AUTH, {"enabled": False}, 404),
+        ("", {}, {}, 401),
+    ],
+)
+def test_every_board_response_is_private(
+    make_board_client, query, headers, settings_kwargs, status
+):
+    client, _ = make_board_client(settings=board_settings(**settings_kwargs))
+
+    response = client.get(f"/api/dfs/board{query}", headers=headers)
+
+    assert response.status_code == status
+    assert_private(response)
+
+
+def test_an_unavailable_and_an_oversized_board_are_private(make_board_client):
+    unavailable, _ = make_board_client(
+        failures={"dabble": requests.exceptions.Timeout("x")}
+    )
+    oversized, _ = make_board_client(max_markets=1)
+
+    outage = unavailable.get("/api/dfs/board?providers=dabble", headers=AUTH)
+    refused = oversized.get("/api/dfs/board", headers=AUTH)
+
+    assert (outage.status_code, refused.status_code) == (503, 400)
+    assert_private(outage)
+    assert_private(refused)
+
+
+def test_an_unexpected_failure_is_private_too(make_board_client, monkeypatch):
+    """A centrally handled 500 is still one caller's response, not a cacheable one."""
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("host=secret.example")
+
+    monkeypatch.setattr(DFSBoardResponseService, "respond_to_query", explode)
+    client, _ = make_board_client()
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 500
+    assert "secret" not in response.get_data(as_text=True)
+    assert_private(response)
+
+
+@pytest.mark.parametrize(
+    ("query", "headers", "settings_kwargs"),
+    [
+        ("?providers=", AUTH, {}),
+        ("", AUTH, {"enabled": False}),
+        ("", {}, {}),
+    ],
+)
+def test_only_a_published_board_carries_an_entity_tag(
+    make_board_client, query, headers, settings_kwargs
+):
+    """A tag identifies a board; a failure is not one to revalidate."""
+
+    client, _ = make_board_client(settings=board_settings(**settings_kwargs))
+
+    response = client.get(f"/api/dfs/board{query}", headers=headers)
+
+    assert "ETag" not in response.headers
+
+
 def test_a_served_board_is_private_and_revalidatable(make_board_client):
     client, _ = make_board_client()
 
