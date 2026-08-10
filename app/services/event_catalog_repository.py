@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -12,17 +12,14 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.domain.freshness import exact_seconds
+from app.domain.utc import as_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 
 DEFAULT_FAILURE_SUMMARY = "The event catalog refresh could not complete."
 
 
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
-
 def _iso(value: datetime | None) -> str | None:
-    return _utc(value).isoformat() if value is not None else None
+    return as_utc(value).isoformat() if value is not None else None
 
 
 class EventCatalogRepository:
@@ -110,7 +107,7 @@ class EventCatalogRepository:
         # hours made a third of an hour gate at 1200 seconds and report
         # 1199.99999999999988, so an age and its own ceiling disagreed at the
         # boundary they were compared at.
-        return {"season": season, "fresh": bool(success and _utc(observed_at) - _utc(success) <= max_age),
+        return {"season": season, "fresh": bool(success and as_utc(observed_at) - as_utc(success) <= max_age),
                 "max_age_seconds": exact_seconds(max_age),
                 "last_attempt_at": _iso(row["last_attempt_at"]) if row else None,
                 "last_success_at": _iso(success), "last_failure_at": _iso(row["last_failure_at"]) if row else None,

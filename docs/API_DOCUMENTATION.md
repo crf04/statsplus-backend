@@ -194,7 +194,6 @@ then `game_id`.
 ```json
 {
   "slate_date": "2026-01-02",
-  "pool_status": "unavailable",
   "freshness": {
     "schedule": {
       "status": "fresh",
@@ -235,13 +234,17 @@ then `game_id`.
 
 `status.state` is `scheduled`, `postponed`, or `final`; `status.label` retains
 the Event Catalog label. `classification` is `null` for an ordinary Regular
-Season game and contains the catalog classification for unusual games.
-Preseason games are included with `preseason: true`; All-Star exhibitions are
-excluded. Postponed games remain on their ET slate.
+Season game and contains meaningful provider display classification for
+unusual games, including a reviewed event sublabel such as `Emirates NBA Cup`.
+Generic series, game-number, and postponement sublabels are not badges. The
+canonical game-ID kind remains authoritative: `001` games are included with
+`preseason: true`, and `003` All-Star exhibitions are excluded even when the
+display classification is branded differently. Postponed games remain on
+their ET slate.
 
 Until the Player Pool surface is implemented, both team counts are truthfully
-zero, top-level `pool_status` is `unavailable`, and `freshness.pool` reports an
-unavailable surface with no retrieval time or providers. A stale but stored
+zero and `freshness.pool` is the sole pool-status authority: it reports an
+unavailable surface with no retrieval time or providers. A stale but populated
 schedule remains a `200` with `freshness.schedule.status: "stale"`.
 Schedule freshness uses the nightly schedule surface's independent
 `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default), not the broader
@@ -252,9 +255,9 @@ Empty and error behavior:
 
 | Case | Response |
 | --- | --- |
-| Date has no current-season games | `200` with `games: []` and freshness blocks |
+| Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is not exactly `YYYY-MM-DD` | `400 invalid_input` |
-| No successful schedule is stored | `503 provider_unavailable` |
+| No successful schedule metadata or no catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
 ### Get Game Logs

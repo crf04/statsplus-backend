@@ -91,8 +91,23 @@ def test_recorded_schedule_preserves_provider_and_game_type_classification():
     parsed = parse_recorded_schedule(payload, season="2025-26")
 
     assert parsed["classification"].tolist() == [
-        "Regular Season",
-        "Regular Season",
+        "NBA Finals",
+        "Emirates NBA Cup",
         "International Series",
         "Skills Challenge",
+    ]
+
+
+def test_schedule_sublabel_filters_generic_series_and_postponement_evidence():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][0][sublabel_index] = "Series tied 1-1"
+    result_set["rowSet"][1][sublabel_index] = "Postponed due to weather"
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed["classification"].tolist()[:2] == [
+        "Regular Season",
+        "Regular Season",
     ]

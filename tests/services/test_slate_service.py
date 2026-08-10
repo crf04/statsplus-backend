@@ -173,7 +173,6 @@ def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     payload = service.get_slate()
 
     assert payload["slate_date"] == "2026-01-02"
-    assert payload["pool_status"] == "unavailable"
     assert payload["freshness"] == {
         "schedule": {
             "status": "fresh",
@@ -194,7 +193,7 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
     freshness = {
         "fresh": True,
         "last_success_at": retrieved_at.isoformat(),
-        "event_count": 0,
+        "event_count": 1,
     }
 
     at_boundary = _service(
@@ -214,7 +213,7 @@ def test_schedule_freshness_accepts_a_valid_injected_max_age():
     retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
     payload = _service(
         [],
-        freshness={"last_success_at": retrieved_at.isoformat()},
+        freshness={"last_success_at": retrieved_at.isoformat(), "event_count": 1},
         now=retrieved_at + timedelta(hours=2),
         schedule_max_age=timedelta(hours=1),
     ).get_slate("2026-01-02")
@@ -229,7 +228,9 @@ def test_schedule_freshness_rejects_invalid_injected_max_age(schedule_max_age):
 
 
 def test_slate_returns_an_empty_success_for_a_date_without_games():
-    payload = _service([]).get_slate("2026-01-15")
+    payload = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")]
+    ).get_slate("2026-01-15")
 
     assert payload["games"] == []
 
@@ -244,6 +245,20 @@ def test_slate_requires_a_stored_schedule_success_even_when_the_date_is_empty():
     service = _service(
         [],
         freshness={"fresh": False, "last_success_at": None, "event_count": 0},
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        service.get_slate("2026-01-15")
+
+
+def test_slate_requires_stored_events_even_when_success_metadata_exists():
+    service = _service(
+        [],
+        freshness={
+            "fresh": True,
+            "last_success_at": "2026-01-02T10:00:00+00:00",
+            "event_count": 0,
+        },
     )
 
     with pytest.raises(ProviderUnavailableError):

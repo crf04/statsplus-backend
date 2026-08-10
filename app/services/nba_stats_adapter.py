@@ -43,7 +43,7 @@ import requests
 from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.domain.nba_events import event_classification
+from app.domain.nba_events import display_event_classification
 from app.errors import ProviderUnavailableError
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
@@ -313,7 +313,11 @@ def normalize_whole_season_schedule(
             or _text_value(row.get("gameSubtype"))
             or _text_value(row.get("gameLabel"))
         )
-        classification = event_classification(game_id, provider_classification)
+        classification = display_event_classification(
+            game_id,
+            provider_classification,
+            _text_value(row.get("gameSubLabel")),
+        )
         evidence: dict[str, object] = {}
         status_marker = any(
             "postpon" in _text_value(row.get(field)).lower()

@@ -8,7 +8,6 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 def test_get_slate_returns_the_service_payload(client, dependencies):
     expected = {
         "slate_date": "2026-01-02",
-        "pool_status": "unavailable",
         "freshness": {
             "schedule": {
                 "status": "fresh",
