@@ -135,6 +135,29 @@ timer. Set `EVENT_CATALOG_MAX_AGE_HOURS` to change the default 72-hour
 freshness window. For offline verification, pass `--fixture` with a recorded
 `ScheduleLeagueV2` JSON payload.
 
+### Railway Nightly Refresh
+
+Configure a separate Railway cron service from this repository with the same
+`DATABASE_URL` as the API and this start command:
+
+```bash
+python scripts/nightly_refresh.py
+```
+
+Set its Cron Schedule to `0 10 * * *`. Railway evaluates cron expressions in
+UTC, so this runs at about 5:00 AM Eastern during standard time and 6:00 AM
+during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
+instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
+standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
+
+The process refreshes all stats tables and the current season's Event Catalog
+as one ordered unit. If either step fails, it starts the whole unit over once;
+after that single retry it exits nonzero. Success exits zero. The stats
+freshness timestamp is committed in the same transaction as the table swaps,
+and the Event Catalog keeps its existing transactional success timestamp. The
+admin `POST /api/data/update_database` path uses the same stats publication
+service and remains the manual backstop.
+
 Validate the bundled fixture without changing it:
 
 ```bash

@@ -161,8 +161,13 @@ def build_default_refresh_handlers(
 
     from app.services.data_service import DataService
     from app.services.player_service import PlayerService
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
 
-    data_service = data_service or DataService(engine, settings=settings)
+    data_service = data_service or DataService(
+        engine,
+        settings=settings,
+        stats_freshness=StatsFreshnessRepository(engine),
+    )
     player_service = player_service or PlayerService(engine, settings=settings)
 
     def player_pbp(

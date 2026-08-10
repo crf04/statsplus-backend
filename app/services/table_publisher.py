@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
+from typing import Protocol
 
 import pandas as pd
 from sqlalchemy import text
@@ -36,7 +37,16 @@ class TablePublicationError(ValueError):
 # the table swap and leave a window in which a competing worker could reclaim
 # the job.  Keeping this callback typed at the publisher boundary makes the
 # transaction/fencing contract explicit to every caller.
-PublicationFence = Callable[[Connection], None]
+class PublicationFence(Protocol):
+    """Validate ownership immediately before the first live-table swap."""
+
+    def __call__(self, connection: Connection) -> None: ...
+
+
+class PublicationCompletion(Protocol):
+    """Persist completion after every swap, inside the same transaction."""
+
+    def __call__(self, connection: Connection) -> None: ...
 
 
 class AtomicTablePublisher:
@@ -54,6 +64,7 @@ class AtomicTablePublisher:
         frames: Mapping[str, pd.DataFrame],
         *,
         publication_fence: PublicationFence | None = None,
+        publication_completion: PublicationCompletion | None = None,
     ) -> None:
         """Publish ``frames`` (named by target table) as one atomic set.
 
@@ -89,6 +100,8 @@ class AtomicTablePublisher:
                     publication_fence(connection)
                 for table in targets:
                     self._swap(connection, staging_names[table], table)
+                if publication_completion is not None:
+                    publication_completion(connection)
         except BaseException:
             self._cleanup_staging(staging_names)
             raise

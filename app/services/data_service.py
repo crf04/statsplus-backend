@@ -10,6 +10,7 @@ transaction and preserves the previous tables if anything fails.
 
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 import pandas as pd
 from nba_api.stats.static import players, teams
@@ -27,6 +28,7 @@ from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher, PublicationFence
+from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.utils.performance_monitor import monitor_nba_api_calls
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,8 @@ class DataService:
         *,
         pbp_provider: PBPStatsProvider | None = None,
         nba_stats_provider: NBAStatsProvider | None = None,
+        clock: Callable[[], datetime] | None = None,
+        stats_freshness: StatsFreshnessWriter | None = None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -47,6 +51,8 @@ class DataService:
         self.pbp_provider = pbp_provider or PBPStatsAdapter(settings=self.settings)
         self.pbp = self.pbp_provider
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.stats_freshness = stats_freshness
 
     def update_all_data(
         self,
@@ -65,7 +71,20 @@ class DataService:
             frames = self._collect_all_frames()
             progress.transform("Transforming provider data")
             progress.publish("Publishing refreshed tables")
-            self.publisher.publish(frames, publication_fence=publication_fence)
+            publication_completion = None
+            stats_freshness = self.stats_freshness
+            if stats_freshness is not None:
+                def record_stats_completion(connection):
+                    stats_freshness.record_success(
+                        self._clock(), connection=connection
+                    )
+
+                publication_completion = record_stats_completion
+            self.publisher.publish(
+                frames,
+                publication_fence=publication_fence,
+                publication_completion=publication_completion,
+            )
             progress.complete()
             return True
         except ProviderUnavailableError:
