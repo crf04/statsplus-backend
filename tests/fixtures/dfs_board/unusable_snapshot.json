@@ -4,6 +4,7 @@
     "details": {
       "contract_version": "1",
       "disabled_providers": [
+        "prizepicks",
         "underdog"
       ],
       "provider_outcomes": [
@@ -13,18 +14,8 @@
           "freshness": null,
           "future_observation": false,
           "provider": "dabble",
-          "reason": "timeout",
-          "status": "failed",
-          "warning_codes": []
-        },
-        {
-          "cache_failure_reason": null,
-          "cache_status": null,
-          "freshness": null,
-          "future_observation": false,
-          "provider": "prizepicks",
-          "reason": "timeout",
-          "status": "failed",
+          "reason": null,
+          "status": "complete",
           "warning_codes": []
         }
       ]

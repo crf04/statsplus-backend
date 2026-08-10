@@ -412,6 +412,87 @@ def test_no_usable_snapshot_is_a_sanitized_service_unavailable():
     assert details["disabled_providers"] == ["underdog"]
 
 
+def test_a_snapshot_past_the_stale_ceiling_is_not_a_usable_board():
+    """A retrieval nothing on the board may read is an outage, not a 200.
+
+    The provider succeeded, so its status is ``complete``; but every market it
+    carried is excluded as ``stale_snapshot``, so the caller would receive a
+    board stating nothing at all.
+    """
+
+    beyond = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    comparison_service, _ = _service([beyond])
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError) as error:
+        service.respond(board_request())
+
+    outcome = error.value.public_details["provider_outcomes"][0]
+    assert error.value.status_code == 503
+    assert outcome["status"] == "complete"
+    assert outcome["freshness"] is None
+    assert outcome["future_observation"] is False
+
+
+def test_a_snapshot_at_the_exact_stale_ceiling_is_still_usable():
+    """The maximum permitted age is inclusive here, as everywhere else."""
+
+    ceiling = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1800),
+    )
+    comparison_service, _ = _service([ceiling])
+    service = build_service(comparison_service)
+
+    representation = service.respond(board_request())
+
+    assert representation.status_code == 200
+    assert representation.payload["provider_reports"][0]["freshness"] == "stale"
+
+
+def test_a_future_dated_snapshot_alone_is_not_a_usable_board():
+    future = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT + timedelta(seconds=60),
+    )
+    comparison_service, _ = _service([future])
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError) as error:
+        service.respond(board_request())
+
+    outcome = error.value.public_details["provider_outcomes"][0]
+    assert outcome["future_observation"] is True
+    assert outcome["freshness"] is None
+
+
+def test_one_readable_provider_publishes_the_board_beside_an_unreadable_one():
+    beyond = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    fresh = _snapshot(
+        "prizepicks",
+        (_market(provider="prizepicks", market_id="m-2", threshold="26.0"),),
+    )
+    comparison_service, _ = _service([beyond, fresh])
+    service = build_service(comparison_service)
+
+    representation = service.respond(board_request())
+
+    assert representation.status_code == 200
+    assert [
+        entry["reason"] for entry in representation.payload["unresolved_markets"]
+    ] == ["stale_snapshot"]
+
+
 def test_an_oversized_board_is_refused_with_its_observed_count():
     comparison_service, _ = complete_board_service(max_markets=1)
     service = build_service(comparison_service)

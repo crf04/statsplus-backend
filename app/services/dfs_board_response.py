@@ -349,11 +349,31 @@ def _has_usable_provider(board: ComparisonBoard) -> bool:
 
     A complete, partial, permitted-stale, or empty-complete snapshot all count.
     Emptiness is a fact about the providers' current offerings, not an outage.
+
+    A retrieval that succeeded is not by itself a usable board.  An observation
+    past its provider's stale-if-error ceiling, or timestamped ahead of the
+    board's own clock, enters no comparison and leaves every one of its markets
+    unresolved, so a board carrying only those states nothing and is reported as
+    the outage it is.  Both are read from the report's own typed evidence --
+    :class:`~app.domain.comparisons.MarketFreshness` and the future-observation
+    flag the board already derived -- never from exclusion text.
     """
 
-    return any(
+    return any(_is_usable(report) for report in board.provider_reports)
+
+
+def _is_usable(report: Any) -> bool:
+    """Whether one provider report is a snapshot the board could read.
+
+    A complete or partial outcome always carries a snapshot, so it always
+    carries an observation: freshness is absent exactly when the observation is
+    beyond the permitted maximum age or ahead of the board's clock.
+    """
+
+    return (
         report.status in _USABLE_PROVIDER_STATUSES
-        for report in board.provider_reports
+        and not report.future_observation
+        and report.freshness is not None
     )
 
 
@@ -364,6 +384,10 @@ def _provider_outcome(report: Any) -> dict[str, Any]:
         "provider": report.provider,
         "status": report.status,
         "reason": report.reason,
+        # Why a successful retrieval still published nothing: both are closed
+        # facts the board derived, never an upstream label.
+        "freshness": None if report.freshness is None else report.freshness.value,
+        "future_observation": report.future_observation,
         "warning_codes": list(report.warning_codes),
         "cache_status": None if report.cache is None else report.cache.status,
         "cache_failure_reason": (

@@ -515,13 +515,23 @@ recommendation, average, preferred market, or entry payout.
 
 | Status | When |
 | --- | --- |
-| `200` | At least one provider produced a usable snapshot — complete, partial, permitted-stale, or empty-complete. An empty complete snapshot is a valid empty board, not an outage. |
+| `200` | At least one provider produced a *readable* snapshot — complete, partial, permitted-stale, or empty-complete. An empty complete snapshot is a valid empty board, not an outage. |
 | `304` | The caller's `If-None-Match` already holds an equivalent board. |
 | `400 invalid_input` | A filter cannot be parsed or is outside a supported vocabulary. |
 | `400 board_too_large` | The post-filter board exceeds `DFS_COMPARISON_MAX_MARKETS`. Nothing is truncated; `details` states `observed_market_count`, `market_limit`, and `supported_filters`. |
 | `401` | Missing or invalid Firebase credentials. |
 | `404 dfs_board_disabled` | The deployment does not publish the board. |
-| `503 provider_unavailable` | No provider produced a usable snapshot. `details` states the sanitized Provider Outcomes and the disabled providers. |
+| `503 provider_unavailable` | No provider produced a readable snapshot. `details` states the sanitized Provider Outcomes and the disabled providers. |
+
+A snapshot is *readable* only while the board can still compare it. A retrieval
+that succeeded but is older than that provider's `DFS_<PROVIDER>_CACHE_STALE_IF_ERROR_SECONDS`
+ceiling, or timestamped ahead of the board's own clock, resolves no market at
+all — every market it carried is `stale_snapshot` or `future_snapshot` — so a
+board carrying only those answers `503` rather than a `200` stating nothing. The
+maximum age is inclusive: a snapshot exactly at the ceiling is still readable.
+Each sanitized Provider Outcome in the `503` body therefore also states its
+`freshness` (`fresh`, `stale`, or `null`) and `future_observation`, so a caller
+can tell a failed retrieval from an unreadable one.
 
 ### Caching
 
@@ -539,7 +549,7 @@ the same cache headers are present on `304` responses too.
 ### Executable response fixtures
 
 The complete-success, mixed partial/stale, empty, oversized, unauthenticated,
-disabled, and total-failure responses are recorded verbatim in
+disabled, total-failure, and unreadable-snapshot responses are recorded verbatim in
 `tests/fixtures/dfs_board/` and asserted byte-for-byte by
 `tests/test_dfs_routes.py`, so these examples cannot drift from behavior:
 
@@ -552,6 +562,7 @@ disabled, and total-failure responses are recorded verbatim in
 | Unauthenticated | `tests/fixtures/dfs_board/unauthenticated.json` |
 | Disabled | `tests/fixtures/dfs_board/disabled.json` |
 | Total failure | `tests/fixtures/dfs_board/total_failure.json` |
+| Unreadable snapshot | `tests/fixtures/dfs_board/unusable_snapshot.json` |
 
 Rerecord them with `RECORD_BOARD_FIXTURES=1 pytest tests/test_dfs_routes.py`
 after an intended contract change, and review the diff.

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -284,6 +285,22 @@ def test_an_oversized_board_is_refused_without_truncation(make_board_client):
 
     assert response.status_code == 400
     assert_fixture("oversized", response.get_json())
+
+
+def test_a_board_no_provider_could_be_read_from_is_a_sanitized_503(make_board_client):
+    """A snapshot past its stale ceiling publishes no board, only an outage."""
+
+    beyond = _snapshot(
+        "dabble",
+        (_market(market_id="m-1", threshold="25.5"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    client, _ = make_board_client([beyond])
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 503
+    assert_fixture("unusable_snapshot", response.get_json())
 
 
 def test_a_total_provider_failure_is_a_sanitized_503(make_board_client):
