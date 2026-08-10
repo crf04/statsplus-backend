@@ -105,6 +105,20 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "heartbeat_at",
         "attempt_count",
     }
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_pool_snapshots")
+    } == {
+        "season",
+        "game_ids",
+        "payload",
+        "retrieved_at",
+        "updated_at",
+        "lease_owner",
+        "lease_expires_at",
+        "refresh_version",
+        "refresh_outcome",
+    }
 
     with engine.connect() as connection:
         assert connection.execute(

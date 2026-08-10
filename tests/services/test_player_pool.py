@@ -5,6 +5,7 @@ from dataclasses import fields, replace
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 import pytest
 from sqlalchemy import create_engine
 
@@ -23,6 +24,7 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.migrations import run_migrations
+from app.errors import ProviderUnavailableError
 from app.services.player_pool import PlayerPoolService
 from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
 from app.services.athlete_resolver import (
@@ -207,14 +209,26 @@ def _event_outcome(
     )
 
 
-def _provider_outcome(provider, markets=None, *, failed=False):
+def _provider_outcome(
+    provider,
+    markets=None,
+    *,
+    failed=False,
+    retrieved_at=NOW,
+    cache_status=None,
+):
     if failed:
         return ProviderOutcome(provider, ProviderOutcomeStatus.FAILED, reason="timeout")
     snapshot = ProviderSnapshot(
         provider=provider, status=SnapshotStatus.COMPLETE,
-        markets=tuple(markets or ()), coverage=CoverageEvidence(), retrieved_at=NOW,
+        markets=tuple(markets or ()), coverage=CoverageEvidence(), retrieved_at=retrieved_at,
     )
-    return ProviderOutcome(provider, ProviderOutcomeStatus.COMPLETE, snapshot=snapshot)
+    return ProviderOutcome(
+        provider,
+        ProviderOutcomeStatus.COMPLETE,
+        snapshot=snapshot,
+        cache_status=cache_status,
+    )
 
 
 def _record(record_type, **values):
@@ -355,21 +369,283 @@ def test_partial_refresh_replaces_union_and_reports_missing_provider(tmp_path):
 
 
 def test_simultaneous_pool_requests_share_one_atomic_refresh(tmp_path):
-    boards = SequencedBoardService(_joined_board(("prizepicks", "pp-1", 101)))
-    service = _persistent_service(tmp_path, boards, lambda: NOW)
+    database_url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    entered = Event()
+    release = Event()
+
+    class BlockingBoardService:
+        def __init__(self):
+            self.queries = []
+
+        def get_board(self, query):
+            self.queries.append(query)
+            entered.set()
+            assert release.wait(timeout=5)
+            return _joined_board(("prizepicks", "pp-1", 101))
+
+    class RefusingBoardService:
+        def get_board(self, query):
+            pytest.fail("the follower must reuse the durable winner")
+
+    boards = BlockingBoardService()
+    first = PlayerPoolService(
+        boards,
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW,
+    )
+    second = PlayerPoolService(
+        RefusingBoardService(),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW,
+    )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        pools = tuple(
-            executor.map(
-                lambda _: service.get_pool(
-                    season="2025-26", game_ids={"0022500001"}
-                ),
-                range(2),
-            )
+        owner = executor.submit(
+            first.get_pool, season="2025-26", game_ids={"0022500001"}
         )
+        assert entered.wait(timeout=5)
+        follower = executor.submit(
+            second.get_pool, season="2025-26", game_ids={"0022500001"}
+        )
+        release.set()
+        pools = (owner.result(timeout=5), follower.result(timeout=5))
 
     assert len(boards.queries) == 1
     assert pools[0] == pools[1]
+
+
+def test_simultaneous_total_failure_shares_one_stale_decision(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    initial = PlayerPoolService(
+        RecordedBoardService(_joined_board(("prizepicks", "pp-1", 101))),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(engine),
+        clock=lambda: NOW,
+    )
+    initial.get_pool(season="2025-26", game_ids={"0022500001"})
+    entered = Event()
+    release = Event()
+
+    class BlockingFailure:
+        def __init__(self):
+            self.calls = 0
+
+        def get_board(self, query):
+            self.calls += 1
+            entered.set()
+            assert release.wait(timeout=5)
+            return _board((_provider_outcome("prizepicks", failed=True),))
+
+    class RefusingBoardService:
+        def get_board(self, query):
+            pytest.fail("the follower must adopt the durable failure decision")
+
+    failure = BlockingFailure()
+    follower_waiting = Event()
+
+    def wait_for_owner(seconds):
+        follower_waiting.set()
+        release.wait(timeout=5)
+
+    owner_service = PlayerPoolService(
+        failure,
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW + timedelta(hours=1),
+    )
+    follower_service = PlayerPoolService(
+        RefusingBoardService(),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW + timedelta(hours=1),
+        sleeper=wait_for_owner,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owner = executor.submit(
+            owner_service.get_pool,
+            season="2025-26",
+            game_ids={"0022500001"},
+        )
+        assert entered.wait(timeout=5)
+        follower = executor.submit(
+            follower_service.get_pool,
+            season="2025-26",
+            game_ids={"0022500001"},
+        )
+        assert follower_waiting.wait(timeout=5)
+        release.set()
+        pools = (owner.result(timeout=5), follower.result(timeout=5))
+
+    assert failure.calls == 1
+    assert pools[0].freshness["status"] == "stale-served"
+    assert pools[1].freshness["status"] == "stale-served"
+
+
+def test_restart_reuses_the_persisted_snapshot_without_a_board_fetch(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    repository = PlayerPoolSnapshotRepository(engine)
+    first = PlayerPoolService(
+        RecordedBoardService(_joined_board(("prizepicks", "pp-1", 101))),
+        CATALOG,
+        snapshot_repository=repository,
+        clock=lambda: NOW,
+    )
+    expected = first.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    class RefusingBoardService:
+        def get_board(self, query):
+            pytest.fail("a restarted service must reuse the stored snapshot")
+
+    restarted = PlayerPoolService(
+        RefusingBoardService(),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW + timedelta(minutes=1),
+    )
+
+    assert restarted.get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    ) == expected
+
+
+def test_zero_provider_outcomes_are_total_failure_and_stale_serve(tmp_path):
+    now = [NOW]
+    boards = SequencedBoardService(
+        _joined_board(("prizepicks", "pp-1", 101)),
+        _board(()),
+    )
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+    service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    now[0] += timedelta(hours=1)
+    stale = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert stale.freshness["status"] == "stale-served"
+    assert [player.canonical_player_id for player in stale.players] == [101]
+
+
+def test_expected_collection_exception_stale_serves_but_defects_propagate(tmp_path):
+    now = [NOW]
+
+    class RaisingBoardService:
+        def __init__(self, error):
+            self.error = error
+
+        def get_board(self, query):
+            raise self.error
+
+    initial = _persistent_service(
+        tmp_path,
+        RecordedBoardService(_joined_board(("prizepicks", "pp-1", 101))),
+        lambda: now[0],
+    )
+    initial.get_pool(season="2025-26", game_ids={"0022500001"})
+    now[0] += timedelta(hours=1)
+    expected = _persistent_service(
+        tmp_path,
+        RaisingBoardService(ProviderUnavailableError()),
+        lambda: now[0],
+    )
+    assert expected.get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    ).freshness["status"] == "stale-served"
+
+    defect = _persistent_service(
+        tmp_path, RaisingBoardService(RuntimeError("defect")), lambda: now[0]
+    )
+    with pytest.raises(RuntimeError, match="defect"):
+        defect.get_pool(season="2025-26", game_ids={"0022500001"})
+
+
+def test_expected_collection_exception_without_snapshot_is_honestly_unavailable(
+    tmp_path,
+):
+    class UnavailableBoardService:
+        def get_board(self, query):
+            raise ProviderUnavailableError()
+
+    service = _persistent_service(tmp_path, UnavailableBoardService(), lambda: NOW)
+
+    pool = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert pool.players == ()
+    assert pool.freshness == {
+        "status": "unavailable",
+        "retrieved_at": None,
+        "providers": {},
+    }
+
+
+def test_repeated_failures_do_not_extend_the_six_hour_snapshot_age(tmp_path):
+    now = [NOW]
+    boards = SequencedBoardService(
+        _joined_board(("prizepicks", "pp-1", 101)),
+        _board((_provider_outcome("prizepicks", failed=True),)),
+        _board((_provider_outcome("prizepicks", failed=True),)),
+    )
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+    service.get_pool(season="2025-26", game_ids={"0022500001"})
+    now[0] += timedelta(hours=1)
+    assert service.get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    ).freshness["status"] == "stale-served"
+
+    now[0] = NOW + timedelta(hours=6, microseconds=1)
+    expired = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert expired.players == ()
+    assert expired.freshness["status"] == "unavailable"
+
+
+def test_stale_provider_cache_truth_is_retained_and_never_reused_as_fresh(tmp_path):
+    now = NOW + timedelta(hours=1)
+    stale_board = _joined_board(("prizepicks", "pp-1", 101))
+    stale_outcome = replace(stale_board.provider_outcomes[0], cache_status="stale")
+    stale_board = replace(stale_board, provider_outcomes=(stale_outcome,))
+    boards = SequencedBoardService(stale_board, stale_board)
+    service = _persistent_service(tmp_path, boards, lambda: now)
+
+    first = service.get_pool(season="2025-26", game_ids={"0022500001"})
+    second = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert first.freshness["status"] == "stale-served"
+    assert first.freshness["providers"]["prizepicks"] == {
+        "status": "stale-served",
+        "retrieved_at": NOW.isoformat(),
+    }
+    assert second.freshness == first.freshness
+    assert len(boards.queries) == 2
+
+
+def test_persisted_trailing_z_timestamps_are_normalized_through_utc_authority():
+    pool = PlayerPoolService._decode_pool(
+        {
+            "players": [],
+            "team_counts": {},
+            "freshness": {
+                "status": "fresh",
+                "retrieved_at": "2026-01-02T12:00:00Z",
+                "providers": {
+                    "prizepicks": {
+                        "status": "fresh",
+                        "retrieved_at": "2026-01-02T12:00:00Z",
+                    }
+                },
+            },
+        }
+    )
+
+    assert pool.freshness["retrieved_at"] == NOW.isoformat()
+    assert pool.freshness["providers"]["prizepicks"]["retrieved_at"] == NOW.isoformat()
 
 
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])

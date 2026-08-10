@@ -1,27 +1,24 @@
-"""Persisted, governed Player Pool snapshots."""
+"""Persisted, governed Player Pool snapshots and refresh leases."""
 
-from sqlalchemy import DateTime, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
+from sqlalchemy import Column, DateTime, Integer, String, Text
 
-from app.models import Base
+from . import Base
 
 
 class PlayerPoolSnapshot(Base):
     """One atomic Player Pool observation for a season and exact game set."""
 
     __tablename__ = "player_pool_snapshots"
-    __table_args__ = (
-        UniqueConstraint("season", "game_ids", name="uq_player_pool_snapshot_scope"),
-    )
 
-    season: Mapped[str] = mapped_column(String(7), primary_key=True)
-    game_ids: Mapped[str] = mapped_column(Text, primary_key=True)
-    payload: Mapped[str] = mapped_column(Text, nullable=False)
-    retrieved_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[object] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    season = Column(String(7), primary_key=True)
+    game_ids = Column(Text, primary_key=True)
+    payload = Column(Text, nullable=True)
+    retrieved_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    lease_owner = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    refresh_version = Column(Integer, nullable=False, default=0, server_default="0")
+    refresh_outcome = Column(String(16), nullable=True)
 
 
 __all__ = ["PlayerPoolSnapshot"]

@@ -1,19 +1,35 @@
-"""Atomic persistence for governed Player Pool snapshots."""
+"""Atomic persistence and cross-process refresh leases for Player Pools."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 import json
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
-from sqlalchemy.sql import func
 
+from app.domain.utc import assume_utc
 from app.models.player_pool_snapshot import PlayerPoolSnapshot
+from app.utils.db import is_demo_database_url
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerPoolSnapshotScope:
+    """The single canonical identity of a persisted pool request."""
+
+    season: str
+    game_ids: tuple[str, ...]
+
+    @classmethod
+    def create(cls, season: str, game_ids: Iterable[str]) -> PlayerPoolSnapshotScope:
+        return cls(str(season), tuple(sorted({str(game_id) for game_id in game_ids})))
+
+    @property
+    def storage_game_ids(self) -> str:
+        return json.dumps(self.game_ids, separators=(",", ":"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,77 +38,168 @@ class StoredPlayerPoolSnapshot:
     retrieved_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PlayerPoolRefreshResult:
+    version: int
+    outcome: str | None
+
+
 class PlayerPoolSnapshotRepository:
-    """Store one canonical JSON document per exact Player Pool request scope."""
+    """Store canonical pool documents and coordinate their lazy refresh."""
 
     def __init__(self, engine: Engine) -> None:
+        if is_demo_database_url(str(engine.url)):
+            raise ValueError("the demo database cannot store Player Pool snapshots")
         self.engine = engine
 
     @staticmethod
-    def _scope(game_ids: Iterable[str]) -> str:
-        return json.dumps(sorted({str(game_id) for game_id in game_ids}), separators=(",", ":"))
+    def _identity(table: Any, scope: PlayerPoolSnapshotScope) -> Any:
+        return and_(
+            table.c.season == scope.season,
+            table.c.game_ids == scope.storage_game_ids,
+        )
 
-    def get(self, *, season: str, game_ids: Iterable[str]) -> StoredPlayerPoolSnapshot | None:
-        scope = self._scope(game_ids)
-        with Session(self.engine) as session:
-            row = session.scalar(
-                select(PlayerPoolSnapshot).where(
-                    PlayerPoolSnapshot.season == season,
-                    PlayerPoolSnapshot.game_ids == scope,
+    def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None:
+        table = PlayerPoolSnapshot.__table__
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.payload, table.c.retrieved_at).where(
+                    self._identity(table, scope)
                 )
-            )
-            if row is None:
-                return None
-            retrieved_at = row.retrieved_at
-            if retrieved_at.tzinfo is None:
-                retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
-            payload = json.loads(row.payload)
-            if not isinstance(payload, dict):
-                raise ValueError("stored Player Pool snapshot must be an object")
-            return StoredPlayerPoolSnapshot(payload, retrieved_at.astimezone(timezone.utc))
+            ).mappings().one_or_none()
+        if row is None or row["payload"] is None or row["retrieved_at"] is None:
+            return None
+        payload = json.loads(row["payload"])
+        if not isinstance(payload, dict):
+            raise ValueError("stored Player Pool snapshot must be an object")
+        return StoredPlayerPoolSnapshot(payload, assume_utc(row["retrieved_at"]))
 
-    def replace(
+    def get_refresh_result(self, scope: PlayerPoolSnapshotScope) -> PlayerPoolRefreshResult:
+        table = PlayerPoolSnapshot.__table__
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.refresh_version, table.c.refresh_outcome).where(
+                    self._identity(table, scope)
+                )
+            ).one_or_none()
+        if row is None:
+            return PlayerPoolRefreshResult(0, None)
+        return PlayerPoolRefreshResult(int(row.refresh_version), row.refresh_outcome)
+
+    def try_acquire_refresh(
         self,
+        scope: PlayerPoolSnapshotScope,
         *,
-        season: str,
-        game_ids: Iterable[str],
+        owner: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        table = PlayerPoolSnapshot.__table__
+        observed_at = assume_utc(now)
+        expires_at = observed_at + timedelta(seconds=lease_seconds)
+        with self.engine.begin() as connection:
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(table).values(
+                            season=scope.season,
+                            game_ids=scope.storage_game_ids,
+                            lease_owner=owner,
+                            lease_expires_at=expires_at,
+                            refresh_version=0,
+                        )
+                    )
+                return True
+            except IntegrityError:
+                pass
+            claimed = connection.execute(
+                update(table)
+                .where(
+                    self._identity(table, scope),
+                    or_(
+                        table.c.lease_owner.is_(None),
+                        table.c.lease_expires_at.is_(None),
+                        table.c.lease_expires_at <= observed_at,
+                    ),
+                )
+                .values(lease_owner=owner, lease_expires_at=expires_at)
+            )
+            return claimed.rowcount == 1
+
+    def replace_owned(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
         payload: Mapping[str, Any],
         retrieved_at: datetime,
-    ) -> None:
-        scope = self._scope(game_ids)
-        document = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        observed_at = retrieved_at.astimezone(timezone.utc)
-        values = {"payload": document, "retrieved_at": observed_at, "updated_at": func.now()}
-        with Session(self.engine) as session:
-            result = session.execute(
-                update(PlayerPoolSnapshot)
+        now: datetime,
+    ) -> bool:
+        table = PlayerPoolSnapshot.__table__
+        document = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        observed_at = assume_utc(now)
+        result = None
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
                 .where(
-                    PlayerPoolSnapshot.season == season,
-                    PlayerPoolSnapshot.game_ids == scope,
+                    self._identity(table, scope),
+                    table.c.lease_owner == owner,
+                    table.c.lease_expires_at > observed_at,
                 )
-                .values(**values)
+                .values(
+                    payload=document,
+                    retrieved_at=assume_utc(retrieved_at),
+                    updated_at=observed_at,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    refresh_version=table.c.refresh_version + 1,
+                    refresh_outcome="success",
+                )
             )
-            if result.rowcount == 0:
-                session.add(
-                    PlayerPoolSnapshot(
-                        season=season,
-                        game_ids=scope,
-                        payload=document,
-                        retrieved_at=observed_at,
-                    )
-                )
-            try:
-                session.commit()
-            except IntegrityError:
-                session.rollback()
-                session.execute(
-                    update(PlayerPoolSnapshot)
-                    .where(
-                        PlayerPoolSnapshot.season == season,
-                        PlayerPoolSnapshot.game_ids == scope,
-                    )
-                    .values(**values)
-                )
-                session.commit()
+        return result.rowcount == 1
 
-__all__ = ["PlayerPoolSnapshotRepository", "StoredPlayerPoolSnapshot"]
+    def finish_failure_owned(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
+        now: datetime,
+    ) -> bool:
+        table = PlayerPoolSnapshot.__table__
+        observed_at = assume_utc(now)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(
+                    self._identity(table, scope),
+                    table.c.lease_owner == owner,
+                    table.c.lease_expires_at > observed_at,
+                )
+                .values(
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    refresh_version=table.c.refresh_version + 1,
+                    refresh_outcome="failure",
+                )
+            )
+        return result.rowcount == 1
+
+    def release_refresh(self, scope: PlayerPoolSnapshotScope, *, owner: str) -> None:
+        table = PlayerPoolSnapshot.__table__
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(self._identity(table, scope), table.c.lease_owner == owner)
+                .values(lease_owner=None, lease_expires_at=None)
+            )
+
+
+__all__ = [
+    "PlayerPoolSnapshotRepository",
+    "PlayerPoolSnapshotScope",
+    "PlayerPoolRefreshResult",
+    "StoredPlayerPoolSnapshot",
+]
