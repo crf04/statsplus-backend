@@ -253,7 +253,9 @@ independently of repository row order.
 Until the Player Pool surface is implemented, both team counts are truthfully
 zero and `freshness.pool` is the sole pool-status authority: it reports an
 unavailable surface with no retrieval time or providers. A stale but populated
-schedule remains a `200` with `freshness.schedule.status: "stale"`.
+schedule remains a `200` with `freshness.schedule.status: "stale"`. Stored
+catalog rows without successful-refresh metadata remain servable and report
+`freshness.schedule` as `{ "status": "missing", "retrieved_at": null }`.
 Schedule freshness uses the nightly schedule surface's independent
 `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default), not the broader
 Event Catalog eligibility TTL. The exact boundary is fresh; an older retrieval
@@ -266,7 +268,8 @@ Empty and error behavior:
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
-| No successful schedule metadata or no catalog events are stored | `503 provider_unavailable` |
+| Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
+| No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
 ### Get Game Logs

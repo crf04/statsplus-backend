@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 def assume_utc(value: datetime) -> datetime:
     """Return one datetime in UTC, treating persisted naive values as UTC."""
 
-    if value.tzinfo is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 

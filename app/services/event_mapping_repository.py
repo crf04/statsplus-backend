@@ -25,6 +25,7 @@ from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app.domain.nba_events import is_postponed_event
 from app.domain.utc import assume_utc
 from app.errors import InvalidConfigurationError
 from app.models.event_catalog import EventCatalogEntry
@@ -1828,10 +1829,15 @@ class EventMappingRepository:
         ).mappings().one_or_none()
         if row is None:
             return None
-        return {
-            **row,
-            "is_postponed": bool(row["postponed_status"] or row["postponement_evidence"]),
-        }
+        event = dict(row)
+        evidence = event.get("postponement_evidence")
+        if evidence:
+            try:
+                event["postponement_evidence"] = json.loads(evidence)
+            except (TypeError, ValueError):
+                pass
+        event["is_postponed"] = is_postponed_event(event)
+        return event
 
     @staticmethod
     def _latest_decision(

@@ -304,6 +304,29 @@ def test_slate_returns_an_empty_success_for_a_date_without_games():
     assert payload["games"] == []
 
 
+def test_slate_serves_stored_rows_when_refresh_metadata_is_missing():
+    payload = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        freshness={"last_success_at": None, "event_count": 1},
+    ).get_slate("2026-01-02")
+
+    assert [game["game_id"] for game in payload["games"]] == ["0022500001"]
+    assert payload["freshness"]["schedule"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
+
+
+def test_slate_serves_empty_date_when_catalog_rows_exist_without_metadata():
+    payload = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        freshness={"last_success_at": None, "event_count": 1},
+    ).get_slate("2026-01-15")
+
+    assert payload["games"] == []
+    assert payload["freshness"]["schedule"]["status"] == "missing"
+
+
 @pytest.mark.parametrize("value", ["", "2026-1-02", "not-a-date"])
 def test_slate_rejects_malformed_dates(value):
     with pytest.raises(InvalidInputError):

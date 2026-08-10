@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, insert, inspect, select
+from sqlalchemy import create_engine, insert, inspect, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
@@ -466,6 +466,22 @@ def test_migration_008_creates_event_mapping_tables(tmp_path):
         "event_mapping_locks",
     } <= tables
     assert set(EVENT_MAPPING_STATES) < set(EVENT_MAPPING_DECISION_STATES)
+
+
+def test_raw_catalog_empty_json_evidence_is_not_postponed(event_db):
+    engine, _ = event_db
+    with engine.begin() as connection:
+        connection.execute(
+            update(EventCatalogEntry.__table__)
+            .where(EventCatalogEntry.nba_game_id == "0022500001")
+            .values(postponement_evidence="{}")
+        )
+        event = EventMappingRepository._select_canonical_event(
+            connection, SEASON, "0022500001"
+        )
+
+    assert event["postponement_evidence"] == {}
+    assert event["is_postponed"] is False
 
 
 @pytest.mark.parametrize(
