@@ -8,7 +8,7 @@ from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
 
 
-def test_nightly_refresh_runs_stats_catalog_schedule_then_player_logs_once_on_success():
+def test_nightly_refresh_runs_stats_schedule_catalog_then_player_logs_once_on_success():
     calls = []
 
     assert (
@@ -21,7 +21,7 @@ def test_nightly_refresh_runs_stats_catalog_schedule_then_player_logs_once_on_su
         )
         == 0
     )
-    assert calls == ["stats", "athlete_catalog", "schedule", "player_game_logs"]
+    assert calls == ["stats", "schedule", "athlete_catalog", "player_game_logs"]
 
 
 def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
@@ -41,14 +41,14 @@ def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
     assert calls == [
         "stats",
         "stats",
-        "athlete_catalog",
         "schedule",
+        "athlete_catalog",
         "player_game_logs",
     ]
     assert "attempt 1 failed during stats refresh; retrying" in capsys.readouterr().err
 
 
-def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(capsys):
+def test_nightly_refresh_keeps_schedule_before_retrying_athlete_catalog(capsys):
     calls = []
     athlete_results = iter([False, True])
 
@@ -65,10 +65,11 @@ def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(caps
     )
     assert calls == [
         "stats",
+        "schedule",
         "athlete_catalog",
         "stats",
-        "athlete_catalog",
         "schedule",
+        "athlete_catalog",
         "player_game_logs",
     ]
     assert "attempt 1 failed during athlete catalog refresh; retrying" in (
@@ -76,7 +77,7 @@ def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(caps
     )
 
 
-def test_nightly_refresh_reports_athlete_failure_without_running_dependents(capsys):
+def test_nightly_refresh_reports_athlete_failure_without_running_player_logs(capsys):
     calls = []
 
     assert (
@@ -89,7 +90,14 @@ def test_nightly_refresh_reports_athlete_failure_without_running_dependents(caps
         )
         == 1
     )
-    assert calls == ["stats", "athlete_catalog", "stats", "athlete_catalog"]
+    assert calls == [
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "stats",
+        "schedule",
+        "athlete_catalog",
+    ]
     diagnostics = capsys.readouterr().err
     assert "attempt 1 failed during athlete catalog refresh; retrying" in diagnostics
     assert (
@@ -114,10 +122,8 @@ def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
     )
     assert calls == [
         "stats",
-        "athlete_catalog",
         "schedule",
         "stats",
-        "athlete_catalog",
         "schedule",
     ]
     diagnostics = capsys.readouterr().err
@@ -147,12 +153,12 @@ def test_nightly_refresh_retries_whole_unit_when_player_logs_fail(capsys):
     )
     assert calls == [
         "stats",
-        "athlete_catalog",
         "schedule",
+        "athlete_catalog",
         "player_game_logs",
         "stats",
-        "athlete_catalog",
         "schedule",
+        "athlete_catalog",
         "player_game_logs",
     ]
     assert "failed during player game logs refresh" in capsys.readouterr().err

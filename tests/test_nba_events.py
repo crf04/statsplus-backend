@@ -4,6 +4,7 @@ import pytest
 
 from app.domain.nba_events import (
     NBAGameStatus,
+    canonical_event_kind,
     is_all_star_kind,
     is_final_event,
     is_ordinary_classification,
@@ -41,6 +42,10 @@ def test_regular_season_event_uses_canonical_game_id_authority():
 )
 def test_regular_season_event_normalizes_fallback_season_type_labels(label):
     assert is_regular_season_event({"nba_game_id": "", "classification": label})
+
+
+def test_canonical_event_kind_preserves_fallback_label_spelling():
+    assert canonical_event_kind("", " regular season ") == "regular season"
 
 
 @pytest.mark.parametrize("game_id", ["0012500001", "0032500001", "0042500001"])

@@ -121,132 +121,143 @@ class PlayerGameLogService:
         )
         retrieved_at = assume_utc(now or self._clock())
         if not isinstance(frame, pd.DataFrame):
+            self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
             raise PlayerGameLogIdentityError(
                 "player game logs must be a normalized provider data frame"
             )
+        return self._refresh_dataframe(canonical_season, frame, retrieved_at)
 
-        events = self.event_catalog.get_events(canonical_season)
-        if frame.empty:
-            if not events:
-                self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
-                raise PlayerGameLogIdentityError(
-                    "an empty snapshot has no event catalog evidence"
-                )
-            if any(
-                is_regular_season_event(event)
-                and is_final_event(event)
-                and not is_postponed_event(event)
-                for event in events
+    def _refresh_dataframe(
+        self, canonical_season: str, frame: pd.DataFrame, retrieved_at: datetime
+    ) -> PlayerGameLogRefreshResult:
+        canonicalized: _CanonicalizationResult | None = None
+        try:
+            events = self.event_catalog.get_events(canonical_season)
+            event_freshness = self.event_catalog.get_freshness(
+                canonical_season, now=retrieved_at
+            )
+            event_count = event_freshness.get("event_count")
+            if (
+                not event_freshness.get("fresh")
+                or not event_count
+                or event_count != len(events)
             ):
-                self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
+                self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
                 raise PlayerGameLogIdentityError(
-                    "an empty snapshot cannot represent a season with completed games"
+                    "the Event Catalog must be present, fresh, and complete before publication"
+                )
+            if frame.empty:
+                if any(
+                    is_regular_season_event(event)
+                    and is_final_event(event)
+                    and not is_postponed_event(event)
+                    for event in events
+                ):
+                    self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
+                    raise PlayerGameLogIdentityError(
+                        "an empty snapshot cannot represent a season with completed games"
+                    )
+                try:
+                    row_count = self.repository.publish(
+                        canonical_season,
+                        (),
+                        retrieved_at=retrieved_at,
+                        source_provider=SOURCE_PROVIDER,
+                        allow_empty=True,
+                    )
+                except ValueError:
+                    self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
+                    raise
+                self._record_telemetry(0, row_count, 0, 0, 0)
+                return PlayerGameLogRefreshResult(
+                    season=canonical_season,
+                    row_count=row_count,
+                    retrieved_at=retrieved_at.isoformat(),
+                )
+
+            athlete_freshness = self.athlete_catalog.get_freshness(
+                canonical_season, now=retrieved_at
+            )
+            if not athlete_freshness.get(
+                "is_fresh"
+            ) or not athlete_freshness.get("row_count"):
+                self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
+                raise PlayerGameLogIdentityError(
+                    "the Athlete Catalog must be present and fresh before publication"
+                )
+            athletes = self.athlete_catalog.get_catalog(
+                canonical_season, active_only=False
+            )
+            published_player_identities = (
+                self.repository.get_published_player_identities(
+                    canonical_season, source_provider=SOURCE_PROVIDER
+                )
+            )
+            try:
+                canonicalized = self._canonicalize(
+                    canonical_season,
+                    frame,
+                    athletes=athletes,
+                    events=events,
+                    published_player_identities=published_player_identities,
+                )
+            except _CanonicalizationAbort as error:
+                self._record_canonicalization_telemetry(
+                    error.result,
+                    published=0,
+                    malformed=error.malformed_row_count,
+                    rejected=1,
+                )
+                raise
+            if not canonicalized.records:
+                self._record_canonicalization_telemetry(
+                    canonicalized, published=0, rejected=1
+                )
+                raise PlayerGameLogIdentityError(
+                    "a non-empty player game log snapshot produced no canonical rows"
+                )
+            prior = self.repository.get_freshness(canonical_season)
+            if (
+                canonicalized.unjoined_event_count
+                and prior.retrieved_at is not None
+                and prior.row_count > 0
+                and canonicalized.source_row_count > prior.row_count
+                and len(canonicalized.records) <= prior.row_count
+            ):
+                self._record_canonicalization_telemetry(
+                    canonicalized, published=0, rejected=1
+                )
+                raise PlayerGameLogIdentityError(
+                    "cumulative player logs reveal an incomplete Event Catalog"
                 )
             try:
                 row_count = self.repository.publish(
                     canonical_season,
-                    (),
+                    canonicalized.records,
                     retrieved_at=retrieved_at,
                     source_provider=SOURCE_PROVIDER,
-                    allow_empty=True,
                 )
-            except (ValueError, SQLAlchemyError):
-                self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
+            except ValueError:
+                self._record_canonicalization_telemetry(
+                    canonicalized, published=0, rejected=1
+                )
                 raise
-            self._record_telemetry(0, row_count, 0, 0, 0)
+            self._record_canonicalization_telemetry(
+                canonicalized, published=row_count
+            )
             return PlayerGameLogRefreshResult(
                 season=canonical_season,
                 row_count=row_count,
                 retrieved_at=retrieved_at.isoformat(),
             )
-
-        event_freshness = self.event_catalog.get_freshness(
-            canonical_season, now=retrieved_at
-        )
-        event_count = event_freshness.get("event_count")
-        if (
-            not event_freshness.get("fresh")
-            or not event_count
-            or event_count != len(events)
-        ):
-            self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
-            raise PlayerGameLogIdentityError(
-                "the Event Catalog must be present, fresh, and complete before publication"
-            )
-
-        athlete_freshness = self.athlete_catalog.get_freshness(
-            canonical_season, now=retrieved_at
-        )
-        if not athlete_freshness.get("is_fresh") or not athlete_freshness.get(
-            "row_count"
-        ):
-            self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
-            raise PlayerGameLogIdentityError(
-                "the Athlete Catalog must be present and fresh before publication"
-            )
-        athletes = self.athlete_catalog.get_catalog(
-            canonical_season, active_only=False
-        )
-        published_player_identities = (
-            self.repository.get_published_player_identities(
-                canonical_season, source_provider=SOURCE_PROVIDER
-            )
-        )
-        try:
-            canonicalized = self._canonicalize(
-                canonical_season,
-                frame,
-                athletes=athletes,
-                events=events,
-                published_player_identities=published_player_identities,
-            )
-        except _CanonicalizationAbort as error:
-            self._record_canonicalization_telemetry(
-                error.result,
-                published=0,
-                malformed=error.malformed_row_count,
-                rejected=1,
-            )
+        except SQLAlchemyError:
+            if canonicalized is None:
+                self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
+            else:
+                self._record_canonicalization_telemetry(
+                    canonicalized, published=0, rejected=1
+                )
             raise
-        if not canonicalized.records:
-            self._record_canonicalization_telemetry(
-                canonicalized, published=0, rejected=1
-            )
-            raise PlayerGameLogIdentityError(
-                "a non-empty player game log snapshot produced no canonical rows"
-            )
-        prior = self.repository.get_freshness(canonical_season)
-        if (
-            canonicalized.unjoined_event_count
-            and prior.retrieved_at is not None
-            and prior.row_count > 0
-            and canonicalized.source_row_count > prior.row_count
-            and len(canonicalized.records) <= prior.row_count
-        ):
-            self._record_canonicalization_telemetry(
-                canonicalized, published=0, rejected=1
-            )
-            raise PlayerGameLogIdentityError(
-                "cumulative player logs reveal an incomplete Event Catalog"
-            )
-        try:
-            row_count = self.repository.publish(
-                canonical_season,
-                canonicalized.records,
-                retrieved_at=retrieved_at,
-                source_provider=SOURCE_PROVIDER,
-            )
-        except (ValueError, SQLAlchemyError):
-            self._record_canonicalization_telemetry(
-                canonicalized, published=0, rejected=1
-            )
-            raise
-        self._record_canonicalization_telemetry(canonicalized, published=row_count)
-        return PlayerGameLogRefreshResult(
-            season=canonical_season,
-            row_count=row_count,
-            retrieved_at=retrieved_at.isoformat(),
-        )
 
     def _canonicalize(
         self,

@@ -132,6 +132,8 @@ class PlayerGameLogRepository:
                 raise ValueError("every player game log must belong to the publication season")
             key = (record.player_id, record.game_id)
             existing = unique.get(key)
+            # The service rejects provider conflicts for telemetry; publish repeats
+            # the invariant because it is also a direct persistence boundary.
             if existing is not None and existing != record:
                 raise ValueError("conflicting player game log facts share one identity")
             unique[key] = record

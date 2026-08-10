@@ -197,6 +197,21 @@ def test_slate_treats_unknown_as_ordinary_and_detects_preseason_game_id():
     assert games[1]["preseason"] is True
 
 
+def test_slate_preserves_existing_fallback_classification_behavior():
+    game = _service(
+        [
+            _event(
+                "uncanonical",
+                "2025-10-23T00:00:00+00:00",
+                classification=" regular season ",
+            )
+        ]
+    ).get_slate("2025-10-22")["games"][0]
+
+    assert game["classification"] is None
+    assert game["preseason"] is False
+
+
 def test_game_id_kind_overrides_conflicting_provider_classification():
     service = _service(
         [

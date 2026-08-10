@@ -76,10 +76,12 @@ def is_regular_season_event(event: Mapping[str, object]) -> bool:
 
     game_id = event.get("nba_game_id")
     classification = event.get("classification")
-    return canonical_event_kind(
-        str(game_id) if game_id is not None else "",
-        str(classification) if classification is not None else "",
-    ) == "Regular Season"
+    return _normalized_words(
+        canonical_event_kind(
+            str(game_id) if game_id is not None else "",
+            str(classification) if classification is not None else "",
+        )
+    ) == "regular season"
 
 
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
@@ -88,10 +90,6 @@ def canonical_event_kind(game_id: str, provider_classification: str = "") -> str
     if len(game_id) == 10 and game_id.isdigit():
         game_type = _GAME_TYPE_BY_ID_PREFIX.get(game_id[:3])
         if game_type is not None:
-            return game_type
-    normalized = _normalized_words(provider_classification)
-    for game_type in _GAME_TYPE_BY_ID_PREFIX.values():
-        if normalized == _normalized_words(game_type):
             return game_type
     return _known_classification(provider_classification)
 

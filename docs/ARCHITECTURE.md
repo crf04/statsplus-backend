@@ -481,14 +481,15 @@ returns the frozen stored fact
 distinguishes the before-first-run state. A later presentation seam owns its
 translation into API `retrieved_at` and freshness status. The process-level
 `scripts/nightly_refresh.py` command runs that same stats service, the
-current-season Athlete Catalog refresh, the current-season Event Catalog
+current-season Event Catalog refresh, the current-season Athlete Catalog
 refresh, and then the current-season player-game-log refresh. The two catalogs
 precede game logs so every stored log joins against current canonical
 player/game/team identity. `DataService.update_all_data` publishes the legacy
 `player_information` table, not the season-owned Athlete Catalog or its
 freshness, so the separate `AthleteCatalogService` step is required rather
-than a duplicate stats fetch. If that owner refresh fails, schedule and player
-logs do not run, the prior log publication remains readable, and the command
+than a duplicate stats fetch. Schedule deliberately precedes it: an Athlete
+Catalog failure skips player logs but cannot suppress the required Event
+Catalog refresh. The prior log publication remains readable, and the command
 reports the named `athlete catalog` failed step. The command retries the
 complete ordered unit exactly once after any step fails and returns a nonzero
 process status when both attempts fail. It is deployment-scheduled and has no
@@ -500,10 +501,11 @@ HTTP/authentication dependency.
 once during Nightly Refresh and stamps retrieval only after that provider call
 returns. It reads canonical identities through `AthleteCatalogService` and
 `EventCatalogService`; the player-log module does not query their tables
-directly. A nonempty snapshot requires a present, fresh, nonempty Athlete
-Catalog and a present, fresh, nonempty, internally complete Event Catalog for
-the same season observation before canonicalization. Event freshness metadata
-must agree with the actual governed event-row count. Each provider `PLAYER_ID`
+directly. Every snapshot, including an empty preseason observation, requires a
+present, fresh, nonempty, internally complete Event Catalog for the same season
+observation; its freshness metadata must agree with the actual governed
+event-row count. A nonempty snapshot also requires a present, fresh, nonempty
+Athlete Catalog before canonicalization. Each provider `PLAYER_ID`
 must join exactly to the requested season's Athlete Catalog, and each `GAME_ID`
 plus per-game `TEAM_ID` must join exactly to the Event Catalog. Team and
 opponent tricodes and home/away identity come from that canonical event.
@@ -527,18 +529,20 @@ and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
 replacement and its `nba_stats` source, timezone-aware retrieval time, and row
 count commit in the same transaction. Exact duplicate provider rows collapse
 to one fact and increment bounded duplicate telemetry; conflicting duplicates
-fail closed. Any validation or database failure leaves both the prior rows and
-prior successful freshness unchanged and emits bounded rejection telemetry;
-the service catches SQLAlchemy publication failures after repository rollback
-without swallowing them. An empty Regular Season provider
-snapshot is publishable only when the governed Event Catalog is present and
-contains no Regular Season event classified final by the shared governed NBA
-event predicates. A postponed event does not become completed evidence merely
-because its feed status code or text says final. Completed preseason,
-exhibition, All-Star, playoff, and other-phase events do not block that empty
-Regular Season publication. An empty snapshot can never replace a prior
-nonempty publication. A missing Event Catalog or an empty snapshot after a
-completed Regular Season game fails closed and preserves the last valid facts
+fail closed at canonicalization, and the repository repeats that invariant for
+direct persistence callers. Any validation or database failure leaves both the
+prior rows and prior successful freshness unchanged and emits bounded rejection
+telemetry. One service-boundary SQLAlchemy handler covers prerequisite catalog,
+identity, and freshness reads plus publication after repository rollback,
+without swallowing the error or counting it twice. An empty Regular Season
+provider snapshot is publishable only when the governed Event Catalog is
+present and contains no Regular Season event classified final by the shared
+governed NBA event predicates. A postponed event does not become completed
+evidence merely because its feed status code or text says final. Completed
+preseason, exhibition, All-Star, playoff, and other-phase events do not block
+that empty Regular Season publication. An empty snapshot can never replace a
+prior nonempty publication. A missing Event Catalog or an empty snapshot after
+a completed Regular Season game fails closed and preserves the last valid facts
 and freshness. Because a season-wide
 log snapshot is cumulative, a nonempty replacement with fewer canonical rows
 than the prior successful publication also fails closed; equal-size

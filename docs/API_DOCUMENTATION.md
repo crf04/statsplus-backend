@@ -447,36 +447,40 @@ provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
-endpoint. It refreshes the stats tables, current-season Athlete Catalog,
-current-season Event Catalog, and then durable current-season player game logs,
+endpoint. It refreshes the stats tables, current-season Event Catalog,
+current-season Athlete Catalog, and then durable current-season player game logs,
 retrying that ordered unit once. The player-log step uses one season-wide
 provider read and publishes normalized player/game facts plus its season
 sidecar transactionally. For the configured current season, that transaction
 also advances the named `player_game_logs` stats freshness; historical
 backfills retain independent season freshness and never replace or gate the
-current observation. A nonempty result also requires a present, fresh,
-nonempty Athlete Catalog and a present, fresh, nonempty Event Catalog whose
-freshness count agrees with its actual season rows. `update_database` does not
+current observation. Every result requires a present, fresh, nonempty Event
+Catalog whose freshness count agrees with its actual season rows; a nonempty
+result also requires a present, fresh, nonempty Athlete Catalog.
+`update_database` does not
 publish the season-owned Athlete Catalog or its freshness, so Nightly's named
-Athlete Catalog step is required; if it fails, later schedule and log steps do
-not run and the prior player-log publication remains valid.
+Athlete Catalog step is required. Schedule precedes that step, so an Athlete
+Catalog failure skips player logs without suppressing the required schedule
+refresh, and the prior player-log publication remains valid.
 Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
 preserves the last valid publication; individual well-formed unjoined athlete,
 game, or team rows are excluded and counted without exposing their identities.
 Source growth hidden by an unjoined game fails as incomplete Event Catalog
 evidence instead of republishing an unchanged cumulative snapshot as fresh.
-SQLAlchemy publication failures are re-raised after rollback and emit the same
-bounded rejection aggregate with already-observed coverage counts.
+SQLAlchemy failures from prerequisite freshness/identity reads or publication
+are re-raised and emit one bounded rejection aggregate with already-observed
+coverage counts; publication failures first roll back.
 An athlete missing from a refreshed catalog can reuse only its exact durable
 NBA ID and canonical name from the prior complete same-season NBA Stats
 publication; new identities and mismatched events or teams remain excluded.
 Empty Regular Season results require a present schedule with no completed
 Regular Season events; completed preseason, exhibition, All-Star, playoff, or
 other-phase games do not count, and a postponed event with a terminal-looking
-status is not completed evidence. Fallback season-type labels are normalized
-for case and whitespace when no canonical game-ID phase is available; a known
-NBA game-ID prefix remains authoritative. Empty results cannot replace
-nonempty facts.
+status is not completed evidence. The empty-snapshot Regular Season predicate
+normalizes fallback season-type case and separators when no canonical game-ID
+phase is available; public stored/display classification spelling remains
+unchanged, and a known NBA game-ID prefix remains authoritative. Empty results
+cannot replace nonempty facts.
 These stored facts back future matchup rail and selection reads; this slice
 adds no public matchup route and does not change `GET /api/games/game_logs`.
 
@@ -616,8 +620,9 @@ writable database, and has no wall-clock season default or background timer.
 `get_freshness(season)` read the persisted catalog and independent success /
 failure timestamps. `ATHLETE_CATALOG_FRESHNESS_DAYS` controls the default
 seven-day freshness window. Nightly Refresh invokes the same service with its
-explicit current season before Event Catalog and player-game-log publication;
-player logs also gate canonicalization on the resulting freshness fact.
+explicit current season after Event Catalog and before player-game-log
+publication; player logs also gate canonicalization on the resulting freshness
+fact.
 
 Provider athlete mappings are an internal, persisted read-side seam rather
 than new HTTP mutation routes. `AthleteResolver` accepts typed provider

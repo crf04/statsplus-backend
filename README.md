@@ -150,13 +150,15 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The process refreshes all stats tables and the current season's Event Catalog
-as one ordered unit. If either step fails, it starts the whole unit over once;
-after that single retry it exits nonzero. Success exits zero. The stats
-freshness timestamp is committed in the same transaction as the table swaps,
-and the Event Catalog keeps its existing transactional success timestamp. The
-admin `POST /api/data/update_database` path uses the same stats publication
-service and remains the manual backstop.
+The process runs four named current-season steps in this exact order: stats
+tables, Event Catalog schedule, Athlete Catalog, then durable player game logs.
+If a step fails, later steps in that attempt do not run and the whole unit
+starts over once. A failed Athlete Catalog therefore never suppresses the
+required schedule refresh that precedes it, while player logs remain untouched.
+After the single retry the process exits nonzero and names the failed step;
+success exits zero. Each owning service preserves its prior publication on
+failure. The admin `POST /api/data/update_database` path uses the same stats
+publication service and remains the manual backstop.
 
 Validate the bundled fixture without changing it:
 

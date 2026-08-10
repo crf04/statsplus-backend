@@ -34,8 +34,8 @@ from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: 
 def run_nightly_refresh(
     *,
     refresh_stats: Callable[[], Any],
-    refresh_athlete_catalog: Callable[[], Any],
     refresh_schedule: Callable[[], Any],
+    refresh_athlete_catalog: Callable[[], Any],
     refresh_player_game_logs: Callable[[], Any],
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
@@ -44,8 +44,8 @@ def run_nightly_refresh(
         succeeded = True
         for step, refresh in (
             ("stats", refresh_stats),
-            ("athlete catalog", refresh_athlete_catalog),
             ("schedule", refresh_schedule),
+            ("athlete catalog", refresh_athlete_catalog),
             ("player game logs", refresh_player_game_logs),
         ):
             failed_step = step
@@ -108,13 +108,13 @@ def _run(database_url: str) -> int:
         )
         return run_nightly_refresh(
             refresh_stats=data_service.update_all_data,
+            refresh_schedule=lambda: event_service.refresh(
+                settings.nba.current_season
+            ),
             refresh_athlete_catalog=lambda: athlete_service.refresh_season(
                 settings.nba.current_season
             ).status
             == "succeeded",
-            refresh_schedule=lambda: event_service.refresh(
-                settings.nba.current_season
-            ),
             refresh_player_game_logs=lambda: player_game_log_service.refresh(
                 settings.nba.current_season
             ),

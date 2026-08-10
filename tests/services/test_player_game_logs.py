@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, delete, insert, text, update
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import create_engine, delete, event, insert, text, update
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
@@ -359,7 +359,7 @@ def test_empty_replacement_preserves_last_valid_rows_and_freshness(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
 
 
-def test_conflicting_duplicate_identity_preserves_last_valid_publication(tmp_path):
+def test_repository_defensively_rejects_conflicting_duplicate_identity(tmp_path):
     repository = _repository(tmp_path)
     original = _record()
     repository.publish(
@@ -650,6 +650,28 @@ def test_refresh_timestamp_is_observed_after_provider_fetch(tmp_path):
     assert observations == ["provider", "clock"]
 
 
+def test_non_dataframe_provider_result_records_rejected_publication(tmp_path):
+    repository = _repository(tmp_path)
+    provider = _RecordedSeasonProvider([{"PLAYER_ID": 101}])
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="data frame"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON)
+
+    assert telemetry.events == [
+        PlayerGameLogTelemetryEvent(
+            source_row_count=0,
+            published_row_count=0,
+            unjoined_athlete_count=0,
+            unjoined_event_count=0,
+            team_mismatch_count=0,
+            rejected_publication_count=1,
+        )
+    ]
+
+
 def test_refresh_collapses_and_counts_exact_duplicate_source_rows(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
@@ -684,6 +706,42 @@ def test_preseason_empty_snapshot_can_record_honest_zero_row_freshness(tmp_path)
         retrieved_at=RETRIEVED_AT,
         row_count=0,
     )
+
+
+@pytest.mark.parametrize("catalog_state", ["missing", "stale", "count_mismatch"])
+def test_empty_snapshot_requires_complete_fresh_event_catalog(tmp_path, catalog_state):
+    repository = _repository(tmp_path)
+    _seed_identities(repository, completed=False)
+    observed_at = RETRIEVED_AT + timedelta(hours=1)
+    if catalog_state == "missing":
+        with repository.engine.begin() as connection:
+            connection.execute(
+                delete(EventCatalogRefresh.__table__).where(
+                    EventCatalogRefresh.season == SEASON
+                )
+            )
+    elif catalog_state == "stale":
+        observed_at = RETRIEVED_AT + timedelta(hours=73)
+    else:
+        with repository.engine.begin() as connection:
+            connection.execute(
+                update(EventCatalogRefresh.__table__)
+                .where(EventCatalogRefresh.season == SEASON)
+                .values(event_count=2)
+            )
+    provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="Event Catalog.*fresh"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=observed_at)
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+    assert StatsFreshnessRepository(
+        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
+    ).get().last_successful_completion is None
+    assert telemetry.events[0].rejected_publication_count == 1
 
 
 def test_preseason_final_before_opening_night_allows_empty_regular_season_snapshot(
@@ -747,12 +805,12 @@ def test_postponed_regular_season_event_with_final_code_allows_empty_snapshot(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
 
 
-def test_empty_snapshot_without_event_catalog_evidence_fails_closed(tmp_path):
+def test_empty_snapshot_without_event_catalog_rows_fails_closed(tmp_path):
     repository = _repository(tmp_path)
     provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
     telemetry = _RecordingTelemetry()
 
-    with pytest.raises(PlayerGameLogIdentityError, match="event catalog evidence"):
+    with pytest.raises(PlayerGameLogIdentityError, match="Event Catalog.*present"):
         _service(
             repository, provider, telemetry_recorder=telemetry
         ).refresh(SEASON)
@@ -1148,6 +1206,54 @@ def test_database_publication_failure_preserves_snapshot_and_records_rejection(
             source_row_count=5,
             published_row_count=0,
             unjoined_athlete_count=1,
+            unjoined_event_count=0,
+            team_mismatch_count=0,
+            rejected_publication_count=1,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement_fragment",
+    [
+        "FROM event_catalog_refreshes",
+        "FROM athlete_catalog_freshness",
+        "SELECT DISTINCT player_game_logs.player_id",
+    ],
+)
+def test_prerequisite_database_read_failure_records_rejection_once(
+    tmp_path, statement_fragment
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    _service(repository, provider).refresh(SEASON)
+    before = repository.list_player_rows(SEASON, 101)
+    telemetry = _RecordingTelemetry()
+
+    def fail_identity_read(
+        connection, cursor, statement, parameters, context, executemany
+    ):
+        del connection, cursor, context, executemany
+        if statement_fragment in statement:
+            raise OperationalError(statement, parameters, RuntimeError("forced read"))
+
+    event.listen(repository.engine, "before_cursor_execute", fail_identity_read)
+    try:
+        with pytest.raises(SQLAlchemyError):
+            _service(
+                repository, provider, telemetry_recorder=telemetry
+            ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", fail_identity_read)
+
+    assert repository.list_player_rows(SEASON, 101) == before
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+    assert telemetry.events == [
+        PlayerGameLogTelemetryEvent(
+            source_row_count=4,
+            published_row_count=0,
+            unjoined_athlete_count=0,
             unjoined_event_count=0,
             team_mismatch_count=0,
             rejected_publication_count=1,
