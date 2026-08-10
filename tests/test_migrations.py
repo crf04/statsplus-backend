@@ -47,6 +47,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "006_create_athlete_mappings",
         "007_create_athlete_mapping_contradictions",
         "008_create_event_mappings",
+        "009_create_stats_freshness",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -70,6 +71,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "event_mapping_decision_candidates",
             "event_mapping_rejections",
             "event_mapping_locks",
+            "stats_refreshes",
         ]
     )
     assert {
@@ -114,6 +116,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (6, "006_create_athlete_mappings"),
             (7, "007_create_athlete_mapping_contradictions"),
             (8, "008_create_event_mappings"),
+            (9, "009_create_stats_freshness"),
         ]
 
 
@@ -136,6 +139,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "006_create_athlete_mappings",
         "007_create_athlete_mapping_contradictions",
         "008_create_event_mappings",
+        "009_create_stats_freshness",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -217,6 +221,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "event_mapping_decision_candidates",
             "event_mapping_rejections",
             "event_mapping_locks",
+            "stats_refreshes",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -326,6 +331,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
     assert first.applied == (
         "007_create_athlete_mapping_contradictions",
         "008_create_event_mappings",
+        "009_create_stats_freshness",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")

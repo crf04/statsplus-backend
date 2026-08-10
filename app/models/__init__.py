@@ -54,6 +54,7 @@ from .user import User  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
 from .athlete_catalog import AthleteCatalog, AthleteCatalogFreshness  # noqa: E402
 from .event_catalog import EventCatalogEntry, EventCatalogRefresh  # noqa: E402
+from .stats_freshness import StatsRefresh  # noqa: E402
 from .athlete_mapping import (  # noqa: E402
     AthleteMappingDecision,
     AthleteMappingDecisionCandidate,
@@ -81,6 +82,7 @@ __all__ = [
     'AthleteCatalogFreshness',
     'EventCatalogEntry',
     'EventCatalogRefresh',
+    'StatsRefresh',
     'ProviderAthleteMapping',
     'AthleteMappingDecision',
     'AthleteMappingDecisionCandidate',

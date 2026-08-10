@@ -62,6 +62,7 @@ def build_dependencies(
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_board_response import DFSBoardResponseService
     from app.services.dfs_snapshot_cache import (
@@ -149,11 +150,13 @@ def build_dependencies(
         settings=settings,
         nba_stats_provider=nba_stats_provider,
     )
+    stats_freshness_repository = StatsFreshnessRepository(engine)
     data_service = DataService(
         engine,
         settings=settings,
         pbp_provider=pbp_stats_provider,
         nba_stats_provider=nba_stats_provider,
+        stats_freshness=stats_freshness_repository,
     )
     provider_health_service = ProviderHealthService(
         engine,

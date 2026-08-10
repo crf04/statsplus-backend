@@ -442,6 +442,19 @@ POST /api/data/update_database (or a PBP/PUT refresh)
 
 Every mutating refresh is recorded in the application-owned
 `data_refresh_jobs` table before the request returns `202 Accepted`.
+
+Successful `update_database` publication also upserts the singleton
+`stats_refreshes` record inside the same transaction as the complete stats
+table swap. Failed or fenced publication therefore cannot advance stats
+freshness. `StatsFreshnessRepository.get()` returns the frozen stored fact
+`StatsFreshness(last_successful_completion=...)`; a null completion explicitly
+distinguishes the before-first-run state. A later presentation seam owns its
+translation into API `retrieved_at` and freshness status. The process-level
+`scripts/nightly_refresh.py` command runs that same stats service followed by
+the current-season Event Catalog refresh, retries the complete ordered unit
+exactly once after either failure, and returns a nonzero process status when
+both attempts fail. It is deployment-scheduled and has no HTTP/authentication
+dependency.
 `DataRefreshJobService` writes queued/running/succeeded/failed transitions and
 a sanitized `failure_summary` (exception/provider text is never stored), and
 its partial unique index enforces at most one queued or running job per
@@ -1464,7 +1477,8 @@ construction.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
-opening it for writes. Migration tests must use a temporary database, and the
+opening it for writes. Migration 009 creates the singleton `stats_refreshes`
+completion record. Migration tests must use a temporary database, and the
 validator must not be used to repair the fixture.
 
 ## Test seams

@@ -199,6 +199,13 @@ def _create_event_mapping_tables(connection: Connection) -> None:
     EventMappingLock.__table__.create(connection, checkfirst=True)
 
 
+def _create_stats_freshness_table(connection: Connection) -> None:
+    """Create the singleton success record for stats-table publication."""
+    from app.models.stats_freshness import StatsRefresh
+
+    StatsRefresh.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -212,6 +219,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _create_athlete_mapping_contradictions_table,
     ),
     Migration(8, "008_create_event_mappings", _create_event_mapping_tables),
+    Migration(9, "009_create_stats_freshness", _create_stats_freshness_table),
 )
 
 
