@@ -97,6 +97,34 @@ def _repository(
     )
 
 
+def test_repository_requires_an_explicit_stats_surface_season(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
+    run_migrations(engine)
+
+    with pytest.raises(TypeError, match="stats_surface_season"):
+        PlayerGameLogRepository(
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_max_age=timedelta(hours=30),
+        )
+
+
+@pytest.mark.parametrize("stats_surface_season", [None, "", "   ", "2025-27"])
+def test_repository_rejects_an_invalid_stats_surface_season(
+    tmp_path, stats_surface_season
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
+    run_migrations(engine)
+
+    with pytest.raises(ValueError, match="season must be an explicit canonical"):
+        PlayerGameLogRepository(
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_season=stats_surface_season,
+            stats_surface_max_age=timedelta(hours=30),
+        )
+
+
 def _recorded_season_frame():
     path = Path(__file__).parents[1] / "fixtures/nba_stats/player_game_logs.season.json"
     return normalize_season_player_game_logs(

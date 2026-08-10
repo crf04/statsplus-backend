@@ -86,7 +86,7 @@ class PlayerSeasonRate:
 
 
 class PlayerGameLogRepository:
-    """Publish season facts; optionally observe one as the current stats surface."""
+    """Publish season facts and observe one explicit current stats surface."""
 
     def __init__(
         self,
@@ -94,15 +94,11 @@ class PlayerGameLogRepository:
         *,
         statistic_catalog: StatisticCatalog,
         stats_surface_max_age: timedelta,
-        stats_surface_season: str | None = None,
+        stats_surface_season: str,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.engine = engine
-        self._stats_surface_season = (
-            validate_canonical_season(stats_surface_season)
-            if stats_surface_season is not None
-            else None
-        )
+        self._stats_surface_season = validate_canonical_season(stats_surface_season)
         self._surface_freshness = StatsFreshnessRepository(
             engine, surface=PLAYER_GAME_LOG_SURFACE
         )
