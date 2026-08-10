@@ -51,7 +51,7 @@ class TeamMatchupFactRow(Base):
             name="ck_team_matchup_facts_status",
         ),
         CheckConstraint(
-            "denominator_unit IS NULL OR denominator_unit IN ('minutes', 'seconds', 'games')",
+            "denominator_unit IS NULL OR denominator_unit IN ('minutes', 'seconds')",
             name="ck_team_matchup_facts_denominator_unit",
         ),
         UniqueConstraint(

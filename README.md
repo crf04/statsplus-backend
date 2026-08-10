@@ -180,6 +180,10 @@ remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by default). Historical
 season backfills retain independent season freshness and are not hidden when
 the current observation expires.
 
+Early in a season, the same successful unit publishes Season facts and an
+explicitly missing Last-15 observation until every team has 15 governed
+completed games; it never substitutes a shorter or mixed-phase window.
+
 Validate the bundled fixture without changing it:
 
 ```bash

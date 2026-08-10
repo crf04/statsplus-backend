@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Iterable
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
 from app.domain.utc import assume_utc
@@ -248,6 +248,29 @@ class TeamMatchupRepository:
                 for row in observation_rows
             ),
         )
+
+    def get_latest_scope(
+        self,
+        season: str,
+        *,
+        window_games: int | None = None,
+        as_of: date | None = None,
+    ) -> TeamMatchupSnapshotScope | None:
+        requested = TeamMatchupSnapshotScope(season, as_of or date.max, window_games)
+        table = TeamMatchupSurfaceObservationRow.__table__
+        conditions = (
+            table.c.season == season,
+            table.c.window_kind == requested.window_kind,
+            table.c.window_games == requested.stored_window_games,
+        )
+        statement = select(func.max(table.c.as_of_date)).where(*conditions)
+        if as_of is not None:
+            statement = statement.where(table.c.as_of_date <= as_of)
+        with self.engine.connect() as connection:
+            latest_as_of = connection.execute(statement).scalar_one()
+        if latest_as_of is None:
+            return None
+        return TeamMatchupSnapshotScope(season, latest_as_of, window_games)
 
 
 __all__ = [

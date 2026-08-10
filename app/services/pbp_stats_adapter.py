@@ -106,6 +106,7 @@ class PBPTotalsAdapter:
         data_type: PBPDataKind = "player",
         *,
         season: str | None = None,
+        season_type: str = "Regular Season",
         team_id: int | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
@@ -124,7 +125,7 @@ class PBPTotalsAdapter:
             )
         params = {
             "Season": season or self.settings.nba.current_season,
-            "SeasonType": "Regular+Season",
+            "SeasonType": season_type,
             "Type": "Player" if data_type == "player" else "Opponent",
         }
         if team_id is not None:

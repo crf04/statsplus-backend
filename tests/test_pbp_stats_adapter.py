@@ -140,6 +140,7 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
     adapter.fetch_totals_frame(
         "opponent",
         season="2024-25",
+        season_type="Playoffs",
         team_id=1610612738,
         from_date="2025-03-01",
         to_date="2025-04-15",
@@ -151,7 +152,7 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
             {
                 "params": {
                     "Season": "2024-25",
-                    "SeasonType": "Regular+Season",
+                    "SeasonType": "Playoffs",
                     "Type": "Opponent",
                     "TeamId": "1610612738",
                     "FromDate": "2025-03-01",

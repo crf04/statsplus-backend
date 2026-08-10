@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date
 from statistics import fmean, pstdev
 
 from app.services.team_matchup_repository import (
@@ -29,7 +30,7 @@ class TeamMatchupMetric:
     slice_key: str
     stat_key: str
     allowed_per_48: float
-    percent_vs_league_average: float
+    percent_vs_league_average: float | None
     sigma_deviation: float
     rank: int
 
@@ -47,6 +48,20 @@ class TeamMatchupQueryService:
 
     def __init__(self, repository: TeamMatchupRepository) -> None:
         self.repository = repository
+
+    def get_latest_window(
+        self,
+        season: str,
+        *,
+        window_games: int | None = None,
+        as_of: date | None = None,
+    ) -> TeamMatchupWindow | None:
+        """Read the newest stored window on or before an optional slate date."""
+
+        scope = self.repository.get_latest_scope(
+            season, window_games=window_games, as_of=as_of
+        )
+        return None if scope is None else self.get_window(scope)
 
     def get_window(self, scope: TeamMatchupSnapshotScope) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
@@ -86,7 +101,9 @@ class TeamMatchupQueryService:
                     TeamMatchupMetric(
                         *key,
                         allowed_per_48=value,
-                        percent_vs_league_average=(value / average - 1) * 100,
+                        percent_vs_league_average=(
+                            (value / average - 1) * 100 if average else None
+                        ),
                         sigma_deviation=(value - average) / sigma if sigma else 0.0,
                         rank=ranks[value],
                     )
@@ -111,8 +128,6 @@ class TeamMatchupQueryService:
             return float(raw) * 48 / float(denominator)
         if denominator_unit == "seconds":
             return float(raw) * 48 * 60 / float(denominator)
-        if denominator_unit == "games":
-            return float(raw) / float(denominator)
         raise ValueError(
             "an available team matchup fact has an unknown denominator unit"
         )

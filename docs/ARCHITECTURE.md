@@ -655,25 +655,49 @@ previous tables.
 the stats-table and canonical Event Catalog refreshes. It publishes two
 internal team windows for the current product: Season and exact rolling 15
 games. There is deliberately no public matchup route in this layer; the narrow
-consumer seam is `TeamMatchupQueryService.get_window(scope)`.
+consumer seams are `TeamMatchupQueryService.get_window(scope)` and
+`get_latest_window(season, window_games, as_of)`. The latter deterministically
+selects the greatest stored as-of date no later than an optional Slate Date;
+it returns the selected snapshot's persisted per-surface collection times, so
+route code does not mistake "latest row" for "fresh now."
 
 Rolling boundaries come only from completed, governed `event_catalog` games.
 The resolver excludes postponed, preseason, All-Star, non-final, and
-post-as-of events, then resolves each team's own 15th-most-recent game. NBA
-Stats surfaces are queried per team with `LastNGames=15` and the as-of date.
-PBP Stats opponent totals are queried per team with `TeamId`, that team's
-governed `FromDate`, and the common as-of `ToDate`; one league-wide cutoff is
-never used. Synergy exposes neither Last-N nor date bounds, so its Last-15
-play-type rows and surface observation are stored as `unavailable` with
-`provider_unsupported` provenance. Season Synergy remains available, and no
-Season value is relabeled as Last-15.
+post-as-of events, then resolves each team's own 15th-most-recent game. The
+30-team roster is derived from governed regular-season/playoff catalog events,
+so preseason and exhibition participants cannot contaminate it. A homogeneous
+window carries its governed `Regular Season` or `Playoffs` provider phase. A
+window crossing those phases is retained as canonical evidence but published
+unavailable because the approved aggregate providers cannot represent that
+exact mixed game set in one request.
+
+NBA Stats surfaces are queried per team with `LastNGames=15`, `TeamID`, the
+team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
+the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
+responses must identify the requested team and report exactly 15 games; the
+shot-zone aggregate must identify the team (that endpoint exposes no game
+count). A surface that cannot prove its requested aggregate is discarded and
+observed as `unavailable/provider_window_unverified`, never mislabeled
+Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
+ISO `FromDate`, and the common ISO `ToDate`; one league-wide cutoff is never
+used. Synergy exposes neither Last-N nor date bounds, so its Last-15 play-type
+rows and observation are `unavailable/provider_unsupported`; no Season value
+is relabeled as Last-15.
+
+Before every team has 15 governed completions, the same transaction publishes
+the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces
+are `missing/insufficient_governed_games`. Nightly refresh therefore remains
+successful early in the season. Season NBA and PBP aggregates are bounded by
+the snapshot date. Season Synergy is collected only for a current-date
+snapshot; a backdated as-of cannot bound Synergy and records
+`unavailable/provider_unbounded_as_of` instead of combining mismatched scopes.
 
 Migration 012 creates `team_matchup_facts` and
 `team_matchup_surface_observations`. The intentional version gap reserves
 migration 011 for the independently developed player-log prerequisite (#56).
 A fact is identified by season, as-of date, window kind plus rolling game
 count, team, Base, slice, and stat. Available facts retain the provider's raw
-numerator and its raw minutes, seconds, or games denominator; they do not
+numerator and its raw minutes or seconds denominator; they do not
 persist a previously normalized ratio or rank. Surface observations retain a
 timezone-aware collection time and an `available`, `unavailable`, or `missing`
 status plus explicit reason per window.
@@ -686,7 +710,18 @@ team-matchups unit once. The query service derives allowed-per-48 from the raw
 numerator/denominator and requires exactly 30 distinct teams for every
 available league metric. It then computes the 30-team mean, population sigma,
 percent versus average, sigma deviation, and defensive rank. Player scoring
-and Diet Shares are outside this team-window store and remain Season-only.
+and Diet Shares are outside this team-window store and remain Season-only. If
+the 30-team mean is zero, percent-versus-average is null because that ratio is
+undefined; a zero population sigma yields a conventional zero sigma deviation.
+
+One fully available run makes 17 Season provider calls (16 NBA, one PBP) and
+180 rolling calls (five NBA plus one PBP for each of 30 teams). The calls stay
+sequential: each NBA call already uses the shared configured timeout,
+concurrency bound, and provider telemetry, while each PBP call uses the shared
+pooled session, connect/read timeouts, retry accounting, and telemetry. The
+Nightly Refresh supplies the one whole-unit retry. Adding another concurrency
+layer here would multiply load against rate-sensitive upstreams, so the exact
+request plan is preferred over speculative parallelism.
 
 ### Canonical athlete catalog
 

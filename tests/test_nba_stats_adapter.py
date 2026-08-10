@@ -648,11 +648,12 @@ def test_team_matchup_nba_surface_uses_exact_last_n_and_as_of(monkeypatch):
     adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
 
     adapter.fetch_opponent_team_stats(
-        None,
+        "03/01/2025",
+        date_to="04/15/2025",
         season="2024-25",
+        season_type="Regular Season",
         team_id=1610612738,
         last_n_games=15,
-        date_to="2025-04-15",
         per_mode_detailed="Totals",
     )
 
@@ -660,9 +661,10 @@ def test_team_matchup_nba_surface_uses_exact_last_n_and_as_of(monkeypatch):
         {
             "measure_type_detailed_defense": "Opponent",
             "per_mode_detailed": "Totals",
-            "date_from_nullable": None,
-            "date_to_nullable": "2025-04-15",
+            "date_from_nullable": "03/01/2025",
+            "date_to_nullable": "04/15/2025",
             "season": "2024-25",
+            "season_type_all_star": "Regular Season",
             "team_id_nullable": 1610612738,
             "last_n_games": 15,
             "league_id_nullable": "00",
