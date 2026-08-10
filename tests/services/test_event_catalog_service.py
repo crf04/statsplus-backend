@@ -9,14 +9,20 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import create_engine, event, insert, inspect
 from sqlalchemy.exc import OperationalError
 
 from app.errors import ProviderUnavailableError
-from app.config.settings import CatalogSettings, RuntimeSettings
+from app.config.settings import (
+    CatalogSettings,
+    NBASeasonSettings,
+    RuntimeSettings,
+)
 from app.migrations import run_migrations
+from app.models.event_catalog import EventCatalogEntry
 from app.services.event_catalog_service import EventCatalogService
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
+from app.services.slate_service import SlateService
 
 
 FIXTURE = json.loads(
@@ -83,6 +89,51 @@ def test_date_window_read_is_half_open_and_ordered(tmp_path):
     )
 
     assert [row["nba_game_id"] for row in rows] == ["0022500001"]
+
+
+def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
+    engine = _engine(tmp_path)
+    observed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__).values(
+                nba_game_id="0022500001",
+                season="2025-26",
+                home_team_id=2,
+                home_team_name="Home",
+                home_team_tricode="HME",
+                away_team_id=1,
+                away_team_name="Away",
+                away_team_tricode="AWY",
+                scheduled_at=datetime(2025, 10, 23, tzinfo=timezone.utc),
+                status_text="7:00 pm ET",
+                status_code=1,
+                postponed_status=None,
+                postponement_evidence=None,
+                classification="Regular Season",
+                first_seen_at=observed_at,
+                last_seen_at=observed_at,
+            )
+        )
+    catalog = EventCatalogService(engine, FakeScheduleProvider())
+    slate = SlateService(
+        catalog,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        clock=lambda: observed_at,
+    )
+
+    payload = slate.get_slate("2025-10-22")
+
+    assert catalog.count_events("2025-26") == 1
+    assert catalog.get_freshness("2025-26")["event_count"] == 0
+    assert [game["game_id"] for game in payload["games"]] == ["0022500001"]
+    assert payload["freshness"]["schedule"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
 
 
 def test_service_uses_catalog_event_max_age_setting(tmp_path):

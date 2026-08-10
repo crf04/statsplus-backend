@@ -32,6 +32,9 @@ def test_get_slate_returns_the_service_payload(client, dependencies):
 
 def test_authenticated_omitted_date_defaults_through_real_service(client, dependencies):
     class Catalog:
+        def count_events(self, season):
+            return 1
+
         def get_freshness(self, season, *, now):
             return {
                 "last_success_at": "2026-03-08T06:00:00+00:00",

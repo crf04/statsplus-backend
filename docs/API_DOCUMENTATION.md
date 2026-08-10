@@ -256,6 +256,8 @@ unavailable surface with no retrieval time or providers. A stale but populated
 schedule remains a `200` with `freshness.schedule.status: "stale"`. Stored
 catalog rows without successful-refresh metadata remain servable and report
 `freshness.schedule` as `{ "status": "missing", "retrieved_at": null }`.
+Availability is determined from actual stored Event Catalog rows, not the
+refresh record's informational `event_count`.
 Schedule freshness uses the nightly schedule surface's independent
 `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default), not the broader
 Event Catalog eligibility TTL. The exact boundary is fresh; an older retrieval

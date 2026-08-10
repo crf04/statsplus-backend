@@ -25,6 +25,10 @@ class RecordedCatalog:
             if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
         ]
 
+    def count_events(self, season):
+        assert season == "2025-26"
+        return len(self.events)
+
     def get_freshness(self, season, *, now=None):
         assert season == "2025-26"
         return dict(self.freshness)
@@ -252,10 +256,12 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
     }
 
     at_boundary = _service(
-        [], freshness=freshness, now=retrieved_at + timedelta(hours=30)
+        [_event("stored", "2026-01-04T00:00:00+00:00")],
+        freshness=freshness,
+        now=retrieved_at + timedelta(hours=30),
     ).get_slate("2026-01-02")
     past_boundary = _service(
-        [],
+        [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness=freshness,
         now=retrieved_at + timedelta(hours=30, microseconds=1),
     ).get_slate("2026-01-02")
@@ -267,7 +273,7 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
 def test_schedule_freshness_treats_future_metadata_as_zero_age():
     observed_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
     payload = _service(
-        [],
+        [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={
             "last_success_at": (observed_at + timedelta(minutes=1)).isoformat(),
             "event_count": 1,
@@ -281,7 +287,7 @@ def test_schedule_freshness_treats_future_metadata_as_zero_age():
 def test_schedule_freshness_accepts_a_valid_injected_max_age():
     retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
     payload = _service(
-        [],
+        [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={"last_success_at": retrieved_at.isoformat(), "event_count": 1},
         now=retrieved_at + timedelta(hours=2),
         schedule_max_age=timedelta(hours=1),

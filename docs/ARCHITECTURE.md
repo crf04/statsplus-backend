@@ -387,7 +387,8 @@ metadata is missing, with schedule freshness reported as `missing`. A populated
 catalog can return an empty date, and populated but
 older schedule data remains servable and is marked stale. The player-pool
 surface remains an explicit unavailable aggregate until its owning service is
-implemented.
+implemented. Availability uses an efficient count of actual season rows; the
+refresh record's `event_count` remains metadata and does not gate the read.
 
 Natural-language query:
 

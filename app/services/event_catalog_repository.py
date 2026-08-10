@@ -97,6 +97,17 @@ class EventCatalogRepository:
                 table.c.season == season).order_by(table.c.scheduled_at, table.c.nba_game_id)).mappings()
             return [self._serialize(row) for row in rows]
 
+    def count_events(self, season: str) -> int:
+        """Count actual persisted events for one season."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(
+                    select(func.count()).select_from(table).where(table.c.season == season)
+                ).scalar_one()
+            )
+
     def list_events_between(
         self, season: str, starts_at: datetime, ends_at: datetime
     ) -> list[dict[str, Any]]:

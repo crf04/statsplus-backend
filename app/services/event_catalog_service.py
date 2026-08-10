@@ -131,6 +131,9 @@ class EventCatalogService:
     def get_events(self, season: str) -> list[dict[str, Any]]:
         return self.repository.list_events(validate_canonical_season(season))
 
+    def count_events(self, season: str) -> int:
+        return self.repository.count_events(validate_canonical_season(season))
+
     def get_events_between(
         self, season: str, starts_at: datetime, ends_at: datetime
     ) -> list[dict[str, Any]]:

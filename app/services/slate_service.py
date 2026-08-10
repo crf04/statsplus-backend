@@ -66,12 +66,12 @@ class SlateService:
             )
 
         observed_at = assume_utc(self._clock())
-        freshness = self.event_catalog.get_freshness(season, now=observed_at)
-        retrieved_at = freshness.get("last_success_at")
-        if freshness.get("event_count", 0) == 0:
+        if self.event_catalog.count_events(season) == 0:
             raise ProviderUnavailableError(
                 "The NBA schedule is not available. Please try again later."
             )
+        freshness = self.event_catalog.get_freshness(season, now=observed_at)
+        retrieved_at = freshness.get("last_success_at")
 
         local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
         local_end = local_start + timedelta(days=1)
