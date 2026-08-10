@@ -16,7 +16,12 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from app.domain.market_content import market_content_key, market_evidence_key
+from app.domain.market_content import (
+    NumericDomainError,
+    market_content_key,
+    market_evidence_key,
+    normalized_decimal,
+)
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 
 from app.utils.request_id import is_valid_request_id
@@ -168,19 +173,23 @@ def normalize_scoring_period(
 
 
 def _decimal_value(value: Decimal | int | str | float, *, field: str) -> Decimal:
-    """Convert an upstream numeric value without introducing float arithmetic."""
+    """Convert an upstream numeric value without introducing float arithmetic.
+
+    This is the one boundary at which a provider number enters the
+    application, so it is where the normalized numeric domain is enforced: a
+    value outside it is rejected here, as one malformed provider field, rather
+    than accepted and then found uncomparable when a board states its spread.
+    """
 
     if isinstance(value, bool):
-        raise ValueError(f"{field} must be a finite decimal")
+        raise NumericDomainError(f"{field} must be a finite decimal")
     if isinstance(value, float) and not isfinite(value):
-        raise ValueError(f"{field} must be a finite decimal")
+        raise NumericDomainError(f"{field} must be a finite decimal")
     try:
         decimal = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{field} must be a finite decimal") from error
-    if not decimal.is_finite():
-        raise ValueError(f"{field} must be a finite decimal")
-    return decimal
+        raise NumericDomainError(f"{field} must be a finite decimal") from error
+    return normalized_decimal(decimal, field=field)
 
 
 @dataclass(frozen=True, slots=True)

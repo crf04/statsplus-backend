@@ -39,7 +39,12 @@ from app.providers.dfs import (
     normalize_selection_direction,
     normalize_scoring_period,
 )
-from app.domain.market_content import market_content_key, market_evidence_key
+from app.domain.market_content import (
+    NORMALIZED_DECIMAL_PLACE_LIMIT,
+    NumericDomainError,
+    market_content_key,
+    market_evidence_key,
+)
 from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.providers.dfs import _SnapshotMarketCollector
 
@@ -110,6 +115,47 @@ def test_threshold_keeps_exact_decimal_and_source_value():
 
     with pytest.raises((AttributeError, TypeError)):
         threshold.value = Decimal("26")  # type: ignore[misc]
+
+
+def test_the_normalized_numeric_domain_accepts_its_documented_boundary():
+    limit = NORMALIZED_DECIMAL_PLACE_LIMIT
+    highest = f"1E+{limit}"
+    lowest = f"1E-{limit}"
+    widest = "9" * (2 * limit + 1) + f"E-{limit}"
+
+    assert MarketThreshold(value=highest, unit="points").value == Decimal(highest)
+    assert MarketThreshold(value=lowest, unit="points").value == Decimal(lowest)
+    assert MarketThreshold(value=widest, unit="points").value == Decimal(widest)
+    assert SelectionModifier(
+        value=highest, kind="multiplier", scope="selection"
+    ).value == Decimal(highest)
+    assert Selection(
+        selection_id="s-1", decimal_price=lowest
+    ).decimal_price == Decimal(lowest)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"-1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"-1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        "9" * (2 * NORMALIZED_DECIMAL_PLACE_LIMIT + 2)
+        + f"E-{NORMALIZED_DECIMAL_PLACE_LIMIT}",
+        "1E+999999999",
+    ],
+)
+def test_a_provider_number_beyond_the_numeric_domain_is_refused(value):
+    assert issubclass(NumericDomainError, ValueError)
+    for build in (
+        lambda: MarketThreshold(value=value, unit="points"),
+        lambda: SelectionModifier(value=value, kind="multiplier", scope="selection"),
+        lambda: Selection(selection_id="s-1", decimal_price=value),
+    ):
+        with pytest.raises(NumericDomainError, match="normalized numeric domain") as raised:
+            build()
+        assert value not in str(raised.value)
 
 
 def test_selection_modifier_is_decimal_evidence_not_a_payout():

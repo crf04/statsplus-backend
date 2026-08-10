@@ -21,14 +21,33 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import MAX_EMAX, MIN_EMIN, Decimal, Inexact, localcontext
+from decimal import (
+    MAX_EMAX,
+    MIN_EMIN,
+    ROUND_HALF_EVEN,
+    Clamped,
+    Context,
+    Decimal,
+    DivisionByZero,
+    FloatOperation,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Subnormal,
+    Underflow,
+)
 from enum import Enum
 from collections.abc import Iterable, Sequence
 from typing import Any
 
 from app.domain.market_content import (
+    MAX_EXACT_DIFFERENCE_SPAN,
+    NORMALIZED_DECIMAL_PLACE_LIMIT,
+    NumericDomainError,
     aware_utc as _aware_utc,
     canonical_decimal,
+    normalized_decimal,
     canonical_selections,
     encode_canonical as _encode,
     market_content_key,
@@ -157,52 +176,60 @@ class CatalogAvailabilityReason(str, Enum):
     NOT_CONFIGURED = "catalog_not_configured"
 
 
-#: The most base-ten places an exact difference may span.  A difference costs
-#: one digit per place from the larger value's leading digit down to the
-#: smaller value's last written one, so two values whose exponents are far
-#: apart cost memory proportional to that separation rather than to the digits
-#: either provider actually wrote.
-EXACT_DIFFERENCE_DIGIT_LIMIT = 1000
+#: Every decimal signal, trapped, so the context below can produce a number or
+#: raise but never quietly record that it did something inexact.
+_DECIMAL_SIGNALS = (
+    Clamped,
+    DivisionByZero,
+    FloatOperation,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Subnormal,
+    Underflow,
+)
 
 
 def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
-    """The exact difference of two finite decimals, whatever context is ambient.
+    """The exact difference of two normalized decimals, ambient context aside.
 
-    Decimal subtraction rounds to the ambient context's precision, so the same
-    two provider thresholds subtracted inside ``localcontext(prec=5)`` and
-    outside it are two different numbers, and a threshold carrying more digits
-    than the ambient precision is rounded into a value that is not the
-    difference of the numbers the board states.  This asks instead for exactly
-    the precision the result needs, read off the operands' own digit counts and
-    exponents: the leading place either value could carry into, down to the
-    last place either wrote.
+    Decimal arithmetic reads the ambient context, so the same two provider
+    thresholds subtracted inside ``localcontext(prec=5)`` and outside it are
+    two different numbers, and a threshold carrying more digits than the
+    ambient precision is rounded into a value that is not the difference of
+    the numbers the board states.  Nor is precision the only inherited state:
+    a narrow ``Emax``, a clamping context, or a caller's own traps would each
+    change or refuse the result.
 
-    Nothing is materialized from an exponent.  A precision is only a ceiling,
-    so it costs nothing until the digits exist -- but the digits of a genuinely
-    separated difference do exist, and ``1E+1000000`` less ``1`` really is a
-    million of them.  Such a difference is refused rather than allocated, and
-    the ``Inexact`` trap makes a returned value exact by construction.
+    So none of it is inherited.  The subtraction is performed by a fresh
+    :class:`decimal.Context` that states every field it depends on --
+    precision, exponent range, rounding, capitals, clamping, and a trap for
+    every signal -- and it is performed by that context's own method, never by
+    an operator, so no thread-local state takes part at all.
+
+    Its precision is :data:`MAX_EXACT_DIFFERENCE_SPAN`, the widest exact
+    difference the normalized numeric domain admits.  Both operands must be
+    inside that domain, which is enforced where a provider number is first
+    accepted, so every threshold the contract accepted subtracts exactly and
+    no trap can fire.  A decimal from anywhere else is refused with one typed
+    :class:`NumericDomainError` rather than allocating a difference whose
+    digits are the distance between two exponents.
     """
 
     for name, value in (("minuend", minuend), ("subtrahend", subtrahend)):
-        if not isinstance(value, Decimal) or not value.is_finite():
-            raise ValueError(f"an exact difference requires a finite Decimal {name}")
-    _sign, left_digits, left_exponent = minuend.as_tuple()
-    _sign, right_digits, right_exponent = subtrahend.as_tuple()
-    leading = max(left_exponent + len(left_digits), right_exponent + len(right_digits))
-    trailing = min(left_exponent, right_exponent)
-    required = leading - trailing + 1
-    if required > EXACT_DIFFERENCE_DIGIT_LIMIT:
-        raise ValueError(
-            "an exact difference cannot span more than "
-            f"{EXACT_DIFFERENCE_DIGIT_LIMIT} decimal places"
-        )
-    with localcontext() as context:
-        context.prec = required
-        context.Emax = MAX_EMAX
-        context.Emin = MIN_EMIN
-        context.traps[Inexact] = True
-        return minuend - subtrahend
+        normalized_decimal(value, field=f"an exact difference {name}")
+    context = Context(
+        prec=MAX_EXACT_DIFFERENCE_SPAN,
+        rounding=ROUND_HALF_EVEN,
+        Emin=MIN_EMIN,
+        Emax=MAX_EMAX,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=list(_DECIMAL_SIGNALS),
+    )
+    return context.subtract(minuend, subtrahend)
 
 
 def exact_seconds(value: object) -> Decimal:
@@ -1209,7 +1236,8 @@ class ComparisonBoard:
 
 
 __all__ = [
-    "EXACT_DIFFERENCE_DIGIT_LIMIT",
+    "MAX_EXACT_DIFFERENCE_SPAN",
+    "NORMALIZED_DECIMAL_PLACE_LIMIT",
     "REFERENCE_VERSION",
     "SUPPORTED_NARROWING_FILTERS",
     "BoardAppearance",
@@ -1239,6 +1267,7 @@ __all__ = [
     "ComparisonMember",
     "ComparisonSummary",
     "MarketFreshness",
+    "NumericDomainError",
     "ProviderReport",
     "UnresolvedMarket",
     "canonical_decimal",
@@ -1248,6 +1277,7 @@ __all__ = [
     "market_content_key",
     "market_evidence_key",
     "market_reference",
+    "normalized_decimal",
     "observation_evidence_key",
     "selection_reference",
 ]

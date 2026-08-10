@@ -278,6 +278,30 @@ def test_missing_prizepicks_relationship_is_partial_when_another_row_is_valid() 
     assert "projection relationships could not be resolved" in snapshot.coverage.diagnostic_details
 
 
+def test_a_prizepicks_line_outside_the_numeric_domain_is_one_malformed_record() -> None:
+    payload = _payload("projections.page1.valid.json")
+    rows = payload["data"]
+    assert isinstance(rows, list)
+    out_of_domain = copy.deepcopy(rows[0])
+    out_of_domain["id"] = "projection-out-of-domain"
+    out_of_domain["attributes"]["line_score"] = "1E+999999999"
+    rows.append(out_of_domain)
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert [market.market_id for market in snapshot.markets] == ["projection-1"]
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
+    assert all(
+        "1E+999999999" not in detail
+        for detail in snapshot.coverage.diagnostic_details
+    )
+
+
 def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error() -> None:
     payload = _payload("projections.page1.valid.json")
     payload["data"] = [payload["data"][0]]

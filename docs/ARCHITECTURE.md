@@ -93,6 +93,25 @@ without guessing missing facts; they expose no provider-specific public routes.
 two-digit end year must be the calendar year after the four-digit start year,
 so `2024-99` fails at construction rather than reaching an adapter.
 
+Every provider number — a `MarketThreshold` value, a `SelectionModifier`
+value, and a selection's decimal price — is converted once, at that single
+boundary, into the **normalized numeric domain**: a finite `Decimal` whose
+leading significant digit sits no higher than `1E+128` and whose last written
+digit no lower than `1E-128`, the reviewed
+`NORMALIZED_DECIMAL_PLACE_LIMIT`. The bound exists because an exact difference
+costs one digit per base-ten place between its operands, so two accepted
+values whose exponents were far apart would allocate that separation rather
+than the digits a provider actually wrote. The range is far wider than any
+real projection line, price, or multiplier; a value outside it is one
+malformed provider field, refused with a typed `NumericDomainError` — a
+`ValueError`, so each adapter's existing conversion into a typed malformed
+record and `malformed_record` coverage code applies unchanged, and the message
+never quotes the offending value. Membership is decided from a value's own
+exponent and digit count, never by materializing the places between them, so
+`1E+999999999` is rejected at the cost of its own two digits. Because the
+domain is enforced there, nothing the contract accepts can later refuse to
+enter a Comparison Group.
+
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
 includes the adapter-contract version; it never serializes a `DFSBoard`. The
@@ -865,13 +884,16 @@ A summary states only exact decimal minimum, maximum, and Threshold Spread,
 the provider and market counts, the freshness, and the sorted market
 references. Thresholds are `Decimal` throughout, so a serialized value is the
 provider's own exact number. The Threshold Spread is the exact difference of
-the stated minimum and maximum whatever decimal context the caller happens to
-be inside, and a summary validates its spread against that same exact
-difference, so neither a stored nor an accepted spread can be a rounded one.
-The precision that needs is read off the operands' own digit counts and
-exponents rather than materialized from an exponent; a difference spanning
-more than `EXACT_DIFFERENCE_DIGIT_LIMIT` decimal places is refused rather than
-allocated. No probability, expected value, recommendation,
+the stated minimum and maximum, and a summary validates its spread against
+that same exact difference, so neither a stored nor an accepted spread can be
+a rounded one. That difference inherits nothing from the ambient decimal
+context: it is computed by a fresh `decimal.Context` that states its own
+precision, exponent range, rounding, capitals, clamping, and a trap for every
+signal, using that context's own method rather than an operator, so no
+thread-local precision, clamp, or trap can change or refuse it. Its precision
+is `MAX_EXACT_DIFFERENCE_SPAN`, the widest exact difference the normalized
+numeric domain admits, so every threshold the provider contract accepted
+subtracts exactly. No probability, expected value, recommendation,
 average, preferred market, entry payout, or cross-provider fantasy assumption
 is produced anywhere in this seam.
 

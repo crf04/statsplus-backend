@@ -6,15 +6,33 @@ import dataclasses
 import time
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, localcontext
+from decimal import (
+    MAX_EMAX,
+    MIN_EMIN,
+    ROUND_CEILING,
+    Clamped,
+    Decimal,
+    DivisionByZero,
+    FloatOperation,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Subnormal,
+    Underflow,
+    localcontext,
+)
 
 import pytest
 import requests
 
 from app.domain import comparisons
 from app.domain.comparisons import (
+    MAX_EXACT_DIFFERENCE_SPAN,
+    NORMALIZED_DECIMAL_PLACE_LIMIT,
     REFERENCE_VERSION,
     SUPPORTED_NARROWING_FILTERS,
+    NumericDomainError,
     ComparisonBoard,
     ComparisonGroup,
     ComparisonMember,
@@ -86,6 +104,7 @@ from app.services.event_resolver import (
 from app.services.statistic_catalog import StatisticCatalog
 
 SEASON = "2025-26"
+PLACE_LIMIT = NORMALIZED_DECIMAL_PLACE_LIMIT
 RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
 GENERATED_AT = RETRIEVED_AT + timedelta(seconds=30)
 
@@ -1207,6 +1226,16 @@ def test_a_threshold_spread_is_exact_whatever_context_a_caller_is_inside():
         ("-0", "0.000", "0"),
         ("-1E-30", "1E-30", "2E-30"),
         ("1E-10", "1E+40", "9" * 40 + "." + "9" * 10),
+        # The highest and lowest places the normalized domain admits, in both
+        # signs, and a coefficient far longer than any decimal context default.
+        (f"-1E+{PLACE_LIMIT}", f"1E+{PLACE_LIMIT}", f"2E+{PLACE_LIMIT}"),
+        (f"-1E-{PLACE_LIMIT}", f"1E-{PLACE_LIMIT}", f"2E-{PLACE_LIMIT}"),
+        (
+            f"1E-{PLACE_LIMIT}",
+            f"1E+{PLACE_LIMIT}",
+            "9" * PLACE_LIMIT + "." + "9" * PLACE_LIMIT,
+        ),
+        ("-1." + "7" * 120, "1." + "3" * 120, "3." + "1" * 119 + "0"),
     ],
 )
 def test_a_threshold_spread_is_exact_across_signs_zero_and_exponents(
@@ -1250,13 +1279,129 @@ def test_a_summary_spread_rounded_by_the_ambient_context_is_refused():
     assert accepted.threshold_spread == exact
 
 
-def test_a_spread_separated_by_a_huge_exponent_is_refused_not_allocated():
-    # The exact difference really is a million digits long; refusing it costs
-    # the exponents themselves rather than the digits between them.
-    with pytest.raises(ValueError, match="decimal places"):
-        comparisons.exact_difference(Decimal("1E+1000000"), Decimal("1"))
-    with pytest.raises(ValueError, match="decimal places"):
-        _summary("1", "1E+1000000")
+def test_the_maximum_exact_difference_span_is_the_widest_the_domain_admits():
+    # The widest pair the normalized domain admits: one value occupying every
+    # place from the highest permitted down to the lowest, less its negation.
+    # The difference borrows one place above the highest, so the span is the
+    # whole place range plus that carry.
+    widest = Decimal("9" * (2 * PLACE_LIMIT + 1) + f"E-{PLACE_LIMIT}")
+    expected = Decimal("1" + "9" * (2 * PLACE_LIMIT) + "8" + f"E-{PLACE_LIMIT}")
+
+    difference = comparisons.exact_difference(widest, widest.copy_negate())
+    _sign, digits, exponent = difference.as_tuple()
+
+    assert difference == expected
+    assert len(digits) == MAX_EXACT_DIFFERENCE_SPAN
+    assert exponent == -PLACE_LIMIT
+    assert MAX_EXACT_DIFFERENCE_SPAN == 2 * PLACE_LIMIT + 2
+
+
+def test_a_decimal_at_the_place_boundary_is_inside_the_normalized_domain():
+    minimum = f"1E-{PLACE_LIMIT}"
+    maximum = f"1E+{PLACE_LIMIT}"
+
+    summary = _summary(minimum, maximum)
+
+    assert summary.threshold_spread == Decimal(
+        "9" * PLACE_LIMIT + "." + "9" * PLACE_LIMIT
+    )
+    assert MarketThreshold(value=maximum, unit="points").value == Decimal(maximum)
+    assert MarketThreshold(value=minimum, unit="points").value == Decimal(minimum)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"1E+{PLACE_LIMIT + 1}",
+        f"-1E+{PLACE_LIMIT + 1}",
+        f"1E-{PLACE_LIMIT + 1}",
+        f"-1E-{PLACE_LIMIT + 1}",
+        "1E+999999999",
+        "-1E-999999999",
+        "0E+999999999",
+        "1." + "0" * (2 * PLACE_LIMIT + 1) + "1",
+    ],
+)
+def test_a_decimal_beyond_the_place_boundary_is_outside_the_domain(value):
+    with pytest.raises(NumericDomainError, match="normalized numeric domain"):
+        comparisons.exact_difference(Decimal(value), Decimal("1"))
+    with pytest.raises(NumericDomainError, match="normalized numeric domain"):
+        comparisons.exact_difference(Decimal("1"), Decimal(value))
+    with pytest.raises(NumericDomainError, match="normalized numeric domain"):
+        MarketThreshold(value=value, unit="points")
+
+
+def test_the_numeric_domain_is_decided_without_allocating_an_exponent():
+    # A value whose fixed-point form would be a billion digits long is decided
+    # from its own exponent and digit count, not by materializing the places
+    # between them.
+    started = time.monotonic()
+    for value in ("1E+999999999", "-1E-999999999", "1E+1000000"):
+        with pytest.raises(NumericDomainError):
+            MarketThreshold(value=value, unit="points")
+        with pytest.raises(NumericDomainError):
+            comparisons.exact_difference(Decimal(value), Decimal("1"))
+
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_exact_difference_ignores_ambient_precision_clamp_and_traps():
+    minimum = Decimal(f"1E-{PLACE_LIMIT}")
+    maximum = Decimal(f"1E+{PLACE_LIMIT}")
+    expected = comparisons.exact_difference(maximum, minimum).as_tuple()
+    signals = (
+        Clamped,
+        DivisionByZero,
+        FloatOperation,
+        Inexact,
+        InvalidOperation,
+        Overflow,
+        Rounded,
+        Subnormal,
+        Underflow,
+    )
+
+    hostile = []
+    for emax, emin in ((0, 0), (MAX_EMAX, MIN_EMIN)):
+        with localcontext() as context:
+            context.prec = 1
+            context.Emax = emax
+            context.Emin = emin
+            context.clamp = 1
+            context.capitals = 0
+            context.rounding = ROUND_CEILING
+            for signal in signals:
+                context.traps[signal] = True
+            hostile.append(comparisons.exact_difference(maximum, minimum).as_tuple())
+            hostile.append(_summary(str(minimum), str(maximum)).threshold_spread.as_tuple())
+
+    assert hostile == [expected] * 4
+
+
+def test_every_threshold_the_provider_contract_accepts_can_be_compared():
+    # Nothing the normalized numeric boundary accepts may later refuse to
+    # assemble into a stated comparison.
+    accepted = tuple(
+        MarketThreshold(value=value, unit="points").value
+        for value in (
+            "0",
+            "25.5",
+            "-25.5",
+            f"1E+{PLACE_LIMIT}",
+            f"-1E+{PLACE_LIMIT}",
+            f"1E-{PLACE_LIMIT}",
+            f"-1E-{PLACE_LIMIT}",
+            "9" * (2 * PLACE_LIMIT + 1) + f"E-{PLACE_LIMIT}",
+            "-" + "9" * (2 * PLACE_LIMIT + 1) + f"E-{PLACE_LIMIT}",
+        )
+    )
+
+    for left in accepted:
+        for right in accepted:
+            summary = _summary(str(min(left, right)), str(max(left, right)))
+            assert summary.threshold_spread == comparisons.exact_difference(
+                max(left, right), min(left, right)
+            )
 
 
 def test_a_group_requires_deterministically_ordered_members():
@@ -1562,9 +1707,9 @@ def test_a_canonical_decimal_separates_every_distinct_finite_value():
         "25.05",
         "255",
         "1E+2",
-        "1E+1000000",
-        "1E-1000000",
-        "-1E+1000000",
+        f"1E+{PLACE_LIMIT}",
+        f"1E-{PLACE_LIMIT}",
+        f"-1E+{PLACE_LIMIT}",
     )
     encodings = {canonical_decimal(Decimal(value)) for value in values}
 
@@ -1572,9 +1717,15 @@ def test_a_canonical_decimal_separates_every_distinct_finite_value():
 
 
 def test_a_canonical_decimal_is_bounded_however_large_its_exponent():
-    # A fixed-point rendering of these would be a million characters long.
-    for value in ("1E+1000000", "-1E+1000000", "1.5E-999999999"):
-        assert len(canonical_decimal(Decimal(value))) < 64
+    # A fixed-point rendering of the highest and lowest places the normalized
+    # domain admits would be hundreds of characters long.
+    for value in (
+        f"1E+{PLACE_LIMIT}",
+        f"-1E+{PLACE_LIMIT}",
+        f"1.5E-{PLACE_LIMIT - 1}",
+    ):
+        decimal = MarketThreshold(value=value, unit="points").value
+        assert len(canonical_decimal(decimal)) < 32
 
 
 def test_a_reference_does_not_depend_on_the_scale_a_number_was_written_in():

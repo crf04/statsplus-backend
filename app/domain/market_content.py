@@ -41,6 +41,74 @@ def aware_utc(value: datetime, *, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+# -- the normalized numeric domain -----------------------------------------
+#
+# Every provider number the application keeps is an exact decimal, and the
+# board states exact differences of them.  A difference costs one digit per
+# base-ten place from the higher operand's leading place down to the lower
+# one's last written place, so two values whose exponents are far apart cost
+# memory proportional to that separation rather than to the digits either
+# provider wrote: ``1E+1000000`` less ``1`` is a million digits.
+#
+# An exact difference therefore needs a bounded domain, and the only place to
+# bound it is where a provider number is first accepted.  A value is in the
+# domain when every base-ten place it occupies is inside the reviewed range;
+# a value outside it never becomes a MarketThreshold, a SelectionModifier, or
+# a selection price, so nothing the contract accepts can later refuse to be
+# compared.  The range is far wider than any real projection line, price, or
+# multiplier -- it exists to bound allocation, not to constrain evidence.
+
+#: The highest base-ten place a normalized provider decimal may occupy, and
+#: (negated) the lowest.  A value's leading significant digit must sit no
+#: higher than ``1E+128`` and its last written digit no lower than ``1E-128``.
+NORMALIZED_DECIMAL_PLACE_LIMIT = 128
+
+#: The most base-ten places the exact difference of two normalized decimals
+#: can span, and so the exact precision that difference is computed at.  It
+#: runs from the place a borrow can carry the result into, one above the
+#: highest either operand may occupy, down to the lowest place either may have
+#: written, counting both ends.
+MAX_EXACT_DIFFERENCE_SPAN = 2 * NORMALIZED_DECIMAL_PLACE_LIMIT + 2
+
+
+class NumericDomainError(ValueError):
+    """One decimal outside the normalized numeric domain.
+
+    It is a ``ValueError`` so every provider adapter's existing conversion of
+    a rejected field into a typed malformed record keeps working, and its
+    message never quotes the offending value.
+    """
+
+
+def decimal_places(value: Decimal) -> tuple[int, int]:
+    """The highest and lowest base-ten places one finite decimal occupies.
+
+    Both are read off the value's own digits and exponent, so deciding them
+    costs the digits the provider wrote rather than the places between them.
+    """
+
+    _sign, digits, exponent = value.as_tuple()
+    return exponent + len(digits) - 1, exponent
+
+
+def normalized_decimal(value: Decimal, *, field: str) -> Decimal:
+    """One finite decimal inside the normalized numeric domain, or an error."""
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise NumericDomainError(f"{field} must be a finite decimal")
+    highest, lowest = decimal_places(value)
+    if (
+        highest > NORMALIZED_DECIMAL_PLACE_LIMIT
+        or lowest < -NORMALIZED_DECIMAL_PLACE_LIMIT
+    ):
+        raise NumericDomainError(
+            f"{field} must occupy base-ten places within the normalized numeric "
+            f"domain of 1E+{NORMALIZED_DECIMAL_PLACE_LIMIT} down to "
+            f"1E-{NORMALIZED_DECIMAL_PLACE_LIMIT}"
+        )
+    return value
+
+
 def canonical_decimal(value: Decimal) -> str:
     """The one canonical token for an exact decimal, independent of scale.
 
@@ -58,8 +126,8 @@ def canonical_decimal(value: Decimal) -> str:
     reference, and would make a reference depend on the context a caller
     happened to be inside.
 
-    Nothing here is materialized from the exponent, so a legitimate provider
-    value such as ``1E+1000000`` costs its own digits rather than a million
+    Nothing here is materialized from the exponent, so a value at the edge of
+    the normalized numeric domain costs its own digits rather than hundreds of
     characters of positional zeroes.
     """
 
