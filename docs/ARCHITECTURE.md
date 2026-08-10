@@ -938,6 +938,17 @@ is `MAX_EXACT_DIFFERENCE_SPAN`, the widest exact difference the normalized
 numeric domain admits, so every threshold the provider contract accepted
 subtracts exactly.
 
+A summary is derived evidence, never independent evidence. A `ComparisonGroup`
+validates its summary against `ComparisonSummary.of(members)` after ordering its
+members, so it can carry only the derivation its own members produce: a false
+provider count, market count, minimum, maximum, spread, freshness, or market
+reference list is refused where the group is built rather than published beside
+the markets that contradict it. The comparison is at the scale a threshold is
+written in, not merely at the value it compares equal to, because a board
+publishes `Decimal("25.50")` and `Decimal("25.5")` as different strings even
+though Python compares them equal. The rule is independent of member order,
+since nothing the derivation states depends on which member sorts first.
+
 How old an observation or a catalog is inherits nothing either. `exact_seconds`
 counts a duration in whole microseconds and writes the result straight from
 those digits, so no decimal operation and therefore no ambient precision takes
@@ -1058,6 +1069,27 @@ retains nothing, cannot be expressed as a board at all.
 sibling of `ComparisonBoardTooLargeError`, so should it ever escape the response
 seam the central handler already answers it as the safe 503 an outage is, with
 no evidence in its public details and no 400 telling a caller to narrow filters.
+
+Agreeing counts are not yet a coherent board, so a `ComparisonBoard` also
+validates that its three collections are one partition of the evidence it
+retained. Every market reference a group's members cite, and every reference
+stated as unresolved, is backed by a retained `BoardMarket` on the same board;
+each reference lands on exactly one side, entering at most one comparison and
+being stated unresolved at most once; and every retained market names where it
+went — a compared one names the comparison whose members cite it, an excluded
+one names a reference the board reports as unresolved. Backing is not one market
+per reference: contradicting observations of one source identity are all
+retained, so one unresolved reference may stand on several retained
+observations. An empty board satisfies this trivially, and it is why
+`group_count + unresolved_count` can never exceed `market_count`.
+
+`BoardReadEvidence` carries counts without the collections behind them, so it
+enforces that same relation directly: a read cannot have established more
+comparisons and unresolved markets together than the observations it made. The
+count-only evidence a refusal carries satisfies it — an unreadable read states
+no group and one unresolved reference per observation, and an over-ceiling
+readable read states groups and unresolved references drawn from disjoint
+subsets of what it observed.
 
 Both seams judge readability through one domain authority,
 `ProviderReport.is_readable` and `has_readable_provider`, so the seam that

@@ -8,6 +8,7 @@ board tests use, so no provider, cache, or database is involved.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -46,10 +47,17 @@ from app.services.dfs_board_response import (
     serialize_board,
 )
 from app.utils.telemetry import BoardRequestEvent
-from app.domain.comparisons import ComparisonFilters
+from app.domain.comparisons import (
+    ComparisonFilters,
+    ComparisonGroup,
+    ComparisonSummary,
+)
 
 from tests.services.test_comparison_board import (
+    FALSE_SUMMARIES,
+    _ascending_members,
     _forced_reference,
+    _key,
     _read_markets,
     _spelled,
     GENERATED_AT,
@@ -1243,3 +1251,80 @@ def test_the_audited_count_keys_cover_every_count_the_contract_publishes():
         if key.endswith(("_count", "_ordinal", "_total", "_index"))
     }
     assert named <= COUNT_KEYS
+
+
+# -- a published summary states exactly the members published beside it ------
+
+
+def test_a_published_group_summary_states_exactly_its_published_members():
+    """A reader can re-derive every summary from the members in the same body."""
+
+    comparison_service, _ = complete_board_service()
+    board = comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    payload = serialize_board(board)
+
+    assert payload["comparison_groups"]
+    for group in payload["comparison_groups"]:
+        summary = group["summary"]
+        thresholds = [Decimal(member["threshold"]) for member in group["members"]]
+        assert Decimal(summary["minimum_threshold"]) == min(thresholds)
+        assert Decimal(summary["maximum_threshold"]) == max(thresholds)
+        assert Decimal(summary["threshold_spread"]) == max(thresholds) - min(thresholds)
+        assert summary["market_count"] == len(group["members"])
+        assert summary["provider_count"] == len(
+            {member["provider"] for member in group["members"]}
+        )
+        assert summary["market_references"] == sorted(
+            member["market_reference"] for member in group["members"]
+        )
+
+
+@pytest.mark.parametrize("falsified", sorted(FALSE_SUMMARIES), ids=sorted(FALSE_SUMMARIES))
+def test_no_falsified_group_summary_can_reach_the_serializer(falsified):
+    """A group is refused where it is built, so no body may carry one."""
+
+    members = _ascending_members()
+    summary = dataclasses.replace(
+        ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified]
+    )
+
+    with pytest.raises(ValueError, match="summary must state exactly its members"):
+        serialize_board(
+            dataclasses.replace(
+                _read_group_board(),
+                groups=(ComparisonGroup(key=_key(), members=members, summary=summary),),
+            )
+        )
+
+
+def _read_group_board():
+    comparison_service, _ = complete_board_service()
+    return comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+
+def test_a_published_board_partitions_every_reference_it_states():
+    comparison_service, _ = complete_board_service()
+    board = comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    payload = serialize_board(board)
+
+    grouped = {
+        member["market_reference"]
+        for group in payload["comparison_groups"]
+        for member in group["members"]
+    }
+    unresolved = {entry["market_reference"] for entry in payload["unresolved_markets"]}
+    retained = {market["market_reference"] for market in payload["markets"]}
+    references = {
+        group["comparison_reference"] for group in payload["comparison_groups"]
+    }
+    assert grouped
+    assert not grouped & unresolved
+    assert grouped | unresolved == retained
+    assert payload["market_count"] == len(payload["markets"])
+    for market in payload["markets"]:
+        if market["comparison_reference"] is not None:
+            assert market["comparison_reference"] in references
+        else:
+            assert market["market_reference"] in unresolved

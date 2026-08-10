@@ -1898,19 +1898,13 @@ def test_a_board_unresolved_count_must_be_an_exact_count(count):
 
 
 def test_a_board_accepts_the_exact_counts_it_retained():
-    unresolved = (
-        comparisons.UnresolvedMarket(
-            market_reference="ref-1",
-            provider="dabble",
-            reason=ComparisonExclusion.STALE_SNAPSHOT,
-        ),
-    )
     board = ComparisonBoard(
         season=SEASON,
         generated_at=GENERATED_AT,
         availability=_available(),
-        unresolved=unresolved,
-        market_count=0,
+        unresolved=(_unresolved_market("ref-1"),),
+        markets=(_excluded_market("ref-1"),),
+        market_count=1,
         unresolved_count=1,
     )
 
@@ -1951,40 +1945,36 @@ def test_board_read_evidence_reads_exact_counts_from_a_board():
 
 
 def test_a_board_counts_exactly_what_it_retained():
-    unresolved = (
-        comparisons.UnresolvedMarket(
-            market_reference="ref-1",
-            provider="dabble",
-            reason=ComparisonExclusion.STALE_SNAPSHOT,
-        ),
-    )
     board = ComparisonBoard(
         season=SEASON,
         generated_at=GENERATED_AT,
         availability=_available(),
-        unresolved=unresolved,
+        unresolved=(_unresolved_market("ref-1"),),
+        markets=(_excluded_market("ref-1"),),
+        market_count=1,
     )
 
     assert board.unresolved_count == 1
-    assert board.market_count == 0
+    assert board.market_count == 1
     assert board.is_empty is False
 
 
 def test_a_board_retaining_a_market_is_never_empty():
     """Emptiness is read from everything the board kept, counts included."""
 
-    service, _ = _service([_snapshot("dabble", (_market(market_id="m-1"),))])
-    retained = _read(service).markets
+    read = _read(_service([_snapshot("dabble", (_market(market_id="m-1"),))])[0])
 
     board = ComparisonBoard(
         season=SEASON,
         generated_at=GENERATED_AT,
         availability=_available(),
-        markets=retained,
-        market_count=len(retained),
+        groups=read.groups,
+        unresolved=read.unresolved,
+        markets=read.markets,
+        market_count=len(read.markets),
     )
 
-    assert retained
+    assert read.markets
     assert board.is_empty is False
 
 
@@ -3401,3 +3391,400 @@ def test_an_identity_is_not_constrained_as_a_count():
 
     assert key.canonical_athlete_id == 203999
     assert selection.american_price == -120
+
+
+# -- a group states exactly what its members state --------------------------
+
+#: Two members whose ascending thresholds also sort first by provider, and two
+#: whose descending thresholds do, so nothing below can depend on the member
+#: the deterministic order happens to put first.
+def _ascending_members():
+    return (
+        _member(reference="mkt_1_a", threshold="25.5", provider="dabble"),
+        _member(reference="mkt_1_b", threshold="26.5", provider="prizepicks"),
+    )
+
+
+def _descending_members():
+    return (
+        _member(reference="mkt_1_b", threshold="26.5", provider="dabble"),
+        _member(reference="mkt_1_a", threshold="25.5", provider="prizepicks"),
+    )
+
+
+MEMBER_ORDERS = [_ascending_members, _descending_members]
+
+
+def _key(statistic="points"):
+    return comparisons.ComparisonKey(
+        canonical_event_id="0022500001",
+        canonical_athlete_id=203999,
+        canonical_statistic_id=statistic,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+
+
+def _group_of(members, key=None):
+    return ComparisonGroup(
+        key=key or _key(), members=members, summary=ComparisonSummary.of(members)
+    )
+
+
+#: Each falsification is a summary that is internally valid -- its spread is
+#: still the exact difference of its own bounds and its reference count still
+#: matches its own references -- and yet states something its members do not.
+FALSE_SUMMARIES = {
+    "provider_count": {"provider_count": 1},
+    "market_count": {"market_count": 1, "market_references": ("mkt_1_a",)},
+    "minimum_threshold": {
+        "minimum_threshold": Decimal("24.5"),
+        "threshold_spread": Decimal("2.0"),
+    },
+    "maximum_threshold": {
+        "maximum_threshold": Decimal("27.5"),
+        "threshold_spread": Decimal("2.0"),
+    },
+    "threshold_spread": {
+        "minimum_threshold": Decimal("24.5"),
+        "maximum_threshold": Decimal("25.5"),
+    },
+    "market_references": {"market_references": ("mkt_1_a", "mkt_1_c")},
+    "freshness": {"freshness": ComparisonFreshness.STALE},
+    "decimal_scale": {
+        "minimum_threshold": Decimal("25.50"),
+        "maximum_threshold": Decimal("26.50"),
+        "threshold_spread": Decimal("1.00"),
+    },
+}
+
+
+@pytest.mark.parametrize("members_of", MEMBER_ORDERS)
+def test_a_group_summary_is_exactly_what_its_members_state(members_of):
+    members = members_of()
+
+    group = _group_of(members)
+
+    assert group.summary == ComparisonSummary.of(members)
+    assert group.summary.market_references == ("mkt_1_a", "mkt_1_b")
+    assert group.summary.provider_count == 2
+
+
+@pytest.mark.parametrize("members_of", MEMBER_ORDERS)
+@pytest.mark.parametrize("falsified", sorted(FALSE_SUMMARIES), ids=sorted(FALSE_SUMMARIES))
+def test_a_group_cannot_state_a_summary_its_members_contradict(members_of, falsified):
+    """A summary is derived evidence, so a group may only carry the derivation."""
+
+    members = members_of()
+    summary = dataclasses.replace(
+        ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified]
+    )
+
+    with pytest.raises(ValueError, match="summary must state exactly its members"):
+        ComparisonGroup(key=_key(), members=members, summary=summary)
+
+
+@pytest.mark.parametrize("members_of", MEMBER_ORDERS)
+def test_a_group_summary_that_merely_compares_equal_is_not_the_same_summary(members_of):
+    """``Decimal("25.50") == Decimal("25.5")`` but the two publish differently."""
+
+    members = members_of()
+    rescaled = dataclasses.replace(
+        ComparisonSummary.of(members), **FALSE_SUMMARIES["decimal_scale"]
+    )
+
+    assert rescaled == ComparisonSummary.of(members)
+    with pytest.raises(ValueError, match="summary must state exactly its members"):
+        ComparisonGroup(key=_key(), members=members, summary=rescaled)
+
+
+@pytest.mark.parametrize("summary", [None, "summary", 1, {"market_count": 1}])
+def test_a_group_requires_a_comparison_summary(summary):
+    with pytest.raises(ValueError, match="requires a ComparisonSummary"):
+        ComparisonGroup(key=_key(), members=_ascending_members(), summary=summary)
+
+
+def test_every_assembled_group_states_exactly_its_own_members():
+    """Nothing the assembler builds may be refused by the derivation rule."""
+
+    service, _ = _service(
+        [
+            _snapshot("dabble", (_market(market_id="m-1", threshold="25.5"),)),
+            _snapshot(
+                "prizepicks",
+                (_market(provider="prizepicks", market_id="m-2", threshold="26.5"),),
+            ),
+        ]
+    )
+
+    board = _read(service)
+
+    assert board.groups
+    for group in board.groups:
+        assert group.summary == ComparisonSummary.of(group.members)
+        assert group.summary.market_references == tuple(
+            sorted(member.market_reference for member in group.members)
+        )
+
+
+# -- a board is a backed partition, not three independent lists -------------
+
+
+def _compared_market(reference, comparison_reference, **overrides):
+    return comparisons.BoardMarket(
+        market_reference=reference,
+        provider="dabble",
+        observation=_board_observation(),
+        comparison_reference=comparison_reference,
+        **overrides,
+    )
+
+
+def _excluded_market(reference, **overrides):
+    values = {
+        "market_reference": reference,
+        "provider": "dabble",
+        "observation": _board_observation(),
+        "exclusion": ComparisonExclusion.STALE_SNAPSHOT,
+    }
+    return comparisons.BoardMarket(**{**values, **overrides})
+
+
+def _unresolved_market(reference, reason=ComparisonExclusion.STALE_SNAPSHOT):
+    return comparisons.UnresolvedMarket(
+        market_reference=reference, provider="dabble", reason=reason
+    )
+
+
+def _partition_board(*, groups=(), unresolved=(), markets=(), **overrides):
+    """One board assembled from already-ordered parts, counting what it keeps."""
+
+    markets = tuple(sorted(markets, key=lambda market: market.order))
+    values = {
+        "season": SEASON,
+        "generated_at": GENERATED_AT,
+        "availability": _available(),
+        "groups": tuple(groups),
+        "unresolved": tuple(sorted(unresolved, key=lambda entry: entry.order)),
+        "markets": markets,
+        "market_count": len(markets),
+    }
+    return ComparisonBoard(**{**values, **overrides})
+
+
+def _single_member_group(reference="mkt_1_a", key=None):
+    return _group_of((_member(reference=reference),), key=key)
+
+
+def test_a_compared_market_requires_the_retained_evidence_it_was_read_from():
+    group = _single_member_group()
+
+    with pytest.raises(ValueError, match="every compared market requires the evidence"):
+        _partition_board(groups=(group,))
+
+
+def test_a_compared_market_is_not_backed_by_evidence_that_was_excluded():
+    group = _single_member_group()
+
+    with pytest.raises(ValueError, match="every compared market requires the evidence"):
+        _partition_board(groups=(group,), markets=(_excluded_market("mkt_1_a"),))
+
+
+def test_an_unresolved_market_requires_the_retained_evidence_it_was_read_from():
+    with pytest.raises(
+        ValueError, match="every unresolved market requires the evidence"
+    ):
+        _partition_board(unresolved=(_unresolved_market("mkt_1_a"),))
+
+
+def test_a_market_reference_is_compared_or_unresolved_but_never_both():
+    group = _single_member_group()
+
+    with pytest.raises(ValueError, match="compared or unresolved, never both"):
+        _partition_board(
+            groups=(group,),
+            unresolved=(_unresolved_market("mkt_1_a"),),
+            markets=(
+                _compared_market("mkt_1_a", group.reference),
+                _excluded_market("mkt_1_a"),
+            ),
+        )
+
+
+def test_a_market_reference_may_enter_only_one_comparison():
+    keys = sorted((_key("assists"), _key("points")), key=lambda key: key.order)
+    groups = tuple(_single_member_group(key=key) for key in keys)
+
+    with pytest.raises(ValueError, match="may enter only one comparison"):
+        _partition_board(
+            groups=groups,
+            markets=tuple(
+                _compared_market("mkt_1_a", group.reference) for group in groups
+            ),
+        )
+
+
+def test_one_comparison_cannot_state_the_same_market_reference_twice():
+    members = (_member(reference="mkt_1_a"), _member(reference="mkt_1_a"))
+    group = _group_of(members)
+
+    with pytest.raises(ValueError, match="may enter only one comparison"):
+        _partition_board(
+            groups=(group,), markets=(_compared_market("mkt_1_a", group.reference),)
+        )
+
+
+def test_a_market_reference_is_unresolved_only_once():
+    with pytest.raises(ValueError, match="unresolved only once"):
+        _partition_board(
+            unresolved=(_unresolved_market("mkt_1_a"), _unresolved_market("mkt_1_a")),
+            markets=(_excluded_market("mkt_1_a"),),
+        )
+
+
+def test_retained_compared_evidence_must_name_the_comparison_its_market_entered():
+    group = _single_member_group()
+
+    with pytest.raises(ValueError, match="must name the comparison its market entered"):
+        _partition_board(
+            groups=(group,),
+            markets=(_compared_market("mkt_1_a", "cmp_1_something_else"),),
+        )
+
+
+def test_retained_excluded_evidence_must_name_an_unresolved_market():
+    with pytest.raises(ValueError, match="must name an unresolved market"):
+        _partition_board(markets=(_excluded_market("mkt_1_z"),))
+
+
+def test_a_contradicted_reference_is_backed_by_every_observation_it_kept():
+    """Conflict evidence keeps many observations behind one unresolved market."""
+
+    board = _partition_board(
+        unresolved=(
+            _unresolved_market(
+                "mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+            ),
+        ),
+        markets=(
+            _conflicted_market(conflict_ordinal=0, conflict_count=2),
+            _conflicted_market(conflict_ordinal=1, conflict_count=2),
+        ),
+    )
+
+    assert board.market_count == 2
+    assert board.unresolved_count == 1
+    assert len(board.conflicting_markets) == 2
+
+
+def test_a_backed_partition_accepts_a_comparison_and_an_unresolved_market():
+    group = _single_member_group()
+
+    board = _partition_board(
+        groups=(group,),
+        unresolved=(_unresolved_market("mkt_1_b"),),
+        markets=(
+            _compared_market("mkt_1_a", group.reference),
+            _excluded_market("mkt_1_b"),
+        ),
+    )
+
+    assert board.market_count == 2
+    assert board.unresolved_count == 1
+    assert board.markets_for(group.reference)[0].market_reference == "mkt_1_a"
+
+
+def test_an_empty_board_is_a_valid_partition():
+    board = _partition_board()
+
+    assert board.is_empty is True
+    assert board.market_count == 0
+    assert board.unresolved_count == 0
+
+
+def test_an_assembled_board_partitions_every_reference_it_kept():
+    """Whatever real assembly produces is a backed, non-overlapping partition."""
+
+    service, _ = _service(
+        [
+            _snapshot("dabble", (_market(market_id="m-1", threshold="25.5"),)),
+            _snapshot(
+                "prizepicks",
+                (_market(provider="prizepicks", market_id="m-2", threshold="26.5"),),
+            ),
+        ]
+    )
+
+    board = _read(service)
+
+    grouped = {
+        member.market_reference for group in board.groups for member in group.members
+    }
+    unresolved = {entry.market_reference for entry in board.unresolved}
+    retained = {market.market_reference for market in board.markets}
+    assert grouped
+    assert not grouped & unresolved
+    assert grouped | unresolved == retained
+    assert len(board.groups) + board.unresolved_count <= board.market_count
+
+
+# -- board read evidence states relationships it could have observed --------
+
+
+def test_board_read_evidence_cannot_count_more_than_the_markets_it_observed():
+    with pytest.raises(ValueError, match="than the markets it observed"):
+        BoardReadEvidence(
+            availability=_available(),
+            group_count=1,
+            unresolved_count=1,
+            market_count=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("group_count", "unresolved_count", "market_count"),
+    [
+        (0, 0, 0),
+        (0, 3, 3),  # an unreadable read: every observation stayed unresolved
+        (2, 1, 3),  # exactly accounted for
+        (2, 1, 5),  # contradictions keep more observations than references
+    ],
+)
+def test_board_read_evidence_accepts_counts_a_read_could_have_observed(
+    group_count, unresolved_count, market_count
+):
+    evidence = BoardReadEvidence(
+        availability=_available(),
+        group_count=group_count,
+        unresolved_count=unresolved_count,
+        market_count=market_count,
+    )
+
+    assert evidence.group_count == group_count
+    assert evidence.market_count == market_count
+
+
+def test_evidence_read_from_an_oversized_board_states_possible_counts():
+    service, _ = _service(
+        [
+            _snapshot("dabble", (_market(market_id="m-1", threshold="25.5"),)),
+            _snapshot(
+                "prizepicks",
+                (_market(provider="prizepicks", market_id="m-2", threshold="26.5"),),
+            ),
+        ],
+        max_markets=1,
+    )
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        _read(service)
+
+    evidence = error.value.board_evidence
+    assert evidence.group_count + evidence.unresolved_count <= evidence.market_count
+
+
+def test_evidence_read_from_a_published_board_states_possible_counts():
+    service, _ = _service([_snapshot("dabble", (_market(market_id="m-1"),))])
+
+    evidence = BoardReadEvidence.of(_read(service))
+
+    assert evidence.group_count + evidence.unresolved_count <= evidence.market_count

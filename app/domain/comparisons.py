@@ -434,9 +434,44 @@ class ComparisonSummary:
         )
 
 
+def _same_published_decimal(left: Decimal, right: Decimal) -> bool:
+    """Whether two exact decimals are the same *published* number.
+
+    ``Decimal("25.50") == Decimal("25.5")`` in Python, but a board writes a
+    threshold in the scale the provider published, so the two reach a caller as
+    different strings.  A summary is therefore compared against its members at
+    the scale it would be written in, not merely at the value it compares equal
+    to.
+    """
+
+    return left.as_tuple() == right.as_tuple()
+
+
+def _states_exactly(summary: "ComparisonSummary", derived: "ComparisonSummary") -> bool:
+    """Whether a summary is field-for-field the derivation of its members."""
+
+    return (
+        _same_published_decimal(summary.minimum_threshold, derived.minimum_threshold)
+        and _same_published_decimal(summary.maximum_threshold, derived.maximum_threshold)
+        and _same_published_decimal(summary.threshold_spread, derived.threshold_spread)
+        and summary.provider_count == derived.provider_count
+        and summary.market_count == derived.market_count
+        and summary.freshness is derived.freshness
+        and summary.market_references == derived.market_references
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ComparisonGroup:
-    """One canonical identity and every market that offers it."""
+    """One canonical identity and every market that offers it.
+
+    The summary is derived evidence, never independent evidence: a group may
+    carry only the summary its own members produce.  A count, a bound, a
+    spread, or a reference list that its members do not state is refused where
+    the group is built, so nothing downstream -- the serializer least of all --
+    can publish a comparison whose headline contradicts the markets printed
+    beneath it.
+    """
 
     key: ComparisonKey
     members: tuple[ComparisonMember, ...]
@@ -452,6 +487,12 @@ class ComparisonGroup:
             raise ValueError("comparison members must be ComparisonMember values")
         if tuple(sorted(members, key=lambda member: member.order)) != members:
             raise ValueError("comparison members must be deterministically ordered")
+        if not isinstance(self.summary, ComparisonSummary):
+            raise ValueError("a comparison group requires a ComparisonSummary")
+        if not _states_exactly(self.summary, ComparisonSummary.of(members)):
+            raise ValueError(
+                "a comparison group summary must state exactly its members"
+            )
 
     @property
     def reference(self) -> str:
@@ -1244,6 +1285,72 @@ class ComparisonBoard:
             raise ValueError("disabled providers must be deterministically ordered")
         if not isinstance(self.filters, ComparisonFilters):
             raise ValueError("a comparison board requires ComparisonFilters")
+        self._require_backed_partition(groups, unresolved, markets)
+
+    @staticmethod
+    def _require_backed_partition(
+        groups: tuple["ComparisonGroup", ...],
+        unresolved: tuple["UnresolvedMarket", ...],
+        markets: tuple[BoardMarket, ...],
+    ) -> None:
+        """Require the three collections to be one partition of retained evidence.
+
+        A board is not three independent lists that merely count consistently.
+        Every market reference a comparison cites, and every reference stated as
+        unresolved, is read from retained :class:`BoardMarket` evidence on this
+        same board -- and each reference lands on exactly one side, so a caller
+        auditing a comparison always finds the observation behind it and never
+        finds the same market both compared and excluded.
+
+        Backing is not one market per reference.  Contradicting observations of
+        one source identity are all retained, so a single unresolved reference
+        may stand on several retained observations; what is required is that at
+        least one exists and that every retained observation names where it
+        went.
+        """
+
+        grouped: dict[str, str] = {}
+        for group in groups:
+            for member in group.members:
+                if member.market_reference in grouped:
+                    raise ValueError(
+                        "a market reference may enter only one comparison"
+                    )
+                grouped[member.market_reference] = group.reference
+        unresolved_references: set[str] = set()
+        for entry in unresolved:
+            if entry.market_reference in unresolved_references:
+                raise ValueError("a market reference is unresolved only once")
+            unresolved_references.add(entry.market_reference)
+        if unresolved_references & set(grouped):
+            raise ValueError(
+                "a market reference is compared or unresolved, never both"
+            )
+        compared_backing = {
+            market.market_reference for market in markets if market.is_compared
+        }
+        excluded_backing = {
+            market.market_reference for market in markets if not market.is_compared
+        }
+        if set(grouped) - compared_backing:
+            raise ValueError(
+                "every compared market requires the evidence it was read from"
+            )
+        if unresolved_references - excluded_backing:
+            raise ValueError(
+                "every unresolved market requires the evidence it was read from"
+            )
+        for market in markets:
+            if market.is_compared:
+                if grouped.get(market.market_reference) != market.comparison_reference:
+                    raise ValueError(
+                        "retained compared evidence must name the comparison its "
+                        "market entered"
+                    )
+            elif market.market_reference not in unresolved_references:
+                raise ValueError(
+                    "retained excluded evidence must name an unresolved market"
+                )
 
     @property
     def is_empty(self) -> bool:
@@ -1321,6 +1428,18 @@ class BoardReadEvidence:
             _exact_count(
                 getattr(self, name),
                 f"a board read evidence {name.replace('_', ' ')}",
+            )
+        # Typed counts are not yet possible counts.  Each comparison stands on
+        # at least one retained observation, each unresolved reference stands on
+        # at least one more, and no reference is on both sides, so a read can
+        # never have established more comparisons and unresolved markets
+        # together than the observations it made.  Contradictions only widen
+        # that gap, never close it, so the relation holds for the count-only
+        # evidence a refusal carries exactly as it does for a published board.
+        if self.group_count + self.unresolved_count > self.market_count:
+            raise ValueError(
+                "board read evidence cannot state more comparisons and unresolved "
+                "markets than the markets it observed"
             )
 
     @classmethod
