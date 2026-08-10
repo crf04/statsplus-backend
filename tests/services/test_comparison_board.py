@@ -1867,6 +1867,89 @@ def test_a_board_cannot_state_an_unresolved_count_it_did_not_retain():
         )
 
 
+@pytest.mark.parametrize(
+    "count",
+    [False, True, 0.0, 1.0, Decimal("0"), Decimal("1"), "0", -1],
+)
+def test_a_board_market_count_must_be_an_exact_count(count):
+    """A count Python merely compares equal to is not a count."""
+
+    with pytest.raises(ValueError, match="market count must be an exact count"):
+        ComparisonBoard(
+            season=SEASON,
+            generated_at=GENERATED_AT,
+            availability=_available(),
+            market_count=count,
+        )
+
+
+@pytest.mark.parametrize(
+    "count",
+    [False, True, 0.0, 1.0, Decimal("0"), Decimal("1"), "0", -1],
+)
+def test_a_board_unresolved_count_must_be_an_exact_count(count):
+    with pytest.raises(ValueError, match="unresolved count must be an exact count"):
+        ComparisonBoard(
+            season=SEASON,
+            generated_at=GENERATED_AT,
+            availability=_available(),
+            unresolved_count=count,
+        )
+
+
+def test_a_board_accepts_the_exact_counts_it_retained():
+    unresolved = (
+        comparisons.UnresolvedMarket(
+            market_reference="ref-1",
+            provider="dabble",
+            reason=ComparisonExclusion.STALE_SNAPSHOT,
+        ),
+    )
+    board = ComparisonBoard(
+        season=SEASON,
+        generated_at=GENERATED_AT,
+        availability=_available(),
+        unresolved=unresolved,
+        market_count=0,
+        unresolved_count=1,
+    )
+
+    assert type(board.market_count) is int
+    assert type(board.unresolved_count) is int
+
+
+@pytest.mark.parametrize("count", [False, True, 1.0, Decimal("1"), "1", -1])
+def test_a_summary_count_must_be_an_exact_count(count):
+    members = (_member(),)
+    summary = ComparisonSummary.of(members)
+    for name, message in (
+        ("market_count", "market count must be an exact count"),
+        ("provider_count", "provider count must be an exact count"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            dataclasses.replace(summary, **{name: count})
+
+
+@pytest.mark.parametrize("name", ["group_count", "market_count", "unresolved_count"])
+@pytest.mark.parametrize("count", [False, True, 1.0, Decimal("1"), "1", -1])
+def test_board_read_evidence_counts_must_be_exact_counts(name, count):
+    message = f"board read evidence {name.replace('_', ' ')} must be an exact count"
+    with pytest.raises(ValueError, match=message):
+        BoardReadEvidence(availability=_available(), **{name: count})
+
+
+def test_board_read_evidence_reads_exact_counts_from_a_board():
+    evidence = BoardReadEvidence.of(
+        ComparisonBoard(
+            season=SEASON, generated_at=GENERATED_AT, availability=_available()
+        )
+    )
+
+    assert type(evidence.group_count) is int
+    assert type(evidence.market_count) is int
+    assert type(evidence.unresolved_count) is int
+
+
 def test_a_board_counts_exactly_what_it_retained():
     unresolved = (
         comparisons.UnresolvedMarket(

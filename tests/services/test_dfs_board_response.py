@@ -1096,3 +1096,17 @@ def test_serialize_board_is_reusable_outside_a_request():
     assert payload["contract_version"] == "1"
     assert isinstance(payload["generated_at"], str)
     assert datetime.fromisoformat(payload["generated_at"]).tzinfo is timezone.utc
+
+
+def test_a_published_count_is_an_exact_integer_never_a_boolean():
+    """A serialized count is a JSON number, never ``true`` or ``false``."""
+
+    comparison_service, _ = complete_board_service()
+    board = comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    payload = serialize_board(board)
+
+    assert type(payload["market_count"]) is int
+    for group in payload["comparison_groups"]:
+        assert type(group["summary"]["market_count"]) is int
+        assert type(group["summary"]["provider_count"]) is int

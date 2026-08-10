@@ -200,6 +200,22 @@ def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
     return _exact_context(MAX_EXACT_DIFFERENCE_SPAN).subtract(minuend, subtrahend)
 
 
+def _exact_count(value: object, field: str) -> None:
+    """Require one public count to be an exact non-negative built-in integer.
+
+    ``False == 0`` and ``Decimal("2") == 2`` in Python, so a count checked only
+    by equality against what was retained accepts a boolean, a float, or a
+    decimal that happens to agree -- and then states it, so a body whose
+    contract says a market count is an integer can publish ``false`` or
+    ``2.0``.  Every count is required to be an ``int`` that is not a ``bool``
+    before any equality reads it, so a value that could never be a count is
+    refused where it is constructed rather than downstream.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be an exact count")
+
+
 @dataclass(frozen=True, slots=True)
 class CatalogAvailability:
     """Identity, age, and usability of one canonical catalog."""
@@ -380,6 +396,8 @@ class ComparisonSummary:
             raise ValueError("comparison summary spread must be the exact difference")
         if not isinstance(self.freshness, ComparisonFreshness):
             raise ValueError("comparison summary requires a ComparisonFreshness")
+        _exact_count(self.provider_count, "a comparison summary provider count")
+        _exact_count(self.market_count, "a comparison summary market count")
         references = tuple(self.market_references)
         if tuple(sorted(references)) != references:
             raise ValueError("comparison summary market references must be sorted")
@@ -1188,12 +1206,17 @@ class ComparisonBoard:
         # at all, and states what it observed as
         # :class:`BoardReadEvidence` instead, so nothing that reaches the
         # serializer can report a count its own collections contradict.
+        _exact_count(self.market_count, "a board market count")
         if len(markets) != self.market_count:
             raise ValueError("a board must retain every market it counted")
         if self.unresolved_count is None:
             object.__setattr__(self, "unresolved_count", len(unresolved))
-        elif self.unresolved_count != len(unresolved):
-            raise ValueError("a board must retain every unresolved market it counted")
+        else:
+            _exact_count(self.unresolved_count, "a board unresolved count")
+            if self.unresolved_count != len(unresolved):
+                raise ValueError(
+                    "a board must retain every unresolved market it counted"
+                )
         reports = tuple(self.provider_reports)
         if tuple(sorted(reports, key=lambda report: report.provider)) != reports:
             raise ValueError("provider reports must be deterministically ordered")
@@ -1277,11 +1300,11 @@ class BoardReadEvidence:
     def __post_init__(self) -> None:
         if not isinstance(self.availability, ComparisonAvailability):
             raise ValueError("board read evidence requires a ComparisonAvailability")
-        if any(
-            isinstance(count, bool) or not isinstance(count, int) or count < 0
-            for count in (self.group_count, self.market_count, self.unresolved_count)
-        ):
-            raise ValueError("board read evidence counts must be non-negative")
+        for name in ("group_count", "market_count", "unresolved_count"):
+            _exact_count(
+                getattr(self, name),
+                f"a board read evidence {name.replace('_', ' ')}",
+            )
 
     @classmethod
     def of(cls, board: ComparisonBoard) -> "BoardReadEvidence":
