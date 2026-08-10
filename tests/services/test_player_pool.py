@@ -155,7 +155,14 @@ def _athlete_outcome(provider, provider_id, player_id, team_id, name):
     )
 
 
-def _event_outcome(provider, provider_id, game_id, team_ids=(1, 2)):
+def _event_outcome(
+    provider,
+    provider_id,
+    game_id,
+    team_ids=(1, 2),
+    *,
+    governed_game_id=None,
+):
     evidence = EventEvidence(provider_id=provider_id)
     resolution = EventResolution(
         provider=provider, provider_evidence=evidence, season="2025-26",
@@ -166,15 +173,22 @@ def _event_outcome(provider, provider_id, game_id, team_ids=(1, 2)):
         ),
     )
     mapping = None
+    state = EventResolutionState.AUTO
     if provider_id:
+        mapped_game_id = governed_game_id or game_id
+        state = (
+            EventResolutionState.MANUAL_OVERRIDE
+            if governed_game_id is not None
+            else EventResolutionState.AUTO
+        )
         mapping = _record(
             ProviderEventMappingRecord, provider=provider,
-            provider_event_id=provider_id, mapping_state="auto", is_active=True,
-            season="2025-26", canonical_event_id=game_id,
+            provider_event_id=provider_id, mapping_state=state.value, is_active=True,
+            season="2025-26", canonical_event_id=mapped_game_id,
             first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
         )
     return BoardEventMappingOutcome(
-        resolution=resolution, state=EventResolutionState.AUTO,
+        resolution=resolution, state=state,
         persisted=True, mapping=mapping,
     )
 
@@ -390,6 +404,60 @@ def test_joined_athlete_on_neither_governed_game_team_is_excluded_and_counted():
 
     assert pool.players == ()
     assert telemetry.events[-1].team_mismatch_count == 1
+
+
+def test_disagreeing_manual_event_mapping_cannot_supply_another_games_teams():
+    market = _market("prizepicks", "pp-1", "points", event_id="provider-game")
+    board = _board(
+        (_provider_outcome("prizepicks", (market,)),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
+        ),
+        event_outcomes=(
+            _event_outcome(
+                "prizepicks",
+                "provider-game",
+                "0022500002",
+                (3, 4),
+                governed_game_id="0022500001",
+            ),
+        ),
+    )
+    telemetry = RecordedTelemetry()
+    service = PlayerPoolService(
+        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
+    )
+
+    for slate_game_id in ("0022500001", "0022500002"):
+        pool = service.get_pool(season="2025-26", game_ids={slate_game_id})
+        assert pool.players == ()
+        assert pool.team_counts == {}
+        assert telemetry.events[-1].unjoined_event_count == 1
+
+
+def test_agreeing_manual_event_mapping_uses_its_canonical_game_teams():
+    market = _market("prizepicks", "pp-1", "points", event_id="provider-game")
+    board = _board(
+        (_provider_outcome("prizepicks", (market,)),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
+        ),
+        event_outcomes=(
+            _event_outcome(
+                "prizepicks",
+                "provider-game",
+                "0022500001",
+                (1, 2),
+                governed_game_id="0022500001",
+            ),
+        ),
+    )
+
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG).get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    )
+
+    assert pool.team_counts == {1: 1}
 
 
 def test_mapped_noncomparable_market_category_still_qualifies():

@@ -242,7 +242,12 @@ class PlayerPoolService:
             key = PlayerPoolService._evidence_key(
                 resolution.provider, resolution.provider_evidence
             )
-            if key is not None and game_id is not None and canonical is not None:
+            if (
+                key is not None
+                and game_id is not None
+                and canonical is not None
+                and canonical.nba_game_id == str(game_id)
+            ):
                 team_ids = frozenset(
                     team_id
                     for team_id in (canonical.home_team_id, canonical.away_team_id)
