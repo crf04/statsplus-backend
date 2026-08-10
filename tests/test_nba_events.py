@@ -10,7 +10,6 @@ from app.domain.nba_events import (
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
-    is_regular_season_event,
     player_game_log_season_type,
     resolve_stored_event_classification,
 )
@@ -31,20 +30,6 @@ def test_final_event_rejects_nonterminal_schedule_status():
     assert not is_final_event({"status_code": 1, "status_text": "7:00 pm ET"})
 
 
-def test_regular_season_event_uses_canonical_game_id_authority():
-    assert is_regular_season_event(
-        {"nba_game_id": "0022500001", "classification": "Preseason"}
-    )
-
-
-@pytest.mark.parametrize(
-    "label",
-    [" regular season ", "REGULAR SEASON", "Regular   Season", "regular_season"],
-)
-def test_regular_season_event_normalizes_fallback_season_type_labels(label):
-    assert is_regular_season_event({"nba_game_id": "", "classification": label})
-
-
 @pytest.mark.parametrize(
     ("event", "season_type"),
     [
@@ -62,13 +47,6 @@ def test_player_game_log_phase_uses_game_id_authority_then_normalized_fallback(
 
 def test_canonical_event_kind_preserves_fallback_label_spelling():
     assert canonical_event_kind("", " regular season ") == "regular season"
-
-
-@pytest.mark.parametrize("game_id", ["0012500001", "0032500001", "0042500001"])
-def test_regular_season_event_excludes_other_governed_phases(game_id):
-    assert not is_regular_season_event(
-        {"nba_game_id": game_id, "classification": "Regular Season"}
-    )
 
 
 @pytest.mark.parametrize(

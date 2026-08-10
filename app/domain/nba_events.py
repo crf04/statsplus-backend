@@ -76,19 +76,6 @@ def is_final_event(event: Mapping[str, object]) -> bool:
     )
 
 
-def is_regular_season_event(event: Mapping[str, object]) -> bool:
-    """Whether canonical game-ID authority classifies an event as Regular Season."""
-
-    game_id = event.get("nba_game_id")
-    classification = event.get("classification")
-    return _normalized_words(
-        canonical_event_kind(
-            str(game_id) if game_id is not None else "",
-            str(classification) if classification is not None else "",
-        )
-    ) == "regular season"
-
-
 def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
     """Return the durable game-log phase for one governed catalog event."""
 
@@ -190,7 +177,6 @@ __all__ = [
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",
-    "is_regular_season_event",
     "player_game_log_season_type",
     "resolve_stored_event_classification",
     "validate_player_game_log_season_type",

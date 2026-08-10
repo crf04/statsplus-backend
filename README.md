@@ -160,6 +160,9 @@ required schedule refresh that precedes it, while player logs remain untouched.
 The player-log step makes one whole-season NBA Stats request for Regular Season
 and one for Playoffs, then publishes both phases and current freshness
 atomically.
+Recorded Regular Season and Playoffs payloads under
+`tests/fixtures/nba_stats/` exercise both phase calls through the production
+parser without network access.
 After the single retry the process exits nonzero and names the failed step;
 success exits zero. Each owning service preserves its prior publication on
 failure. The admin `POST /api/data/update_database` path uses the same stats

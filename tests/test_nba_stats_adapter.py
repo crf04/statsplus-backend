@@ -38,9 +38,16 @@ from app.providers.nba_stats import (
     normalize_season_player_game_logs,
 )
 from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
+from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
+PLAYOFF_FIXTURE_PATH = (
+    Path(__file__).parent
+    / "fixtures"
+    / "nba_stats"
+    / "player_game_logs.playoffs.json"
+)
 
 
 def _recorded_provider_frame() -> pd.DataFrame:
@@ -52,6 +59,11 @@ def _recorded_provider_frame() -> pd.DataFrame:
 def _recorded_provider_result_set() -> dict:
     payload = json.loads(FIXTURE_PATH.read_text())
     return payload["resultSets"][0]
+
+
+def _recorded_playoff_provider_frame() -> pd.DataFrame:
+    payload = json.loads(PLAYOFF_FIXTURE_PATH.read_text())
+    return parse_recorded_game_logs(payload)
 
 
 def _test_settings() -> RuntimeSettings:
@@ -578,9 +590,15 @@ def test_adapter_fetches_and_filters_archetype_logs_through_provider_seam():
     ]
 
 
-@pytest.mark.parametrize("season_type", ["Regular Season", "Playoffs"])
+@pytest.mark.parametrize(
+    ("season_type", "provider_frame", "game_id_prefix"),
+    [
+        ("Regular Season", _recorded_provider_frame, "002"),
+        ("Playoffs", _recorded_playoff_provider_frame, "004"),
+    ],
+)
 def test_adapter_fetches_each_complete_season_phase_in_one_provider_call(
-    season_type,
+    season_type, provider_frame, game_id_prefix,
 ):
     calls: list[dict] = []
 
@@ -589,7 +607,7 @@ def test_adapter_fetches_each_complete_season_phase_in_one_provider_call(
             calls.append(kwargs)
 
         def get_data_frames(self):
-            return [_recorded_provider_frame()]
+            return [provider_frame()]
 
     adapter = InjectedNBAStatsAdapter(
         settings=_test_settings(), endpoint_factory=RecordedEndpoint
@@ -599,8 +617,10 @@ def test_adapter_fetches_each_complete_season_phase_in_one_provider_call(
         season="2025-26", season_type=season_type
     )
 
-    assert normalized.loc[0, "PLAYER_ID"] == 203076
-    assert normalized.loc[0, "MIN"] == 35.233333333333334
+    assert len(normalized) >= 2
+    assert normalized.loc[0, "PLAYER_ID"] > 0
+    assert normalized.loc[0, "MIN"] > 0
+    assert normalized["GAME_ID"].str.startswith(game_id_prefix).all()
     assert calls == [
         {
             "season_nullable": "2025-26",

@@ -33,6 +33,7 @@ def _load(name: str) -> dict:
     "fixture",
     [
         "nba_stats/game_logs.valid.json",
+        "nba_stats/player_game_logs.playoffs.json",
         "pbp_stats/totals.valid.json",
     ],
 )
@@ -68,6 +69,20 @@ def test_recorded_nba_game_logs_parse_through_the_live_path():
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["provider"] == telemetry.PROVIDER_NBA_STATS
     assert event["outcome"] == telemetry.OUTCOME_SUCCESS
+
+
+def test_recorded_playoff_player_logs_parse_through_the_live_path():
+    payload = _load("nba_stats/player_game_logs.playoffs.json")
+    frame = parse_recorded_game_logs(payload)
+
+    assert payload["parameters"] == {
+        "Season": "2025-26",
+        "SeasonType": "Playoffs",
+    }
+    assert len(frame) == 2
+    assert set(frame["PLAYER_ID"]) == {101, 202}
+    assert frame["GAME_ID"].str.startswith("004").all()
+    assert set(frame["TEAM_ID"]) == {1, 2}
 
 
 def test_malformed_nba_game_logs_raise_provider_response_error():

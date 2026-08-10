@@ -273,6 +273,52 @@ def _seed_completed_playoff_event(repository: PlayerGameLogRepository) -> None:
         )
 
 
+def _seed_unsupported_phase_events(
+    repository: PlayerGameLogRepository,
+    *events: tuple[str, str],
+) -> None:
+    published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                {
+                    "nba_game_id": game_id,
+                    "season": SEASON,
+                    "home_team_id": 1,
+                    "home_team_name": "AAA",
+                    "home_team_tricode": "AAA",
+                    "away_team_id": 2,
+                    "away_team_name": "BBB",
+                    "away_team_tricode": "BBB",
+                    "scheduled_at": datetime(2026, 1, 15, tzinfo=timezone.utc),
+                    "status_text": "Scheduled",
+                    "status_code": 1,
+                    "postponed_status": None,
+                    "postponement_evidence": None,
+                    "classification": classification,
+                    "first_seen_at": published_at,
+                    "last_seen_at": published_at,
+                }
+                for game_id, classification in events
+            ],
+        )
+        connection.execute(
+            update(EventCatalogRefresh.__table__)
+            .where(EventCatalogRefresh.season == SEASON)
+            .values(
+                event_count=EventCatalogRefresh.event_count + len(events)
+            )
+        )
+
+
+def _unsupported_phase_row(game_id: str) -> pd.DataFrame:
+    row = _recorded_season_frame().iloc[[0]].copy()
+    row["GAME_ID"] = game_id
+    row["GAME_DATE"] = "2026-01-15"
+    return row
+
+
 def _remove_player_from_fresh_catalog(
     repository: PlayerGameLogRepository, player_id: int
 ) -> None:
@@ -321,7 +367,6 @@ def test_publish_deduplicates_identical_player_game_facts_and_records_freshness(
         repository.engine, surface=PLAYER_GAME_LOG_SURFACE
     ).get() == StatsFreshness(
         last_successful_completion=RETRIEVED_AT,
-        surface=PLAYER_GAME_LOG_SURFACE,
     )
 
 
@@ -1076,6 +1121,105 @@ def test_malformed_playoff_rejection_reports_union_source_coverage(tmp_path):
 
     assert telemetry.events[0].source_row_count == 32
     assert telemetry.events[0].malformed_row_count == 1
+    assert telemetry.events[0].rejected_publication_count == 1
+
+
+def test_mixed_unsupported_phase_rows_are_excluded_and_stably_republish(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_unsupported_phase_events(
+        repository,
+        ("0052500001", "Play-In Tournament"),
+        ("unknown-event", "Mystery Phase"),
+    )
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat(
+            [_recorded_season_frame(), _unsupported_phase_row("0052500001")],
+            ignore_index=True,
+        ),
+        playoff_frame=_unsupported_phase_row("unknown-event"),
+    )
+    first_telemetry = _RecordingTelemetry()
+
+    first = _service(
+        repository, provider, telemetry_recorder=first_telemetry
+    ).refresh(SEASON)
+
+    assert first.row_count == 22
+    assert repository.get_freshness(SEASON).source_row_count == 24
+    assert first_telemetry.events[0].unsupported_phase_count == 2
+    assert first_telemetry.events[0].rejected_publication_count == 0
+    assert not {
+        "0052500001",
+        "unknown-event",
+    }.intersection(
+        row.game_id for row in repository.list_player_rows(SEASON, 101)
+    )
+
+    second_telemetry = _RecordingTelemetry()
+    second = _service(
+        repository, provider, telemetry_recorder=second_telemetry
+    ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert second.row_count == 22
+    assert repository.get_freshness(SEASON).retrieved_at == (
+        RETRIEVED_AT + timedelta(hours=1)
+    )
+    assert second_telemetry.events[0].unsupported_phase_count == 2
+    assert second_telemetry.events[0].rejected_publication_count == 0
+
+
+def test_all_unsupported_phase_rows_fail_closed_with_typed_telemetry(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository, completed=False)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Play-In Tournament")
+    )
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="no canonical rows"):
+        _service(
+            repository,
+            _RecordedSeasonProvider(
+                frame=_unsupported_phase_row("0052500001")
+            ),
+            telemetry_recorder=telemetry,
+        ).refresh(SEASON)
+
+    assert telemetry.events[0].source_row_count == 1
+    assert telemetry.events[0].unsupported_phase_count == 1
+    assert telemetry.events[0].malformed_row_count == 0
+    assert telemetry.events[0].rejected_publication_count == 1
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_new_unsupported_phase_growth_preserves_the_prior_publication(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    initial_provider = _RecordedSeasonProvider()
+    _service(repository, initial_provider).refresh(SEASON)
+    prior = repository.get_freshness(SEASON)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Play-In Tournament")
+    )
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat(
+            [_recorded_season_frame(), _unsupported_phase_row("0052500001")],
+            ignore_index=True,
+        )
+    )
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="incomplete canonical"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert repository.get_freshness(SEASON) == prior
+    assert telemetry.events[0].source_row_count == 23
+    assert telemetry.events[0].unsupported_phase_count == 1
     assert telemetry.events[0].rejected_publication_count == 1
 
 

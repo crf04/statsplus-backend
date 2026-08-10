@@ -23,7 +23,6 @@ class StatsFreshness:
     """Stored fact about the latest complete publication of one stats surface."""
 
     last_successful_completion: datetime | None
-    surface: str = STATS_SURFACE
 
 
 class StatsFreshnessWriter(Protocol):
@@ -75,5 +74,4 @@ class StatsFreshnessRepository:
             last_successful_completion=(
                 assume_utc(value) if value is not None else None
             ),
-            surface=self.surface,
         )

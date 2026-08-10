@@ -10,7 +10,6 @@ from app.migrations import run_migrations
 from app.services.data_service import DataService
 from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
-    STATS_SURFACE,
     StatsFreshness,
     StatsFreshnessRepository,
 )
@@ -28,11 +27,9 @@ def test_named_stats_surfaces_publish_and_read_independently(tmp_path):
 
     assert StatsFreshnessRepository(engine).get() == StatsFreshness(
         last_successful_completion=stats_completed,
-        surface=STATS_SURFACE,
     )
     assert logs.get() == StatsFreshness(
         last_successful_completion=logs_completed,
-        surface=PLAYER_GAME_LOG_SURFACE,
     )
 
 

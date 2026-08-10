@@ -265,6 +265,7 @@ class PlayerGameLogTelemetryEvent:
     unjoined_athlete_count: int
     unjoined_event_count: int
     team_mismatch_count: int
+    unsupported_phase_count: int = 0
     malformed_row_count: int = 0
     rejected_publication_count: int = 0
     duplicate_row_count: int = 0
@@ -279,6 +280,7 @@ class PlayerGameLogTelemetryEvent:
                 self.unjoined_athlete_count,
                 self.unjoined_event_count,
                 self.team_mismatch_count,
+                self.unsupported_phase_count,
                 self.malformed_row_count,
                 self.rejected_publication_count,
                 self.duplicate_row_count,
@@ -530,7 +532,8 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
         logger.info(
             "player_game_log_event source_row_count=%d published_row_count=%d "
             "unjoined_athlete_count=%d unjoined_event_count=%d "
-            "team_mismatch_count=%d malformed_row_count=%d "
+            "team_mismatch_count=%d unsupported_phase_count=%d "
+            "malformed_row_count=%d "
             "rejected_publication_count=%d duplicate_row_count=%d "
             "recovered_shrink_row_count=%d",
             event.source_row_count,
@@ -538,6 +541,7 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
             event.unjoined_athlete_count,
             event.unjoined_event_count,
             event.team_mismatch_count,
+            event.unsupported_phase_count,
             event.malformed_row_count,
             event.rejected_publication_count,
             event.duplicate_row_count,

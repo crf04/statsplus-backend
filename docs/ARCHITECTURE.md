@@ -514,6 +514,11 @@ plus per-game `TEAM_ID` must join exactly to the Event Catalog. Team and
 opponent tricodes and home/away identity come from that canonical event.
 Individual well-formed rows that do not join are excluded and counted in
 bounded scalar-only telemetry; no name or matchup-text guess is accepted. A
+row whose governed catalog event is outside the explicit `Regular Season` and
+`Playoffs` durable phase set is likewise excluded with an
+`unsupported_phase_count`; it never becomes a stored fact. Stable snapshots
+with the same unsupported exclusions may republish, while new source growth
+hidden by those exclusions triggers the cumulative completeness guard. A
 nonempty snapshot that yields no canonical rows fails the refresh before
 publication. For every non-postponed governed `Regular Season` or `Playoffs`
 event that is final and scheduled no later than the source observation time,
@@ -530,8 +535,9 @@ telemetry and the incomplete replacement fails while prior facts remain
 served; no stale name or player identity is recovered from player logs.
 Structurally, numerically, or logically malformed rows abort the
 publication while retaining already observed bounded coverage counts. If a
-new cumulative source row cannot join an athlete, event, or team and canonical
-publication would otherwise remain at or below its prior size, the apparent
+new cumulative source row cannot join an athlete, event, or team, or is outside
+the supported phase set, and canonical publication would otherwise remain at
+or below its prior size, the apparent
 growth exposes incomplete canonical identity coverage and fails closed instead
 of stamping the unchanged snapshot fresh. This comparison uses the prior raw
 source-row count, not the prior canonical count, so an unchanged partially
@@ -566,7 +572,9 @@ phase. This permits an empty `Playoffs` response before the postseason and an
 empty `Regular Season` response before opening night, but not either response
 after a completed event in its phase. A postponed event does not become
 completed evidence merely because its feed status code or text says final.
-Preseason, exhibition, All-Star, and other unsupported phases are never stored.
+Preseason, exhibition, All-Star, Play-In, and other unsupported phases are
+never stored; their provider rows are counted separately from malformed or
+unjoined identity rows.
 An empty union snapshot can never replace a prior nonempty publication. A
 missing Event Catalog or an invalid empty phase within the source observation
 boundary fails closed and preserves the last valid facts and freshness. Because
