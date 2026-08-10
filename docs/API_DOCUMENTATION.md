@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -243,6 +243,10 @@ Until the Player Pool surface is implemented, both team counts are truthfully
 zero, top-level `pool_status` is `unavailable`, and `freshness.pool` reports an
 unavailable surface with no retrieval time or providers. A stale but stored
 schedule remains a `200` with `freshness.schedule.status: "stale"`.
+Schedule freshness uses the nightly schedule surface's independent
+`SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default), not the broader
+Event Catalog eligibility TTL. The exact boundary is fresh; an older retrieval
+is stale.
 
 Empty and error behavior:
 

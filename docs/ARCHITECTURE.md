@@ -344,6 +344,31 @@ home/away team IDs and identities, UTC scheduled time, status text,
 postponement evidence, and provider classification. Recorded fixtures use
 `parse_recorded_schedule` and never make a network request.
 
+Schedule normalization owns NBA game-type evidence. Provider classification,
+subtype, label, and sublabel are retained in that order; when those fields are
+empty, the official game-ID type prefix distinguishes preseason, ordinary
+regular-season, All-Star, and playoff events. This prevents an ordinary or
+preseason row from entering the catalog as an unexplained `unknown` value.
+
+Authenticated slate read:
+
+```text
+GET /api/games/slate?date=YYYY-MM-DD
+  → require_auth
+  → SlateService parses/defaults one US-Eastern Slate Date
+  → EventCatalogService reads the configured season and last successful refresh
+  → SlateService filters ET membership and All-Star exhibitions
+  → response orders UTC tips and reports schedule/pool freshness independently
+```
+
+`SlateService` is assembled once in `ApplicationDependencies` beside the game
+service and reads no provider at request time. Its schedule status uses the
+surface-specific `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default),
+while Event Catalog matching continues to use `EVENT_CATALOG_MAX_AGE_HOURS`.
+Missing successful schedule metadata is unavailable; stored but older schedule
+data remains servable and is marked stale. The player-pool surface remains an
+explicit unavailable aggregate until its owning service is implemented.
+
 Natural-language query:
 
 ```text

@@ -1,6 +1,6 @@
 """Behavioral tests for the current-season ET slate read."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -112,6 +112,34 @@ def test_slate_excludes_all_star_and_retains_unusual_and_postponed_games():
     assert payload["games"][2]["status"] == {"state": "final", "label": "Final"}
 
 
+@pytest.mark.parametrize(
+    "classification",
+    ["All-Star Game", "All Star Celebrity Game", "Rising Stars All-Star Weekend"],
+)
+def test_slate_excludes_all_star_weekend_exhibitions(classification):
+    service = _service(
+        [_event("exhibition", "2026-02-15T01:00:00+00:00", classification=classification)]
+    )
+
+    assert service.get_slate("2026-02-14")["games"] == []
+
+
+def test_slate_treats_unknown_as_ordinary_and_detects_preseason_game_id():
+    service = _service(
+        [
+            _event("0022500001", "2025-10-23T00:00:00+00:00", classification="unknown"),
+            _event("0012500001", "2025-10-23T01:00:00+00:00", classification="unknown"),
+        ]
+    )
+
+    games = service.get_slate("2025-10-22")["games"]
+
+    assert games[0]["classification"] is None
+    assert games[0]["preseason"] is False
+    assert games[1]["classification"] == "Preseason"
+    assert games[1]["preseason"] is True
+
+
 def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     service = _service(
         [_event("late", "2026-01-03T04:30:00+00:00")],
@@ -135,6 +163,27 @@ def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     }
     assert payload["games"][0]["away_team"]["targetable_player_count"] == 0
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 0
+
+
+def test_schedule_freshness_uses_its_own_nightly_refresh_window():
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    freshness = {
+        "fresh": True,
+        "last_success_at": retrieved_at.isoformat(),
+        "event_count": 0,
+    }
+
+    at_boundary = _service(
+        [], freshness=freshness, now=retrieved_at + timedelta(hours=30)
+    ).get_slate("2026-01-02")
+    past_boundary = _service(
+        [],
+        freshness=freshness,
+        now=retrieved_at + timedelta(hours=30, microseconds=1),
+    ).get_slate("2026-01-02")
+
+    assert at_boundary["freshness"]["schedule"]["status"] == "fresh"
+    assert past_boundary["freshness"]["schedule"]["status"] == "stale"
 
 
 def test_slate_returns_an_empty_success_for_a_date_without_games():

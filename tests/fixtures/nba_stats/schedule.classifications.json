@@ -1,0 +1,22 @@
+{
+  "resource": "scheduleleaguev2",
+  "parameters": {"LeagueID": "00", "Season": "2025-26"},
+  "resultSets": [
+    {
+      "name": "SeasonGames",
+      "headers": [
+        "leagueId", "seasonYear", "gameDate", "gameId", "gameStatus",
+        "gameStatusText", "gameDateTimeUTC", "postponedStatus", "gameLabel",
+        "gameSubtype", "homeTeam_teamId", "homeTeam_teamName",
+        "homeTeam_teamTricode", "awayTeam_teamId", "awayTeam_teamName",
+        "awayTeam_teamTricode"
+      ],
+      "rowSet": [
+        ["00", "2025", "2025-10-22", "0022500001", 1, "7:00 pm ET", "2025-10-23T00:00:00Z", "", "Regular Season", "", 1610612747, "Los Angeles Lakers", "LAL", 1610612759, "San Antonio Spurs", "SAS"],
+        ["00", "2025", "2025-10-23", "0022500002", 1, "8:00 pm ET", "2025-10-24T00:00:00Z", "", "", "", 1610612738, "Boston Celtics", "BOS", 1610612751, "Brooklyn Nets", "BKN"],
+        ["00", "2025", "2025-10-04", "0012500001", 1, "8:00 pm ET", "2025-10-05T00:00:00Z", "", "", "", 1610612747, "Los Angeles Lakers", "LAL", 1610612744, "Golden State Warriors", "GSW"],
+        ["00", "2025", "2026-02-13", "0032500001", 1, "7:00 pm ET", "2026-02-14T00:00:00Z", "", "", "All-Star Celebrity Game", 1610612747, "Los Angeles Lakers", "LAL", 1610612744, "Golden State Warriors", "GSW"]
+      ]
+    }
+  ]
+}

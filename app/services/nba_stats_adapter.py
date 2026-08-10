@@ -44,6 +44,7 @@ from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import ProviderUnavailableError
+from app.domain.nba_events import event_classification
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
     CACHE_DISABLED,
@@ -134,7 +135,6 @@ CANONICAL_SCHEDULE_COLUMNS: tuple[str, ...] = (
     "away_team_name",
     "away_team_tricode",
 )
-
 
 def validate_canonical_season(season: str) -> str:
     """Validate and return one explicit NBA ``YYYY-YY`` season label."""
@@ -306,12 +306,14 @@ def normalize_whole_season_schedule(
         status_code = pd.to_numeric(raw_status_code, errors="coerce")
         status_code_value = None if pd.isna(status_code) else int(status_code)
         postponed_status = _text_value(row.get("postponedStatus")) or None
-        classification = (
+        game_id = _text_value(row["gameId"])
+        provider_classification = (
             _text_value(row.get("classification"))
             or _text_value(row.get("gameSubtype"))
             or _text_value(row.get("gameLabel"))
-            or "unknown"
+            or _text_value(row.get("gameSubLabel"))
         )
+        classification = event_classification(game_id, provider_classification)
         evidence: dict[str, object] = {}
         status_marker = any(
             "postpon" in _text_value(row.get(field)).lower()
@@ -334,7 +336,7 @@ def normalize_whole_season_schedule(
 
         output.append(
             {
-                "nba_game_id": _text_value(row["gameId"]),
+                "nba_game_id": game_id,
                 "season": canonical_season,
                 "scheduled_at": parsed_dates.loc[index].to_pydatetime(),
                 "status_text": status_text,

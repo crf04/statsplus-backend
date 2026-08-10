@@ -1,7 +1,8 @@
-"""Game-log HTTP adapter.
+"""Authenticated slate and game-log HTTP adapters.
 
-The route parses query parameters into one typed :class:`GameLogQuery` and
-calls the synchronous :meth:`GameService.get_filtered_logs` directly: Flask
+The slate route delegates one optional ET date to the persisted-schedule
+service. The game-log route parses query parameters into one typed
+:class:`GameLogQuery` and calls :meth:`GameService.get_filtered_logs`: Flask
 serves requests with worker threads, so no event loop is created per request
 (#10).  Malformed filters raise a 400 ``invalid_input`` response; provider
 timeouts keep the documented 503 ``provider_unavailable`` contract.

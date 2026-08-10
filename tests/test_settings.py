@@ -30,6 +30,16 @@ def test_event_catalog_max_age_is_configurable(monkeypatch):
     assert settings.catalog.event_max_age_hours == 24
 
 
+def test_slate_schedule_max_age_defaults_to_thirty_hours_and_is_configurable():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={"FLASK_ENV": "testing", "SLATE_SCHEDULE_MAX_AGE_HOURS": "36"}
+    )
+
+    assert defaults.catalog.slate_schedule_max_age_hours == 30
+    assert configured.catalog.slate_schedule_max_age_hours == 36
+
+
 def test_local_settings_have_typed_safe_defaults(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.delenv("DATABASE_URL", raising=False)

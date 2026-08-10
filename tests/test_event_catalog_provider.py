@@ -17,6 +17,9 @@ from app.utils import telemetry
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.valid.json"
+CLASSIFICATION_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.classifications.json"
+)
 
 
 def _frame() -> pd.DataFrame:
@@ -80,3 +83,16 @@ def test_recorded_schedule_fixture_uses_the_production_parser():
     payload = json.loads(FIXTURE_PATH.read_text())
     parsed = parse_recorded_schedule(payload, season="2025-26")
     assert parsed.loc[1, "postponed_status"] == "Postponed"
+
+
+def test_recorded_schedule_preserves_provider_and_game_type_classification():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed["classification"].tolist() == [
+        "Regular Season",
+        "Regular Season",
+        "Preseason",
+        "All-Star Celebrity Game",
+    ]

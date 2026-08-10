@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.nba_events import NBAGameStatus, event_classification
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.domain.freshness import exact_seconds, time_window_timedelta
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -29,10 +32,23 @@ class SlateService:
         *,
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
+        schedule_max_age: timedelta | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
+        self.schedule_max_age = (
+            schedule_max_age
+            if schedule_max_age is not None
+            else time_window_timedelta(
+                self.settings.catalog.slate_schedule_max_age_hours,
+                unit_seconds=3600,
+                field=field,
+            )
+        )
+        if schedule_max_age is not None:
+            exact_seconds(schedule_max_age, field=field)
 
     def get_slate(self, requested_date: str | None = None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
@@ -63,7 +79,9 @@ class SlateService:
             "pool_status": "unavailable",
             "freshness": {
                 "schedule": {
-                    "status": "fresh" if freshness.get("fresh") else "stale",
+                    "status": self._schedule_freshness(
+                        retrieved_at, observed_at=observed_at
+                    ),
                     "retrieved_at": retrieved_at,
                 },
                 "pool": {
@@ -102,26 +120,44 @@ class SlateService:
 
     @staticmethod
     def _is_all_star(event: Mapping[str, Any]) -> bool:
-        classification = str(event.get("classification") or "").casefold()
-        normalized = classification.replace("-", " ")
+        classification = event_classification(
+            str(event.get("nba_game_id", "")),
+            str(event.get("classification") or ""),
+        ).casefold()
+        normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", classification).split())
         return "all star" in normalized
+
+    def _schedule_freshness(
+        self, retrieved_at: str, *, observed_at: datetime
+    ) -> str:
+        retrieved = _utc(datetime.fromisoformat(retrieved_at.replace("Z", "+00:00")))
+        return (
+            "fresh"
+            if observed_at - retrieved <= self.schedule_max_age
+            else "stale"
+        )
 
     @classmethod
     def _game(cls, event: Mapping[str, Any]) -> dict[str, Any]:
-        classification = str(event.get("classification") or "unknown")
+        game_id = str(event["nba_game_id"])
+        classification = event_classification(
+            game_id, str(event.get("classification") or "")
+        )
         preseason = classification.casefold() == "preseason"
         unusual_classification = (
-            None if classification.casefold() == "regular season" else classification
+            None
+            if classification.casefold() in {"regular season", "unknown"}
+            else classification
         )
         if event.get("is_postponed") or event.get("postponed_status"):
             state = "postponed"
-        elif event.get("status_code") == 3 or str(event.get("status_text", "")).casefold().startswith("final"):
+        elif event.get("status_code") == NBAGameStatus.FINAL or str(event.get("status_text", "")).casefold().startswith("final"):
             state = "final"
         else:
             state = "scheduled"
 
         return {
-            "game_id": str(event["nba_game_id"]),
+            "game_id": game_id,
             "away_team": cls._team(event["away_team"]),
             "home_team": cls._team(event["home_team"]),
             "scheduled_at": cls._scheduled_at(event).isoformat(),
