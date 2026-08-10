@@ -34,6 +34,7 @@ from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotScope,
     StoredPlayerPoolSnapshot,
+    StoredPlayerPoolSnapshotCandidate,
 )
 from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
@@ -152,6 +153,62 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
 
 class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
+
+
+class StoredPlayerPoolSnapshotReader(Protocol):
+    def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None: ...
+
+    def list_containing_game(
+        self, season: str, game_id: str
+    ) -> tuple[StoredPlayerPoolSnapshotCandidate, ...]: ...
+
+
+class StoredPlayerPoolReader:
+    """Read a governed stored slate scope without leases or provider access."""
+
+    def __init__(
+        self,
+        snapshot_repository: StoredPlayerPoolSnapshotReader,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.snapshot_repository = snapshot_repository
+        self._clock = clock
+
+    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+        try:
+            candidates = self.snapshot_repository.list_containing_game(season, game_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        now = self._clock()
+        unusable_scopes: set[PlayerPoolSnapshotScope] = set()
+        for maximum_age, serve_stale in (
+            (POOL_REUSE_MAX_AGE_SECONDS, False),
+            (POOL_STALE_MAX_AGE_SECONDS, True),
+        ):
+            for candidate in candidates:
+                if candidate.scope in unusable_scopes:
+                    continue
+                try:
+                    if not PlayerPoolService._within_age(
+                        candidate, now, maximum_age
+                    ):
+                        continue
+                    stored = self.snapshot_repository.get(candidate.scope)
+                    if stored is None or not PlayerPoolService._within_age(
+                        stored, now, maximum_age
+                    ):
+                        continue
+                    pool = (
+                        PlayerPoolService._stale_pool(stored.payload, {})
+                        if serve_stale
+                        else PlayerPoolService._decode_pool(stored.payload)
+                    )
+                except (KeyError, TypeError, ValueError):
+                    unusable_scopes.add(candidate.scope)
+                    continue
+                return pool
+        return None
 
 
 class PlayerPoolService:
@@ -307,7 +364,7 @@ class PlayerPoolService:
 
     @staticmethod
     def _within_age(
-        stored: StoredPlayerPoolSnapshot | None,
+        stored: StoredPlayerPoolSnapshot | StoredPlayerPoolSnapshotCandidate | None,
         now: datetime,
         maximum_age: Any,
     ) -> bool:
@@ -647,4 +704,5 @@ __all__ = [
     "PlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
+    "StoredPlayerPoolReader",
 ]

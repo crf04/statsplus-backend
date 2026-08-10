@@ -7,7 +7,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event as sqlalchemy_event, update
 
 from app.domain.statistics import MatchReason, MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
@@ -24,13 +24,20 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.migrations import run_migrations
+from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.errors import ProviderUnavailableError
-from app.services.player_pool import PlayerPool, PlayerPoolService
+from app.services.player_pool import (
+    PlayerPool,
+    PlayerPoolService,
+    PoolPlayer,
+    StoredPlayerPoolReader,
+)
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotRepository,
     PlayerPoolSnapshotScope,
     StoredPlayerPoolSnapshot,
+    StoredPlayerPoolSnapshotCandidate,
 )
 from app.services.athlete_resolver import (
     AthleteResolution,
@@ -848,6 +855,135 @@ def test_follower_uses_bounded_read_only_backoff_while_lease_is_healthy(tmp_path
 def test_snapshot_repository_refuses_demo_database():
     with pytest.raises(ValueError, match="demo database"):
         PlayerPoolSnapshotRepository(create_engine("sqlite:///nba_play_types.db"))
+
+
+def test_stored_pool_reader_prefers_latest_fresh_scope_then_governed_stale():
+    def stored(player_id, retrieved_at, other_game_id):
+        scope = PlayerPoolSnapshotScope.create(
+            "2025-26", ("0022500001", other_game_id)
+        )
+        pool = PlayerPool(
+            players=(
+                PoolPlayer(player_id, f"Player {player_id}", 1, ("PTS",), {}),
+            ),
+            team_counts={1: 1},
+            freshness={
+                "status": "fresh",
+                "retrieved_at": retrieved_at.isoformat(),
+                "providers": {},
+            },
+        )
+        return (
+            StoredPlayerPoolSnapshotCandidate(scope, retrieved_at, "success"),
+            StoredPlayerPoolSnapshot(
+                PlayerPoolService._encode_pool(pool), retrieved_at
+            ),
+        )
+
+    class Repository:
+        def __init__(self, stored_pairs):
+            self.snapshots = tuple(candidate for candidate, _stored in stored_pairs)
+            self.payloads = {
+                candidate.scope: stored
+                for candidate, stored in stored_pairs
+            }
+            self.calls = []
+
+        def list_containing_game(self, season, game_id):
+            self.calls.append((season, game_id))
+            return self.snapshots
+
+        def get(self, requested_scope):
+            return self.payloads.get(requested_scope)
+
+    fresh_repository = Repository(
+        (
+            stored(202, NOW - timedelta(minutes=1), "0022500002"),
+            stored(101, NOW - timedelta(minutes=5), "0022500003"),
+        )
+    )
+    stale_repository = Repository(
+        (stored(303, NOW - timedelta(minutes=16), "0022500004"),)
+    )
+
+    fresh = StoredPlayerPoolReader(fresh_repository, clock=lambda: NOW).get_pool_for_game(
+        season="2025-26", game_id="0022500001"
+    )
+    stale = StoredPlayerPoolReader(stale_repository, clock=lambda: NOW).get_pool_for_game(
+        season="2025-26", game_id="0022500001"
+    )
+
+    assert fresh.players[0].canonical_player_id == 202
+    assert fresh_repository.calls == [("2025-26", "0022500001")]
+    assert stale.players[0].canonical_player_id == 303
+    assert stale.freshness["status"] == "stale-served"
+
+
+def test_stored_pool_reader_fetches_only_the_selected_scope_payload(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'metadata-first.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerPoolSnapshotRepository(engine)
+
+    def publish(scope, player_id, retrieved_at):
+        pool = PlayerPool(
+            players=(PoolPlayer(player_id, f"Player {player_id}", 1, ("PTS",), {}),),
+            team_counts={1: 1},
+            freshness={
+                "status": "fresh",
+                "retrieved_at": retrieved_at.isoformat(),
+                "providers": {},
+            },
+        )
+        assert repository.try_acquire_refresh(
+            scope, owner=f"writer-{player_id}", now=retrieved_at, lease_seconds=60
+        )
+        assert repository.replace_owned(
+            scope,
+            owner=f"writer-{player_id}",
+            payload=PlayerPoolService._encode_pool(pool),
+            retrieved_at=retrieved_at,
+            now=retrieved_at,
+        )
+
+    selected_scope = PlayerPoolSnapshotScope.create(
+        "2025-26", ("0022500001", "0022500002")
+    )
+    unrelated_scope = PlayerPoolSnapshotScope.create(
+        "2025-26", ("0022500098", "0022500099")
+    )
+    publish(selected_scope, 101, NOW - timedelta(minutes=1))
+    publish(unrelated_scope, 999, NOW)
+    with engine.begin() as connection:
+        connection.execute(
+            update(PlayerPoolSnapshot.__table__)
+            .where(
+                PlayerPoolSnapshot.__table__.c.season == unrelated_scope.season,
+                PlayerPoolSnapshot.__table__.c.game_ids
+                == unrelated_scope.storage_game_ids,
+            )
+            .values(payload="{malformed unrelated payload")
+        )
+
+    statements = []
+
+    def record_statement(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", record_statement)
+    pool = StoredPlayerPoolReader(repository, clock=lambda: NOW).get_pool_for_game(
+        season="2025-26", game_id="0022500001"
+    )
+
+    pool_reads = [
+        statement
+        for statement in statements
+        if "player_pool_snapshots" in statement
+    ]
+    assert pool.players[0].canonical_player_id == 101
+    assert len(pool_reads) == 2
+    assert "player_pool_snapshots.payload" not in pool_reads[0].partition("FROM")[0]
+    assert "player_pool_snapshots.payload" in pool_reads[1].partition("FROM")[0]
 
 
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])

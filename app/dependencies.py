@@ -27,6 +27,7 @@ class ApplicationDependencies:
     dfs_board_service: Any
     game_service: Any
     slate_service: Any
+    matchup_selection_service: Any
     player_service: Any
     team_service: Any
     data_service: Any
@@ -73,8 +74,11 @@ def build_dependencies(
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
-    from app.services.player_pool import PlayerPoolService
+    from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
+    from app.services.player_archetype_repository import PlayerArchetypeRepository
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
     from app.services.statistic_catalog import StatisticCatalog
@@ -248,6 +252,30 @@ def build_dependencies(
         settings=settings,
         player_pool=player_pool_service,
     )
+    from app.domain.freshness import time_window_timedelta
+
+    player_game_log_repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=statistic_catalog,
+        stats_surface_season=settings.nba.current_season,
+        stats_surface_max_age=time_window_timedelta(
+            settings.catalog.player_game_log_max_age_hours,
+            unit_seconds=3600,
+            field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+        ),
+    )
+    matchup_selection_service = MatchupSelectionService(
+        event_catalog=event_catalog_service,
+        player_pool=(
+            StoredPlayerPoolReader(player_pool_snapshot_repository)
+            if player_pool_snapshot_repository is not None
+            else None
+        ),
+        player_logs=player_game_log_repository,
+        archetypes=PlayerArchetypeRepository(engine),
+        statistic_catalog=statistic_catalog,
+        settings=settings,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -259,6 +287,7 @@ def build_dependencies(
         dfs_board_service=dfs_board_service,
         game_service=game_service,
         slate_service=slate_service,
+        matchup_selection_service=matchup_selection_service,
         player_service=player_service,
         team_service=team_service,
         data_service=data_service,

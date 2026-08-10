@@ -40,6 +40,13 @@ class StoredPlayerPoolSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredPlayerPoolSnapshotCandidate:
+    scope: PlayerPoolSnapshotScope
+    retrieved_at: datetime
+    refresh_outcome: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerPoolRefreshResult:
     version: int
     outcome: str | None
@@ -75,6 +82,49 @@ class PlayerPoolSnapshotRepository:
         if not isinstance(payload, dict):
             raise ValueError("stored Player Pool snapshot must be an object")
         return StoredPlayerPoolSnapshot(payload, assume_utc(row["retrieved_at"]))
+
+    def list_containing_game(
+        self, season: str, game_id: str
+    ) -> tuple[StoredPlayerPoolSnapshotCandidate, ...]:
+        """Read candidate metadata without loading season-wide snapshot payloads."""
+
+        table = PlayerPoolSnapshot.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    table.c.game_ids,
+                    table.c.retrieved_at,
+                    table.c.refresh_outcome,
+                )
+                .where(
+                    table.c.season == str(season),
+                    table.c.payload.is_not(None),
+                    table.c.retrieved_at.is_not(None),
+                )
+                .order_by(table.c.retrieved_at.desc(), table.c.game_ids.asc())
+            ).mappings()
+            candidates = []
+            for row in rows:
+                try:
+                    game_ids = json.loads(row["game_ids"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(game_ids, list) or not all(
+                    isinstance(value, str) for value in game_ids
+                ):
+                    continue
+                scope = PlayerPoolSnapshotScope.create(str(season), game_ids)
+                if scope.storage_game_ids != row["game_ids"]:
+                    continue
+                if str(game_id) in scope.game_ids:
+                    candidates.append(
+                        StoredPlayerPoolSnapshotCandidate(
+                            scope,
+                            assume_utc(row["retrieved_at"]),
+                            row["refresh_outcome"],
+                        )
+                    )
+        return tuple(candidates)
 
     def get_refresh_result(self, scope: PlayerPoolSnapshotScope) -> PlayerPoolRefreshResult:
         table = PlayerPoolSnapshot.__table__
@@ -214,5 +264,6 @@ __all__ = [
     "PlayerPoolSnapshotRepository",
     "PlayerPoolSnapshotScope",
     "PlayerPoolRefreshResult",
+    "StoredPlayerPoolSnapshotCandidate",
     "StoredPlayerPoolSnapshot",
 ]

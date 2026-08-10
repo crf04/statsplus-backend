@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/slate`, `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -308,6 +308,110 @@ Empty and error behavior:
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
+
+### Get Matchup Selection
+
+```http
+GET /api/games/matchup/selection?game_id=<nba_game_id>&player_id=<canonical_player_id>
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns the selected Player Pool player's stored H2H games against the game's
+opponent and the stored games for the player's archetype peers against that
+opponent. `game_id` is one nonempty string and `player_id` is one positive
+canonical integer. Unknown, repeated, empty, noncanonical, or extra parameters
+are refused rather than ignored.
+
+```json
+{
+  "player_id": 2544,
+  "freshness": {
+    "player_pool": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-05T18:00:00+00:00",
+      "providers": {}
+    },
+    "player_game_logs": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-05T18:00:00+00:00"
+    }
+  },
+  "h2h": {
+    "thin": false,
+    "rows": [
+      {
+        "row_type": "game",
+        "player_id": 2544,
+        "player_name": "LeBron James",
+        "game_date": "2026-01-05",
+        "matchup": "LAL @ BOS",
+        "minutes": 36.0,
+        "stats": {"PTS": 31.0, "PRA": 48.0, "FGA": 19.0, "FG3A": 7.0},
+        "deltas": {"PTS": 0.083, "PRA": 0.102, "FGA": 0.018, "FG3A": 0.013}
+      },
+      {
+        "row_type": "average",
+        "player_id": null,
+        "player_name": null,
+        "game_date": null,
+        "matchup": null,
+        "minutes": 36.0,
+        "stats": {"PTS": 31.0, "PRA": 48.0, "FGA": 19.0, "FG3A": 7.0},
+        "deltas": {"PTS": 0.083, "PRA": 0.102, "FGA": 0.018, "FG3A": 0.013}
+      }
+    ]
+  },
+  "archetype": {"thin": true, "rows": []}
+}
+```
+
+Both tables carry backend-owned `thin` booleans. A nonempty table contains
+newest-first `game` rows followed by exactly one `average` row; an empty table
+contains no rows. Game rows always carry ISO game date and stored team/opponent
+matchup identity. The average row always carries null date and matchup.
+Game rows also identify the sampled canonical player; this makes archetype peer
+rows attributable. Average-row player identity is null because it is an
+aggregate across the delivered sample.
+
+Each row's `stats` and `deltas` maps contain every Market Category posted for
+the selected player, including PRA/PA/PR/RA/STKS and FGA/FG3A/FG2A. A delta is
+`game stat / game minutes - sample player's Regular Season stat / Regular
+Season minutes`; it is a ±STAT/MIN difference, not a percentage. H2H and
+archetype game chronology may include stored Regular Season and Playoffs rows,
+but each baseline is derived only from that row's player's stored Regular
+Season logs. Average stats and minutes are per-game means. Average deltas are
+minutes-weighted against the contributing players' own rates. Numeric outputs
+are rounded to six decimal places.
+
+Thinness uses named positive-integer settings:
+`MATCHUP_SELECTION_H2H_MIN_GAMES` (default `1`) and
+`MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` (default `5`). A table is thin below
+its threshold; an empty table is always thin. Missing logs or a missing usable
+Regular Season baseline exclude rows and remain an honest `200` empty/thin
+response. The request consumes persisted Player Pool facts, `player_clusters`,
+and durable `player_game_logs`; it never calls NBA Stats per player and never
+uses recorded test fixtures in production.
+
+`freshness.player_game_logs.status` is `fresh`, `stale`, or `missing`, and its
+`retrieved_at` is the timezone-aware durable publication timestamp when one
+exists. Stale or missing logs degrade to an honest `200` empty/thin response,
+so consumers can distinguish unavailable history from genuinely empty history
+under a fresh publication. `freshness.player_pool` preserves the governed
+Player Pool freshness document. Mixed provider truth may omit its aggregate
+`status`; the per-provider states remain authoritative. The selection lookup
+reads the newest reusable stored slate scope containing the game and may serve
+it as `stale-served` only within the existing six-hour stale window. It never
+acquires a refresh lease or invokes a DFS provider.
+
+| Case | Response |
+| --- | --- |
+| Known selection with no usable H2H or archetype rows | `200` with the affected `rows: []`, `thin: true` |
+| Unknown game in a nonempty Event Catalog, or player absent from a usable stored Player Pool | `404 resource_not_found` |
+| Missing, empty, repeated, noncanonical, or extra query parameter | `400 invalid_input` |
+| Authentication is missing or invalid | existing `401` authentication error contract |
+| Event Catalog is unavailable or empty | `503 provider_unavailable` |
+| No contract-valid stored Player Pool contains the valid game | `503 provider_unavailable` |
+| Stored Player Pool category is absent from the current Statistic Catalog | `503 provider_unavailable` |
 
 ### Get Game Logs
 

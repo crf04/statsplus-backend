@@ -63,6 +63,33 @@ def test_player_game_log_sport_minimum_defaults_to_five_and_is_configurable():
     assert configured.catalog.player_game_log_min_active_players_per_team_game == 7
 
 
+def test_matchup_selection_thin_thresholds_are_named_configuration():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "MATCHUP_SELECTION_H2H_MIN_GAMES": "2",
+            "MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES": "8",
+        }
+    )
+
+    assert defaults.catalog.matchup_selection_h2h_min_games == 1
+    assert defaults.catalog.matchup_selection_archetype_min_games == 5
+    assert configured.catalog.matchup_selection_h2h_min_games == 2
+    assert configured.catalog.matchup_selection_archetype_min_games == 8
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_matchup_selection_thin_thresholds_must_be_positive_integers(value):
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            environ={
+                "FLASK_ENV": "testing",
+                "MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES": value,
+            }
+        )
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
 def test_player_game_log_sport_minimum_must_be_a_positive_integer(value):
     with pytest.raises(ConfigurationError):
