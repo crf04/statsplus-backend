@@ -360,3 +360,31 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         assert connection.execute(
             sql_select(AthleteMappingDecision.provider_athlete_id)
         ).scalars().all() == ["pp-15"]
+
+
+def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_path):
+    """The merged stats-freshness schema advances independently to pool snapshots."""
+    from app.migrations import MIGRATIONS
+
+    database_path = tmp_path / "at-009.sqlite3"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 9),
+        )
+        first = run_migrations(engine)
+
+    assert first.current_version == 9
+    assert inspect(engine).has_table("stats_refreshes")
+    assert not inspect(engine).has_table("player_pool_snapshots")
+
+    upgraded = run_migrations(engine)
+    repeated = run_migrations(engine)
+
+    assert upgraded.applied == ("010_create_player_pool_snapshots",)
+    assert upgraded.current_version == 10
+    assert repeated.applied == ()
+    assert repeated.current_version == 10
+    assert inspect(engine).has_table("stats_refreshes")
+    assert inspect(engine).has_table("player_pool_snapshots")
