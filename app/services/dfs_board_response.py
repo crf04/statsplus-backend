@@ -26,6 +26,8 @@ import hashlib
 import json
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -34,11 +36,13 @@ from typing import Any, Callable
 
 from app.config.settings import RuntimeSettings
 from app.domain.comparisons import ComparisonBoard, ComparisonGroup
-from app.errors import AppError, ProviderUnavailableError
+from app.errors import AppError, InvalidInputError, ProviderUnavailableError
 from app.services.comparison_board import ComparisonBoardTooLargeError
-from app.services.dfs_board_query import BoardRequest
+from app.services.dfs_board_query import BoardRequest, parse_board_request
 from app.utils.telemetry import (
+    BOARD_REQUEST_STATUSES,
     BoardRequestEvent,
+    ProviderResponseError,
     current_request_id,
     record_board_request_event,
 )
@@ -96,6 +100,18 @@ class DFSBoardUnavailableError(ProviderUnavailableError):
         }
 
 
+@dataclass(slots=True)
+class _BoardRead:
+    """What one request in flight has established, for its single event.
+
+    A read that has not yet reached a decision is an error: nothing else can
+    have happened to it, and an outcome is never left unstated.
+    """
+
+    board: ComparisonBoard | None = None
+    outcome: str = "error"
+
+
 @dataclass(frozen=True, slots=True)
 class BoardRepresentation:
     """One board response: its status, its body, and its entity tag."""
@@ -147,84 +163,108 @@ class DFSBoardResponseService:
 
     # -- public seam -------------------------------------------------------
 
+    def respond_to_query(
+        self,
+        args: Any,
+        *,
+        if_none_match: str | None = None,
+    ) -> BoardRepresentation:
+        """Decide one whole authenticated board request, from its query string.
+
+        This is the seam an authenticated request enters and leaves exactly
+        once, so everything that decides its outcome is inside one observation:
+        the publication gate, the parser, the board itself, and the
+        serialization.  Publication is settled *first* -- before a single
+        parameter is read -- because a deployment that publishes no board owes
+        a caller nothing about which filters it would have accepted, and must
+        reach no parser, provider, database, or cache to say so.
+        """
+
+        read = _BoardRead()
+        with self._recorded(read):
+            self._require_published()
+            request = parse_board_request(args, settings=self.settings)
+            return self._respond(read, request, if_none_match)
+
     def respond(
         self,
         request: BoardRequest,
         *,
         if_none_match: str | None = None,
     ) -> BoardRepresentation:
-        """Assemble one board response, or raise its public failure."""
+        """Assemble one board response for an already-parsed read.
 
+        The same single observation applies, so a caller that parsed the query
+        itself still produces exactly one event and never two.
+        """
+
+        read = _BoardRead()
+        with self._recorded(read):
+            self._require_published()
+            return self._respond(read, request, if_none_match)
+
+    # -- decisions ---------------------------------------------------------
+
+    def _require_published(self) -> None:
         if not self.is_published:
             raise DFSBoardDisabledError()
 
-        started_at = self.clock().astimezone(timezone.utc).isoformat()
-        started = self.monotonic()
-        try:
-            board = self.comparison_board_service.get_comparisons(
-                request.query, filters=request.filters
-            )
-        except ComparisonBoardTooLargeError as error:
-            # The refusal already knows what it observed and what would narrow
-            # it; the only thing added here is that it happened and how long it
-            # took, because a board refused for size is an operational signal.
-            self._record(
-                board=None,
-                outcome="too_large",
-                status_code=error.status_code,
-                started=started,
-                started_at=started_at,
-            )
-            raise
+    def _respond(
+        self,
+        read: "_BoardRead",
+        request: BoardRequest,
+        if_none_match: str | None,
+    ) -> BoardRepresentation:
+        """The board itself: retrieved, judged usable, serialized, and tagged."""
+
+        board = self.comparison_board_service.get_comparisons(
+            request.query, filters=request.filters
+        )
+        read.board = board
 
         if not _has_usable_provider(board):
-            outcomes = [_provider_outcome(report) for report in board.provider_reports]
-            self._record(
-                board=board,
-                outcome="unavailable",
-                status_code=503,
-                started=started,
-                started_at=started_at,
-            )
             raise DFSBoardUnavailableError(
-                provider_outcomes=outcomes,
+                provider_outcomes=[
+                    _provider_outcome(report) for report in board.provider_reports
+                ],
                 disabled_providers=list(board.disabled_providers),
             )
 
         payload = serialize_board(board)
         etag = board_etag(payload)
         if _matches(if_none_match, etag):
-            self._record(
-                board=board,
-                outcome="not_modified",
-                status_code=304,
-                started=started,
-                started_at=started_at,
-            )
+            read.outcome = "not_modified"
             return BoardRepresentation(status_code=304, etag=etag)
 
-        self._record(
-            board=board,
-            outcome="served",
-            status_code=200,
-            started=started,
-            started_at=started_at,
-        )
+        read.outcome = "served"
         return BoardRepresentation(status_code=200, etag=etag, payload=payload)
 
     # -- telemetry ---------------------------------------------------------
 
-    def _record(
-        self,
-        *,
-        board: ComparisonBoard | None,
-        outcome: str,
-        status_code: int,
-        started: float,
-        started_at: str,
-    ) -> None:
+    @contextmanager
+    def _recorded(self, read: "_BoardRead") -> Iterator[None]:
+        """Observe one board request exactly once, however it ends.
+
+        The failure classification happens here rather than at each raise, so
+        every path -- the gate, the parser, a refused size, an outage, and an
+        unexpected error the route boundary will translate -- is counted once
+        under the status its caller actually receives.
+        """
+
+        started_at = self.clock().astimezone(timezone.utc).isoformat()
+        started = self.monotonic()
+        try:
+            yield
+        except BaseException as error:
+            read.outcome = _failure_outcome(error)
+            raise
+        finally:
+            self._record(read, started=started, started_at=started_at)
+
+    def _record(self, read: "_BoardRead", *, started: float, started_at: str) -> None:
         """Emit one bounded aggregate for this read, whatever it produced."""
 
+        board = read.board
         reports = () if board is None else board.provider_reports
         availability = "unknown" if board is None else "available"
         if board is not None and not board.availability.available:
@@ -234,8 +274,8 @@ class DFSBoardResponseService:
         self.recorder(
             BoardRequestEvent(
                 duration_ms=max(0.0, (self.monotonic() - started) * 1000.0),
-                outcome=outcome,
-                status_code=status_code,
+                outcome=read.outcome,
+                status_code=BOARD_REQUEST_STATUSES[read.outcome],
                 comparison_availability=availability,
                 provider_status_counts=_counts(report.status for report in reports),
                 failure_reason_counts=_counts(
@@ -375,6 +415,26 @@ def _is_usable(report: Any) -> bool:
         and not report.future_observation
         and report.freshness is not None
     )
+
+
+def _failure_outcome(error: BaseException) -> str:
+    """The bounded outcome one failed board request is counted under.
+
+    Each name is the one the caller's own status will state, so the recorded
+    outcome and the response can never describe two different things.  Anything
+    unrecognized is an ``error``: the route boundary turns it into the same safe
+    500, and telemetry says exactly that rather than guessing at a cause.
+    """
+
+    if isinstance(error, DFSBoardDisabledError):
+        return "disabled"
+    if isinstance(error, ComparisonBoardTooLargeError):
+        return "too_large"
+    if isinstance(error, InvalidInputError):
+        return "invalid"
+    if isinstance(error, (ProviderUnavailableError, ProviderResponseError)):
+        return "unavailable"
+    return "error"
 
 
 def _provider_outcome(report: Any) -> dict[str, Any]:

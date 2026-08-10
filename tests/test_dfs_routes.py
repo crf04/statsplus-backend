@@ -25,6 +25,7 @@ from app.config.settings import (
 )
 from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
 from app.services.dfs_board_response import DFSBoardResponseService
+import app.utils.telemetry as telemetry
 
 from tests.services.test_comparison_board import (
     GENERATED_AT,
@@ -150,6 +151,44 @@ def test_a_disabled_board_is_absent(make_board_client):
     assert response.status_code == 404
     assert_fixture("disabled", response.get_json())
     assert all(provider.calls == 0 for provider in providers.values())
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "?athlete_name=jokic", "?providers=", "?providers=fanduel", "?season="],
+)
+def test_a_disabled_board_is_absent_whatever_the_query_says(
+    make_board_client, monkeypatch, query
+):
+    """The gate runs before the parser, so a disabled board reads nothing.
+
+    A caller must not be able to learn which filters exist -- or reach the
+    parser, a provider, a database, or Redis -- on a deployment that publishes
+    no board at all.
+    """
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("a disabled board parsed a query string")
+
+    monkeypatch.setattr(
+        "app.services.dfs_board_response.parse_board_request", explode
+    )
+    client, providers = make_board_client(settings=board_settings(enabled=False))
+
+    response = client.get(f"/api/dfs/board{query}", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "dfs_board_disabled"
+    assert all(provider.calls == 0 for provider in providers.values())
+
+
+def test_a_disabled_board_still_authenticates_first(make_board_client):
+    client, _ = make_board_client(settings=board_settings(enabled=False))
+
+    response = client.get("/api/dfs/board?athlete_name=jokic")
+
+    assert response.status_code == 401
+    assert_fixture("unauthenticated", response.get_json())
 
 
 def test_no_provider_specific_public_route_exists(make_board_client):
@@ -327,6 +366,100 @@ def test_a_total_provider_failure_is_a_sanitized_503(make_board_client):
     assert response.status_code == 503
     assert_fixture("total_failure", response.get_json())
     assert "secret" not in response.get_data(as_text=True)
+
+
+# -- telemetry -------------------------------------------------------------
+
+
+@pytest.fixture
+def board_events():
+    """Read the process-wide board request aggregates for one test."""
+
+    telemetry.clear_recorded_provider_events()
+    yield lambda: [
+        (event["outcome"], event["status_code"])
+        for event in telemetry.get_recorded_board_request_events()
+    ]
+    telemetry.clear_recorded_provider_events()
+
+
+def test_an_unauthenticated_request_records_no_board_event(
+    make_board_client, board_events
+):
+    """Telemetry begins where the caller's identity does."""
+
+    client, _ = make_board_client()
+
+    assert client.get("/api/dfs/board").status_code == 401
+    assert board_events() == []
+
+
+@pytest.mark.parametrize(
+    ("query", "settings_kwargs", "expected"),
+    [
+        ("", {}, ("served", 200)),
+        ("?providers=", {}, ("invalid", 400)),
+        ("?athlete_name=jokic", {}, ("invalid", 400)),
+        ("", {"enabled": False}, ("disabled", 404)),
+    ],
+)
+def test_every_authenticated_request_records_exactly_one_event(
+    make_board_client, board_events, query, settings_kwargs, expected
+):
+    client, _ = make_board_client(settings=board_settings(**settings_kwargs))
+
+    client.get(f"/api/dfs/board{query}", headers=AUTH)
+
+    assert board_events() == [expected]
+
+
+def test_an_unavailable_and_an_oversized_read_are_each_one_event(
+    make_board_client, board_events
+):
+    unavailable, _ = make_board_client(
+        failures={"dabble": requests.exceptions.Timeout("x")}
+    )
+    unavailable.get("/api/dfs/board?providers=dabble", headers=AUTH)
+    oversized, _ = make_board_client(max_markets=1)
+    oversized.get("/api/dfs/board", headers=AUTH)
+
+    assert board_events() == [("unavailable", 503), ("too_large", 400)]
+
+
+def test_a_revalidated_board_is_one_not_modified_event(
+    make_board_client, board_events
+):
+    client, _ = make_board_client()
+    served = client.get("/api/dfs/board", headers=AUTH)
+
+    client.get(
+        "/api/dfs/board",
+        headers={**AUTH, "If-None-Match": served.headers["ETag"]},
+    )
+
+    assert board_events() == [("served", 200), ("not_modified", 304)]
+
+
+def test_a_board_event_carries_no_identity_or_upstream_text(
+    make_board_client, board_events
+):
+    client, _ = make_board_client()
+
+    client.get("/api/dfs/board?canonical_athlete_ids=203999", headers=AUTH)
+
+    event = telemetry.get_recorded_board_request_events()[0]
+    labels = {
+        label
+        for field in (
+            "provider_status_counts",
+            "failure_reason_counts",
+            "freshness_counts",
+            "cache_counts",
+        )
+        for label in event[field]
+    }
+    assert labels <= {"complete", "partial", "failed", "fresh", "stale", "unset"}
+    assert "203999" not in json.dumps(event)
 
 
 # -- conditional requests and headers --------------------------------------

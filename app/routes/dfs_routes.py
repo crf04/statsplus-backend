@@ -1,10 +1,15 @@
 """HTTP adapter for the authenticated DFS Board.
 
-There is one route, and it decides nothing.  Retrieval, comparison, filtering,
-size limits, serialization, entity tags, and the conditional outcome all belong
-to the board services below it; this module authenticates the caller, converts
-the query string into a typed board read, and turns the representation it is
-handed into a private, revalidatable HTTP response.
+There is one route, and it decides nothing.  Publication, parsing, retrieval,
+comparison, filtering, size limits, serialization, entity tags, the conditional
+outcome, and the one telemetry event describing all of it belong to the board
+response service below it; this module authenticates the caller, hands that
+service the raw query string, and turns the representation it is handed into a
+private, revalidatable HTTP response.
+
+Authentication is the one thing that happens above the service, so an
+unauthenticated request is a 401 that reaches no board and is recorded as no
+board request at all.
 
 No provider, Redis, or database client is created here, at import or at
 request time: the route reads the one graph the application factory assembled.
@@ -16,7 +21,6 @@ from flask import Blueprint, current_app, jsonify, request
 
 from app.dependencies import get_dependencies
 from app.errors import route_error_boundary
-from app.services.dfs_board_query import parse_board_request
 from app.utils.auth import require_auth
 
 dfs_bp = Blueprint("dfs", __name__)
@@ -32,12 +36,8 @@ BOARD_CACHE_CONTROL = "private, no-cache, max-age=0, must-revalidate"
 def dfs_board():
     """Return the central factual DFS Board for the authenticated caller."""
 
-    dependencies = get_dependencies()
-    board_request = parse_board_request(
-        request.args, settings=dependencies.settings
-    )
-    representation = dependencies.dfs_board_response_service.respond(
-        board_request,
+    representation = get_dependencies().dfs_board_response_service.respond_to_query(
+        request.args,
         if_none_match=request.headers.get("If-None-Match"),
     )
     return _board_response(representation)

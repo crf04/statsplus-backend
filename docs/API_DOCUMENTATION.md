@@ -471,6 +471,13 @@ environment, so development and tests opt in explicitly. An unpublished board
 answers an authenticated request with `404 dfs_board_disabled` and calls no
 provider. Startup fails if the flag is set without a provider registry.
 
+Publication is decided immediately after authentication and before the query
+string is read, so *every* authenticated request to an unpublished board is
+`404 dfs_board_disabled` — including one carrying an unknown, malformed, or
+empty filter, which would otherwise be `400`. No parser, provider, database, or
+cache is reached. Authentication still comes first: without credentials the
+answer is `401`, published or not.
+
 ### Filters
 
 Every filter names an exact identity the board itself established. There is no

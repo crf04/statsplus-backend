@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 import requests
+from werkzeug.datastructures import MultiDict
 
 from app.config.settings import (
     FeatureSettings,
@@ -29,6 +30,7 @@ from app.providers.dfs import (
     SelectionModifier,
     SnapshotStatus,
 )
+from app.errors import InvalidInputError
 from app.services.comparison_board import ComparisonBoardTooLargeError
 from app.services.dfs_board_query import BoardRequest
 from app.services.dfs_board_response import (
@@ -172,6 +174,44 @@ def test_a_disabled_board_never_calls_a_provider():
 
     with pytest.raises(DFSBoardDisabledError):
         service.respond(board_request())
+
+    assert [provider.calls for provider in providers.values()] == [0, 0]
+
+
+def test_a_disabled_board_is_refused_before_its_query_is_read():
+    """Publication is decided first, so a disabled deployment parses nothing."""
+
+    comparison_service, providers = complete_board_service()
+    service = build_service(
+        comparison_service,
+        settings=RuntimeSettings(environment="testing"),
+    )
+
+    with pytest.raises(DFSBoardDisabledError):
+        service.respond_to_query(
+            MultiDict([("providers", ""), ("athlete_name", "jokic")])
+        )
+
+    assert [provider.calls for provider in providers.values()] == [0, 0]
+
+
+def test_a_published_board_reads_its_query_string_into_typed_filters():
+    comparison_service, providers = complete_board_service()
+    service = build_service(comparison_service)
+
+    representation = service.respond_to_query(MultiDict([("providers", "dabble")]))
+
+    assert representation.status_code == 200
+    assert representation.payload["filters"]["providers"] == ["dabble"]
+    assert providers["prizepicks"].calls == 0
+
+
+def test_an_invalid_query_is_the_shared_invalid_input_failure():
+    comparison_service, providers = complete_board_service()
+    service = build_service(comparison_service)
+
+    with pytest.raises(InvalidInputError):
+        service.respond_to_query(MultiDict([("providers", "")]))
 
     assert [provider.calls for provider in providers.values()] == [0, 0]
 
@@ -564,6 +604,70 @@ def test_every_outcome_is_observable():
     assert [event.status_code for event in recorder.events] == [200, 304, 503, 400]
     assert recorder.events[2].failure_reason_counts == (("timeout", 2),)
     assert recorder.events[3].comparison_availability == "unknown"
+
+
+def test_a_disabled_request_is_observed_as_one_disabled_event():
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+    service = build_service(
+        comparison_service,
+        settings=RuntimeSettings(environment="testing"),
+        recorder=recorder,
+    )
+
+    with pytest.raises(DFSBoardDisabledError):
+        service.respond_to_query(MultiDict())
+
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [
+        ("disabled", 404)
+    ]
+    assert recorder.events[0].comparison_availability == "unknown"
+
+
+def test_an_invalid_request_is_observed_as_one_invalid_event():
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+    service = build_service(comparison_service, recorder=recorder)
+
+    with pytest.raises(InvalidInputError):
+        service.respond_to_query(MultiDict([("season", "")]))
+
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [
+        ("invalid", 400)
+    ]
+
+
+def test_an_unexpected_failure_is_observed_as_one_error_event():
+    class ExplodingBoard:
+        def get_comparisons(self, query, *, filters=None):
+            raise RuntimeError("host=secret.example")
+
+    recorder = RecordingRecorder()
+    service = build_service(ExplodingBoard(), recorder=recorder)
+
+    with pytest.raises(RuntimeError):
+        service.respond_to_query(MultiDict())
+
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [
+        ("error", 500)
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [MultiDict(), MultiDict([("providers", "")]), MultiDict([("providers", "dabble")])],
+)
+def test_one_request_is_exactly_one_event(args):
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+    service = build_service(comparison_service, recorder=recorder)
+
+    try:
+        service.respond_to_query(args)
+    except InvalidInputError:
+        pass
+
+    assert len(recorder.events) == 1
 
 
 def test_telemetry_labels_never_carry_identities():
