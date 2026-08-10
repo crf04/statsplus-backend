@@ -871,6 +871,11 @@ class BoardMarket:
                 "contradiction evidence states both an ordinal and a count"
             )
         if self.conflict_count is not None:
+            # Typed before compared: ``True < 2`` and ``Decimal("2") < 2`` both
+            # answer, so an ordinal or a count is refused as a count before any
+            # relational check reads it.
+            _exact_count(self.conflict_ordinal, "a board market conflict ordinal")
+            _exact_count(self.conflict_count, "a board market conflict count")
             if self.conflict_count < 2:
                 raise ValueError("a contradiction requires at least two observations")
             if not 0 <= self.conflict_ordinal < self.conflict_count:
@@ -915,6 +920,17 @@ class BoardCoverage:
     skipped_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        for name in (
+            "fetched_count",
+            "eligible_count",
+            "normalized_count",
+            "skipped_count",
+        ):
+            _exact_count(getattr(self, name), f"a coverage {name.replace('_', ' ')}")
+        # The one count a provider may leave unstated: nothing said how many
+        # there were to fetch.  Stated, it is a count like any other.
+        if self.expected_total is not None:
+            _exact_count(self.expected_total, "a coverage expected total")
         for name in ("warning_codes", "skipped_reasons"):
             codes = tuple(
                 sorted({getattr(code, "value", code) for code in getattr(self, name)})
@@ -1023,6 +1039,7 @@ class ProviderReport:
                 raise ValueError("provider report age_seconds must be an exact Decimal")
             if self.age_seconds < 0:
                 raise ValueError("provider report age_seconds can never be negative")
+        _exact_count(self.market_count, "a provider report market count")
         if self.coverage is not None and not isinstance(self.coverage, BoardCoverage):
             raise ValueError("provider report coverage must be BoardCoverage or None")
         if self.cache is not None and not isinstance(self.cache, BoardCacheState):

@@ -49,6 +49,9 @@ from app.utils.telemetry import BoardRequestEvent
 from app.domain.comparisons import ComparisonFilters
 
 from tests.services.test_comparison_board import (
+    _forced_reference,
+    _read_markets,
+    _spelled,
     GENERATED_AT,
     RETRIEVED_AT,
     SEASON,
@@ -1110,3 +1113,133 @@ def test_a_published_count_is_an_exact_integer_never_a_boolean():
     for group in payload["comparison_groups"]:
         assert type(group["summary"]["market_count"]) is int
         assert type(group["summary"]["provider_count"]) is int
+
+
+# -- every published count is an exact integer ------------------------------
+
+#: Every key in the version 1 body whose value is a count, an ordinal, or a
+#: total.  Each must serialize as a JSON number, never ``true`` or ``2.0``.
+COUNT_KEYS = frozenset(
+    {
+        "market_count",
+        "provider_count",
+        "unresolved_count",
+        "conflict_count",
+        "conflict_ordinal",
+        "fetched_count",
+        "eligible_count",
+        "normalized_count",
+        "skipped_count",
+        "expected_total",
+    }
+)
+
+
+def _published_counts(value, path="payload"):
+    """Every count-named leaf in a serialized body, with where it was found."""
+
+    if isinstance(value, dict):
+        found = []
+        for key, item in value.items():
+            found.extend(_published_counts(item, f"{path}.{key}"))
+            if key in COUNT_KEYS:
+                found.append((f"{path}.{key}", item))
+        return found
+    if isinstance(value, list):
+        return [
+            found
+            for index, item in enumerate(value)
+            for found in _published_counts(item, f"{path}[{index}]")
+        ]
+    return []
+
+
+def _assert_exact_published_counts(payload):
+    counts = _published_counts(payload)
+    assert counts, "the audited body published no counts at all"
+    for where, value in counts:
+        assert value is None or type(value) is int, f"{where} published {value!r}"
+
+
+def test_every_published_count_in_an_assembled_board_is_an_exact_integer():
+    comparison_service, _ = complete_board_service()
+    board = comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    payload = serialize_board(board)
+
+    _assert_exact_published_counts(payload)
+    assert type(payload["market_count"]) is int
+
+
+def test_every_published_coverage_count_is_an_exact_integer():
+    comparison_service, _ = _service(
+        [
+            ProviderSnapshot(
+                provider="dabble",
+                status=SnapshotStatus.PARTIAL,
+                markets=(_market(market_id="m-1", threshold="25.5"),),
+                coverage=CoverageEvidence(
+                    fetched_count=3,
+                    eligible_count=2,
+                    normalized_count=1,
+                    skipped_count=1,
+                    expected_total=3,
+                    pagination_complete=False,
+                ),
+                retrieved_at=RETRIEVED_AT,
+            )
+        ]
+    )
+    board = comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    payload = serialize_board(board)
+
+    coverage = payload["provider_reports"][0]["coverage"]
+    _assert_exact_published_counts(payload)
+    assert coverage["fetched_count"] == 3
+    assert coverage["expected_total"] == 3
+    assert type(payload["provider_reports"][0]["market_count"]) is int
+
+
+def test_every_published_contradiction_ordinal_is_an_exact_integer(monkeypatch):
+    _forced_reference(monkeypatch)
+    board = _read_markets(
+        (_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5"))
+    )
+
+    payload = serialize_board(board)
+
+    contradicted = [
+        market
+        for market in payload["markets"]
+        if market["conflict_ordinal"] is not None
+    ]
+    assert [market["conflict_ordinal"] for market in contradicted] == [0, 1]
+    _assert_exact_published_counts(payload)
+
+
+def test_the_audited_count_keys_cover_every_count_the_contract_publishes():
+    """A count added to the contract must be audited, not silently published."""
+
+    comparison_service, _ = complete_board_service()
+    payload = serialize_board(
+        comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+    )
+    published = set()
+
+    def _keys(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                published.add(key)
+                _keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                _keys(item)
+
+    _keys(payload)
+    named = {
+        key
+        for key in published
+        if key.endswith(("_count", "_ordinal", "_total", "_index"))
+    }
+    assert named <= COUNT_KEYS

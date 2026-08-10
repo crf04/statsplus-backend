@@ -3267,3 +3267,137 @@ def test_a_comparison_board_reports_an_exact_cache_age_from_a_float():
     report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
 
     assert report.cache.age_seconds == Decimal("30.5")
+
+
+# -- every nested public count is an exact count ----------------------------
+
+#: Values Python compares equal to a count, or that no count can be.  Each is
+#: refused by construction rather than reaching a body as ``true`` or ``2.0``.
+INEXACT_COUNTS = [False, True, 2.0, Decimal("2"), "2", -1]
+
+
+def _board_observation(**overrides):
+    values = {
+        "provider": "dabble",
+        "snapshot_status": "ok",
+        "retrieved_at": RETRIEVED_AT,
+        "observed_at": GENERATED_AT,
+        "age_seconds": Decimal("30"),
+    }
+    return comparisons.BoardObservation(**{**values, **overrides})
+
+
+def _conflicted_market(**overrides):
+    values = {
+        "market_reference": "mkt_1_a",
+        "provider": "dabble",
+        "observation": _board_observation(),
+        "exclusion": ComparisonExclusion.CONFLICTING_MARKET_IDENTITY,
+        "conflict_ordinal": 0,
+        "conflict_count": 2,
+    }
+    return comparisons.BoardMarket(**{**values, **overrides})
+
+
+@pytest.mark.parametrize("count", INEXACT_COUNTS)
+def test_a_board_market_conflict_count_must_be_an_exact_count(count):
+    with pytest.raises(ValueError, match="conflict count must be an exact count"):
+        _conflicted_market(conflict_count=count)
+
+
+@pytest.mark.parametrize("ordinal", INEXACT_COUNTS)
+def test_a_board_market_conflict_ordinal_must_be_an_exact_count(ordinal):
+    """An ordinal is type-checked before any comparison against the count."""
+
+    with pytest.raises(ValueError, match="conflict ordinal must be an exact count"):
+        _conflicted_market(conflict_ordinal=ordinal, conflict_count=9)
+
+
+def test_a_board_market_states_its_contradiction_as_exact_integers():
+    market = _conflicted_market()
+
+    assert type(market.conflict_ordinal) is int
+    assert type(market.conflict_count) is int
+
+
+def test_a_contradiction_still_requires_at_least_two_observations():
+    with pytest.raises(ValueError, match="at least two observations"):
+        _conflicted_market(conflict_ordinal=0, conflict_count=1)
+
+
+def test_a_contradiction_ordinal_still_names_one_observation():
+    with pytest.raises(ValueError, match="ordinal must name one observation"):
+        _conflicted_market(conflict_ordinal=2, conflict_count=2)
+
+
+COVERAGE_COUNTS = [
+    "fetched_count",
+    "eligible_count",
+    "normalized_count",
+    "skipped_count",
+]
+
+
+@pytest.mark.parametrize("name", COVERAGE_COUNTS)
+@pytest.mark.parametrize("count", INEXACT_COUNTS)
+def test_a_coverage_count_must_be_an_exact_count(name, count):
+    message = f"coverage {name.replace('_', ' ')} must be an exact count"
+    with pytest.raises(ValueError, match=message):
+        comparisons.BoardCoverage(**{name: count})
+
+
+@pytest.mark.parametrize("count", INEXACT_COUNTS)
+def test_a_coverage_expected_total_must_be_an_exact_count_or_none(count):
+    with pytest.raises(ValueError, match="coverage expected total must be an exact"):
+        comparisons.BoardCoverage(expected_total=count)
+
+
+def test_a_coverage_expected_total_may_be_unstated():
+    assert comparisons.BoardCoverage(expected_total=None).expected_total is None
+
+
+def test_coverage_states_every_count_it_carries_as_an_exact_integer():
+    coverage = comparisons.BoardCoverage(
+        fetched_count=4,
+        eligible_count=3,
+        normalized_count=2,
+        skipped_count=1,
+        expected_total=4,
+    )
+
+    for name in COVERAGE_COUNTS + ["expected_total"]:
+        assert type(getattr(coverage, name)) is int
+
+
+@pytest.mark.parametrize("count", INEXACT_COUNTS)
+def test_a_provider_report_market_count_must_be_an_exact_count(count):
+    message = "provider report market count must be an exact count"
+    with pytest.raises(ValueError, match=message):
+        comparisons.ProviderReport(
+            provider="dabble", status="complete", market_count=count
+        )
+
+
+def test_a_provider_report_states_its_market_count_as_an_exact_integer():
+    report = comparisons.ProviderReport(
+        provider="dabble", status="complete", market_count=2
+    )
+
+    assert type(report.market_count) is int
+
+
+def test_an_identity_is_not_constrained_as_a_count():
+    """Canonical identities and prices are not counts and keep their range."""
+
+    key = comparisons.ComparisonKey(
+        canonical_athlete_id=203999,
+        canonical_event_id="evt-1",
+        canonical_statistic_id="points",
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    selection = comparisons.BoardSelection(
+        selection_reference="sel_1", american_price=-120
+    )
+
+    assert key.canonical_athlete_id == 203999
+    assert selection.american_price == -120

@@ -14,12 +14,16 @@ fantasy assumption is derived here, and nothing is ever truncated: a read that
 would exceed the configured ceiling is refused with the count it observed and
 the filters that would narrow it.
 
-Readability comes first.  A read no provider could be read from is an outage
-rather than an over-large board, however many markets it observed, so the
-ceiling is applied only to a read something on it could still be published
-from.  The unreadable one builds no board at all: it raises
+Readability comes first, but only where the ceiling would otherwise speak.  A
+read no provider could be read from is an outage rather than an over-large
+board, however many markets it observed, so an over-ceiling read is refused as
+too large only when something on it could still be published.  The unreadable
+over-ceiling read builds no board at all: it raises
 :class:`UnreadableComparisonBoardError`, carrying bounded evidence for the
-response seam to report, and both seams judge readability through the one
+response seam to report, because a board that retained nothing it counted would
+contradict itself.  An unreadable read within the ceiling is returned as an
+ordinary, fully retained board; the response seam recognizes the outage on it
+and translates it to a 503.  Both seams judge readability through the one
 domain authority in :func:`app.domain.comparisons.has_readable_provider`.
 """
 
