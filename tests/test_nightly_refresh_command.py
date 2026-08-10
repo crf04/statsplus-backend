@@ -13,10 +13,11 @@ def test_nightly_refresh_runs_stats_catalog_schedule_then_player_logs_once_on_su
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("athlete_catalog") or True,
-            lambda: calls.append("schedule") or object(),
-            lambda: calls.append("player_game_logs") or object(),
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 0
     )
@@ -29,10 +30,11 @@ def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or next(stats_results),
-            lambda: calls.append("athlete_catalog") or True,
-            lambda: calls.append("schedule") or object(),
-            lambda: calls.append("player_game_logs") or object(),
+            refresh_stats=lambda: calls.append("stats") or next(stats_results),
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 0
     )
@@ -52,10 +54,12 @@ def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(caps
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("athlete_catalog") or next(athlete_results),
-            lambda: calls.append("schedule") or object(),
-            lambda: calls.append("player_game_logs") or object(),
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog")
+            or next(athlete_results),
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 0
     )
@@ -77,11 +81,12 @@ def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("athlete_catalog") or True,
-            lambda: calls.append("schedule")
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule")
             or (_ for _ in ()).throw(RuntimeError("offline failure")),
-            lambda: calls.append("player_game_logs") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 1
     )
@@ -111,10 +116,10 @@ def test_nightly_refresh_retries_whole_unit_when_player_logs_fail(capsys):
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("athlete_catalog") or True,
-            lambda: calls.append("schedule") or object(),
-            refresh_logs,
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=refresh_logs,
         )
         == 0
     )

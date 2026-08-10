@@ -451,8 +451,11 @@ endpoint. It refreshes the stats tables, current-season Athlete Catalog,
 current-season Event Catalog, and then durable current-season player game logs,
 retrying that ordered unit once. The player-log step uses one season-wide
 provider read and publishes normalized player/game facts plus its season
-sidecar and named `player_game_logs` stats freshness transactionally. A
-nonempty result also requires a present, fresh, nonempty Athlete Catalog.
+sidecar transactionally. For the configured current season, that transaction
+also advances the named `player_game_logs` stats freshness; historical
+backfills retain independent season freshness and never replace or gate the
+current observation. A nonempty result also requires a present, fresh,
+nonempty Athlete Catalog.
 Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
 preserves the last valid publication; individual well-formed unjoined athlete,
 game, or team rows are excluded and counted without exposing their identities.
@@ -494,8 +497,8 @@ credentials, URLs, bodies, or exception text.
 The same endpoint includes `recent_player_game_log_events` plus
 `player_game_log_events_total` and `player_game_log_buffered_events`. Each
 entry contains only source/published row counts, the three unjoined-row counts,
-and a malformed-row count; player, game, team, and provider identities are
-never telemetry dimensions.
+plus malformed-row and rejected-publication counts; player, game, team, and
+provider identities are never telemetry dimensions.
 
 `recent_board_request_events` describes the published `GET /api/dfs/board`
 route: exactly one entry per authenticated request, whatever it ended in.

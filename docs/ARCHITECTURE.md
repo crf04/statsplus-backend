@@ -531,12 +531,13 @@ rates using the reviewed category spellings and component definitions from
 `statistic_catalog.yaml`, the last ten games' minutes in chronological
 sparkline order, H2H rows in deterministic recent-first order, and
 deterministic multi-player H2H rows for archetype sampling. Publication writes
-the season sidecar and the named `player_game_logs` row in `stats_refreshes` in
-the same transaction. Reads require both records with identical completion
-times; orphaned or inconsistent rows return no facts. Callers can also consume
-the named stats freshness through `StatsFreshnessRepository` without
-synthesizing logs. Neither migration 011 nor these services add a public
-route.
+the season sidecar for every season. When that season is the configured current
+season, the same transaction also advances the named `player_game_logs` row in
+`stats_refreshes`. Season reads require their own sidecar completeness; the
+single current-season stats observation never gates or hides historical
+backfills. Callers can consume that named current-season freshness through
+`StatsFreshnessRepository` without synthesizing logs. Neither migration 011
+nor these services add a public route.
 
 ### Durable refresh jobs
 

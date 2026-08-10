@@ -112,13 +112,17 @@ class PlayerGameLogService:
                 raise PlayerGameLogIdentityError(
                     "an empty snapshot cannot represent a season with completed games"
                 )
-            row_count = self.repository.publish(
-                canonical_season,
-                (),
-                retrieved_at=retrieved_at,
-                source_provider=SOURCE_PROVIDER,
-                allow_empty=True,
-            )
+            try:
+                row_count = self.repository.publish(
+                    canonical_season,
+                    (),
+                    retrieved_at=retrieved_at,
+                    source_provider=SOURCE_PROVIDER,
+                    allow_empty=True,
+                )
+            except ValueError:
+                self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
+                raise
             self._record_telemetry(0, row_count, 0, 0, 0)
             return PlayerGameLogRefreshResult(
                 season=canonical_season,
@@ -153,12 +157,18 @@ class PlayerGameLogService:
             raise PlayerGameLogIdentityError(
                 "a non-empty player game log snapshot produced no canonical rows"
             )
-        row_count = self.repository.publish(
-            canonical_season,
-            canonicalized.records,
-            retrieved_at=retrieved_at,
-            source_provider=SOURCE_PROVIDER,
-        )
+        try:
+            row_count = self.repository.publish(
+                canonical_season,
+                canonicalized.records,
+                retrieved_at=retrieved_at,
+                source_provider=SOURCE_PROVIDER,
+            )
+        except ValueError:
+            self._record_canonicalization_telemetry(
+                canonicalized, published=0, rejected=1
+            )
+            raise
         self._record_canonicalization_telemetry(canonicalized, published=row_count)
         return PlayerGameLogRefreshResult(
             season=canonical_season,
@@ -349,7 +359,11 @@ class PlayerGameLogService:
         return numeric
 
     def _record_canonicalization_telemetry(
-        self, result: _CanonicalizationResult, *, published: int
+        self,
+        result: _CanonicalizationResult,
+        *,
+        published: int,
+        rejected: int = 0,
     ) -> None:
         self._record_telemetry(
             result.source_row_count,
@@ -357,6 +371,7 @@ class PlayerGameLogService:
             result.unjoined_athlete_count,
             result.unjoined_event_count,
             result.team_mismatch_count,
+            rejected=rejected,
         )
 
     def _record_telemetry(
@@ -368,6 +383,7 @@ class PlayerGameLogService:
         team_mismatches: int,
         *,
         malformed: int = 0,
+        rejected: int = 0,
     ) -> None:
         self.telemetry_recorder.record(
             PlayerGameLogTelemetryEvent(
@@ -377,6 +393,7 @@ class PlayerGameLogService:
                 unjoined_event_count=unjoined_events,
                 team_mismatch_count=team_mismatches,
                 malformed_row_count=malformed,
+                rejected_publication_count=rejected,
             )
         )
 

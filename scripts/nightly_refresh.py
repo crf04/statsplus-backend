@@ -32,6 +32,7 @@ from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: 
 
 
 def run_nightly_refresh(
+    *,
     refresh_stats: Callable[[], Any],
     refresh_athlete_catalog: Callable[[], Any],
     refresh_schedule: Callable[[], Any],
@@ -95,7 +96,9 @@ def _run(database_url: str) -> int:
             engine, settings=settings, nba_stats_provider=provider
         )
         player_game_log_repository = PlayerGameLogRepository(
-            engine, statistic_catalog=StatisticCatalog.load_default()
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_season=settings.nba.current_season,
         )
         player_game_log_service = PlayerGameLogService(
             nba_stats_provider=provider,
@@ -104,13 +107,17 @@ def _run(database_url: str) -> int:
             event_catalog=event_service,
         )
         return run_nightly_refresh(
-            data_service.update_all_data,
-            lambda: athlete_service.refresh_season(
+            refresh_stats=data_service.update_all_data,
+            refresh_athlete_catalog=lambda: athlete_service.refresh_season(
                 settings.nba.current_season
             ).status
             == "succeeded",
-            lambda: event_service.refresh(settings.nba.current_season),
-            lambda: player_game_log_service.refresh(settings.nba.current_season),
+            refresh_schedule=lambda: event_service.refresh(
+                settings.nba.current_season
+            ),
+            refresh_player_game_logs=lambda: player_game_log_service.refresh(
+                settings.nba.current_season
+            ),
         )
     finally:
         engine.dispose()

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
-from typing import Iterable
 
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.domain.utc import assume_utc
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
-from app.models.stats_freshness import StatsRefresh
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import (
@@ -45,6 +44,15 @@ class PlayerGameLogRecord:
     blocks: int
 
 
+def _two_pointer_attempts(record: PlayerGameLogRecord) -> float:
+    return record.field_goals_attempted - record.three_pointers_attempted
+
+
+_DERIVED_COMPONENT_VALUES: dict[str, Callable[[PlayerGameLogRecord], float]] = {
+    "two_pointers_attempted": _two_pointer_attempts
+}
+
+
 @dataclass(frozen=True, slots=True)
 class PlayerGameLogFreshness:
     season: str
@@ -64,10 +72,21 @@ class PlayerSeasonRate:
 
 
 class PlayerGameLogRepository:
-    """Replace one season atomically and derive read models from its rows."""
+    """Publish season facts; optionally observe one as the current stats surface."""
 
-    def __init__(self, engine: Engine, *, statistic_catalog: StatisticCatalog) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        statistic_catalog: StatisticCatalog,
+        stats_surface_season: str | None = None,
+    ) -> None:
         self.engine = engine
+        self._stats_surface_season = (
+            validate_canonical_season(stats_surface_season)
+            if stats_surface_season is not None
+            else None
+        )
         self._surface_freshness = StatsFreshnessRepository(
             engine, surface=PLAYER_GAME_LOG_SURFACE
         )
@@ -86,7 +105,7 @@ class PlayerGameLogRepository:
             component
             for component in required_components
             if component not in stored_components
-            and component != "two_pointers_attempted"
+            and component not in _DERIVED_COMPONENT_VALUES
         }
         if unsupported:
             raise ValueError(
@@ -162,9 +181,10 @@ class PlayerGameLogRepository:
                 connection.execute(
                     insert(refresh_table).values(season=canonical_season, **values)
                 )
-            self._surface_freshness.record_success(
-                retrieved, connection=connection
-            )
+            if canonical_season == self._stats_surface_season:
+                self._surface_freshness.record_success(
+                    retrieved, connection=connection
+                )
         return len(unique)
 
     def list_player_rows(
@@ -186,19 +206,11 @@ class PlayerGameLogRepository:
     def get_freshness(self, season: str) -> PlayerGameLogFreshness:
         canonical_season = validate_canonical_season(season)
         refresh_table = PlayerGameLogRefresh.__table__
-        surface_table = StatsRefresh.__table__
         with self.engine.connect() as connection:
             row = connection.execute(
-                select(refresh_table)
-                .join(
-                    surface_table,
-                    and_(
-                        surface_table.c.surface == PLAYER_GAME_LOG_SURFACE,
-                        surface_table.c.last_success_at
-                        == refresh_table.c.retrieved_at,
-                    ),
+                select(refresh_table).where(
+                    refresh_table.c.season == canonical_season
                 )
-                .where(refresh_table.c.season == canonical_season)
             ).mappings().one_or_none()
         if row is None:
             return PlayerGameLogFreshness(canonical_season, None, None, 0)
@@ -291,19 +303,11 @@ class PlayerGameLogRepository:
     def _published_rows_statement():
         log_table = PlayerGameLog.__table__
         refresh_table = PlayerGameLogRefresh.__table__
-        surface_table = StatsRefresh.__table__
         return (
             select(log_table)
             .join(
                 refresh_table,
                 refresh_table.c.season == log_table.c.season,
-            )
-            .join(
-                surface_table,
-                and_(
-                    surface_table.c.surface == PLAYER_GAME_LOG_SURFACE,
-                    surface_table.c.last_success_at == refresh_table.c.retrieved_at,
-                ),
             )
             .where(refresh_table.c.row_count > 0)
         )
@@ -320,8 +324,9 @@ class PlayerGameLogRepository:
 
     @staticmethod
     def _component_value(record: PlayerGameLogRecord, component: str) -> float:
-        if component == "two_pointers_attempted":
-            return record.field_goals_attempted - record.three_pointers_attempted
+        derived = _DERIVED_COMPONENT_VALUES.get(component)
+        if derived is not None:
+            return derived(record)
         return float(getattr(record, component))
 
 
