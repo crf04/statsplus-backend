@@ -20,6 +20,28 @@ _GAME_TYPE_BY_ID_PREFIX = {
 }
 
 
+def _normalized_words(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+
+def is_all_star_kind(value: str) -> bool:
+    """Whether a canonical kind names an All-Star event."""
+
+    return "all star" in _normalized_words(value)
+
+
+def is_preseason_kind(value: str) -> bool:
+    """Whether a canonical kind names a preseason event."""
+
+    return _normalized_words(value) in {"preseason", "pre season"}
+
+
+def is_ordinary_classification(value: str) -> bool:
+    """Whether a display classification needs no unusual-event badge."""
+
+    return _normalized_words(value) in {"regular season", "unknown"}
+
+
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
     """Return canonical event kind, with a real game ID as authority."""
 
@@ -39,7 +61,7 @@ def display_event_classification(
 
     classification = _known_classification(provider_classification)
     sublabel = _display_sublabel(provider_sublabel)
-    if classification.casefold() not in {"regular season", "unknown"}:
+    if not is_ordinary_classification(classification):
         return classification
     if sublabel:
         return sublabel
@@ -50,11 +72,11 @@ def display_event_classification(
 
 def _display_sublabel(value: str) -> str:
     sublabel = value.strip()
-    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", sublabel.casefold()).split())
+    normalized = _normalized_words(sublabel)
     if sublabel and not (
         "postpon" in normalized
-        or "series" in normalized
-        or re.fullmatch(r"game [0-9]+", normalized)
+        or re.match(r"^(?:series (?:tied|leads?)|(?:tied|leads?) series)\b", normalized)
+        or re.match(r"^game [0-9]+\b", normalized)
     ):
         return sublabel
     return ""
@@ -71,4 +93,7 @@ __all__ = [
     "NBAGameStatus",
     "canonical_event_kind",
     "display_event_classification",
+    "is_all_star_kind",
+    "is_ordinary_classification",
+    "is_preseason_kind",
 ]

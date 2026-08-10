@@ -185,11 +185,12 @@ Common query types:
 GET /api/games/slate?date=YYYY-MM-DD
 ```
 
-Requires Firebase bearer authentication. `date` is optional and defaults to
-today's Slate Date in US Eastern time. The route reads the configured current
-season's persisted Event Catalog; slate membership is determined by converting
-each UTC `scheduled_at` value to US Eastern time. Games are ordered by tip time,
-then `game_id`.
+Requires Firebase bearer authentication. `date` is optional only by omission
+and defaults to today's Slate Date in US Eastern time; an explicitly empty
+`?date=` is malformed input. The route reads the configured current season's
+persisted Event Catalog; slate membership is determined by converting each UTC
+`scheduled_at` value to US Eastern time. Games are ordered by tip time, then
+`game_id`.
 
 ```json
 {
@@ -256,7 +257,7 @@ Empty and error behavior:
 | Case | Response |
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
-| `date` is not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
 | No successful schedule metadata or no catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
-import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -20,8 +19,11 @@ from app.domain.nba_events import (
     NBAGameStatus,
     canonical_event_kind,
     display_event_classification,
+    is_all_star_kind,
+    is_ordinary_classification,
+    is_preseason_kind,
 )
-from app.domain.utc import as_utc, parse_utc_iso
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
 
 
@@ -63,7 +65,7 @@ class SlateService:
                 "The NBA schedule is not available. Please try again later."
             )
 
-        observed_at = as_utc(self._clock())
+        observed_at = assume_utc(self._clock())
         freshness = self.event_catalog.get_freshness(season, now=observed_at)
         retrieved_at = freshness.get("last_success_at")
         if not retrieved_at or freshness.get("event_count", 0) == 0:
@@ -80,7 +82,7 @@ class SlateService:
                 game_id, str(event.get("classification") or "")
             )
             canonical_kind = canonical_event_kind(game_id, classification)
-            if self._is_all_star_kind(canonical_kind):
+            if is_all_star_kind(canonical_kind):
                 continue
             games.append(
                 self._game(
@@ -111,7 +113,7 @@ class SlateService:
 
     def _parse_slate_date(self, value: str | None) -> date:
         if value is None:
-            parsed = as_utc(self._clock()).astimezone(EASTERN).date()
+            parsed = assume_utc(self._clock()).astimezone(EASTERN).date()
         else:
             try:
                 parsed = datetime.strptime(value, "%Y-%m-%d").date()
@@ -133,20 +135,12 @@ class SlateService:
     def _belongs_to_slate(cls, event: Mapping[str, Any], slate_date: date) -> bool:
         return cls._scheduled_at(event).astimezone(EASTERN).date() == slate_date
 
-    @staticmethod
-    def _is_all_star_kind(canonical_kind: str) -> bool:
-        normalized = " ".join(
-            re.sub(r"[^a-z0-9]+", " ", canonical_kind.casefold()).split()
-        )
-        return "all star" in normalized
-
     def _schedule_freshness(
         self, retrieved_at: str, *, observed_at: datetime
     ) -> str:
         retrieved = parse_utc_iso(retrieved_at)
-        age = exact_age_seconds(
-            exact_seconds(observed_at - retrieved), field="schedule age"
-        )
+        elapsed = max(observed_at - retrieved, timedelta(0))
+        age = exact_age_seconds(exact_seconds(elapsed), field="schedule age")
         return "fresh" if within_max_age(age, self.schedule_max_age_seconds) else "stale"
 
     @classmethod
@@ -158,11 +152,9 @@ class SlateService:
         canonical_kind: str,
     ) -> dict[str, Any]:
         game_id = str(event["nba_game_id"])
-        preseason = canonical_kind.casefold() == "preseason"
+        preseason = is_preseason_kind(canonical_kind)
         unusual_classification = (
-            None
-            if classification.casefold() in {"regular season", "unknown"}
-            else classification
+            None if is_ordinary_classification(classification) else classification
         )
         if event.get("is_postponed") or event.get("postponed_status"):
             state = "postponed"

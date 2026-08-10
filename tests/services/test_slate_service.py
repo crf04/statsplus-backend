@@ -209,6 +209,20 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
     assert past_boundary["freshness"]["schedule"]["status"] == "stale"
 
 
+def test_schedule_freshness_treats_future_metadata_as_zero_age():
+    observed_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    payload = _service(
+        [],
+        freshness={
+            "last_success_at": (observed_at + timedelta(minutes=1)).isoformat(),
+            "event_count": 1,
+        },
+        now=observed_at,
+    ).get_slate("2026-01-02")
+
+    assert payload["freshness"]["schedule"]["status"] == "fresh"
+
+
 def test_schedule_freshness_accepts_a_valid_injected_max_age():
     retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
     payload = _service(
@@ -235,7 +249,7 @@ def test_slate_returns_an_empty_success_for_a_date_without_games():
     assert payload["games"] == []
 
 
-@pytest.mark.parametrize("value", ["2026-1-02", "not-a-date"])
+@pytest.mark.parametrize("value", ["", "2026-1-02", "not-a-date"])
 def test_slate_rejects_malformed_dates(value):
     with pytest.raises(InvalidInputError):
         _service([]).get_slate(value)

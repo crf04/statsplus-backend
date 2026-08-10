@@ -2,14 +2,14 @@
 
 from datetime import datetime, timedelta, timezone
 
-from app.domain.utc import as_utc, parse_utc_iso
+from app.domain.utc import assume_utc, parse_utc_iso
 
 
-def test_as_utc_treats_naive_values_as_utc_and_converts_aware_values():
-    assert as_utc(datetime(2026, 1, 2, 10)) == datetime(
+def test_assume_utc_treats_naive_values_as_utc_and_converts_aware_values():
+    assert assume_utc(datetime(2026, 1, 2, 10)) == datetime(
         2026, 1, 2, 10, tzinfo=timezone.utc
     )
-    assert as_utc(
+    assert assume_utc(
         datetime(2026, 1, 2, 4, tzinfo=timezone(-timedelta(hours=6)))
     ) == datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
 

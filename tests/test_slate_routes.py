@@ -38,6 +38,16 @@ def test_get_slate_requires_authentication(client, monkeypatch):
     assert response.get_json()["error"]["code"] == "authentication_required"
 
 
+def test_get_slate_preserves_an_explicit_empty_date_as_invalid(client, dependencies):
+    dependencies.slate_service.get_slate.side_effect = InvalidInputError("bad date")
+
+    response = client.get("/api/games/slate?date=")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "invalid_input"
+    dependencies.slate_service.get_slate.assert_called_once_with("")
+
+
 @pytest.mark.parametrize(
     ("error", "status", "code"),
     [

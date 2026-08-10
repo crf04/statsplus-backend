@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-def as_utc(value: datetime) -> datetime:
+def assume_utc(value: datetime) -> datetime:
     """Return one datetime in UTC, treating persisted naive values as UTC."""
 
     if value.tzinfo is None:
@@ -16,7 +16,7 @@ def as_utc(value: datetime) -> datetime:
 def parse_utc_iso(value: str) -> datetime:
     """Parse one ISO timestamp, accepting the standard trailing-Z form."""
 
-    return as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return assume_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
 
 
-__all__ = ["as_utc", "parse_utc_iso"]
+__all__ = ["assume_utc", "parse_utc_iso"]

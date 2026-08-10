@@ -18,7 +18,7 @@ from app.domain.freshness import (
     exact_timedelta,
     time_window_timedelta,
 )
-from app.domain.utc import as_utc
+from app.domain.utc import assume_utc
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsProvider
 from app.services.event_catalog_repository import EventCatalogRepository
@@ -101,7 +101,7 @@ class EventCatalogService:
         return EventCatalogBatchResult(tuple(results), failures)
 
     def _refresh_one(self, canonical: str, *, now: datetime | None) -> EventCatalogRefreshResult:
-        refreshed_at = as_utc(now or self._clock())
+        refreshed_at = assume_utc(now or self._clock())
         try:
             raw = self.provider.fetch_whole_season_schedule(season=canonical)
             frame = self._as_frame(raw)
@@ -132,7 +132,7 @@ class EventCatalogService:
         return self.repository.list_events(validate_canonical_season(season))
 
     def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]:
-        return self.repository.freshness(validate_canonical_season(season), as_utc(now or self._clock()), self.max_age)
+        return self.repository.freshness(validate_canonical_season(season), assume_utc(now or self._clock()), self.max_age)
 
     def is_fresh(self, season: str, *, now: datetime | None = None) -> bool:
         return bool(self.get_freshness(season, now=now)["fresh"])

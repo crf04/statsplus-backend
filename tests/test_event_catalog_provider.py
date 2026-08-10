@@ -111,3 +111,14 @@ def test_schedule_sublabel_filters_generic_series_and_postponement_evidence():
         "Regular Season",
         "Regular Season",
     ]
+
+
+def test_schedule_sublabel_preserves_a_branded_series_name():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][1][sublabel_index] = "NBA Mexico City Series"
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed.loc[1, "classification"] == "NBA Mexico City Series"
