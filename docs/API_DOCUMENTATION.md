@@ -202,9 +202,17 @@ time, then `game_id`.
       "retrieved_at": "2026-01-02T10:00:00+00:00"
     },
     "pool": {
-      "status": "unavailable",
-      "retrieved_at": null,
-      "providers": {}
+      "retrieved_at": "2026-01-02T10:04:00+00:00",
+      "providers": {
+        "prizepicks": {
+          "status": "fresh",
+          "retrieved_at": "2026-01-02T10:04:00+00:00"
+        },
+        "underdog": {
+          "status": "missing",
+          "retrieved_at": null
+        }
+      }
     }
   },
   "games": [
@@ -214,13 +222,13 @@ time, then `game_id`.
         "team_id": 1610612747,
         "tricode": "LAL",
         "name": "Los Angeles Lakers",
-        "targetable_player_count": 0
+        "targetable_player_count": 4
       },
       "home_team": {
         "team_id": 1610612759,
         "tricode": "SAS",
         "name": "San Antonio Spurs",
-        "targetable_player_count": 0
+        "targetable_player_count": 3
       },
       "scheduled_at": "2026-01-03T00:00:00+00:00",
       "status": {
@@ -250,10 +258,28 @@ display classification is branded differently. Postponed games remain on
 their ET slate. Output is always ordered by UTC tip and then game ID,
 independently of repository row order.
 
-Until the Player Pool surface is implemented, both team counts are truthfully
-zero and `freshness.pool` is the sole pool-status authority: it reports an
-unavailable surface with no retrieval time or providers. A stale but populated
-schedule remains a `200` with `freshness.schedule.status: "stale"`. Stored
+Each team count is the number of canonical players in the live Player Pool for
+that slate game. The pool is the union of usable PrizePicks, Underdog, and
+Dabble observations. A market qualifies only when it is available, standard,
+full-game, and explicitly mapped to PTS, REB, AST, 3PM, TOV, STL, BLK, PRA, PA,
+PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
+period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
+other-slate markets do not affect counts.
+
+`freshness.pool.providers` reports each attempted provider as `fresh` or
+`missing`, with the provider snapshot time when fresh. A successful empty board
+is fresh information and produces zero counts. If every provider is missing,
+the aggregate is `unavailable`. If every attempted provider succeeds, the
+aggregate is `fresh`. When usable and missing provider observations disagree,
+aggregate `status` is omitted so the frontend derives its documented partial
+presentation from the provider entries. The union uses every usable observation. This route
+performs a live board collection on every request; stored-snapshot and
+stale-served behavior belongs to the later persistence slice.
+Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
+never understates any provider observation included in the union.
+
+A stale but populated schedule remains a `200` with
+`freshness.schedule.status: "stale"`. Stored
 catalog rows without successful-refresh metadata remain servable and report
 `freshness.schedule` as `{ "status": "missing", "retrieved_at": null }`.
 Availability is determined from actual stored Event Catalog rows, not the
@@ -430,8 +456,12 @@ GET /api/data/telemetry
 
 `GET /api/data/telemetry` returns bounded, sanitized provider, board, and
 application telemetry counters on the documented seams, with the most recent
-50 provider events, internal board-collection events, and published board
-request events. Board aggregates are kept in separate bounded scalar
+50 provider events, internal board-collection events, published board request
+events, and `recent_player_pool_events`. Player Pool entries contain only the
+per-request `unknown_stat_label_count`, `unjoined_athlete_count`,
+`unjoined_event_count`, and `team_mismatch_count`; the
+corresponding `player_pool_events_total` and `player_pool_buffered_events`
+metrics describe their total and bounded buffer. Board aggregates are kept in separate bounded scalar
 collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries

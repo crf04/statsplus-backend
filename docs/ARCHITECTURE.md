@@ -232,7 +232,9 @@ plus the immutable typed `StatisticMatch`, while the catalog service owns
 resolution. Schema v1's field vocabulary is exact and closed: a document has
 `schema_version` (required, exactly `1`), optional `component_order`, and
 `statistics`; each statistic has `id`, `label`, `unit`, `scoring_periods`,
-`components`, and optional `provider_mappings` and `comparable`. There are no
+`components`, and optional `provider_mappings`, `comparable`, and
+`market_category`. `market_category` is the single governed source of Player
+Pool eligibility and its public PTS/REB/etc. spelling. There are no
 aliases — `version`, `canonical_statistics`, `canonical_id`, `display_name`,
 `name`, `period`, `periods`, `ordered_components`, `mappings`,
 `provider_labels`, `comparison_allowed`, and mapping `alias`/`aliases` are all
@@ -255,8 +257,9 @@ during snapshot resolution, so every market on `board.snapshots` carries an
 explicit match; the provider's coverage evidence and observation remain
 unchanged.
 
-The initial catalog maps full-game points, rebounds, assists, three-pointers
-made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use
+The catalog maps full-game points, rebounds, assists, three-pointers made,
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
+three-pointer, and two-pointer attempts. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, and Underdog labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
@@ -269,6 +272,33 @@ fantasy labels return `MatchState.UNMAPPED` with a closed `MatchReason`, retain
 the original provider evidence, and are not included in the board's
 canonical-market view. This slice does not create
 comparison groups or a public route.
+
+### Live Player Pool
+
+`PlayerPoolService` consumes one `DFSBoardService` result for the current
+season and the exact canonical game IDs on an ET Slate. It admits only
+available, standard, full-game markets whose Statistic Catalog match belongs
+to the closed Market Category vocabulary. Governed athlete and event mapping
+outcomes join provider identities to canonical NBA player and game IDs; a
+market without both joins cannot affect a slate count. Pool membership is the
+union by canonical player ID, with deterministic Market Categories and
+per-provider provenance retained on each internal `PoolPlayer`.
+
+The live slice does not synthesize players and does not persist snapshots. A
+usable empty provider snapshot is `fresh`; a failed provider is `missing`.
+Unanimously usable observations make the aggregate `fresh`, mixed usable and
+missing observations omit aggregate status for the frontend's partial
+derivation, and total failure is `unavailable`. Unknown provider stat market
+occurrences and unjoined athlete
+or event occurrences, plus canonical athletes whose team is not one of the
+governed game's teams, are counted in a bounded Player Pool telemetry event,
+without
+logging names, labels, or provider IDs.
+Drop telemetry is slate-scoped: an event must first join to the requested Slate
+before unknown-stat and athlete/team counters apply; an unjoined event is
+counted separately, while a governed event on another Slate is irrelevant and
+not counted. Aggregate pool `retrieved_at` is the oldest usable contributor
+snapshot.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

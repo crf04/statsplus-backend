@@ -7,8 +7,12 @@ component_order:
   - steals
   - blocks
   - turnovers
+  - field_goals_attempted
+  - three_pointers_attempted
+  - two_pointers_attempted
 statistics:
   - id: points
+    market_category: PTS
     label: Points
     unit: count
     scoring_periods: [full_game]
@@ -18,6 +22,7 @@ statistics:
       prizepicks: [Points]
       underdog: [Points]
   - id: rebounds
+    market_category: REB
     label: Rebounds
     unit: count
     scoring_periods: [full_game]
@@ -27,6 +32,7 @@ statistics:
       prizepicks: [Rebounds]
       underdog: [Rebounds]
   - id: assists
+    market_category: AST
     label: Assists
     unit: count
     scoring_periods: [full_game]
@@ -36,6 +42,7 @@ statistics:
       prizepicks: [Assists]
       underdog: [Assists]
   - id: three_pointers_made
+    market_category: 3PM
     label: Three-Pointers Made
     unit: count
     scoring_periods: [full_game]
@@ -45,6 +52,7 @@ statistics:
       prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
       underdog: [3-Pointers Made, Three Pointers Made, 3PM]
   - id: steals
+    market_category: STL
     label: Steals
     unit: count
     scoring_periods: [full_game]
@@ -54,6 +62,7 @@ statistics:
       prizepicks: [Steals]
       underdog: [Steals]
   - id: blocks
+    market_category: BLK
     label: Blocks
     unit: count
     scoring_periods: [full_game]
@@ -63,6 +72,7 @@ statistics:
       prizepicks: [Blocks]
       underdog: [Blocks]
   - id: turnovers
+    market_category: TOV
     label: Turnovers
     unit: count
     scoring_periods: [full_game]
@@ -72,6 +82,7 @@ statistics:
       prizepicks: [Turnovers]
       underdog: [Turnovers]
   - id: pra
+    market_category: PRA
     label: Points + Rebounds + Assists
     unit: count
     scoring_periods: [full_game]
@@ -87,6 +98,7 @@ statistics:
       prizepicks: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
       underdog: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
   - id: pa
+    market_category: PA
     label: Points + Assists
     unit: count
     scoring_periods: [full_game]
@@ -96,6 +108,7 @@ statistics:
       prizepicks: [PA, Points + Assists, Pts+Asts]
       underdog: [PA, Points + Assists, Pts+Asts]
   - id: pr
+    market_category: PR
     label: Points + Rebounds
     unit: count
     scoring_periods: [full_game]
@@ -105,6 +118,7 @@ statistics:
       prizepicks: [PR, Points + Rebounds, Pts+Rebs]
       underdog: [PR, Points + Rebounds, Pts+Rebs]
   - id: ra
+    market_category: RA
     label: Rebounds + Assists
     unit: count
     scoring_periods: [full_game]
@@ -113,3 +127,43 @@ statistics:
       dabble: [assists+rebounds, rebounds+assists]
       prizepicks: [RA, Rebounds + Assists, Rebs+Asts]
       underdog: [RA, Rebounds + Assists, Rebs+Asts]
+  - id: stks
+    market_category: STKS
+    label: Steals + Blocks
+    unit: count
+    scoring_periods: [full_game]
+    components: [steals, blocks]
+    provider_mappings:
+      dabble: [blocks+steals, steals+blocks]
+      prizepicks: [STKS, Steals + Blocks, Blks+Stls]
+      underdog: [STKS, Steals + Blocks, Blks+Stls]
+  - id: field_goals_attempted
+    market_category: FGA
+    label: Field Goals Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [field_goals_attempted]
+    provider_mappings:
+      dabble: [field-goals-attempted, FGA]
+      prizepicks: [Field Goals Attempted, FGA]
+      underdog: [Field Goals Attempted, FGA]
+  - id: three_pointers_attempted
+    market_category: FG3A
+    label: Three-Pointers Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [three_pointers_attempted]
+    provider_mappings:
+      dabble: [three-pointers-attempted, threes-attempted, FG3A]
+      prizepicks: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
+      underdog: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
+  - id: two_pointers_attempted
+    market_category: FG2A
+    label: Two-Pointers Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [two_pointers_attempted]
+    provider_mappings:
+      dabble: [two-pointers-attempted, FG2A]
+      prizepicks: [2-Pointers Attempted, Two Pointers Attempted, FG2A]
+      underdog: [2-Pointers Attempted, Two Pointers Attempted, FG2A]

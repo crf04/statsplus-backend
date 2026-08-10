@@ -1,0 +1,8 @@
+[
+  {"provider": "prizepicks", "label": "Points", "category": "PTS"},
+  {"provider": "prizepicks", "label": "Pts+Rebs+Asts", "category": "PRA"},
+  {"provider": "prizepicks", "label": "FGA", "category": "FGA"},
+  {"provider": "underdog", "label": "3-Pointers Attempted", "category": "FG3A"},
+  {"provider": "underdog", "label": "Steals + Blocks", "category": "STKS"},
+  {"provider": "dabble", "label": "two-pointers-attempted", "category": "FG2A"}
+]

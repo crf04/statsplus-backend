@@ -81,6 +81,11 @@ _NON_DECOMPOSING_LATIN_LETTERS = {
     "ŧ": "t",
     "ı": "i",
 }
+_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+_TEAM_ABBREVIATION_DIALECTS = {
+    "PHO": "PHX",
+    "NO": "NOP",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,10 +219,23 @@ def normalize_athlete_name(value: str | None) -> str:
     folded = "".join(
         _NON_DECOMPOSING_LATIN_LETTERS.get(char, char) for char in without_marks
     )
-    # Punctuation and underscores are presentation, not identity.  Removing
-    # them (rather than turning them into spaces) keeps D'Angelo/DAngelo and
-    # Nikola_Jokic/Nikola Jokic exact matches while retaining no fuzzy logic.
-    return "".join(char for char in folded if char.isalnum())
+    tokens = [
+        "".join(char for char in token if char.isalnum())
+        for token in folded.replace("_", " ").replace(",", " ").split()
+    ]
+    tokens = [token for token in tokens if token]
+    # Some boards serialize a suffix first (``Jr., Gary Trent``).  Preserve the
+    # suffix while putting that presentation dialect into NBA display-name order.
+    if tokens and tokens[0] in _NAME_SUFFIXES:
+        tokens = tokens[1:] + tokens[:1]
+    return "".join(tokens)
+
+
+def normalize_team_abbreviation(value: str | None) -> str:
+    """Normalize the two reviewed provider/NBA tricode dialects."""
+
+    normalized = value.strip().upper() if isinstance(value, str) else ""
+    return _TEAM_ABBREVIATION_DIALECTS.get(normalized, normalized)
 
 
 def _provider_name(value: str | None) -> str:
@@ -552,7 +570,9 @@ class AthleteResolver:
             ):
                 return True
         if provider_team.abbreviation and canonical.team_abbreviation:
-            return provider_team.abbreviation.casefold() != canonical.team_abbreviation.casefold()
+            return normalize_team_abbreviation(
+                provider_team.abbreviation
+            ) != normalize_team_abbreviation(canonical.team_abbreviation)
         return False
 
     @staticmethod
@@ -660,7 +680,9 @@ class AthleteResolver:
             return any(previous != current for previous, current in comparable)
         previous_abbreviation = existing.get("provider_team_abbreviation")
         if previous_abbreviation and team.abbreviation:
-            return previous_abbreviation.casefold() != team.abbreviation.casefold()
+            return normalize_team_abbreviation(
+                previous_abbreviation
+            ) != normalize_team_abbreviation(team.abbreviation)
         previous_team_name = existing.get("provider_team_name")
         if previous_team_name and team.name:
             return normalize_athlete_name(previous_team_name) != normalize_athlete_name(

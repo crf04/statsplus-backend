@@ -25,6 +25,7 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.player_pool import PlayerPool, PlayerPoolReader
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -40,10 +41,12 @@ class SlateService:
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
         schedule_max_age: timedelta | None = None,
+        player_pool: PlayerPoolReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.player_pool = player_pool
         field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
         if schedule_max_age is None:
             self.schedule_max_age = time_window_timedelta(
@@ -98,6 +101,20 @@ class SlateService:
         # The public ordering contract does not depend on repository behavior.
         games.sort(key=lambda game: (game["scheduled_at"], game["game_id"]))
 
+        pool_freshness = PlayerPool.unavailable_freshness()
+        if self.player_pool is not None:
+            pool = self.player_pool.get_pool(
+                season=season,
+                game_ids={game["game_id"] for game in games},
+            )
+            pool_freshness = dict(pool.freshness)
+            for game in games:
+                for side in ("away_team", "home_team"):
+                    team = game[side]
+                    team["targetable_player_count"] = pool.team_counts.get(
+                        team["team_id"], 0
+                    )
+
         return {
             "slate_date": slate_date.isoformat(),
             "freshness": {
@@ -111,11 +128,7 @@ class SlateService:
                     ),
                     "retrieved_at": retrieved_at,
                 },
-                "pool": {
-                    "status": "unavailable",
-                    "retrieved_at": None,
-                    "providers": {},
-                },
+                "pool": pool_freshness,
             },
             "games": games,
         }
