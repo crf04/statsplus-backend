@@ -1060,6 +1060,66 @@ def test_a_board_over_the_ceiling_is_refused_rather_than_truncated():
     assert error.value.supported_filters == SUPPORTED_NARROWING_FILTERS
 
 
+def test_a_refused_board_keeps_the_evidence_it_already_gathered():
+    """A ceiling refusal knows as much about the read as a published board.
+
+    The retrieval and the whole classification are complete by the time the
+    ceiling is applied, so the provider outcomes, freshness, cache states,
+    disabled providers, and comparison availability are all already facts.
+    They travel with the refusal so an operator sees the same read a served
+    board would have shown.
+    """
+
+    markets = tuple(
+        _market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(4)
+    )
+    service, _ = _service([_snapshot("dabble", markets)], max_markets=3)
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        _read(service)
+
+    evidence = error.value.board_evidence
+    assert evidence.market_count == 4
+    assert evidence.availability.available is True
+    assert [report.provider for report in evidence.provider_reports] == ["dabble"]
+    assert [report.status for report in evidence.provider_reports] == ["complete"]
+    assert [report.freshness.value for report in evidence.provider_reports] == ["fresh"]
+    assert evidence.group_count == 1
+    assert evidence.unresolved_count == 0
+    assert evidence.disabled_providers == ("prizepicks", "underdog")
+
+
+def test_a_refusal_states_the_providers_it_did_not_read():
+    """A provider filter narrows the refusal's evidence exactly as it narrows a board."""
+
+    service, _ = _service(
+        [
+            _snapshot("dabble", (_market(market_id="m-1"),)),
+            _snapshot(
+                "prizepicks",
+                (_market(provider="prizepicks", market_id="m-2"),),
+            ),
+        ],
+        max_markets=1,
+    )
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        service.get_comparisons(_query(), _context())
+
+    evidence = error.value.board_evidence
+    assert evidence.market_count == 2
+    assert [report.provider for report in evidence.provider_reports] == [
+        "dabble",
+        "prizepicks",
+    ]
+    assert evidence.disabled_providers == ("underdog",)
+    assert error.value.public_details == {
+        "observed_market_count": 2,
+        "market_limit": 1,
+        "supported_filters": list(SUPPORTED_NARROWING_FILTERS),
+    }
+
+
 def test_the_ceiling_applies_after_filters():
     markets = (
         _market(market_id="m-1"),

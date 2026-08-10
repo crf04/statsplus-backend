@@ -24,6 +24,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
+import app.routes.dfs_routes as dfs_routes
 from app.services.dfs_board_response import DFSBoardResponseService
 import app.utils.telemetry as telemetry
 
@@ -95,7 +96,6 @@ def make_board_client(monkeypatch):
         response_service = DFSBoardResponseService(
             comparison_service,
             settings=runtime_settings,
-            clock=lambda: GENERATED_AT,
         )
         dependencies = SimpleNamespace(
             settings=runtime_settings,
@@ -438,6 +438,74 @@ def test_a_revalidated_board_is_one_not_modified_event(
     )
 
     assert board_events() == [("served", 200), ("not_modified", 304)]
+
+
+def test_a_dependency_lookup_failure_is_still_one_error_event(
+    make_board_client, board_events, monkeypatch
+):
+    """An observation begins before the graph is read, so a lookup that fails is seen."""
+
+    client, _ = make_board_client()
+
+    def explode():
+        raise RuntimeError("host=secret.example")
+
+    monkeypatch.setattr(dfs_routes, "get_dependencies", explode)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 500
+    assert "secret" not in response.get_data(as_text=True)
+    assert board_events() == [("error", 500)]
+
+
+def test_a_rendering_failure_is_an_error_event_that_keeps_what_it_read(
+    make_board_client, board_events, monkeypatch
+):
+    """The status the caller received decides the outcome, not the service's intent.
+
+    The board was assembled and the service meant to serve it, so the facts it
+    established are recorded; the response was a 500, so the outcome is the
+    error it was.
+    """
+
+    client, _ = make_board_client()
+
+    def explode(representation):
+        raise RuntimeError("rendering failed")
+
+    monkeypatch.setattr(dfs_routes, "_board_response", explode)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 500
+    assert board_events() == [("error", 500)]
+    event = telemetry.get_recorded_board_request_events()[0]
+    assert event["market_count"] == 2
+    assert event["provider_status_counts"] == {"complete": 2}
+
+
+def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(
+    make_board_client, board_events
+):
+    """A refusal counts the markets it observed, not the board it never built."""
+
+    client, _ = make_board_client(max_markets=1)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["observed_market_count"] == 2
+    assert board_events() == [("too_large", 400)]
+    event = telemetry.get_recorded_board_request_events()[0]
+    assert event["market_count"] == 2
+    assert event["comparison_availability"] == "available"
+    assert event["provider_status_counts"] == {"complete": 2}
+    assert event["freshness_counts"] == {"fresh": 2}
+    assert event["cache_counts"] == {"unset": 2}
+    assert event["disabled_provider_count"] == 1
+    assert event["group_count"] == 1
+    assert event["unresolved_count"] == 0
 
 
 def test_a_board_event_carries_no_identity_or_upstream_text(

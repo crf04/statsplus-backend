@@ -1017,20 +1017,27 @@ and is reported as disabled for that board. There is deliberately no fuzzy or
 partial name filter. The post-filter market ceiling is
 `DFS_COMPARISON_MAX_MARKETS` (default 10000); a larger read raises
 `ComparisonBoardTooLargeError` (`board_too_large`) carrying the observed count
-and the supported narrowing filters, and nothing is ever truncated.
+and the supported narrowing filters, and nothing is ever truncated. The refusal
+also retains the completed read's `BoardReadEvidence` — provider reports,
+disabled providers, comparison availability, and the group, market, and
+unresolved counts — which is observed rather than published, so telemetry
+describes the read that actually happened while the caller's details stay as
+bounded as before.
 
 ### Published DFS Board
 
 ```text
 GET /api/dfs/board
   → require_auth (Firebase bearer token)
-  → DFSBoardResponseService.respond_to_query(request.args)   ← one event, here
+  → PendingBoardObservation opens                     ← the observation starts here
+  → DFSBoardResponseService.respond_to_query(request.args, observation=...)
       → publication gate (feature flag + provider registry)
       → parse_board_request(...) → NBAMarketQuery + ComparisonFilters
-      → ComparisonBoardService.get_comparisons(...)
+      → ComparisonBoardService.get_comparisons(...)   → BoardReadEvidence observed
       → HTTP outcome, version 1 payload, weak ETag
-  → private, revalidatable JSON (200), or 304 / 400 / 404 / 503
+  → private, revalidatable JSON (200), or 304 / 400 / 404 / 503 / 500
   → blueprint after_request: private caching and security headers, every status
+                             and the one event, finalized from that status
 ```
 
 The route in `app.routes.dfs_routes` decides nothing. It authenticates and
@@ -1094,21 +1101,50 @@ added rather than assigned, so a CORS `Origin` survives beside it. No other
 blueprint's caching is affected.
 
 **Observability.** Exactly one `BoardRequestEvent` per authenticated request,
-emitted by the recording seam that encloses the gate, the parser, the board,
-and the serialization — so a disabled, invalid, or unexpectedly failed request
-is counted like a served one, and none is counted twice. It records latency,
-the HTTP outcome and status, comparison availability, provider status and
-failure-reason counts, freshness and cache-state counts, and
-group/market/unresolved/disabled counts. Outcome and status are one closed
-pairing (`served`/200, `not_modified`/304, `invalid`/400, `too_large`/400,
-`disabled`/404, `error`/500, `unavailable`/503) enforced where the event is
-built, alongside the finite non-negative duration and boolean-free counts.
-Every label comes from a closed vocabulary in `app.utils.telemetry`; no
-athlete, event, market, selection, or provider-source ID and no upstream text
-can become a metric dimension. An unauthenticated request records nothing:
-telemetry begins where the caller's identity does. Operators read the most
-recent 50 as `recent_board_request_events` on `GET /api/data/telemetry`. The
-collector's own `BoardTelemetryEvent` remains the record of one retrieval.
+and its lifecycle is deliberately split across the two layers that each know
+half of it.
+
+A `PendingBoardObservation` opens in the route *before* the dependency graph is
+read, before the publication gate, and before a parameter is parsed, so a
+request that fails before it reaches a board is still one request that
+happened. It is passed into the response service rather than reached for
+through a Flask global, so the service stays free of request state. The service
+contributes only what it knows: the typed `BoardReadEvidence` a completed read
+established, and the typed failure it raised.
+
+The event is finalized once, by the blueprint `after_request`, from the status
+of the response the caller actually received. That is the only place the status
+is settled — a dependency that never resolved, a serialization that raised
+after the board was assembled, and a centrally handled `AppError` all decide it
+after the service has stopped speaking — so the event and the response can
+never describe two different requests. `after_request` runs for every status,
+including a centrally handled 500, so a served board that failed to render is
+recorded as the `error` it was rather than the `served` it intended. Finalizing
+again does nothing: one request is one event.
+
+Because a refusal after retrieval has already learned everything a served board
+would have shown, `ComparisonBoardTooLargeError` carries that read's
+`BoardReadEvidence`, and the observation absorbs it. A board refused at the
+ceiling therefore reports its real observed market count, provider statuses,
+failure reasons, freshness, cache states, disabled providers, and comparison
+availability — the same facts its public `observed_market_count` already
+states — instead of an empty read that looks like it never happened.
+
+The event records latency, the HTTP outcome and status, comparison
+availability, provider status and failure-reason counts, freshness and
+cache-state counts, and group/market/unresolved/disabled counts. Outcome and
+status are one closed pairing (`served`/200, `not_modified`/304, `invalid`/400,
+`too_large`/400, `disabled`/404, `error`/500, `unavailable`/503) enforced where
+the event is built, alongside the finite non-negative duration and boolean-free
+counts. Two outcomes share the 400, so the refusal the service raised chooses
+between them and every other status names its outcome alone; a status the
+vocabulary cannot state is a defect, logged and counted as `error`. Every label
+comes from a closed vocabulary in `app.utils.telemetry`; no athlete, event,
+market, selection, or provider-source ID and no upstream text can become a
+metric dimension. An unauthenticated request opens no observation and records
+nothing: telemetry begins where the caller's identity does. Operators read the
+most recent 50 as `recent_board_request_events` on `GET /api/data/telemetry`.
+The collector's own `BoardTelemetryEvent` remains the record of one retrieval.
 
 **Operations.** Catalog freshness gates comparisons but never retrieval, so a
 stale catalog yields a 200 board with `comparison_availability.available:

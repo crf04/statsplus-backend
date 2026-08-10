@@ -1196,6 +1196,53 @@ class ComparisonBoard:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BoardReadEvidence:
+    """What one board read established, whether or not it published a board.
+
+    A read that is refused after retrieval -- one over the market ceiling, say
+    -- has already learned everything an operator needs to explain it: how many
+    markets it observed, which providers answered and how fresh and cached
+    their answers were, and whether comparison identity was available at all.
+    Keeping those facts on their own value, rather than only inside the
+    :class:`ComparisonBoard` a refusal never builds, is what lets the refusal be
+    observed as accurately as a success.
+
+    Every field is either a count or an already-sanitized board value, so this
+    carries no provider, athlete, event, market, or selection identity of its
+    own and nothing here can widen what telemetry may state.
+    """
+
+    availability: ComparisonAvailability
+    provider_reports: tuple[ProviderReport, ...] = ()
+    disabled_providers: tuple[str, ...] = ()
+    group_count: int = 0
+    market_count: int = 0
+    unresolved_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.availability, ComparisonAvailability):
+            raise ValueError("board read evidence requires a ComparisonAvailability")
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in (self.group_count, self.market_count, self.unresolved_count)
+        ):
+            raise ValueError("board read evidence counts must be non-negative")
+
+    @classmethod
+    def of(cls, board: ComparisonBoard) -> "BoardReadEvidence":
+        """The same evidence, read from a board that was published."""
+
+        return cls(
+            availability=board.availability,
+            provider_reports=board.provider_reports,
+            disabled_providers=board.disabled_providers,
+            group_count=len(board.groups),
+            market_count=board.market_count,
+            unresolved_count=len(board.unresolved),
+        )
+
+
 __all__ = [
     "MAX_EXACT_DIFFERENCE_SPAN",
     "NORMALIZED_DECIMAL_PLACE_LIMIT",
@@ -1211,6 +1258,7 @@ __all__ = [
     "BoardModifier",
     "BoardNamedEvidence",
     "BoardObservation",
+    "BoardReadEvidence",
     "BoardSelection",
     "BoardStatistic",
     "BoardStatisticResolution",

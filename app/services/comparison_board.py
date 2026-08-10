@@ -38,6 +38,7 @@ from app.domain.comparisons import (
     BoardMarket,
     BoardNamedEvidence,
     BoardObservation,
+    BoardReadEvidence,
     BoardSelection,
     BoardStatistic,
     BoardStatisticResolution,
@@ -91,7 +92,16 @@ EVENT_CATALOG = "event_catalog"
 
 
 class ComparisonBoardTooLargeError(AppError):
-    """The post-filter board exceeds the configured market ceiling."""
+    """The post-filter board exceeds the configured market ceiling.
+
+    The refusal carries two separate things.  ``public_details`` is the bounded
+    contract a caller acts on -- what the read observed and what would narrow
+    it.  ``board_evidence`` is the completed retrieval and classification the
+    read had already finished when the ceiling stopped it, kept so an operator
+    observing the refusal sees the same providers, freshness, cache states, and
+    availability a published board would have shown, rather than a board that
+    looks like it never happened.  It is not published to a caller.
+    """
 
     status_code = 400
     code = "board_too_large"
@@ -105,11 +115,13 @@ class ComparisonBoardTooLargeError(AppError):
         observed_market_count: int,
         market_limit: int,
         supported_filters: tuple[str, ...] = SUPPORTED_NARROWING_FILTERS,
+        board_evidence: BoardReadEvidence | None = None,
         message: str | None = None,
     ) -> None:
         self.observed_market_count = observed_market_count
         self.market_limit = market_limit
         self.supported_filters = tuple(supported_filters)
+        self.board_evidence = board_evidence
         super().__init__(message)
 
     @property
@@ -411,6 +423,11 @@ class ComparisonBoardService:
                     self._member(market, reference, observation)
                 )
 
+        # The provider reports are derived before the ceiling is applied
+        # because they describe the retrieval, which is complete either way: a
+        # refused read is still a read whose providers answered.
+        reports = self._provider_reports(board, observed_at, filters)
+
         # The whole read is classified before the ceiling is applied, so the
         # count reported back is what the caller's filters actually observed
         # rather than the point a truncating reader would have stopped at.
@@ -418,6 +435,14 @@ class ComparisonBoardService:
             raise ComparisonBoardTooLargeError(
                 observed_market_count=observed,
                 market_limit=self.max_markets,
+                board_evidence=BoardReadEvidence(
+                    availability=availability,
+                    provider_reports=reports,
+                    disabled_providers=board.disabled_providers,
+                    group_count=len(members),
+                    market_count=observed,
+                    unresolved_count=len(unresolved),
+                ),
             )
 
         groups = tuple(
@@ -431,7 +456,7 @@ class ComparisonBoardService:
             groups=groups,
             unresolved=tuple(sorted(unresolved, key=lambda entry: entry.order)),
             markets=tuple(sorted(markets, key=lambda entry: entry.order)),
-            provider_reports=self._provider_reports(board, observed_at, filters),
+            provider_reports=reports,
             disabled_providers=board.disabled_providers,
             filters=filters,
             market_count=observed,

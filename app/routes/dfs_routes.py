@@ -1,15 +1,17 @@
 """HTTP adapter for the authenticated DFS Board.
 
 There is one route, and it decides nothing.  Publication, parsing, retrieval,
-comparison, filtering, size limits, serialization, entity tags, the conditional
-outcome, and the one telemetry event describing all of it belong to the board
-response service below it; this module authenticates the caller, hands that
-service the raw query string, and turns the representation it is handed into a
-private, revalidatable HTTP response.
+comparison, filtering, size limits, serialization, entity tags, and the
+conditional outcome belong to the board response service below it; this module
+authenticates the caller, hands that service the raw query string, and turns
+the representation it is handed into a private, revalidatable HTTP response.
 
-Authentication is the one thing that happens above the service, so an
-unauthenticated request is a 401 that reaches no board and is recorded as no
-board request at all.
+Two things happen here because only here can they.  Authentication is above the
+service, so an unauthenticated request is a 401 that reaches no board and is
+recorded as no board request at all.  And the single telemetry event for a
+board request is finalized here, from the response's own status, because the
+status a caller receives is decided by this layer and the central error
+handlers -- not by what the service intended to publish.
 
 No provider, Redis, or database client is created here, at import or at
 request time: the route reads the one graph the application factory assembled.
@@ -17,10 +19,11 @@ request time: the route reads the one graph the application factory assembled.
 
 from __future__ import annotations
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from app.dependencies import get_dependencies
 from app.errors import route_error_boundary
+from app.services.dfs_board_response import PendingBoardObservation
 from app.utils.auth import require_auth
 
 dfs_bp = Blueprint("dfs", __name__)
@@ -30,15 +33,27 @@ dfs_bp = Blueprint("dfs", __name__)
 BOARD_CACHE_CONTROL = "private, no-cache, max-age=0, must-revalidate"
 
 
+#: Where one request's own open observation lives while it is being decided.
+_OBSERVATION = "dfs_board_observation"
+
+
 @dfs_bp.route("/board", methods=["GET"])
 @require_auth
 @route_error_boundary("The DFS board could not be assembled.")
 def dfs_board():
     """Return the central factual DFS Board for the authenticated caller."""
 
+    # Opened before the dependency graph is read, so a request that fails
+    # before it reaches a board is still one request that happened.  It is
+    # request-scoped state, not the service's, which is why it lives in ``g``
+    # and is handed to the service rather than reached for inside it.
+    observation = PendingBoardObservation()
+    setattr(g, _OBSERVATION, observation)
+
     representation = get_dependencies().dfs_board_response_service.respond_to_query(
         request.args,
         if_none_match=request.headers.get("If-None-Match"),
+        observation=observation,
     )
     return _board_response(representation)
 
@@ -56,6 +71,13 @@ def _private_board_response(response):
 
     An entity tag is deliberately not set here: it identifies one board, and a
     failure is not a board a caller could revalidate.
+
+    This is also the one place that sees the status the caller will actually
+    receive -- the parser's 400, the gate's 404, the outage's 503, a centrally
+    handled 500 from a dependency that never resolved or a serialization that
+    raised, the 304, and the 200 -- so it is where the request's single event
+    is finalized.  A request that reached no observation, an unauthenticated
+    one, records nothing.
     """
 
     response.headers["Cache-Control"] = BOARD_CACHE_CONTROL
@@ -63,6 +85,10 @@ def _private_board_response(response):
     # Origin, say -- is preserved beside this one.
     response.vary.add("Authorization")
     response.headers["X-Content-Type-Options"] = "nosniff"
+
+    observation = g.pop(_OBSERVATION, None)
+    if observation is not None:
+        observation.finalize(response.status_code)
     return response
 
 

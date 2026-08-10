@@ -2,10 +2,17 @@
 
 The route above this seam does no deciding.  Everything that determines what a
 caller receives -- whether the board is published at all, whether it is usable,
-the exact JSON of version 1, the representation ETag, the conditional outcome,
-and the bounded telemetry describing all of it -- is decided here, once, from
-the deterministic :class:`~app.domain.comparisons.ComparisonBoard` the
-comparison service returns.
+the exact JSON of version 1, the representation ETag, and the conditional
+outcome -- is decided here, once, from the deterministic
+:class:`~app.domain.comparisons.ComparisonBoard` the comparison service
+returns.
+
+The one bounded event describing the request is *not* decided here, and that is
+deliberate.  This service knows what it meant to publish; only the response
+knows what the caller received.  So a request carries a
+:class:`PendingBoardObservation` opened before anything could decide it, this
+service contributes the typed facts and typed failures it produces, and the
+HTTP layer finalizes it once against the real status.
 
 Two rules shape the serialization.  Every exact decimal is written as a string
 in the scale the provider published it in, because a JSON number would silently
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -35,7 +43,11 @@ from enum import Enum
 from typing import Any, Callable
 
 from app.config.settings import RuntimeSettings
-from app.domain.comparisons import ComparisonBoard, ComparisonGroup
+from app.domain.comparisons import (
+    BoardReadEvidence,
+    ComparisonBoard,
+    ComparisonGroup,
+)
 from app.errors import AppError, InvalidInputError, ProviderUnavailableError
 from app.services.comparison_board import ComparisonBoardTooLargeError
 from app.services.dfs_board_query import BoardRequest, parse_board_request
@@ -46,6 +58,8 @@ from app.utils.telemetry import (
     current_request_id,
     record_board_request_event,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The public response contract version.  It is independent of the internal
 #: reference and cache algorithm versions, so those may change without
@@ -100,16 +114,144 @@ class DFSBoardUnavailableError(ProviderUnavailableError):
         }
 
 
-@dataclass(slots=True)
-class _BoardRead:
-    """What one request in flight has established, for its single event.
+#: The outcome each final HTTP status is counted under.  Two outcomes share the
+#: 400, so a refusal that states which one it was decides between them; every
+#: other status names exactly one outcome and needs no hint.
+_OUTCOME_BY_STATUS = {
+    200: "served",
+    304: "not_modified",
+    400: "invalid",
+    404: "disabled",
+    500: "error",
+    503: "unavailable",
+}
 
-    A read that has not yet reached a decision is an error: nothing else can
-    have happened to it, and an outcome is never left unstated.
+
+class PendingBoardObservation:
+    """One authenticated board request, observed until its response exists.
+
+    An observation opens before anything can decide the request -- before the
+    dependency graph is read, the publication gate is consulted, or a parameter
+    is parsed -- so a request that fails before reaching the board is still one
+    request that happened.  It accumulates the typed facts each stage
+    establishes, and it is finalized exactly once, from the status of the
+    response the caller actually received.
+
+    That last part is the whole point.  A service can only state what it *meant*
+    to publish; a serialization that raises afterwards, a dependency that never
+    resolved, and an error handler that translated a failure all decide the
+    caller's status after the service has stopped speaking.  Recording the real
+    status means the event and the response can never describe two different
+    requests.
     """
 
-    board: ComparisonBoard | None = None
-    outcome: str = "error"
+    def __init__(
+        self,
+        *,
+        recorder: Callable[[BoardRequestEvent], None] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
+        self._recorder = recorder or record_board_request_event
+        self._monotonic = monotonic or time.monotonic
+        started = (clock or (lambda: datetime.now(timezone.utc)))()
+        self._started_at = started.astimezone(timezone.utc).isoformat()
+        self._started = self._monotonic()
+        self._evidence: BoardReadEvidence | None = None
+        self._refusal: str | None = None
+        self._finalized = False
+
+    # -- accumulation ------------------------------------------------------
+
+    def observe(self, evidence: BoardReadEvidence) -> None:
+        """Keep what a completed read established, published or refused."""
+
+        if not isinstance(evidence, BoardReadEvidence):
+            raise TypeError("a board observation records typed board evidence")
+        self._evidence = evidence
+
+    def note_refusal(self, error: BaseException) -> None:
+        """Note the typed failure leaving the board service, and its evidence.
+
+        The label is a hint rather than the outcome: it only distinguishes the
+        two refusals that share one status.  A refusal that finished a read
+        before refusing it -- an over-ceiling board -- carries that read's
+        evidence, which is absorbed here so the event counts what was observed
+        instead of the board that was never built.
+        """
+
+        self._refusal = _failure_outcome(error)
+        evidence = getattr(error, "board_evidence", None)
+        if isinstance(evidence, BoardReadEvidence):
+            self._evidence = evidence
+
+    # -- the single event --------------------------------------------------
+
+    def finalize(self, status_code: int) -> None:
+        """Record this request's one event, from the status it truly ended in.
+
+        Later calls do nothing: one request is one event, however many layers
+        see the response on its way out.
+        """
+
+        if self._finalized:
+            return
+        self._finalized = True
+        self._recorder(self._event(self._outcome(status_code)))
+
+    def _outcome(self, status_code: int) -> str:
+        outcome = _OUTCOME_BY_STATUS.get(status_code)
+        if outcome is None:
+            # A board request cannot end in any other status, so one that did
+            # is a defect rather than an operational signal, and it is counted
+            # as the error it is rather than inventing a label for it.
+            logger.warning("board request ended in unstatable status %s", status_code)
+            return "error"
+        if self._refusal is not None and status_code == BOARD_REQUEST_STATUSES.get(
+            self._refusal
+        ):
+            return self._refusal
+        return outcome
+
+    def _event(self, outcome: str) -> BoardRequestEvent:
+        evidence = self._evidence
+        reports = () if evidence is None else evidence.provider_reports
+        availability = "unknown"
+        if evidence is not None:
+            availability = "available"
+            if not evidence.availability.available:
+                unavailable = evidence.availability.unavailable_catalogs
+                if unavailable:
+                    availability = unavailable[0].reason.value
+        request_id = current_request_id()
+        return BoardRequestEvent(
+            duration_ms=max(0.0, (self._monotonic() - self._started) * 1000.0),
+            outcome=outcome,
+            status_code=BOARD_REQUEST_STATUSES[outcome],
+            comparison_availability=availability,
+            provider_status_counts=_counts(report.status for report in reports),
+            failure_reason_counts=_counts(
+                report.reason for report in reports if report.reason
+            ),
+            freshness_counts=_counts(
+                "unknown" if report.freshness is None else report.freshness.value
+                for report in reports
+            ),
+            cache_counts=_counts(
+                "unset"
+                if report.cache is None or report.cache.status is None
+                else report.cache.status
+                for report in reports
+            ),
+            group_count=0 if evidence is None else evidence.group_count,
+            market_count=0 if evidence is None else evidence.market_count,
+            unresolved_count=0 if evidence is None else evidence.unresolved_count,
+            disabled_provider_count=(
+                0 if evidence is None else len(evidence.disabled_providers)
+            ),
+            started_at=self._started_at,
+            request_id=None if request_id == "-" else request_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,17 +275,11 @@ class DFSBoardResponseService:
         comparison_board_service: Any,
         *,
         settings: RuntimeSettings,
-        monotonic: Callable[[], float] | None = None,
-        clock: Callable[[], datetime] | None = None,
-        recorder: Callable[[BoardRequestEvent], None] | None = None,
     ) -> None:
         if not callable(getattr(comparison_board_service, "get_comparisons", None)):
             raise TypeError("the board response service requires a comparison board")
         self.comparison_board_service = comparison_board_service
         self.settings = settings
-        self.monotonic = monotonic or time.monotonic
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self.recorder = recorder or record_board_request_event
 
     # -- publication -------------------------------------------------------
 
@@ -168,40 +304,38 @@ class DFSBoardResponseService:
         args: Any,
         *,
         if_none_match: str | None = None,
+        observation: PendingBoardObservation | None = None,
     ) -> BoardRepresentation:
         """Decide one whole authenticated board request, from its query string.
 
-        This is the seam an authenticated request enters and leaves exactly
-        once, so everything that decides its outcome is inside one observation:
-        the publication gate, the parser, the board itself, and the
-        serialization.  Publication is settled *first* -- before a single
-        parameter is read -- because a deployment that publishes no board owes
-        a caller nothing about which filters it would have accepted, and must
-        reach no parser, provider, database, or cache to say so.
+        Publication is settled *first* -- before a single parameter is read --
+        because a deployment that publishes no board owes a caller nothing
+        about which filters it would have accepted, and must reach no parser,
+        provider, database, or cache to say so.
+
+        ``observation`` is the request's own already-open observation.  This
+        service contributes the facts it learns and the typed failure it
+        raises; it never decides that the request is over, because the status
+        the caller receives is not settled here.
         """
 
-        read = _BoardRead()
-        with self._recorded(read):
+        with _contributing(observation):
             self._require_published()
             request = parse_board_request(args, settings=self.settings)
-            return self._respond(read, request, if_none_match)
+            return self._respond(observation, request, if_none_match)
 
     def respond(
         self,
         request: BoardRequest,
         *,
         if_none_match: str | None = None,
+        observation: PendingBoardObservation | None = None,
     ) -> BoardRepresentation:
-        """Assemble one board response for an already-parsed read.
+        """Assemble one board response for an already-parsed read."""
 
-        The same single observation applies, so a caller that parsed the query
-        itself still produces exactly one event and never two.
-        """
-
-        read = _BoardRead()
-        with self._recorded(read):
+        with _contributing(observation):
             self._require_published()
-            return self._respond(read, request, if_none_match)
+            return self._respond(observation, request, if_none_match)
 
     # -- decisions ---------------------------------------------------------
 
@@ -211,7 +345,7 @@ class DFSBoardResponseService:
 
     def _respond(
         self,
-        read: "_BoardRead",
+        observation: PendingBoardObservation | None,
         request: BoardRequest,
         if_none_match: str | None,
     ) -> BoardRepresentation:
@@ -220,7 +354,8 @@ class DFSBoardResponseService:
         board = self.comparison_board_service.get_comparisons(
             request.query, filters=request.filters
         )
-        read.board = board
+        if observation is not None:
+            observation.observe(BoardReadEvidence.of(board))
 
         if not _has_usable_provider(board):
             raise DFSBoardUnavailableError(
@@ -233,74 +368,26 @@ class DFSBoardResponseService:
         payload = serialize_board(board)
         etag = board_etag(payload)
         if _matches(if_none_match, etag):
-            read.outcome = "not_modified"
             return BoardRepresentation(status_code=304, etag=etag)
 
-        read.outcome = "served"
         return BoardRepresentation(status_code=200, etag=etag, payload=payload)
 
-    # -- telemetry ---------------------------------------------------------
 
-    @contextmanager
-    def _recorded(self, read: "_BoardRead") -> Iterator[None]:
-        """Observe one board request exactly once, however it ends.
+@contextmanager
+def _contributing(observation: PendingBoardObservation | None) -> Iterator[None]:
+    """Let one request's observation see the typed failure this service raised.
 
-        The failure classification happens here rather than at each raise, so
-        every path -- the gate, the parser, a refused size, an outage, and an
-        unexpected error the route boundary will translate -- is counted once
-        under the status its caller actually receives.
-        """
+    The classification happens once, here, rather than at each raise, and it is
+    only ever a contribution: what the caller finally receives, and therefore
+    what the request is counted as, is settled where the response is.
+    """
 
-        started_at = self.clock().astimezone(timezone.utc).isoformat()
-        started = self.monotonic()
-        try:
-            yield
-        except BaseException as error:
-            read.outcome = _failure_outcome(error)
-            raise
-        finally:
-            self._record(read, started=started, started_at=started_at)
-
-    def _record(self, read: "_BoardRead", *, started: float, started_at: str) -> None:
-        """Emit one bounded aggregate for this read, whatever it produced."""
-
-        board = read.board
-        reports = () if board is None else board.provider_reports
-        availability = "unknown" if board is None else "available"
-        if board is not None and not board.availability.available:
-            unavailable = board.availability.unavailable_catalogs
-            availability = unavailable[0].reason.value if unavailable else "available"
-        request_id = current_request_id()
-        self.recorder(
-            BoardRequestEvent(
-                duration_ms=max(0.0, (self.monotonic() - started) * 1000.0),
-                outcome=read.outcome,
-                status_code=BOARD_REQUEST_STATUSES[read.outcome],
-                comparison_availability=availability,
-                provider_status_counts=_counts(report.status for report in reports),
-                failure_reason_counts=_counts(
-                    report.reason for report in reports if report.reason
-                ),
-                freshness_counts=_counts(
-                    "unknown" if report.freshness is None else report.freshness.value
-                    for report in reports
-                ),
-                cache_counts=_counts(
-                    "unset"
-                    if report.cache is None or report.cache.status is None
-                    else report.cache.status
-                    for report in reports
-                ),
-                group_count=0 if board is None else len(board.groups),
-                market_count=0 if board is None else board.market_count,
-                unresolved_count=0 if board is None else len(board.unresolved),
-                disabled_provider_count=(
-                    0 if board is None else len(board.disabled_providers)
-                ),
-                started_at=started_at,
-                request_id=None if request_id == "-" else request_id,
-            )
-        )
+    try:
+        yield
+    except BaseException as error:
+        if observation is not None:
+            observation.note_refusal(error)
+        raise
 
 
 # -- serialization ---------------------------------------------------------
@@ -488,6 +575,7 @@ __all__ = [
     "DFSBoardDisabledError",
     "DFSBoardResponseService",
     "DFSBoardUnavailableError",
+    "PendingBoardObservation",
     "board_etag",
     "serialize_board",
 ]

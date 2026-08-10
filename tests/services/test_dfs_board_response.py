@@ -38,6 +38,7 @@ from app.services.dfs_board_response import (
     DFSBoardDisabledError,
     DFSBoardResponseService,
     DFSBoardUnavailableError,
+    PendingBoardObservation,
     board_etag,
     serialize_board,
 )
@@ -83,14 +84,38 @@ class RecordingRecorder:
         self.events.append(event)
 
 
-def build_service(comparison_service, *, settings=None, recorder=None):
+def build_service(comparison_service, *, settings=None):
     return DFSBoardResponseService(
         comparison_service,
         settings=settings or published_settings(),
+    )
+
+
+def build_observation(recorder=None):
+    """One request's own observation, on deterministic clocks."""
+
+    return PendingBoardObservation(
+        recorder=recorder or RecordingRecorder(),
         clock=lambda: GENERATED_AT,
         monotonic=_ticking_clock(),
-        recorder=recorder or RecordingRecorder(),
     )
+
+
+def observed(service, call, *, status_code, recorder):
+    """Run one request through its whole lifecycle, response included.
+
+    The service contributes facts and failures; the observation is finalized
+    from the status the caller would have received, exactly as the route's
+    ``after_request`` finalizes it.  Tests state that status themselves so a
+    service that quietly changed what it publishes cannot also quietly change
+    what was recorded about it.
+    """
+
+    observation = build_observation(recorder)
+    try:
+        return call(observation)
+    finally:
+        observation.finalize(status_code)
 
 
 def board_request(**filters) -> BoardRequest:
@@ -561,7 +586,14 @@ def test_an_oversized_board_is_refused_with_its_observed_count():
 def test_a_served_board_records_bounded_labels_only():
     recorder = RecordingRecorder()
     comparison_service, _ = complete_board_service()
-    build_service(comparison_service, recorder=recorder).respond(board_request())
+    service = build_service(comparison_service)
+
+    observed(
+        service,
+        lambda observation: service.respond(board_request(), observation=observation),
+        status_code=200,
+        recorder=recorder,
+    )
 
     event = recorder.events[0]
     assert event.outcome == "served"
@@ -581,19 +613,47 @@ def test_a_served_board_records_bounded_labels_only():
 def test_every_outcome_is_observable():
     recorder = RecordingRecorder()
     comparison_service, providers = complete_board_service()
-    service = build_service(comparison_service, recorder=recorder)
-    first = service.respond(board_request())
-    service.respond(board_request(), if_none_match=first.etag)
+    service = build_service(comparison_service)
+    first = observed(
+        service,
+        lambda observation: service.respond(board_request(), observation=observation),
+        status_code=200,
+        recorder=recorder,
+    )
+    observed(
+        service,
+        lambda observation: service.respond(
+            board_request(), if_none_match=first.etag, observation=observation
+        ),
+        status_code=304,
+        recorder=recorder,
+    )
 
     unavailable_service, unavailable_providers = complete_board_service()
     for provider in unavailable_providers.values():
         provider.failure = requests.exceptions.Timeout()
+    unavailable = build_service(unavailable_service)
     with pytest.raises(DFSBoardUnavailableError):
-        build_service(unavailable_service, recorder=recorder).respond(board_request())
+        observed(
+            unavailable,
+            lambda observation: unavailable.respond(
+                board_request(), observation=observation
+            ),
+            status_code=503,
+            recorder=recorder,
+        )
 
     oversized_service, _ = complete_board_service(max_markets=1)
+    oversized = build_service(oversized_service)
     with pytest.raises(ComparisonBoardTooLargeError):
-        build_service(oversized_service, recorder=recorder).respond(board_request())
+        observed(
+            oversized,
+            lambda observation: oversized.respond(
+                board_request(), observation=observation
+            ),
+            status_code=400,
+            recorder=recorder,
+        )
 
     assert [event.outcome for event in recorder.events] == [
         "served",
@@ -603,7 +663,34 @@ def test_every_outcome_is_observable():
     ]
     assert [event.status_code for event in recorder.events] == [200, 304, 503, 400]
     assert recorder.events[2].failure_reason_counts == (("timeout", 2),)
-    assert recorder.events[3].comparison_availability == "unknown"
+    assert recorder.events[3].comparison_availability == "available"
+
+
+def test_a_refused_board_is_observed_with_the_read_it_completed():
+    """The ceiling stops a board, not the retrieval that had already happened."""
+
+    recorder = RecordingRecorder()
+    oversized_service, _ = complete_board_service(max_markets=1)
+    service = build_service(oversized_service)
+
+    with pytest.raises(ComparisonBoardTooLargeError):
+        observed(
+            service,
+            lambda observation: service.respond(
+                board_request(), observation=observation
+            ),
+            status_code=400,
+            recorder=recorder,
+        )
+
+    event = recorder.events[0]
+    assert (event.outcome, event.status_code) == ("too_large", 400)
+    assert event.market_count == 2
+    assert event.comparison_availability == "available"
+    assert event.provider_status_counts == (("complete", 2),)
+    assert event.freshness_counts == (("fresh", 2),)
+    assert event.cache_counts == (("unset", 2),)
+    assert event.disabled_provider_count == 1
 
 
 def test_a_disabled_request_is_observed_as_one_disabled_event():
@@ -612,11 +699,17 @@ def test_a_disabled_request_is_observed_as_one_disabled_event():
     service = build_service(
         comparison_service,
         settings=RuntimeSettings(environment="testing"),
-        recorder=recorder,
     )
 
     with pytest.raises(DFSBoardDisabledError):
-        service.respond_to_query(MultiDict())
+        observed(
+            service,
+            lambda observation: service.respond_to_query(
+                MultiDict(), observation=observation
+            ),
+            status_code=404,
+            recorder=recorder,
+        )
 
     assert [(event.outcome, event.status_code) for event in recorder.events] == [
         ("disabled", 404)
@@ -627,10 +720,17 @@ def test_a_disabled_request_is_observed_as_one_disabled_event():
 def test_an_invalid_request_is_observed_as_one_invalid_event():
     recorder = RecordingRecorder()
     comparison_service, _ = complete_board_service()
-    service = build_service(comparison_service, recorder=recorder)
+    service = build_service(comparison_service)
 
     with pytest.raises(InvalidInputError):
-        service.respond_to_query(MultiDict([("season", "")]))
+        observed(
+            service,
+            lambda observation: service.respond_to_query(
+                MultiDict([("season", "")]), observation=observation
+            ),
+            status_code=400,
+            recorder=recorder,
+        )
 
     assert [(event.outcome, event.status_code) for event in recorder.events] == [
         ("invalid", 400)
@@ -643,37 +743,117 @@ def test_an_unexpected_failure_is_observed_as_one_error_event():
             raise RuntimeError("host=secret.example")
 
     recorder = RecordingRecorder()
-    service = build_service(ExplodingBoard(), recorder=recorder)
+    service = build_service(ExplodingBoard())
 
     with pytest.raises(RuntimeError):
-        service.respond_to_query(MultiDict())
+        observed(
+            service,
+            lambda observation: service.respond_to_query(
+                MultiDict(), observation=observation
+            ),
+            status_code=500,
+            recorder=recorder,
+        )
 
     assert [(event.outcome, event.status_code) for event in recorder.events] == [
         ("error", 500)
     ]
 
 
-@pytest.mark.parametrize(
-    "args",
-    [MultiDict(), MultiDict([("providers", "")]), MultiDict([("providers", "dabble")])],
-)
-def test_one_request_is_exactly_one_event(args):
+def test_the_response_decides_the_outcome_a_service_only_intended():
+    """A board that was assembled but never published is not a served board."""
+
     recorder = RecordingRecorder()
     comparison_service, _ = complete_board_service()
-    service = build_service(comparison_service, recorder=recorder)
+    service = build_service(comparison_service)
+
+    observation = build_observation(recorder)
+    service.respond(board_request(), observation=observation)
+    # The representation never became a response: the rendering after it raised.
+    observation.finalize(500)
+
+    event = recorder.events[0]
+    assert (event.outcome, event.status_code) == ("error", 500)
+    assert event.market_count == 2
+    assert event.provider_status_counts == (("complete", 2),)
+
+
+def test_one_request_is_exactly_one_event_however_often_it_is_finalized():
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+    service = build_service(comparison_service)
+
+    observation = build_observation(recorder)
+    service.respond(board_request(), observation=observation)
+    observation.finalize(200)
+    observation.finalize(500)
+
+    assert [event.outcome for event in recorder.events] == ["served"]
+
+
+@pytest.mark.parametrize(
+    ("args", "status_code"),
+    [
+        (MultiDict(), 200),
+        (MultiDict([("providers", "")]), 400),
+        (MultiDict([("providers", "dabble")]), 200),
+    ],
+)
+def test_one_request_is_exactly_one_event(args, status_code):
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+    service = build_service(comparison_service)
 
     try:
-        service.respond_to_query(args)
+        observed(
+            service,
+            lambda observation: service.respond_to_query(
+                args, observation=observation
+            ),
+            status_code=status_code,
+            recorder=recorder,
+        )
     except InvalidInputError:
         pass
 
     assert len(recorder.events) == 1
 
 
+def test_a_status_the_board_cannot_state_is_recorded_as_the_error_it_is():
+    """No response invents a label; an unstatable status is a defect, not a signal."""
+
+    recorder = RecordingRecorder()
+    observation = build_observation(recorder)
+
+    observation.finalize(409)
+
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [
+        ("error", 500)
+    ]
+
+
+def test_a_request_without_an_observation_records_nothing():
+    """Telemetry is the request's, not the service's: no observation, no event."""
+
+    recorder = RecordingRecorder()
+    comparison_service, _ = complete_board_service()
+
+    build_service(comparison_service).respond(board_request())
+
+    assert recorder.events == []
+
+
 def test_telemetry_labels_never_carry_identities():
     recorder = RecordingRecorder()
     comparison_service, _ = complete_board_service()
-    build_service(comparison_service, recorder=recorder).respond(board_request())
+    service = build_service(comparison_service)
+
+    observed(
+        service,
+        lambda observation: service.respond(board_request(), observation=observation),
+        status_code=200,
+        recorder=recorder,
+    )
 
     labels = {
         label

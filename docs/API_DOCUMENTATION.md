@@ -346,7 +346,12 @@ credentials, URLs, bodies, or exception text.
 route: exactly one entry per authenticated request, whatever it ended in.
 `outcome` and `status_code` are one closed pair — `served`/`200`,
 `not_modified`/`304`, `invalid`/`400`, `too_large`/`400`, `disabled`/`404`,
-`error`/`500`, `unavailable`/`503`. An unauthenticated request records nothing,
+`error`/`500`, `unavailable`/`503` — and they are taken from the status the
+caller actually received, so a board that was assembled but failed to render is
+an `error`/`500` rather than the `served` it intended. A request refused at the
+market ceiling reports the counts and provider facts its read had already
+observed, matching the `observed_market_count` in its own 400 body. An
+unauthenticated request records nothing,
 because telemetry begins where the caller's identity does. Every label is a
 closed vocabulary and every other field is a count: provider names may appear
 as configured registry names, but no provider-source, athlete, event, market,
