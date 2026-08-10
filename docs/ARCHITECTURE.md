@@ -359,6 +359,9 @@ On a slate read, `resolve_stored_event_classification` returns that canonical
 kind and display label together exactly once. Recognized `001` through `004`
 prefixes remain authoritative; only an unknown prefix falls back to the stored
 display classification for kind, so a badge cannot reclassify a known game.
+`is_postponed_event` likewise owns postponement truth across catalog
+serialization, event resolution, and slate shaping: an explicit normalized
+flag, a postponement status, or non-empty structured evidence is sufficient.
 
 Authenticated slate read:
 

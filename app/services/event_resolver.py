@@ -24,6 +24,7 @@ from app.domain.freshness import (
     exact_timedelta,
     time_window_timedelta,
 )
+from app.domain.nba_events import is_postponed_event
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.providers.dfs import (
     EventEvidence,
@@ -213,7 +214,7 @@ class CanonicalEvent:
             classification=(
                 None if row.get("classification") is None else str(row["classification"])
             ),
-            is_postponed=bool(row.get("is_postponed") or row.get("postponed_status")),
+            is_postponed=is_postponed_event(row),
         )
 
 

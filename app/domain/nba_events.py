@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 import re
@@ -49,6 +50,16 @@ def is_ordinary_classification(value: str) -> bool:
     """Whether a display classification needs no unusual-event badge."""
 
     return _normalized_words(value) in {"regular season", "unknown"}
+
+
+def is_postponed_event(event: Mapping[str, object]) -> bool:
+    """Whether normalized status or non-empty structured evidence says postponed."""
+
+    return bool(
+        event.get("is_postponed")
+        or event.get("postponed_status")
+        or event.get("postponement_evidence")
+    )
 
 
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
@@ -119,6 +130,7 @@ __all__ = [
     "display_event_classification",
     "is_all_star_kind",
     "is_ordinary_classification",
+    "is_postponed_event",
     "is_preseason_kind",
     "resolve_stored_event_classification",
 ]

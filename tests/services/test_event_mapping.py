@@ -97,6 +97,13 @@ def _event_row(
     }
 
 
+def test_canonical_event_uses_structured_postponement_evidence():
+    row = _event_row()
+    row["postponement_evidence"] = {"reason": "weather"}
+
+    assert CanonicalEvent.from_row(row).is_postponed is True
+
+
 class FakeEventCatalog:
     """The two read seams ``EventResolver`` requires, without a database."""
 

@@ -19,6 +19,7 @@ from app.domain.nba_events import (
     NBAGameStatus,
     is_all_star_kind,
     is_ordinary_classification,
+    is_postponed_event,
     is_preseason_kind,
     resolve_stored_event_classification,
 )
@@ -156,7 +157,7 @@ class SlateService:
         unusual_classification = (
             None if is_ordinary_classification(classification) else classification
         )
-        if event.get("is_postponed") or event.get("postponed_status"):
+        if is_postponed_event(event):
             state = "postponed"
         elif (
             event.get("status_code") == NBAGameStatus.FINAL

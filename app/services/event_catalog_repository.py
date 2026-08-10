@@ -12,6 +12,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.domain.freshness import exact_seconds
+from app.domain.nba_events import is_postponed_event
 from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 
@@ -140,11 +141,10 @@ class EventCatalogRepository:
                 evidence = json.loads(evidence)
             except (TypeError, ValueError):
                 pass
-        return {"nba_game_id": row["nba_game_id"], "season": row["season"],
+        event = {"nba_game_id": row["nba_game_id"], "season": row["season"],
                 "scheduled_at": _iso(row["scheduled_at"]), "status_text": row["status_text"],
                 "status_code": row["status_code"], "postponed_status": row["postponed_status"],
                 "postponement_evidence": evidence,
-                "is_postponed": bool(row["postponed_status"] or evidence),
                 "classification": row["classification"],
                 "home_team_id": row["home_team_id"], "home_team_name": row["home_team_name"],
                 "home_team_tricode": row["home_team_tricode"], "away_team_id": row["away_team_id"],
@@ -152,3 +152,5 @@ class EventCatalogRepository:
                 "home_team": {"id": row["home_team_id"], "name": row["home_team_name"], "tricode": row["home_team_tricode"]},
                 "away_team": {"id": row["away_team_id"], "name": row["away_team_name"], "tricode": row["away_team_tricode"]},
                 "first_seen_at": _iso(row["first_seen_at"]), "last_seen_at": _iso(row["last_seen_at"])}
+        event["is_postponed"] = is_postponed_event(event)
+        return event

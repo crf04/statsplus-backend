@@ -139,6 +139,20 @@ def test_slate_excludes_all_star_and_retains_unusual_and_postponed_games():
     assert payload["games"][2]["status"] == {"state": "final", "label": "Final"}
 
 
+def test_structured_postponement_evidence_sets_slate_state():
+    game = _service(
+        [
+            _event(
+                "evidence",
+                "2026-02-15T03:00:00+00:00",
+                postponement_evidence={"reason": "weather"},
+            )
+        ]
+    ).get_slate("2026-02-14")["games"][0]
+
+    assert game["status"]["state"] == "postponed"
+
+
 @pytest.mark.parametrize(
     "classification",
     ["All-Star Game", "All Star Celebrity Game", "Rising Stars All-Star Weekend"],

@@ -5,6 +5,7 @@ import pytest
 from app.domain.nba_events import (
     is_all_star_kind,
     is_ordinary_classification,
+    is_postponed_event,
     is_preseason_kind,
     resolve_stored_event_classification,
 )
@@ -46,3 +47,24 @@ def test_unknown_game_id_prefix_uses_stored_classification_as_kind_fallback():
 
     assert resolved.kind == "All-Star Showcase"
     assert resolved.display == "All-Star Showcase"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"is_postponed": True},
+        {"postponed_status": "Postponed"},
+        {"postponement_evidence": {"reason": "weather"}},
+        {"postponement_evidence": ["provider flag"]},
+    ],
+)
+def test_postponement_truth_accepts_normalized_status_or_structured_evidence(event):
+    assert is_postponed_event(event)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [{}, {"is_postponed": False}, {"postponed_status": "", "postponement_evidence": {}}],
+)
+def test_postponement_truth_rejects_absent_or_empty_evidence(event):
+    assert not is_postponed_event(event)
