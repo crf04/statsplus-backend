@@ -72,6 +72,7 @@ from .event_mapping import (  # noqa: E402
     ProviderEventMapping,
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
+from .player_game_log import PlayerGameLog, PlayerGameLogRefresh  # noqa: E402
 
 __all__ = [
     'Base',
@@ -97,4 +98,6 @@ __all__ = [
     'EventMappingLock',
     'EventMappingRejection',
     'PlayerPoolSnapshot',
+    'PlayerGameLog',
+    'PlayerGameLogRefresh',
 ]

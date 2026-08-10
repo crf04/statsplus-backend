@@ -14,11 +14,18 @@ class NBAGameStatus(IntEnum):
     FINAL = 3
 
 
+REGULAR_SEASON_TYPE = "Regular Season"
+PLAYOFFS_SEASON_TYPE = "Playoffs"
+PLAY_IN_EVENT_KIND = "Play-In"
+PLAYER_GAME_LOG_SEASON_TYPES = (REGULAR_SEASON_TYPE, PLAYOFFS_SEASON_TYPE)
+
+
 _GAME_TYPE_BY_ID_PREFIX = {
     "001": "Preseason",
-    "002": "Regular Season",
+    "002": REGULAR_SEASON_TYPE,
     "003": "All-Star",
-    "004": "Playoffs",
+    "004": PLAYOFFS_SEASON_TYPE,
+    "005": PLAY_IN_EVENT_KIND,
 }
 
 
@@ -62,6 +69,42 @@ def is_postponed_event(event: Mapping[str, object]) -> bool:
     )
 
 
+def is_final_event(event: Mapping[str, object]) -> bool:
+    """Whether governed code or normalized terminal text says a game is final."""
+
+    return bool(
+        event.get("status_code") == NBAGameStatus.FINAL
+        or str(event.get("status_text", "")).casefold().startswith("final")
+    )
+
+
+def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
+    """Return the durable game-log phase for one governed catalog event."""
+
+    game_id = event.get("nba_game_id")
+    classification = event.get("classification")
+    kind = canonical_event_kind(
+        str(game_id) if game_id is not None else "",
+        str(classification) if classification is not None else "",
+    )
+    normalized = _normalized_words(kind)
+    if normalized == "regular season":
+        return REGULAR_SEASON_TYPE
+    if normalized in {"playoffs", "play offs"}:
+        return PLAYOFFS_SEASON_TYPE
+    return None
+
+
+def validate_player_game_log_season_type(value: object) -> str:
+    """Require one exact governed durable game-log phase."""
+
+    if value not in PLAYER_GAME_LOG_SEASON_TYPES:
+        raise ValueError(
+            "season_type must be one of the governed player game log phases"
+        )
+    return str(value)
+
+
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
     """Return canonical event kind, with a real game ID as authority."""
 
@@ -97,9 +140,17 @@ def resolve_stored_event_classification(
 
     stored_display = _known_classification(stored_classification)
     kind = canonical_event_kind(game_id, stored_display)
+    canonical_display_required = (
+        is_ordinary_classification(stored_display)
+        and not is_ordinary_classification(kind)
+    )
     return EventClassification(
         kind=kind,
-        display=kind if stored_display == "unknown" else stored_display,
+        display=(
+            kind
+            if stored_display == "unknown" or canonical_display_required
+            else stored_display
+        ),
     )
 
 
@@ -126,11 +177,18 @@ def _known_classification(value: str) -> str:
 __all__ = [
     "EventClassification",
     "NBAGameStatus",
+    "PLAYER_GAME_LOG_SEASON_TYPES",
+    "PLAY_IN_EVENT_KIND",
+    "PLAYOFFS_SEASON_TYPE",
+    "REGULAR_SEASON_TYPE",
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
+    "is_final_event",
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",
+    "player_game_log_season_type",
     "resolve_stored_event_classification",
+    "validate_player_game_log_season_type",
 ]

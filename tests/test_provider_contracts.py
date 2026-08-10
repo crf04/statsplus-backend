@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from app.providers.nba_stats import REQUIRED_GAME_LOG_COLUMNS
 from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 from app.utils import telemetry
@@ -33,6 +34,7 @@ def _load(name: str) -> dict:
     "fixture",
     [
         "nba_stats/game_logs.valid.json",
+        "nba_stats/player_game_logs.playoffs.json",
         "pbp_stats/totals.valid.json",
     ],
 )
@@ -68,6 +70,47 @@ def test_recorded_nba_game_logs_parse_through_the_live_path():
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["provider"] == telemetry.PROVIDER_NBA_STATS
     assert event["outcome"] == telemetry.OUTCOME_SUCCESS
+
+
+def test_recorded_playoff_player_logs_parse_through_the_live_path():
+    payload = _load("nba_stats/player_game_logs.playoffs.json")
+    frame = parse_recorded_game_logs(payload)
+
+    assert payload["parameters"] == {
+        "Season": "2025-26",
+        "SeasonType": "Playoffs",
+    }
+    assert len(frame) == 10
+    assert set(frame["PLAYER_ID"]) == {
+        101,
+        103,
+        104,
+        105,
+        106,
+        202,
+        107,
+        108,
+        109,
+        110,
+    }
+    assert set(frame["PLAYER_NAME"]) == {
+        "Canonical One",
+        "Canonical 103",
+        "Canonical 104",
+        "Canonical 105",
+        "Canonical 106",
+        "Canonical Two",
+        "Canonical 107",
+        "Canonical 108",
+        "Canonical 109",
+        "Canonical 110",
+    }
+    assert set(REQUIRED_GAME_LOG_COLUMNS).union({"PLAYER_ID"}).issubset(
+        frame.columns
+    )
+    assert set(frame["GAME_ID"]) == {"0042500001"}
+    assert frame["TEAM_ID"].value_counts().to_dict() == {1: 5, 2: 5}
+    assert (frame["MIN"] > 0).all()
 
 
 def test_malformed_nba_game_logs_raise_provider_response_error():

@@ -446,6 +446,84 @@ stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
+The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
+endpoint. It refreshes the stats tables, current-season Event Catalog,
+current-season Athlete Catalog, and then durable current-season player game logs,
+retrying that ordered unit once. The player-log step uses exactly two
+season-wide provider reads—one `Regular Season`, one `Playoffs`—and publishes
+their normalized player/game facts plus the season sidecar as one transaction.
+For the configured current season, that transaction
+also advances the named `player_game_logs` stats freshness; historical
+backfills retain independent season freshness and never replace or gate the
+current observation. Every result requires a present, fresh, nonempty Event
+Catalog whose freshness count agrees with its actual season rows; a nonempty
+result also requires a present, fresh, nonempty Athlete Catalog.
+`update_database` does not
+publish the season-owned Athlete Catalog or its freshness, so Nightly's named
+Athlete Catalog step is required. Schedule precedes that step, so an Athlete
+Catalog failure skips player logs without suppressing the required schedule
+refresh, and the prior player-log publication remains valid.
+Failed, wholly unjoinable, malformed, or eligible-identity-removing cumulative
+data preserves the last valid publication; individual well-formed unjoined
+athlete, game, or team rows are excluded and counted without exposing their
+identities. Rows governed as Play-In or another phase outside the explicit
+`Regular Season`/`Playoffs` set are excluded under
+`unsupported_phase_count`. Stable exclusions and source growth containing only
+those governed unsupported phases may republish and advance freshness; they do
+not represent an athlete, game, or team identity-join failure, including when
+a previously observed unjoined identity remains stable. Governed event phase
+is classified before athlete identity, so an unknown athlete on an exact
+unsupported event remains an unsupported-phase exclusion.
+Every completed, non-postponed governed `Regular Season` or `Playoffs` game
+through the source observation time must have logs from its exact phase for
+both exact teams and at least the configured
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` distinct positive-minute
+players per team (default `5`). This rejects a truncated first publication
+without estimating a season total and does not require future games or DNPs.
+The season sidecar stores canonical, bounded raw source-row, and
+identity-relevant source-row counts. The identity count excludes only governed
+unsupported phases, making prior and current denominators comparable. Stable
+partial exclusions can therefore republish idempotently; source growth hidden
+by an unjoined athlete, game, or team fails as incomplete canonical identity
+evidence instead of republishing an unchanged cumulative snapshot as fresh,
+and publication recovers when those exact governed identities arrive.
+SQLAlchemy failures from prerequisite freshness/identity reads or publication
+are re-raised and emit one bounded rejection aggregate with already-observed
+coverage counts; publication failures first roll back.
+Canonical athlete identity comes only from the fresh Athlete Catalog. A player
+missing from that owner is excluded and counted; the incomplete replacement
+fails while the prior publication remains readable until the catalog owner
+recovers. Every publication compares the complete prior and candidate
+player/game identity sets. Removed stored keys are accepted only when all of
+their games were removed from the fresh Event Catalog or made ineligible by
+phase/postponement; an eligible-game removal fails even if additions create net
+growth. Recovery telemetry exposes the actual bounded admitted removed-key
+count rather than the net row-count change.
+An empty phase result requires a present schedule with no completed event in
+that exact phase, so empty Playoffs is valid before the postseason but not after
+a completed playoff game. Completed preseason, exhibition, All-Star, or other
+unsupported-phase games do not count, and a postponed event with a terminal-
+looking status is not completed evidence. Phase matching normalizes fallback
+season-type case and separators when no canonical game-ID phase is available;
+fallback stored/display classification spelling remains unchanged when no
+closed game-ID prefix applies, while a known NBA game-ID prefix remains
+authoritative. In particular, prefix `005` is
+governed as Play-In and remains visibly unusual on Slate even if stored with a
+misleading `Regular Season` provider label; it is never stored as a durable
+player log. Empty union results cannot replace
+nonempty facts. Configured-current-season reads also require the
+named `stats_refreshes.player_game_logs` observation to exist and be no older
+than `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 by default). Historical reads remain
+governed only by their season sidecar and are not hidden by missing, stale, or
+newer current-season observations.
+These stored facts back future matchup rail and selection reads; this slice
+adds no public matchup route and does not change `GET /api/games/game_logs`.
+Internal season rates default to Regular Season only unless a caller explicitly
+requests Playoffs or all phases. Last-ten minutes and H2H rows include both
+stored phases in deterministic chronology. The batch query seam returns
+Regular Season rates and oldest-to-newest combined-phase last tens for multiple
+canonical player IDs with one player-log rows query.
+
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
 `progress`, timestamps, and a sanitized `failure_summary` (provider or
@@ -475,6 +553,14 @@ collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries
 credentials, URLs, bodies, or exception text.
+
+The same endpoint includes `recent_player_game_log_events` plus
+`player_game_log_events_total` and `player_game_log_buffered_events`. Each
+entry contains only source/published row counts, the three unjoined-row counts,
+unsupported-phase row count, plus malformed-row, rejected-publication,
+exact-duplicate-row, and governed
+shrink-recovery row counts;
+player, game, team, and provider identities are never telemetry dimensions.
 
 `recent_board_request_events` describes the published `GET /api/dfs/board`
 route: exactly one entry per authenticated request, whatever it ended in.
@@ -575,7 +661,10 @@ writable database, and has no wall-clock season default or background timer.
 `AthleteCatalogService.get_catalog(season, active_only=...)` and
 `get_freshness(season)` read the persisted catalog and independent success /
 failure timestamps. `ATHLETE_CATALOG_FRESHNESS_DAYS` controls the default
-seven-day freshness window.
+seven-day freshness window. Nightly Refresh invokes the same service with its
+explicit current season after Event Catalog and before player-game-log
+publication; player logs also gate canonicalization on the resulting freshness
+fact.
 
 Provider athlete mappings are an internal, persisted read-side seam rather
 than new HTTP mutation routes. `AthleteResolver` accepts typed provider

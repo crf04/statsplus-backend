@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run stats and schedule refreshes as one deployment-owned process unit."""
+"""Run durable current-season refreshes as one deployment-owned process unit."""
 
 from __future__ import annotations
 
@@ -17,10 +17,15 @@ if __package__ in {None, ""}:
 from sqlalchemy import create_engine  # noqa: E402
 
 from app.config.settings import load_settings  # noqa: E402
+from app.domain.freshness import time_window_timedelta  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
+from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
+from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
+from app.services.player_game_log_service import PlayerGameLogService  # noqa: E402
+from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
     StatsFreshnessRepository,
 )
@@ -28,23 +33,32 @@ from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: 
 
 
 def run_nightly_refresh(
-    refresh_stats: Callable[[], Any], refresh_schedule: Callable[[], Any]
+    *,
+    refresh_stats: Callable[[], Any],
+    refresh_schedule: Callable[[], Any],
+    refresh_athlete_catalog: Callable[[], Any],
+    refresh_player_game_logs: Callable[[], Any],
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
 
     for attempt in range(1, 3):
-        failed_step = "stats"
-        try:
-            stats_succeeded = refresh_stats() is not False
-        except Exception:
-            stats_succeeded = False
-        if stats_succeeded:
-            failed_step = "schedule"
+        succeeded = True
+        for step, refresh in (
+            ("stats", refresh_stats),
+            ("schedule", refresh_schedule),
+            ("athlete catalog", refresh_athlete_catalog),
+            ("player game logs", refresh_player_game_logs),
+        ):
+            failed_step = step
             try:
-                refresh_schedule()
-                return 0
+                if refresh() is False:
+                    succeeded = False
+                    break
             except Exception:
-                pass
+                succeeded = False
+                break
+        if succeeded:
+            return 0
         disposition = "retrying" if attempt == 1 else "no retries remain"
         print(
             f"Nightly Refresh attempt {attempt} failed during "
@@ -79,9 +93,40 @@ def _run(database_url: str) -> int:
         event_service = EventCatalogService(
             engine, settings=settings, nba_stats_provider=provider
         )
+        athlete_service = AthleteCatalogService(
+            engine, settings=settings, nba_stats_provider=provider
+        )
+        player_game_log_repository = PlayerGameLogRepository(
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_season=settings.nba.current_season,
+            stats_surface_max_age=time_window_timedelta(
+                settings.catalog.player_game_log_max_age_hours,
+                unit_seconds=3600,
+                field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+            ),
+        )
+        player_game_log_service = PlayerGameLogService(
+            nba_stats_provider=provider,
+            repository=player_game_log_repository,
+            athlete_catalog=athlete_service,
+            event_catalog=event_service,
+            minimum_active_players_per_team_game=(
+                settings.catalog.player_game_log_min_active_players_per_team_game
+            ),
+        )
         return run_nightly_refresh(
-            data_service.update_all_data,
-            lambda: event_service.refresh(settings.nba.current_season),
+            refresh_stats=data_service.update_all_data,
+            refresh_schedule=lambda: event_service.refresh(
+                settings.nba.current_season
+            ),
+            refresh_athlete_catalog=lambda: athlete_service.refresh_season(
+                settings.nba.current_season
+            ).status
+            == "succeeded",
+            refresh_player_game_logs=lambda: player_game_log_service.refresh(
+                settings.nba.current_season
+            ),
         )
     finally:
         engine.dispose()

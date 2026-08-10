@@ -6,7 +6,7 @@ from . import Base
 
 
 class StatsRefresh(Base):
-    """The latest successful publication of the single stats surface."""
+    """The latest successful publication for one governed stats surface."""
 
     __tablename__ = "stats_refreshes"
 

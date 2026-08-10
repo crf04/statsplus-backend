@@ -200,7 +200,7 @@ def _create_event_mapping_tables(connection: Connection) -> None:
 
 
 def _create_stats_freshness_table(connection: Connection) -> None:
-    """Create the singleton success record for stats-table publication."""
+    """Create governed completion records for stats-surface publications."""
     from app.models.stats_freshness import StatsRefresh
 
     StatsRefresh.__table__.create(connection, checkfirst=True)
@@ -211,6 +211,14 @@ def _create_player_pool_snapshot_table(connection: Connection) -> None:
     from app.models.player_pool_snapshot import PlayerPoolSnapshot
 
     PlayerPoolSnapshot.__table__.create(connection, checkfirst=True)
+
+
+def _create_player_game_log_tables(connection: Connection) -> None:
+    """Create canonical player-game facts and season publication metadata."""
+    from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
+
+    PlayerGameLog.__table__.create(connection, checkfirst=True)
+    PlayerGameLogRefresh.__table__.create(connection, checkfirst=True)
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -228,6 +236,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(8, "008_create_event_mappings", _create_event_mapping_tables),
     Migration(9, "009_create_stats_freshness", _create_stats_freshness_table),
     Migration(10, "010_create_player_pool_snapshots", _create_player_pool_snapshot_table),
+    Migration(11, "011_create_player_game_logs", _create_player_game_log_tables),
 )
 
 

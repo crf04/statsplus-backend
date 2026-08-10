@@ -1,6 +1,7 @@
 """Offline behavior of the Railway Nightly Refresh process command."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,17 +9,135 @@ from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
 
 
-def test_nightly_refresh_runs_stats_then_schedule_once_on_success():
+def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
+    calls = []
+    provider = object()
+    catalog = object()
+    stats_freshness = object()
+    player_log_repository = object()
+
+    class FakeEngine:
+        def dispose(self):
+            calls.append("dispose")
+
+    engine = FakeEngine()
+    stats_service = SimpleNamespace(
+        update_all_data=lambda: calls.append("stats") or True
+    )
+    event_service = SimpleNamespace(
+        refresh=lambda season: calls.append(("schedule", season)) or object()
+    )
+    athlete_service = SimpleNamespace(
+        refresh_season=lambda season: calls.append(("athlete_catalog", season))
+        or SimpleNamespace(status="succeeded")
+    )
+    player_log_service = SimpleNamespace(
+        refresh=lambda season: calls.append(("player_game_logs", season)) or object()
+    )
+    settings = SimpleNamespace(
+        nba=SimpleNamespace(current_season="2025-26"),
+        catalog=SimpleNamespace(
+            player_game_log_max_age_hours=30,
+            player_game_log_min_active_players_per_team_game=5,
+        ),
+    )
+
+    def build_data_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {
+            "settings": settings,
+            "nba_stats_provider": provider,
+            "stats_freshness": stats_freshness,
+        }
+        return stats_service
+
+    def build_event_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"settings": settings, "nba_stats_provider": provider}
+        return event_service
+
+    def build_athlete_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"settings": settings, "nba_stats_provider": provider}
+        return athlete_service
+
+    def build_log_repository(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {
+            "statistic_catalog": catalog,
+            "stats_surface_season": "2025-26",
+            "stats_surface_max_age": nightly_refresh.time_window_timedelta(
+                settings.catalog.player_game_log_max_age_hours,
+                unit_seconds=3600,
+                field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+            ),
+        }
+        return player_log_repository
+
+    def build_log_service(**kwargs):
+        assert kwargs == {
+            "nba_stats_provider": provider,
+            "repository": player_log_repository,
+            "athlete_catalog": athlete_service,
+            "event_catalog": event_service,
+            "minimum_active_players_per_team_game": 5,
+        }
+        return player_log_service
+
+    monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(nightly_refresh, "create_engine", lambda url: engine)
+    monkeypatch.setattr(nightly_refresh, "_normalize_database_url", lambda url: url)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "run_migrations",
+        lambda actual_engine: calls.append("migrations"),
+    )
+    monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", lambda **kwargs: provider)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatsFreshnessRepository",
+        lambda actual_engine: stats_freshness,
+    )
+    monkeypatch.setattr(nightly_refresh, "DataService", build_data_service)
+    monkeypatch.setattr(nightly_refresh, "EventCatalogService", build_event_service)
+    monkeypatch.setattr(nightly_refresh, "AthleteCatalogService", build_athlete_service)
+    monkeypatch.setattr(nightly_refresh, "PlayerGameLogRepository", build_log_repository)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatisticCatalog",
+        SimpleNamespace(load_default=lambda: catalog),
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "PlayerGameLogService",
+        build_log_service,
+    )
+
+    assert nightly_refresh._run("sqlite:///nightly.sqlite3") == 0
+    assert calls == [
+        "migrations",
+        "stats",
+        ("schedule", "2025-26"),
+        ("athlete_catalog", "2025-26"),
+        ("player_game_logs", "2025-26"),
+        "dispose",
+    ]
+
+
+def test_nightly_refresh_runs_stats_schedule_catalog_then_player_logs_once_on_success():
     calls = []
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("schedule") or object(),
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 0
     )
-    assert calls == ["stats", "schedule"]
+    assert calls == ["stats", "schedule", "athlete_catalog", "player_game_logs"]
 
 
 def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
@@ -27,13 +146,80 @@ def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or next(stats_results),
-            lambda: calls.append("schedule") or object(),
+            refresh_stats=lambda: calls.append("stats") or next(stats_results),
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 0
     )
-    assert calls == ["stats", "stats", "schedule"]
+    assert calls == [
+        "stats",
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "player_game_logs",
+    ]
     assert "attempt 1 failed during stats refresh; retrying" in capsys.readouterr().err
+
+
+def test_nightly_refresh_keeps_schedule_before_retrying_athlete_catalog(capsys):
+    calls = []
+    athlete_results = iter([False, True])
+
+    assert (
+        run_nightly_refresh(
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog")
+            or next(athlete_results),
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
+        )
+        == 0
+    )
+    assert calls == [
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "player_game_logs",
+    ]
+    assert "attempt 1 failed during athlete catalog refresh; retrying" in (
+        capsys.readouterr().err
+    )
+
+
+def test_nightly_refresh_reports_athlete_failure_without_running_player_logs(capsys):
+    calls = []
+
+    assert (
+        run_nightly_refresh(
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or False,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
+        )
+        == 1
+    )
+    assert calls == [
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "stats",
+        "schedule",
+        "athlete_catalog",
+    ]
+    diagnostics = capsys.readouterr().err
+    assert "attempt 1 failed during athlete catalog refresh; retrying" in diagnostics
+    assert (
+        "attempt 2 failed during athlete catalog refresh; no retries remain"
+        in diagnostics
+    )
 
 
 def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
@@ -41,17 +227,57 @@ def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
 
     assert (
         run_nightly_refresh(
-            lambda: calls.append("stats") or True,
-            lambda: calls.append("schedule")
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule")
             or (_ for _ in ()).throw(RuntimeError("offline failure")),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
         )
         == 1
     )
-    assert calls == ["stats", "schedule", "stats", "schedule"]
+    assert calls == [
+        "stats",
+        "schedule",
+        "stats",
+        "schedule",
+    ]
     diagnostics = capsys.readouterr().err
     assert "attempt 1 failed during schedule refresh; retrying" in diagnostics
     assert "attempt 2 failed during schedule refresh; no retries remain" in diagnostics
     assert "offline failure" not in diagnostics
+
+
+def test_nightly_refresh_retries_whole_unit_when_player_logs_fail(capsys):
+    calls = []
+    log_attempts = iter([RuntimeError("offline failure"), None])
+
+    def refresh_logs():
+        calls.append("player_game_logs")
+        error = next(log_attempts)
+        if error is not None:
+            raise error
+
+    assert (
+        run_nightly_refresh(
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=refresh_logs,
+        )
+        == 0
+    )
+    assert calls == [
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "player_game_logs",
+        "stats",
+        "schedule",
+        "athlete_catalog",
+        "player_game_logs",
+    ]
+    assert "failed during player game logs refresh" in capsys.readouterr().err
 
 
 def test_main_reports_success_without_live_calls(tmp_path, monkeypatch, capsys):

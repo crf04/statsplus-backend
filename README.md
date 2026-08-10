@@ -75,6 +75,8 @@ the most important variables:
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `SLATE_SCHEDULE_MAX_AGE_HOURS` | No | `30`; freshness window for the nightly slate schedule surface |
+| `PLAYER_GAME_LOG_MAX_AGE_HOURS` | No | `30`; maximum age for configured-current-season durable player-log reads |
+| `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` | No | `5`; required positive-minute players for each team in a completed game |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
@@ -150,13 +152,26 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The process refreshes all stats tables and the current season's Event Catalog
-as one ordered unit. If either step fails, it starts the whole unit over once;
-after that single retry it exits nonzero. Success exits zero. The stats
-freshness timestamp is committed in the same transaction as the table swaps,
-and the Event Catalog keeps its existing transactional success timestamp. The
-admin `POST /api/data/update_database` path uses the same stats publication
-service and remains the manual backstop.
+The process runs four named current-season steps in this exact order: stats
+tables, Event Catalog schedule, Athlete Catalog, then durable player game logs.
+If a step fails, later steps in that attempt do not run and the whole unit
+starts over once. A failed Athlete Catalog therefore never suppresses the
+required schedule refresh that precedes it, while player logs remain untouched.
+The player-log step makes one whole-season NBA Stats request for Regular Season
+and one for Playoffs, then publishes both phases and current freshness
+atomically.
+Recorded Regular Season and Playoffs payloads under
+`tests/fixtures/nba_stats/` exercise both phase calls through the production
+parser without network access.
+After the single retry the process exits nonzero and names the failed step;
+success exits zero. Each owning service preserves its prior publication on
+failure. The admin `POST /api/data/update_database` path uses the same stats
+publication service and remains the manual backstop.
+
+Current-season player-log reads require the named Nightly stats observation to
+remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by default). Historical
+season backfills retain independent season freshness and are not hidden when
+the current observation expires.
 
 Validate the bundled fixture without changing it:
 

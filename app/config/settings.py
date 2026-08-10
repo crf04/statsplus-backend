@@ -398,6 +398,7 @@ CATALOG_WINDOW_UNITS: dict[str, tuple[int, str]] = {
     "event_max_age_hours": (3600, "EVENT_CATALOG_MAX_AGE_HOURS"),
     "event_match_window_hours": (3600, "EVENT_MAPPING_MATCH_WINDOW_HOURS"),
     "slate_schedule_max_age_hours": (3600, "SLATE_SCHEDULE_MAX_AGE_HOURS"),
+    "player_game_log_max_age_hours": (3600, "PLAYER_GAME_LOG_MAX_AGE_HOURS"),
 }
 
 
@@ -426,6 +427,10 @@ class CatalogSettings(BaseModel):
     athlete_freshness_days: int = 7
     event_max_age_hours: Decimal = Decimal(72)
     slate_schedule_max_age_hours: Decimal = Decimal(30)
+    player_game_log_max_age_hours: Decimal = Decimal(30)
+    player_game_log_min_active_players_per_team_game: int = Field(
+        default=5, strict=True, ge=1
+    )
     #: How far a provider's reported start time may sit from a scheduled NBA
     #: game before the two are no longer evidence of the same event.  The
     #: boundary itself is inside the window.
@@ -699,6 +704,12 @@ def _build_settings(
                 ),
                 slate_schedule_max_age_hours=reader.raw(
                     "SLATE_SCHEDULE_MAX_AGE_HOURS", Decimal(30)
+                ),
+                player_game_log_max_age_hours=reader.raw(
+                    "PLAYER_GAME_LOG_MAX_AGE_HOURS", Decimal(30)
+                ),
+                player_game_log_min_active_players_per_team_game=reader.integer(
+                    "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME", 5
                 ),
             ),
             port=reader.integer("PORT", 5000),

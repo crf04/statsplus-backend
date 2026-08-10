@@ -120,6 +120,8 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert dependencies.event_mapping_repository is not None
     assert dependencies.event_catalog_service is not None
     assert dependencies.event_resolver.catalog is dependencies.event_catalog_service
+    assert not hasattr(dependencies, "player_game_log_service")
+    assert not hasattr(dependencies, "player_game_log_repository")
     assert dependencies.event_resolver.match_window == time_window_timedelta(
         settings.catalog.event_match_window_hours,
         unit_seconds=3600,

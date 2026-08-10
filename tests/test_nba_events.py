@@ -3,12 +3,65 @@
 import pytest
 
 from app.domain.nba_events import (
+    NBAGameStatus,
+    canonical_event_kind,
     is_all_star_kind,
+    is_final_event,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
+    player_game_log_season_type,
     resolve_stored_event_classification,
 )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"status_code": NBAGameStatus.FINAL, "status_text": "Scheduled"},
+        {"status_code": 1, "status_text": "Final/OT"},
+    ],
+)
+def test_final_event_accepts_governed_code_and_terminal_text(event):
+    assert is_final_event(event)
+
+
+def test_final_event_rejects_nonterminal_schedule_status():
+    assert not is_final_event({"status_code": 1, "status_text": "7:00 pm ET"})
+
+
+@pytest.mark.parametrize(
+    ("event", "season_type"),
+    [
+        ({"nba_game_id": "0022500001", "classification": "Playoffs"}, "Regular Season"),
+        ({"nba_game_id": "0042500001", "classification": "Regular Season"}, "Playoffs"),
+        ({"nba_game_id": "provider-id", "classification": " PLAY_OFFS "}, "Playoffs"),
+        ({"nba_game_id": "0032500001", "classification": "Playoffs"}, None),
+    ],
+)
+def test_player_game_log_phase_uses_game_id_authority_then_normalized_fallback(
+    event, season_type
+):
+    assert player_game_log_season_type(event) == season_type
+
+
+def test_canonical_event_kind_preserves_fallback_label_spelling():
+    assert canonical_event_kind("", " regular season ") == "regular season"
+
+
+def test_play_in_game_id_overrides_a_misleading_regular_season_label():
+    event = {
+        "nba_game_id": "0052500001",
+        "classification": "Regular Season",
+    }
+
+    assert canonical_event_kind("0052500001", "Regular Season") == "Play-In"
+    assert player_game_log_season_type(event) is None
+    resolved = resolve_stored_event_classification(
+        "0052500001", "Regular Season"
+    )
+    assert resolved.kind == "Play-In"
+    assert resolved.display == "Play-In"
 
 
 @pytest.mark.parametrize(
@@ -43,7 +96,7 @@ def test_stored_classification_cannot_override_a_known_game_id_kind():
 
 
 def test_unknown_game_id_prefix_uses_stored_classification_as_kind_fallback():
-    resolved = resolve_stored_event_classification("0052500001", "All-Star Showcase")
+    resolved = resolve_stored_event_classification("0062500001", "All-Star Showcase")
 
     assert resolved.kind == "All-Star Showcase"
     assert resolved.display == "All-Star Showcase"
