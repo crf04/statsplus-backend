@@ -160,6 +160,11 @@ success exits zero. Each owning service preserves its prior publication on
 failure. The admin `POST /api/data/update_database` path uses the same stats
 publication service and remains the manual backstop.
 
+Current-season player-log reads require the named Nightly stats observation to
+remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by default). Historical
+season backfills retain independent season freshness and are not hidden when
+the current observation expires.
+
 Validate the bundled fixture without changing it:
 
 ```bash

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
+from app.domain.freshness import (
+    exact_age_seconds,
+    exact_seconds,
+    exact_timedelta,
+    within_max_age,
+)
 from app.domain.utc import assume_utc
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
 from app.services.nba_stats_adapter import validate_canonical_season
@@ -51,6 +58,7 @@ def _two_pointer_attempts(record: PlayerGameLogRecord) -> float:
 _DERIVED_COMPONENT_VALUES: dict[str, Callable[[PlayerGameLogRecord], float]] = {
     "two_pointers_attempted": _two_pointer_attempts
 }
+DEFAULT_PLAYER_GAME_LOG_MAX_AGE = timedelta(hours=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +89,8 @@ class PlayerGameLogRepository:
         *,
         statistic_catalog: StatisticCatalog,
         stats_surface_season: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+        stats_surface_max_age: timedelta = DEFAULT_PLAYER_GAME_LOG_MAX_AGE,
     ) -> None:
         self.engine = engine
         self._stats_surface_season = (
@@ -90,6 +100,13 @@ class PlayerGameLogRepository:
         )
         self._surface_freshness = StatsFreshnessRepository(
             engine, surface=PLAYER_GAME_LOG_SURFACE
+        )
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._stats_surface_max_age_seconds = exact_seconds(
+            exact_timedelta(
+                exact_seconds(stats_surface_max_age),
+                field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+            )
         )
         self._market_statistics = tuple(
             statistic
@@ -123,6 +140,8 @@ class PlayerGameLogRepository:
         source_provider: str,
         source_row_count: int,
         allow_empty: bool = False,
+        current_catalog_game_ids: frozenset[str] | None = None,
+        recoverable_game_ids: frozenset[str] = frozenset(),
     ) -> int:
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
@@ -173,9 +192,26 @@ class PlayerGameLogRepository:
                 and existing_row_count is not None
                 and len(unique) < existing_row_count
             ):
-                raise ValueError(
-                    "a smaller player game log snapshot cannot replace cumulative facts"
+                if current_catalog_game_ids is None:
+                    raise ValueError(
+                        "a smaller player game log snapshot cannot replace cumulative facts"
+                    )
+                published_keys = set(
+                    connection.execute(
+                        select(log_table.c.player_id, log_table.c.game_id).where(
+                            log_table.c.season == canonical_season
+                        )
+                    ).all()
                 )
+                removed_keys = published_keys.difference(unique)
+                if any(
+                    game_id in current_catalog_game_ids
+                    and game_id not in recoverable_game_ids
+                    for _player_id, game_id in removed_keys
+                ):
+                    raise ValueError(
+                        "a smaller player game log snapshot cannot replace cumulative facts"
+                    )
             connection.execute(
                 delete(log_table).where(log_table.c.season == canonical_season)
             )
@@ -208,6 +244,8 @@ class PlayerGameLogRepository:
         self, season: str, player_id: int
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        if not self._season_is_readable(canonical_season):
+            return ()
         log_table = PlayerGameLog.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
@@ -338,6 +376,8 @@ class PlayerGameLogRepository:
         opponent_team_id: int,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        if not self._season_is_readable(canonical_season):
+            return ()
         log_table = PlayerGameLog.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
@@ -354,6 +394,18 @@ class PlayerGameLogRepository:
                 )
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
+    def _season_is_readable(self, season: str) -> bool:
+        if season != self._stats_surface_season:
+            return True
+        completed_at = self._surface_freshness.get().last_successful_completion
+        if completed_at is None:
+            return False
+        elapsed = exact_seconds(assume_utc(self._clock()) - completed_at)
+        age = exact_age_seconds(
+            max(elapsed, Decimal(0)), field="player game log publication age"
+        )
+        return within_max_age(age, self._stats_surface_max_age_seconds)
 
     @staticmethod
     def _published_rows_statement():

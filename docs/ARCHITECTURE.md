@@ -512,14 +512,19 @@ opponent tricodes and home/away identity come from that canonical event.
 Individual well-formed rows that do not join are excluded and counted in
 bounded scalar-only telemetry; no name or matchup-text guess is accepted. A
 nonempty snapshot that yields no canonical rows fails the refresh before
-publication. If a fresh
+publication. For every non-postponed governed Regular Season event that is
+final and scheduled no later than the source observation time, the canonical
+snapshot must cover both exact event teams with at least five distinct players
+recording positive minutes per team. This exact completed-game invariant makes
+a truncated first publication fail closed without guessing an expected season
+total or requiring rows for future games or DNPs. If a fresh
 Athlete Catalog drops a player already present in the last complete
 same-season `nba_stats` publication, only that exact durable NBA player ID and
 canonical name may be reused. A never-published or durably ambiguous player
 remains unjoined, and recovered athlete identity never relaxes the exact event
 or team joins. Structurally, numerically, or logically malformed rows abort the
 publication while retaining already observed bounded coverage counts. If a
-new cumulative source row cannot join an event or a team and canonical
+new cumulative source row cannot join an athlete, event, or team and canonical
 publication would otherwise remain at or below its prior size, the apparent
 growth exposes incomplete canonical identity coverage and fails closed instead
 of stamping the unchanged snapshot fresh. This comparison uses the prior raw
@@ -537,10 +542,14 @@ provider rows collapse to one fact and increment bounded duplicate telemetry;
 conflicting duplicates fail closed at canonicalization, and the repository
 repeats that invariant for direct persistence callers. Any validation or
 database failure leaves both the prior rows and prior successful freshness
-unchanged and emits bounded rejection telemetry. One service-boundary
-SQLAlchemy handler covers prerequisite catalog, identity, and freshness reads
-plus publication after repository rollback, without swallowing the error or
-counting it twice. An empty Regular Season
+unchanged and emits bounded rejection telemetry. A smaller canonical snapshot
+is accepted only as an exact recovery when every removed fact belongs to a
+game that the fresh Event Catalog has removed or explicitly made ineligible by
+phase/postponement; arbitrary provider shrink still fails. Recovery emits only
+the bounded removed-row count, never a game or athlete identifier. One
+service-boundary SQLAlchemy handler covers prerequisite catalog, identity, and
+freshness reads plus publication after repository rollback, without swallowing
+the error or counting it twice. An empty Regular Season
 provider snapshot is publishable only when the governed Event Catalog is
 present and contains no Regular Season event classified final by the shared
 governed NBA event predicates. A postponed event does not become completed
@@ -548,11 +557,12 @@ evidence merely because its feed status code or text says final. Completed
 preseason, exhibition, All-Star, playoff, and other-phase events do not block
 that empty Regular Season publication. An empty snapshot can never replace a
 prior nonempty publication. A missing Event Catalog or an empty snapshot after
-a completed Regular Season game fails closed and preserves the last valid facts
-and freshness. Because a season-wide
-log snapshot is cumulative, a nonempty replacement with fewer canonical rows
-than the prior successful publication also fails closed; equal-size
-corrections and growth remain publishable. Every rejected refresh records
+a completed Regular Season game within the source observation boundary fails
+closed and preserves the last valid facts and freshness. Because a season-wide
+log snapshot is cumulative, an unexplained nonempty replacement with fewer
+canonical rows than the prior successful publication also fails closed;
+equal-size corrections, growth, and the exact governed recovery above remain
+publishable. Every rejected refresh records
 bounded scalar rejection and accumulated coverage counts without identities.
 Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
 TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
@@ -568,9 +578,12 @@ deterministic multi-player H2H rows for archetype sampling. Publication writes
 the season sidecar for every season. When that season is the configured current
 season, the same transaction also advances the named `player_game_logs` row in
 `stats_refreshes`. Season reads require their own sidecar completeness; the
-single current-season stats observation never gates or hides historical
-backfills. Callers can consume that named current-season freshness through
-`StatsFreshnessRepository` without synthesizing logs. Neither migration 011
+configured current season additionally requires that named stats observation
+to exist and remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by
+default), otherwise reads fail closed. That global observation never gates or
+hides historical backfills, which remain season-sidecar based. Callers consume
+the same governed `StatsFreshnessRepository` fact rather than synthesizing
+freshness from rows. Neither migration 011
 nor these services add a public route.
 
 ### Durable refresh jobs

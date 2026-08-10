@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
 from sqlalchemy import create_engine  # noqa: E402
 
 from app.config.settings import load_settings  # noqa: E402
+from app.domain.freshness import time_window_timedelta  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
 from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
@@ -99,6 +100,11 @@ def _run(database_url: str) -> int:
             engine,
             statistic_catalog=StatisticCatalog.load_default(),
             stats_surface_season=settings.nba.current_season,
+            stats_surface_max_age=time_window_timedelta(
+                settings.catalog.player_game_log_max_age_hours,
+                unit_seconds=3600,
+                field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+            ),
         )
         player_game_log_service = PlayerGameLogService(
             nba_stats_provider=provider,

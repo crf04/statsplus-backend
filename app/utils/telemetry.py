@@ -268,6 +268,7 @@ class PlayerGameLogTelemetryEvent:
     malformed_row_count: int = 0
     rejected_publication_count: int = 0
     duplicate_row_count: int = 0
+    recovered_shrink_row_count: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -281,6 +282,7 @@ class PlayerGameLogTelemetryEvent:
                 self.malformed_row_count,
                 self.rejected_publication_count,
                 self.duplicate_row_count,
+                self.recovered_shrink_row_count,
             )
         ):
             raise ValueError(
@@ -529,7 +531,8 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
             "player_game_log_event source_row_count=%d published_row_count=%d "
             "unjoined_athlete_count=%d unjoined_event_count=%d "
             "team_mismatch_count=%d malformed_row_count=%d "
-            "rejected_publication_count=%d duplicate_row_count=%d",
+            "rejected_publication_count=%d duplicate_row_count=%d "
+            "recovered_shrink_row_count=%d",
             event.source_row_count,
             event.published_row_count,
             event.unjoined_athlete_count,
@@ -538,6 +541,7 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
             event.malformed_row_count,
             event.rejected_publication_count,
             event.duplicate_row_count,
+            event.recovered_shrink_row_count,
         )
         with _buffer_lock:
             global _player_game_log_events_total

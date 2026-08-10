@@ -40,6 +40,16 @@ def test_slate_schedule_max_age_defaults_to_thirty_hours_and_is_configurable():
     assert configured.catalog.slate_schedule_max_age_hours == 36
 
 
+def test_player_game_log_max_age_defaults_to_thirty_hours_and_is_configurable():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={"FLASK_ENV": "testing", "PLAYER_GAME_LOG_MAX_AGE_HOURS": "36"}
+    )
+
+    assert defaults.catalog.player_game_log_max_age_hours == 30
+    assert configured.catalog.player_game_log_max_age_hours == 36
+
+
 def test_local_settings_have_typed_safe_defaults(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -450,6 +460,7 @@ def test_settings_reject_event_catalog_ttl_outside_the_time_window_domain(value)
     [
         ("EVENT_CATALOG_MAX_AGE_HOURS", 3600),
         ("EVENT_MAPPING_MATCH_WINDOW_HOURS", 3600),
+        ("PLAYER_GAME_LOG_MAX_AGE_HOURS", 3600),
         ("ATHLETE_CATALOG_FRESHNESS_DAYS", 86400),
     ],
 )
@@ -533,6 +544,7 @@ def test_catalog_windows_are_exact_decimals_never_floats():
         {"event_max_age_hours": True},
         {"event_match_window_hours": "1e129"},
         {"event_match_window_hours": -1},
+        {"player_game_log_max_age_hours": 0},
         {"athlete_freshness_days": 0},
         {"athlete_freshness_days": 11575},
     ],

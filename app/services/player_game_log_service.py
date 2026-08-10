@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 import math
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, NoReturn, Protocol
 
 import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,7 +17,7 @@ from app.domain.nba_events import (
     is_postponed_event,
     is_regular_season_event,
 )
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.providers.nba_stats import DEFAULT_SEASON_TYPE, NBAStatsProvider
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.player_game_log_repository import (
@@ -31,7 +32,7 @@ from app.utils.telemetry import (
 
 
 SOURCE_PROVIDER = "nba_stats"
-_ExclusionReason = Literal["athlete", "event", "team"]
+MINIMUM_ACTIVE_PLAYERS_PER_TEAM_GAME = 5
 
 
 class PlayerGameLogIdentityError(ValueError):
@@ -53,6 +54,25 @@ class _CanonicalizationResult:
     unjoined_event_count: int
     team_mismatch_count: int
     duplicate_row_count: int = 0
+
+
+class _ExclusionReason(Enum):
+    ATHLETE = "athlete"
+    EVENT = "event"
+    TEAM = "team"
+
+
+@dataclass(frozen=True, slots=True)
+class _Joined:
+    record: PlayerGameLogRecord
+
+
+@dataclass(frozen=True, slots=True)
+class _Excluded:
+    reason: _ExclusionReason
+
+
+_CanonicalRow = _Joined | _Excluded
 
 
 class _CanonicalizationAbort(PlayerGameLogIdentityError):
@@ -133,62 +153,21 @@ class PlayerGameLogService:
     ) -> PlayerGameLogRefreshResult:
         canonicalized: _CanonicalizationResult | None = None
         try:
-            events = self.event_catalog.get_events(canonical_season)
-            event_freshness = self.event_catalog.get_freshness(
-                canonical_season, now=retrieved_at
+            events = self._require_complete_event_catalog(
+                canonical_season, frame, retrieved_at
             )
-            event_count = event_freshness.get("event_count")
-            if (
-                not event_freshness.get("fresh")
-                or not event_count
-                or event_count != len(events)
-            ):
-                self._reject(
-                    "the Event Catalog must be present, fresh, and complete before publication",
-                    source=len(frame.index),
-                )
+            completed_events = self._completed_regular_season_events(
+                events, observed_at=retrieved_at
+            )
             if frame.empty:
-                if any(
-                    is_regular_season_event(event)
-                    and is_final_event(event)
-                    and not is_postponed_event(event)
-                    for event in events
-                ):
-                    self._reject(
-                        "an empty snapshot cannot represent a season with completed games",
-                        source=0,
-                    )
-                try:
-                    row_count = self.repository.publish(
-                        canonical_season,
-                        (),
-                        retrieved_at=retrieved_at,
-                        source_provider=SOURCE_PROVIDER,
-                        source_row_count=0,
-                        allow_empty=True,
-                    )
-                except ValueError:
-                    self._record_rejection(source=0)
-                    raise
-                self._record_telemetry(0, row_count, 0, 0, 0)
-                return PlayerGameLogRefreshResult(
-                    season=canonical_season,
-                    row_count=row_count,
-                    retrieved_at=retrieved_at.isoformat(),
+                return self._publish_empty(
+                    canonical_season,
+                    retrieved_at,
+                    completed_events=completed_events,
                 )
 
-            athlete_freshness = self.athlete_catalog.get_freshness(
-                canonical_season, now=retrieved_at
-            )
-            if not athlete_freshness.get(
-                "is_fresh"
-            ) or not athlete_freshness.get("row_count"):
-                self._reject(
-                    "the Athlete Catalog must be present and fresh before publication",
-                    source=len(frame.index),
-                )
-            athletes = self.athlete_catalog.get_catalog(
-                canonical_season, active_only=False
+            athletes = self._require_fresh_athlete_catalog(
+                canonical_season, frame, retrieved_at
             )
             published_player_identities = (
                 self.repository.get_published_player_identities(
@@ -204,8 +183,10 @@ class PlayerGameLogService:
                     published_player_identities=published_player_identities,
                 )
             except _CanonicalizationAbort as error:
-                self._record_rejection(
-                    result=error.result, malformed=error.malformed_row_count
+                self._emit_telemetry(
+                    result=error.result,
+                    malformed=error.malformed_row_count,
+                    rejected=1,
                 )
                 raise
             if not canonicalized.records:
@@ -213,10 +194,18 @@ class PlayerGameLogService:
                     "a non-empty player game log snapshot produced no canonical rows",
                     result=canonicalized,
                 )
+            if not self._has_complete_game_coverage(
+                canonicalized.records, completed_events
+            ):
+                self._reject(
+                    "player game logs do not provide complete completed game coverage",
+                    result=canonicalized,
+                )
             prior = self.repository.get_freshness(canonical_season)
             if (
                 (
-                    canonicalized.unjoined_event_count
+                    canonicalized.unjoined_athlete_count
+                    or canonicalized.unjoined_event_count
                     or canonicalized.team_mismatch_count
                 )
                 and prior.retrieved_at is not None
@@ -225,7 +214,7 @@ class PlayerGameLogService:
                 and len(canonicalized.records) <= prior.row_count
             ):
                 self._reject(
-                    "cumulative player logs reveal an incomplete Event Catalog",
+                    "cumulative player logs reveal incomplete canonical identity coverage",
                     result=canonicalized,
                 )
             try:
@@ -235,12 +224,23 @@ class PlayerGameLogService:
                     retrieved_at=retrieved_at,
                     source_provider=SOURCE_PROVIDER,
                     source_row_count=canonicalized.source_row_count,
+                    current_catalog_game_ids=frozenset(
+                        str(event["nba_game_id"]) for event in events
+                    ),
+                    recoverable_game_ids=frozenset(
+                        str(event["nba_game_id"])
+                        for event in events
+                        if not is_regular_season_event(event)
+                        or is_postponed_event(event)
+                    ),
                 )
             except ValueError:
-                self._record_rejection(result=canonicalized)
+                self._emit_telemetry(result=canonicalized, rejected=1)
                 raise
-            self._record_canonicalization_telemetry(
-                canonicalized, published=row_count
+            self._emit_telemetry(
+                result=canonicalized,
+                published=row_count,
+                recovered=max(prior.row_count - row_count, 0),
             )
             return PlayerGameLogRefreshResult(
                 season=canonical_season,
@@ -248,10 +248,66 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at.isoformat(),
             )
         except SQLAlchemyError:
-            self._record_rejection(
-                source=len(frame.index), result=canonicalized
+            self._emit_telemetry(
+                source=len(frame.index), result=canonicalized, rejected=1
             )
             raise
+
+    def _require_complete_event_catalog(
+        self, season: str, frame: pd.DataFrame, retrieved_at: datetime
+    ) -> list[dict[str, Any]]:
+        events = self.event_catalog.get_events(season)
+        freshness = self.event_catalog.get_freshness(season, now=retrieved_at)
+        event_count = freshness.get("event_count")
+        if not freshness.get("fresh") or not event_count or event_count != len(events):
+            self._reject(
+                "the Event Catalog must be present, fresh, and complete before publication",
+                source=len(frame.index),
+            )
+        return events
+
+    def _require_fresh_athlete_catalog(
+        self, season: str, frame: pd.DataFrame, retrieved_at: datetime
+    ) -> list[dict[str, Any]]:
+        freshness = self.athlete_catalog.get_freshness(
+            season, now=retrieved_at
+        )
+        if not freshness.get("is_fresh") or not freshness.get("row_count"):
+            self._reject(
+                "the Athlete Catalog must be present and fresh before publication",
+                source=len(frame.index),
+            )
+        return self.athlete_catalog.get_catalog(season, active_only=False)
+
+    def _publish_empty(
+        self,
+        season: str,
+        retrieved_at: datetime,
+        *,
+        completed_events: tuple[dict[str, Any], ...],
+    ) -> PlayerGameLogRefreshResult:
+        if completed_events:
+            self._reject(
+                "an empty snapshot cannot represent a season with completed games"
+            )
+        try:
+            row_count = self.repository.publish(
+                season,
+                (),
+                retrieved_at=retrieved_at,
+                source_provider=SOURCE_PROVIDER,
+                source_row_count=0,
+                allow_empty=True,
+            )
+        except ValueError:
+            self._emit_telemetry(rejected=1)
+            raise
+        self._emit_telemetry(published=row_count)
+        return PlayerGameLogRefreshResult(
+            season=season,
+            row_count=row_count,
+            retrieved_at=retrieved_at.isoformat(),
+        )
 
     def _canonicalize(
         self,
@@ -317,7 +373,7 @@ class PlayerGameLogService:
 
         for row in rows:
             try:
-                record, exclusion = self._canonicalize_row(
+                outcome = self._canonicalize_row(
                     season,
                     row,
                     athlete_map=athlete_map,
@@ -330,32 +386,15 @@ class PlayerGameLogService:
                     observed_result(),
                     malformed_row_count=1,
                 ) from error
-            if record is not None and exclusion is not None:
-                raise _CanonicalizationAbort(
-                    "player game log canonicalization returned both fact and exclusion",
-                    observed_result(),
-                    malformed_row_count=1,
-                )
-            if exclusion is not None:
-                if exclusion == "athlete":
+            if isinstance(outcome, _Excluded):
+                if outcome.reason is _ExclusionReason.ATHLETE:
                     unjoined_athlete_count += 1
-                elif exclusion == "event":
+                elif outcome.reason is _ExclusionReason.EVENT:
                     unjoined_event_count += 1
-                elif exclusion == "team":
-                    team_mismatch_count += 1
                 else:
-                    raise _CanonicalizationAbort(
-                        "player game log canonicalization returned an unknown exclusion",
-                        observed_result(),
-                        malformed_row_count=1,
-                    )
+                    team_mismatch_count += 1
                 continue
-            if record is None:
-                raise _CanonicalizationAbort(
-                    "player game log canonicalization returned no fact or exclusion",
-                    observed_result(),
-                    malformed_row_count=1,
-                )
+            record = outcome.record
             key = (record.player_id, record.game_id)
             existing = records.get(key)
             if existing is not None:
@@ -370,6 +409,37 @@ class PlayerGameLogService:
 
         return observed_result()
 
+    @staticmethod
+    def _completed_regular_season_events(
+        events: list[dict[str, Any]], *, observed_at: datetime
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            event
+            for event in events
+            if is_regular_season_event(event)
+            and is_final_event(event)
+            and not is_postponed_event(event)
+            and parse_utc_iso(str(event["scheduled_at"])) <= observed_at
+        )
+
+    @staticmethod
+    def _has_complete_game_coverage(
+        records: tuple[PlayerGameLogRecord, ...],
+        completed_events: tuple[dict[str, Any], ...],
+    ) -> bool:
+        participants: dict[tuple[str, int], set[int]] = {}
+        for record in records:
+            if record.minutes > 0:
+                participants.setdefault(
+                    (record.game_id, record.team_id), set()
+                ).add(record.player_id)
+        return all(
+            len(participants.get((str(event["nba_game_id"]), int(team_id)), set()))
+            >= MINIMUM_ACTIVE_PLAYERS_PER_TEAM_GAME
+            for event in completed_events
+            for team_id in (event["home_team_id"], event["away_team_id"])
+        )
+
     def _canonicalize_row(
         self,
         season: str,
@@ -378,7 +448,7 @@ class PlayerGameLogService:
         athlete_map: dict[int, dict[str, Any]],
         event_map: dict[str, dict[str, Any]],
         published_player_identities: dict[int, str],
-    ) -> tuple[PlayerGameLogRecord | None, _ExclusionReason | None]:
+    ) -> _CanonicalRow:
         player_id = int(
             self._number(
                 row["PLAYER_ID"], "player identity", integral=True, minimum=1
@@ -391,11 +461,11 @@ class PlayerGameLogService:
             else published_player_identities.get(player_id)
         )
         if player_name is None:
-            return None, "athlete"
+            return _Excluded(_ExclusionReason.ATHLETE)
         game_id = self._game_id(row["GAME_ID"])
         event = event_map.get(game_id)
         if event is None:
-            return None, "event"
+            return _Excluded(_ExclusionReason.EVENT)
         team_id = int(
             self._number(
                 row["TEAM_ID"], "team identity", integral=True, minimum=1
@@ -412,7 +482,7 @@ class PlayerGameLogService:
             opponent_team_tricode = event["home_team_tricode"]
             is_home = False
         else:
-            return None, "team"
+            return _Excluded(_ExclusionReason.TEAM)
 
         field_goals_made = int(
             self._number(row["FGM"], "field goals made", integral=True)
@@ -444,7 +514,7 @@ class PlayerGameLogService:
                 "a player game log has an invalid game date"
             ) from error
 
-        return (
+        return _Joined(
             PlayerGameLogRecord(
                 season=season,
                 player_id=player_id,
@@ -469,8 +539,7 @@ class PlayerGameLogService:
                 ),
                 steals=int(self._number(row["STL"], "steals", integral=True)),
                 blocks=int(self._number(row["BLK"], "blocks", integral=True)),
-            ),
-            None,
+            )
         )
 
     @staticmethod
@@ -506,25 +575,6 @@ class PlayerGameLogService:
             )
         return numeric
 
-    def _record_canonicalization_telemetry(
-        self,
-        result: _CanonicalizationResult,
-        *,
-        published: int,
-        malformed: int = 0,
-        rejected: int = 0,
-    ) -> None:
-        self._record_telemetry(
-            result.source_row_count,
-            published,
-            result.unjoined_athlete_count,
-            result.unjoined_event_count,
-            result.team_mismatch_count,
-            malformed=malformed,
-            rejected=rejected,
-            duplicates=result.duplicate_row_count,
-        )
-
     def _reject(
         self,
         message: str,
@@ -533,52 +583,44 @@ class PlayerGameLogService:
         result: _CanonicalizationResult | None = None,
         malformed: int = 0,
     ) -> NoReturn:
-        self._record_rejection(
+        self._emit_telemetry(
             source=source,
             result=result,
             malformed=malformed,
+            rejected=1,
         )
         raise PlayerGameLogIdentityError(message)
 
-    def _record_rejection(
+    def _emit_telemetry(
         self,
         *,
         source: int = 0,
         result: _CanonicalizationResult | None = None,
-        malformed: int = 0,
-    ) -> None:
-        if result is None:
-            self._record_telemetry(source, 0, 0, 0, 0, malformed=malformed, rejected=1)
-            return
-        self._record_canonicalization_telemetry(
-            result,
-            published=0,
-            malformed=malformed,
-            rejected=1,
-        )
-
-    def _record_telemetry(
-        self,
-        source: int,
-        published: int,
-        unjoined_athletes: int,
-        unjoined_events: int,
-        team_mismatches: int,
-        *,
+        published: int = 0,
         malformed: int = 0,
         rejected: int = 0,
-        duplicates: int = 0,
+        recovered: int = 0,
     ) -> None:
+        source_count = result.source_row_count if result is not None else source
         self.telemetry_recorder.record(
             PlayerGameLogTelemetryEvent(
-                source_row_count=source,
+                source_row_count=source_count,
                 published_row_count=published,
-                unjoined_athlete_count=unjoined_athletes,
-                unjoined_event_count=unjoined_events,
-                team_mismatch_count=team_mismatches,
+                unjoined_athlete_count=(
+                    result.unjoined_athlete_count if result is not None else 0
+                ),
+                unjoined_event_count=(
+                    result.unjoined_event_count if result is not None else 0
+                ),
+                team_mismatch_count=(
+                    result.team_mismatch_count if result is not None else 0
+                ),
                 malformed_row_count=malformed,
                 rejected_publication_count=rejected,
-                duplicate_row_count=duplicates,
+                duplicate_row_count=(
+                    result.duplicate_row_count if result is not None else 0
+                ),
+                recovered_shrink_row_count=recovered,
             )
         )
 

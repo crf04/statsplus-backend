@@ -34,7 +34,10 @@ def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
     player_log_service = SimpleNamespace(
         refresh=lambda season: calls.append(("player_game_logs", season)) or object()
     )
-    settings = SimpleNamespace(nba=SimpleNamespace(current_season="2025-26"))
+    settings = SimpleNamespace(
+        nba=SimpleNamespace(current_season="2025-26"),
+        catalog=SimpleNamespace(player_game_log_max_age_hours=30),
+    )
 
     def build_data_service(actual_engine, **kwargs):
         assert actual_engine is engine
@@ -60,6 +63,11 @@ def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
         assert kwargs == {
             "statistic_catalog": catalog,
             "stats_surface_season": "2025-26",
+            "stats_surface_max_age": nightly_refresh.time_window_timedelta(
+                settings.catalog.player_game_log_max_age_hours,
+                unit_seconds=3600,
+                field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+            ),
         }
         return player_log_repository
 

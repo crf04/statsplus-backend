@@ -461,7 +461,9 @@ def test_player_pool_recorder_counts_and_bounds_scalar_drop_events():
 
 def test_player_game_log_recorder_counts_and_bounds_scalar_join_events():
     recorder = telemetry.BoundedPlayerGameLogTelemetryRecorder()
-    recorder.record(telemetry.PlayerGameLogTelemetryEvent(4, 1, 1, 1, 1, 1, 1, 1))
+    recorder.record(
+        telemetry.PlayerGameLogTelemetryEvent(4, 1, 1, 1, 1, 1, 1, 1, 1)
+    )
 
     metrics = telemetry.snapshot_metrics()
 
@@ -477,6 +479,7 @@ def test_player_game_log_recorder_counts_and_bounds_scalar_join_events():
             "malformed_row_count": 1,
             "rejected_publication_count": 1,
             "duplicate_row_count": 1,
+            "recovered_shrink_row_count": 1,
         }
     ]
 
