@@ -1,11 +1,115 @@
 """Offline behavior of the Railway Nightly Refresh process command."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
+
+
+def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
+    calls = []
+    provider = object()
+    catalog = object()
+    stats_freshness = object()
+    player_log_repository = object()
+
+    class FakeEngine:
+        def dispose(self):
+            calls.append("dispose")
+
+    engine = FakeEngine()
+    stats_service = SimpleNamespace(
+        update_all_data=lambda: calls.append("stats") or True
+    )
+    event_service = SimpleNamespace(
+        refresh=lambda season: calls.append(("schedule", season)) or object()
+    )
+    athlete_service = SimpleNamespace(
+        refresh_season=lambda season: calls.append(("athlete_catalog", season))
+        or SimpleNamespace(status="succeeded")
+    )
+    player_log_service = SimpleNamespace(
+        refresh=lambda season: calls.append(("player_game_logs", season)) or object()
+    )
+    settings = SimpleNamespace(nba=SimpleNamespace(current_season="2025-26"))
+
+    def build_data_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {
+            "settings": settings,
+            "nba_stats_provider": provider,
+            "stats_freshness": stats_freshness,
+        }
+        return stats_service
+
+    def build_event_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"settings": settings, "nba_stats_provider": provider}
+        return event_service
+
+    def build_athlete_service(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"settings": settings, "nba_stats_provider": provider}
+        return athlete_service
+
+    def build_log_repository(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {
+            "statistic_catalog": catalog,
+            "stats_surface_season": "2025-26",
+        }
+        return player_log_repository
+
+    def build_log_service(**kwargs):
+        assert kwargs == {
+            "nba_stats_provider": provider,
+            "repository": player_log_repository,
+            "athlete_catalog": athlete_service,
+            "event_catalog": event_service,
+        }
+        return player_log_service
+
+    monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(nightly_refresh, "create_engine", lambda url: engine)
+    monkeypatch.setattr(nightly_refresh, "_normalize_database_url", lambda url: url)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "run_migrations",
+        lambda actual_engine: calls.append("migrations"),
+    )
+    monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", lambda **kwargs: provider)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatsFreshnessRepository",
+        lambda actual_engine: stats_freshness,
+    )
+    monkeypatch.setattr(nightly_refresh, "DataService", build_data_service)
+    monkeypatch.setattr(nightly_refresh, "EventCatalogService", build_event_service)
+    monkeypatch.setattr(nightly_refresh, "AthleteCatalogService", build_athlete_service)
+    monkeypatch.setattr(nightly_refresh, "PlayerGameLogRepository", build_log_repository)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatisticCatalog",
+        SimpleNamespace(load_default=lambda: catalog),
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "PlayerGameLogService",
+        build_log_service,
+    )
+
+    assert nightly_refresh._run("sqlite:///nightly.sqlite3") == 0
+    assert calls == [
+        "migrations",
+        "stats",
+        ("schedule", "2025-26"),
+        ("athlete_catalog", "2025-26"),
+        ("player_game_logs", "2025-26"),
+        "dispose",
+    ]
 
 
 def test_nightly_refresh_runs_stats_schedule_catalog_then_player_logs_once_on_success():

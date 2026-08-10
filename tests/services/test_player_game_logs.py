@@ -163,6 +163,7 @@ def _seed_identities(
                     ("0022500001", date(2026, 1, 2), 1, "AAA", 2, "BBB"),
                     ("0022500002", date(2026, 1, 5), 4, "DDD", 3, "CCC"),
                     ("0022500003", date(2026, 1, 8), 2, "BBB", 3, "CCC"),
+                    ("0022500004", date(2026, 1, 11), 1, "AAA", 2, "BBB"),
                 )
             ],
         )
@@ -173,7 +174,7 @@ def _seed_identities(
                 last_success_at=RETRIEVED_AT,
                 last_failure_at=None,
                 failure_summary=None,
-                event_count=3,
+                event_count=4,
             )
         )
 
@@ -211,6 +212,7 @@ def test_publish_deduplicates_identical_player_game_facts_and_records_freshness(
         [record, record],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=2,
     ) == 1
 
     assert repository.list_player_rows(SEASON, 101) == (record,)
@@ -219,6 +221,7 @@ def test_publish_deduplicates_identical_player_game_facts_and_records_freshness(
         source_provider="nba_stats",
         retrieved_at=RETRIEVED_AT,
         row_count=1,
+        source_row_count=2,
     )
     assert StatsFreshnessRepository(
         repository.engine, surface=PLAYER_GAME_LOG_SURFACE
@@ -226,6 +229,47 @@ def test_publish_deduplicates_identical_player_game_facts_and_records_freshness(
         last_successful_completion=RETRIEVED_AT,
         surface=PLAYER_GAME_LOG_SURFACE,
     )
+
+
+@pytest.mark.parametrize(
+    ("source_row_count", "message"),
+    [
+        pytest.param(-1, "non-negative integer", id="negative"),
+        pytest.param(True, "non-negative integer", id="boolean"),
+        pytest.param(0, "smaller than canonical input", id="below-canonical-count"),
+    ],
+)
+def test_publish_rejects_invalid_source_row_coverage(
+    tmp_path, source_row_count, message
+):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        repository.publish(
+            SEASON,
+            [_record()],
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=source_row_count,
+        )
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_publish_rejects_source_count_below_canonical_input_coverage(tmp_path):
+    repository = _repository(tmp_path)
+    record = _record()
+
+    with pytest.raises(ValueError, match="smaller than canonical input"):
+        repository.publish(
+            SEASON,
+            [record, record],
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=1,
+        )
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
 
 
 def test_historical_backfill_after_current_does_not_hide_either_season(tmp_path):
@@ -244,12 +288,14 @@ def test_historical_backfill_after_current_does_not_hide_either_season(tmp_path)
         [current],
         retrieved_at=current_retrieved_at,
         source_provider="nba_stats",
+        source_row_count=1,
     )
     repository.publish(
         HISTORICAL_SEASON,
         [historical],
         retrieved_at=historical_retrieved_at,
         source_provider="nba_stats",
+        source_row_count=1,
     )
 
     assert repository.list_player_rows(SEASON, current.player_id) == (current,)
@@ -282,6 +328,7 @@ def test_current_publication_after_historical_keeps_both_seasons_consistent(tmp_
         [historical],
         retrieved_at=historical_retrieved_at,
         source_provider="nba_stats",
+        source_row_count=1,
     )
     assert StatsFreshnessRepository(
         repository.engine, surface=PLAYER_GAME_LOG_SURFACE
@@ -291,6 +338,7 @@ def test_current_publication_after_historical_keeps_both_seasons_consistent(tmp_
         [current],
         retrieved_at=current_retrieved_at,
         source_provider="nba_stats",
+        source_row_count=1,
     )
 
     assert repository.list_player_rows(
@@ -315,6 +363,7 @@ def test_failed_replacement_rolls_back_rows_and_freshness(tmp_path):
         [original],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=1,
     )
 
     invalid = replace(original, game_id="0022500999", player_name=None)
@@ -324,6 +373,7 @@ def test_failed_replacement_rolls_back_rows_and_freshness(tmp_path):
             [invalid],
             retrieved_at=RETRIEVED_AT + timedelta(days=1),
             source_provider="nba_stats",
+            source_row_count=1,
         )
 
     assert repository.list_player_rows(SEASON, 101) == (original,)
@@ -344,6 +394,7 @@ def test_empty_replacement_preserves_last_valid_rows_and_freshness(
         [original],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=1,
     )
 
     with pytest.raises(ValueError, match="empty player game log snapshot"):
@@ -352,6 +403,7 @@ def test_empty_replacement_preserves_last_valid_rows_and_freshness(
             [],
             retrieved_at=RETRIEVED_AT + timedelta(days=1),
             source_provider="nba_stats",
+            source_row_count=0,
             allow_empty=allow_empty,
         )
 
@@ -367,6 +419,7 @@ def test_repository_defensively_rejects_conflicting_duplicate_identity(tmp_path)
         [original],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=1,
     )
 
     with pytest.raises(ValueError, match="conflicting player game log"):
@@ -375,6 +428,7 @@ def test_repository_defensively_rejects_conflicting_duplicate_identity(tmp_path)
             [original, replace(original, points=99)],
             retrieved_at=RETRIEVED_AT + timedelta(days=1),
             source_provider="nba_stats",
+            source_row_count=2,
         )
 
     assert repository.list_player_rows(SEASON, 101) == (original,)
@@ -395,6 +449,7 @@ def test_durable_identity_reuse_excludes_conflicting_canonical_names(tmp_path):
         [first, conflicting_name],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=2,
     )
 
     assert repository.get_published_player_identities(
@@ -418,6 +473,7 @@ def test_truncated_cumulative_snapshot_preserves_larger_publication(tmp_path):
         complete,
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=25,
     )
 
     with pytest.raises(ValueError, match="smaller.*cumulative"):
@@ -426,6 +482,7 @@ def test_truncated_cumulative_snapshot_preserves_larger_publication(tmp_path):
             complete[:1],
             retrieved_at=RETRIEVED_AT + timedelta(days=1),
             source_provider="nba_stats",
+            source_row_count=1,
         )
 
     assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
@@ -433,6 +490,7 @@ def test_truncated_cumulative_snapshot_preserves_larger_publication(tmp_path):
         source_provider="nba_stats",
         retrieved_at=RETRIEVED_AT,
         row_count=25,
+        source_row_count=25,
     )
 
 
@@ -446,6 +504,7 @@ def test_same_size_and_growing_cumulative_snapshots_can_replace(tmp_path):
         [first, second],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=2,
     )
 
     assert repository.publish(
@@ -453,12 +512,14 @@ def test_same_size_and_growing_cumulative_snapshots_can_replace(tmp_path):
         [replace(first, points=26), second],
         retrieved_at=RETRIEVED_AT + timedelta(days=1),
         source_provider="nba_stats",
+        source_row_count=2,
     ) == 2
     assert repository.publish(
         SEASON,
         [replace(first, points=27), second, third],
         retrieved_at=RETRIEVED_AT + timedelta(days=2),
         source_provider="nba_stats",
+        source_row_count=3,
     ) == 3
     assert repository.get_freshness(SEASON).row_count == 3
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT + timedelta(
@@ -476,6 +537,7 @@ def test_rows_without_complete_publication_metadata_fail_closed(tmp_path):
         source_provider=None,
         retrieved_at=None,
         row_count=0,
+        source_row_count=0,
     )
     assert repository.list_player_rows(SEASON, 101) == ()
 
@@ -488,6 +550,7 @@ def test_season_publication_does_not_depend_on_global_surface_observation(tmp_pa
         [record],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=1,
     )
     with repository.engine.begin() as connection:
         connection.execute(
@@ -501,6 +564,7 @@ def test_season_publication_does_not_depend_on_global_surface_observation(tmp_pa
         source_provider="nba_stats",
         retrieved_at=RETRIEVED_AT,
         row_count=1,
+        source_row_count=1,
     )
     assert repository.list_player_rows(SEASON, 101) == (record,)
     assert StatsFreshnessRepository(
@@ -533,6 +597,7 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
         [*reversed(player_rows), archetype_row],
         retrieved_at=RETRIEVED_AT,
         source_provider="nba_stats",
+        source_row_count=13,
     )
 
     rate = repository.get_season_rate(SEASON, 101)
@@ -617,16 +682,27 @@ def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp
 
     result = service.refresh(SEASON)
 
-    assert result.row_count == 4
+    assert result.row_count == 6
     assert result.retrieved_at == RETRIEVED_AT.isoformat()
     assert provider.calls == [(SEASON, "Regular Season")]
     player_rows = repository.list_player_rows(SEASON, 101)
-    assert [row.team_id for row in player_rows] == [3, 1]
-    assert [row.opponent_team_id for row in player_rows] == [4, 2]
-    assert [row.player_name for row in player_rows] == ["Canonical One"] * 2
-    assert player_rows[0].minutes == 34.25
-    assert player_rows[0].field_goals_attempted == 21
-    assert player_rows[0].three_pointers_made == 4
+    assert [row.team_id for row in player_rows] == [1, 3, 1]
+    assert [row.opponent_team_id for row in player_rows] == [2, 4, 2]
+    assert [row.player_name for row in player_rows] == ["Canonical One"] * 3
+    assert player_rows[1].minutes == 34.25
+    assert player_rows[1].field_goals_attempted == 21
+    assert player_rows[1].three_pointers_made == 4
+    assert [
+        row.game_id for row in repository.list_h2h_rows(SEASON, 101, 2)
+    ] == ["0022500004", "0022500001"]
+    assert [
+        (row.game_id, row.player_id)
+        for row in repository.list_archetype_rows(SEASON, [202, 101], 2)
+    ] == [
+        ("0022500004", 101),
+        ("0022500004", 202),
+        ("0022500001", 101),
+    ]
 
 
 def test_refresh_timestamp_is_observed_after_provider_fetch(tmp_path):
@@ -685,9 +761,9 @@ def test_refresh_collapses_and_counts_exact_duplicate_source_rows(tmp_path):
         repository, provider, telemetry_recorder=telemetry
     ).refresh(SEASON)
 
-    assert result.row_count == 4
-    assert telemetry.events[0].source_row_count == 5
-    assert telemetry.events[0].published_row_count == 4
+    assert result.row_count == 6
+    assert telemetry.events[0].source_row_count == 7
+    assert telemetry.events[0].published_row_count == 6
     assert telemetry.events[0].duplicate_row_count == 1
     assert telemetry.events[0].rejected_publication_count == 0
 
@@ -705,6 +781,7 @@ def test_preseason_empty_snapshot_can_record_honest_zero_row_freshness(tmp_path)
         source_provider="nba_stats",
         retrieved_at=RETRIEVED_AT,
         row_count=0,
+        source_row_count=0,
     )
 
 
@@ -862,13 +939,13 @@ def test_catalog_shrink_reuses_only_exact_previously_published_player_identity(
         repository, provider, telemetry_recorder=telemetry
     ).refresh(SEASON, now=RETRIEVED_AT + timedelta(days=1))
 
-    assert result.row_count == 4
+    assert result.row_count == 6
     assert repository.list_player_rows(SEASON, 101) == prior_player_rows
     assert repository.list_player_rows(SEASON, 999) == ()
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=5,
-            published_row_count=4,
+            source_row_count=7,
+            published_row_count=6,
             unjoined_athlete_count=1,
             unjoined_event_count=0,
             team_mismatch_count=0,
@@ -946,7 +1023,7 @@ def test_unusable_athlete_catalog_preserves_last_valid_publication(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=4,
+            source_row_count=6,
             published_row_count=0,
             unjoined_athlete_count=0,
             unjoined_event_count=0,
@@ -995,7 +1072,7 @@ def test_unusable_event_catalog_preserves_last_valid_publication(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=4,
+            source_row_count=6,
             published_row_count=0,
             unjoined_athlete_count=0,
             unjoined_event_count=0,
@@ -1009,11 +1086,14 @@ def test_incomplete_event_catalog_cannot_hide_cumulative_log_growth(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     provider = _RecordedSeasonProvider()
+    provider.frame.loc[0, "GAME_ID"] = "0022500005"
+    provider.frame.loc[0, "GAME_DATE"] = "2026-01-11"
     service = _service(repository, provider)
     service.refresh(SEASON)
     before = repository.list_player_rows(SEASON, 101)
-    new_game = provider.frame.iloc[[0]].copy()
-    new_game["GAME_ID"] = "0022500004"
+    assert repository.get_freshness(SEASON).source_row_count == 6
+    new_game = provider.frame.iloc[[1]].copy()
+    new_game["GAME_ID"] = "0022500006"
     new_game["GAME_DATE"] = "2026-01-21"
     provider.frame = pd.concat([provider.frame, new_game], ignore_index=True)
     telemetry = _RecordingTelemetry()
@@ -1025,10 +1105,100 @@ def test_incomplete_event_catalog_cannot_hide_cumulative_log_growth(tmp_path):
 
     assert repository.list_player_rows(SEASON, 101) == before
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
-    assert telemetry.events[0].source_row_count == 5
+    assert telemetry.events[0].source_row_count == 7
     assert telemetry.events[0].published_row_count == 0
-    assert telemetry.events[0].unjoined_event_count == 1
+    assert telemetry.events[0].unjoined_event_count == 2
     assert telemetry.events[0].rejected_publication_count == 1
+
+    recovery_at = RETRIEVED_AT + timedelta(hours=2)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                {
+                    "nba_game_id": game_id,
+                    "season": SEASON,
+                    "home_team_id": home_team_id,
+                    "home_team_name": home_team_tricode,
+                    "home_team_tricode": home_team_tricode,
+                    "away_team_id": away_team_id,
+                    "away_team_name": away_team_tricode,
+                    "away_team_tricode": away_team_tricode,
+                    "scheduled_at": scheduled_at,
+                    "status_text": "Final",
+                    "status_code": 3,
+                    "postponed_status": None,
+                    "postponement_evidence": None,
+                    "classification": "Regular Season",
+                    "first_seen_at": recovery_at,
+                    "last_seen_at": recovery_at,
+                }
+                for (
+                    game_id,
+                    home_team_id,
+                    home_team_tricode,
+                    away_team_id,
+                    away_team_tricode,
+                    scheduled_at,
+                ) in (
+                    (
+                        "0022500005",
+                        1,
+                        "AAA",
+                        2,
+                        "BBB",
+                        datetime(2026, 1, 11, tzinfo=timezone.utc),
+                    ),
+                    (
+                        "0022500006",
+                        2,
+                        "BBB",
+                        3,
+                        "CCC",
+                        datetime(2026, 1, 21, tzinfo=timezone.utc),
+                    ),
+                )
+            ],
+        )
+        connection.execute(
+            update(EventCatalogRefresh.__table__)
+            .where(EventCatalogRefresh.season == SEASON)
+            .values(last_success_at=recovery_at, event_count=6)
+        )
+
+    recovered = _service(repository, provider).refresh(SEASON, now=recovery_at)
+
+    assert recovered.row_count == 7
+    assert repository.get_freshness(SEASON).source_row_count == 7
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param("GAME_ID", "0022599999", id="event"),
+        pytest.param("TEAM_ID", 999, id="team"),
+    ],
+)
+def test_stable_partially_unjoined_snapshot_can_republish(
+    tmp_path, column, value
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    provider.frame.loc[0, column] = value
+
+    first = _service(repository, provider).refresh(SEASON)
+    second_at = RETRIEVED_AT + timedelta(hours=1)
+    second = _service(repository, provider).refresh(SEASON, now=second_at)
+
+    assert first.row_count == second.row_count == 5
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=second_at,
+        row_count=5,
+        source_row_count=6,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1052,11 +1222,11 @@ def test_individual_unjoined_rows_are_excluded_and_counted(
         repository, provider, telemetry_recorder=telemetry
     ).refresh(SEASON)
 
-    assert result.row_count == 3
+    assert result.row_count == 5
     assert len(telemetry.events) == 1
     event = telemetry.events[0]
-    assert event.source_row_count == 4
-    assert event.published_row_count == 3
+    assert event.source_row_count == 6
+    assert event.published_row_count == 5
     assert getattr(event, telemetry_field) == 1
     assert (
         event.unjoined_athlete_count
@@ -1084,9 +1254,9 @@ def test_wholly_unjoined_snapshot_preserves_last_valid_publication(tmp_path):
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=4,
+            source_row_count=6,
             published_row_count=0,
-            unjoined_athlete_count=4,
+            unjoined_athlete_count=6,
             unjoined_event_count=0,
             team_mismatch_count=0,
             rejected_publication_count=1,
@@ -1099,6 +1269,7 @@ def test_wholly_unjoined_snapshot_preserves_last_valid_publication(tmp_path):
     [
         pytest.param("MIN", float("nan"), id="nonfinite"),
         pytest.param("FGM", 99, id="logically-inconsistent"),
+        pytest.param("FGM", 1, id="three-pointers-exceed-field-goals"),
     ],
 )
 def test_malformed_row_aborts_publication_and_records_safe_telemetry(
@@ -1122,7 +1293,7 @@ def test_malformed_row_aborts_publication_and_records_safe_telemetry(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert len(telemetry.events) == 1
     assert telemetry.events[0] == PlayerGameLogTelemetryEvent(
-        source_row_count=4,
+        source_row_count=6,
         published_row_count=0,
         unjoined_athlete_count=1,
         unjoined_event_count=0,
@@ -1136,7 +1307,7 @@ def test_malformed_row_aborts_publication_and_records_safe_telemetry(
     ("rejection", "source_row_count"),
     [
         pytest.param("shrink", 1, id="cumulative-shrink"),
-        pytest.param("conflicting_duplicate", 5, id="conflicting-duplicate"),
+        pytest.param("conflicting_duplicate", 7, id="conflicting-duplicate"),
     ],
 )
 def test_rejected_publication_records_safe_telemetry(
@@ -1203,7 +1374,7 @@ def test_database_publication_failure_preserves_snapshot_and_records_rejection(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=5,
+            source_row_count=7,
             published_row_count=0,
             unjoined_athlete_count=1,
             unjoined_event_count=0,
@@ -1251,7 +1422,7 @@ def test_prerequisite_database_read_failure_records_rejection_once(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
     assert telemetry.events == [
         PlayerGameLogTelemetryEvent(
-            source_row_count=4,
+            source_row_count=6,
             published_row_count=0,
             unjoined_athlete_count=0,
             unjoined_event_count=0,

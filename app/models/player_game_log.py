@@ -1,6 +1,16 @@
 """Durable canonical player game-log facts and publication freshness."""
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Index, Integer, String
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+)
 
 from . import Base
 
@@ -62,6 +72,14 @@ class PlayerGameLogRefresh(Base):
     source_provider = Column(String(32), nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     row_count = Column(Integer, nullable=False)
+    source_row_count = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "source_row_count >= row_count AND row_count >= 0",
+            name="ck_player_game_log_refresh_counts",
+        ),
+    )
 
 
 __all__ = ["PlayerGameLog", "PlayerGameLogRefresh"]

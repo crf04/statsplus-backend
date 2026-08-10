@@ -519,22 +519,28 @@ canonical name may be reused. A never-published or durably ambiguous player
 remains unjoined, and recovered athlete identity never relaxes the exact event
 or team joins. Structurally, numerically, or logically malformed rows abort the
 publication while retaining already observed bounded coverage counts. If a
-new cumulative source row cannot join an event and canonical publication would
-otherwise remain at or below its prior size, the apparent growth exposes an
-incomplete Event Catalog and fails closed instead of stamping the unchanged
-snapshot fresh.
+new cumulative source row cannot join an event or a team and canonical
+publication would otherwise remain at or below its prior size, the apparent
+growth exposes incomplete canonical identity coverage and fails closed instead
+of stamping the unchanged snapshot fresh. This comparison uses the prior raw
+source-row count, not the prior canonical count, so an unchanged partially
+unjoined snapshot can be republished idempotently and later recover when its
+governed catalog identities arrive.
 
 Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
 and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
 replacement and its `nba_stats` source, timezone-aware retrieval time, and row
-count commit in the same transaction. Exact duplicate provider rows collapse
-to one fact and increment bounded duplicate telemetry; conflicting duplicates
-fail closed at canonicalization, and the repository repeats that invariant for
-direct persistence callers. Any validation or database failure leaves both the
-prior rows and prior successful freshness unchanged and emits bounded rejection
-telemetry. One service-boundary SQLAlchemy handler covers prerequisite catalog,
-identity, and freshness reads plus publication after repository rollback,
-without swallowing the error or counting it twice. An empty Regular Season
+count commit in the same transaction. The sidecar also records the bounded,
+nonnegative raw `source_row_count`; it can exceed the canonical row count after
+exact duplicates or governed exclusions but never be smaller. Exact duplicate
+provider rows collapse to one fact and increment bounded duplicate telemetry;
+conflicting duplicates fail closed at canonicalization, and the repository
+repeats that invariant for direct persistence callers. Any validation or
+database failure leaves both the prior rows and prior successful freshness
+unchanged and emits bounded rejection telemetry. One service-boundary
+SQLAlchemy handler covers prerequisite catalog, identity, and freshness reads
+plus publication after repository rollback, without swallowing the error or
+counting it twice. An empty Regular Season
 provider snapshot is publishable only when the governed Event Catalog is
 present and contains no Regular Season event classified final by the shared
 governed NBA event predicates. A postponed event does not become completed

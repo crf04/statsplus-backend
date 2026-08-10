@@ -465,8 +465,11 @@ refresh, and the prior player-log publication remains valid.
 Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
 preserves the last valid publication; individual well-formed unjoined athlete,
 game, or team rows are excluded and counted without exposing their identities.
-Source growth hidden by an unjoined game fails as incomplete Event Catalog
-evidence instead of republishing an unchanged cumulative snapshot as fresh.
+The season sidecar stores both canonical and bounded raw source-row counts.
+Stable partial exclusions can therefore republish idempotently; source growth
+hidden by an unjoined game or team fails as incomplete canonical identity
+evidence instead of republishing an unchanged cumulative snapshot as fresh,
+and publication recovers when those exact governed identities arrive.
 SQLAlchemy failures from prerequisite freshness/identity reads or publication
 are re-raised and emit one bounded rejection aggregate with already-observed
 coverage counts; publication failures first roll back.

@@ -59,6 +59,7 @@ class PlayerGameLogFreshness:
     source_provider: str | None
     retrieved_at: datetime | None
     row_count: int
+    source_row_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,14 +121,23 @@ class PlayerGameLogRepository:
         *,
         retrieved_at: datetime,
         source_provider: str,
+        source_row_count: int,
         allow_empty: bool = False,
     ) -> int:
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
+        if (
+            isinstance(source_row_count, bool)
+            or not isinstance(source_row_count, int)
+            or source_row_count < 0
+        ):
+            raise ValueError("source_row_count must be a non-negative integer")
 
         unique: dict[tuple[int, str], PlayerGameLogRecord] = {}
+        canonical_input_count = 0
         for record in records:
+            canonical_input_count += 1
             if record.season != canonical_season:
                 raise ValueError("every player game log must belong to the publication season")
             key = (record.player_id, record.game_id)
@@ -140,6 +150,10 @@ class PlayerGameLogRepository:
 
         if not unique and not allow_empty:
             raise ValueError("empty player game log snapshot cannot be published")
+        if source_row_count < canonical_input_count:
+            raise ValueError(
+                "source_row_count cannot be smaller than canonical input rows"
+            )
 
         retrieved = assume_utc(retrieved_at)
         log_table = PlayerGameLog.__table__
@@ -173,6 +187,7 @@ class PlayerGameLogRepository:
                 "source_provider": source_provider,
                 "retrieved_at": retrieved,
                 "row_count": len(unique),
+                "source_row_count": source_row_count,
             }
             result = connection.execute(
                 update(refresh_table)
@@ -215,12 +230,13 @@ class PlayerGameLogRepository:
                 )
             ).mappings().one_or_none()
         if row is None:
-            return PlayerGameLogFreshness(canonical_season, None, None, 0)
+            return PlayerGameLogFreshness(canonical_season, None, None, 0, 0)
         return PlayerGameLogFreshness(
             season=canonical_season,
             source_provider=row["source_provider"],
             retrieved_at=assume_utc(row["retrieved_at"]),
             row_count=int(row["row_count"]),
+            source_row_count=int(row["source_row_count"]),
         )
 
     def get_published_player_identities(

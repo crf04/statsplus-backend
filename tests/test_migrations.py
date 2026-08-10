@@ -155,7 +155,14 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "source_provider",
         "retrieved_at",
         "row_count",
+        "source_row_count",
     }
+    assert inspect(engine).get_check_constraints("player_game_log_refreshes") == [
+        {
+            "name": "ck_player_game_log_refresh_counts",
+            "sqltext": "source_row_count >= row_count AND row_count >= 0",
+        }
+    ]
 
     with engine.connect() as connection:
         assert connection.execute(
