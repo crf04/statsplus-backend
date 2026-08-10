@@ -1024,20 +1024,29 @@ and the supported narrowing filters, and nothing is ever truncated.
 ```text
 GET /api/dfs/board
   → require_auth (Firebase bearer token)
-  → parse_board_request(request.args) → NBAMarketQuery + ComparisonFilters
-  → DFSBoardResponseService.respond(...)
+  → DFSBoardResponseService.respond_to_query(request.args)   ← one event, here
+      → publication gate (feature flag + provider registry)
+      → parse_board_request(...) → NBAMarketQuery + ComparisonFilters
       → ComparisonBoardService.get_comparisons(...)
-      → HTTP outcome, version 1 payload, weak ETag, bounded telemetry
+      → HTTP outcome, version 1 payload, weak ETag
   → private, revalidatable JSON (200), or 304 / 400 / 404 / 503
+  → blueprint after_request: private caching and security headers, every status
 ```
 
-The route in `app.routes.dfs_routes` decides nothing. It authenticates, parses,
-and formats; `app.services.dfs_board_response` decides whether the board is
-published, whether it is usable, what the payload is, what the entity tag is,
-and whether the caller already holds it. Both the route module and the
-response service create no provider, Redis, or database client: the application
-factory composes `dfs_board_response_service` from the comparison board alone,
-which itself wraps the already-composed collector.
+The route in `app.routes.dfs_routes` decides nothing. It authenticates and
+formats; `app.services.dfs_board_response` decides whether the board is
+published, what the query string means, whether the board is usable, what the
+payload is, what the entity tag is, and whether the caller already holds it.
+Both the route module and the response service create no provider, Redis, or
+database client: the application factory composes `dfs_board_response_service`
+from the comparison board alone, which itself wraps the already-composed
+collector.
+
+The order of the first two steps is a contract, not an implementation detail.
+Publication is settled before a parameter is read, so an authenticated request
+to an unpublished board is 404 whatever its query says, and reaches no parser,
+provider, database, or cache. Authentication remains above the service, so an
+unauthenticated request is 401 and is recorded as no board request at all.
 
 **Publication.** The board is published only when `DFS_BOARD_ENABLED=true`
 *and* `DFS_ENABLED_PROVIDERS` names at least one provider. Both are off by
@@ -1048,29 +1057,58 @@ additionally requires a non-empty registry regardless of the flag. An
 unpublished board answers an authenticated request with 404
 `dfs_board_disabled` and calls no provider.
 
-**Outcomes.** A read is 200 when at least one provider produced a usable
+**Outcomes.** A read is 200 when at least one provider produced a *readable*
 snapshot — complete, partial, permitted-stale, or empty-complete. An empty
-complete snapshot is a valid empty board, not an outage. Only when no provider
-produced a usable snapshot is the response 503, carrying the same bounded
-Provider Outcome vocabulary the board reports on success: provider name,
-status, stable failure reason, coverage warning codes, and cache state. No
-upstream text, URL, payload, or credential can reach a caller through it.
+complete snapshot is a valid empty board, not an outage. Readability is judged
+from the provider report's own typed evidence, the derived `MarketFreshness`
+and the future-observation flag, never from exclusion text: a retrieval that
+succeeded but is past its stale-if-error ceiling, or timestamped ahead of the
+board's clock, carries no freshness, enters no comparison, and leaves every one
+of its markets unresolved. A board of only those states nothing, so it is the
+503 it is rather than an empty 200. The ceiling is inclusive, so a snapshot
+exactly at it is still readable. The 503 carries the same bounded Provider
+Outcome vocabulary the board reports on success — provider name, status, stable
+failure reason, freshness, future-observation flag, coverage warning codes, and
+cache state. No upstream text, URL, payload, or credential can reach a caller
+through it.
+
+**Filters.** Every supplied filter is read as a narrowing the caller meant. An
+empty value or an empty comma-separated member — `providers=`, `providers=,`,
+`providers=dabble,`, a blank canonical identity, `season=` — is
+`400 invalid_input`, never a silent widening to the unfiltered board or the
+default season, and it reaches no provider. A repeated identity is accepted and
+collapsed. Omitting a parameter is the only way to accept a default.
 
 **Conditional requests.** The response carries a weak `ETag` computed over the
 board's stated facts with the instant of observation and every age derived from
 it excluded, so an unchanged board revalidates as 304 instead of resending a
-board that differs only in how old it says it is. `Cache-Control: private,
-no-cache, max-age=0, must-revalidate` and `Vary: Authorization` prohibit shared
-caching of an authenticated board. `X-Request-ID` and the security headers are
-present on 304 responses too.
+board that differs only in how old it says it is. The tag identifies a board, so
+it is set on 200 and 304 only and never on a failure.
 
-**Observability.** One `BoardRequestEvent` per read records latency, the HTTP
-outcome and status, comparison availability, provider status and failure-reason
-counts, freshness and cache-state counts, and group/market/unresolved/disabled
-counts. Every label comes from a closed vocabulary in `app.utils.telemetry`; no
+`Cache-Control: private, no-cache, max-age=0, must-revalidate`,
+`Vary: Authorization`, `X-Content-Type-Options: nosniff`, and `X-Request-ID` are
+stated once, by a blueprint `after_request` scoped to this route, so every
+status carries them — including the 401, the parser's 400, the gate's 404, the
+503, and a centrally handled 500, each produced by a different layer. `Vary` is
+added rather than assigned, so a CORS `Origin` survives beside it. No other
+blueprint's caching is affected.
+
+**Observability.** Exactly one `BoardRequestEvent` per authenticated request,
+emitted by the recording seam that encloses the gate, the parser, the board,
+and the serialization — so a disabled, invalid, or unexpectedly failed request
+is counted like a served one, and none is counted twice. It records latency,
+the HTTP outcome and status, comparison availability, provider status and
+failure-reason counts, freshness and cache-state counts, and
+group/market/unresolved/disabled counts. Outcome and status are one closed
+pairing (`served`/200, `not_modified`/304, `invalid`/400, `too_large`/400,
+`disabled`/404, `error`/500, `unavailable`/503) enforced where the event is
+built, alongside the finite non-negative duration and boolean-free counts.
+Every label comes from a closed vocabulary in `app.utils.telemetry`; no
 athlete, event, market, selection, or provider-source ID and no upstream text
-can become a metric dimension. The collector's own `BoardTelemetryEvent`
-remains the record of one retrieval.
+can become a metric dimension. An unauthenticated request records nothing:
+telemetry begins where the caller's identity does. Operators read the most
+recent 50 as `recent_board_request_events` on `GET /api/data/telemetry`. The
+collector's own `BoardTelemetryEvent` remains the record of one retrieval.
 
 **Operations.** Catalog freshness gates comparisons but never retrieval, so a
 stale catalog yields a 200 board with `comparison_availability.available:
