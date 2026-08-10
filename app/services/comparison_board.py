@@ -26,7 +26,9 @@ from app.domain.comparisons import (
     SUPPORTED_NARROWING_FILTERS,
     BoardAppearance,
     BoardAthlete,
+    BoardCacheState,
     BoardCompetition,
+    BoardCoverage,
     BoardEvent,
     BoardMarket,
     BoardNamedEvidence,
@@ -49,8 +51,11 @@ from app.domain.comparisons import (
     MarketFreshness,
     ProviderReport,
     UnresolvedMarket,
+    canonical_selections,
     exact_seconds,
+    market_evidence_key,
     market_reference,
+    observation_evidence_key,
     selection_reference,
 )
 from app.domain.statistics import MatchState, ScoringPeriod
@@ -302,49 +307,71 @@ class ComparisonBoardService:
         athletes = _athlete_identities(board)
         events_by_identity, events_by_evidence = _event_identities(board)
 
-        retained, conflicting = self._retained_markets(board, filters, observed_at)
+        retained = self._retained_markets(board, filters, observed_at)
 
         members: dict[ComparisonKey, list[ComparisonMember]] = {}
         unresolved: list[UnresolvedMarket] = []
         markets: list[BoardMarket] = []
         observed = 0
-        for reference, (market, observation) in retained.items():
-            if reference in conflicting:
-                key: ComparisonKey | None = None
-                exclusion: ComparisonExclusion | None = (
-                    ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-                )
-                detail: str | None = "conflicting_normalized_content"
-            elif observation.is_future:
-                key, exclusion, detail = None, ComparisonExclusion.FUTURE_SNAPSHOT, None
-            else:
-                key, exclusion, detail = self._classify(
-                    market,
-                    availability=availability,
-                    freshness=observation.freshness,
-                    athletes=athletes,
-                    events_by_identity=events_by_identity,
-                    events_by_evidence=events_by_evidence,
-                )
-            if not self._passes_canonical_filters(key, filters):
-                continue
-            observed += 1
-            markets.append(
-                self._board_market(market, reference, observation, key, exclusion, detail)
-            )
-            if key is None:
-                unresolved.append(
-                    UnresolvedMarket(
-                        market_reference=reference,
-                        provider=market.provider,
-                        reason=exclusion,
-                        detail=detail,
+        for reference, observations in retained.items():
+            # Several disagreeing observations of one reference are all kept,
+            # in their own content-derived order, so nothing is lost and the
+            # board does not depend on which of them arrived first.
+            conflict_count = len(observations) if len(observations) > 1 else None
+            for ordinal, (market, observation) in enumerate(observations):
+                if conflict_count is not None:
+                    key: ComparisonKey | None = None
+                    exclusion: ComparisonExclusion | None = (
+                        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+                    )
+                    detail: str | None = "conflicting_normalized_content"
+                elif observation.is_future:
+                    key, exclusion, detail = (
+                        None,
+                        ComparisonExclusion.FUTURE_SNAPSHOT,
+                        None,
+                    )
+                else:
+                    key, exclusion, detail = self._classify(
+                        market,
+                        availability=availability,
+                        freshness=observation.freshness,
+                        athletes=athletes,
+                        events_by_identity=events_by_identity,
+                        events_by_evidence=events_by_evidence,
+                    )
+                if not self._passes_canonical_filters(key, filters):
+                    continue
+                observed += 1
+                markets.append(
+                    self._board_market(
+                        market,
+                        reference,
+                        observation,
+                        key,
+                        exclusion,
+                        detail,
+                        conflict_ordinal=None if conflict_count is None else ordinal,
+                        conflict_count=conflict_count,
                     )
                 )
-                continue
-            members.setdefault(key, []).append(
-                self._member(market, reference, observation)
-            )
+                if key is None:
+                    # One reference is unresolved once, however many
+                    # observations contested it; each of them stays readable in
+                    # ``markets``.
+                    if conflict_count is None or ordinal == 0:
+                        unresolved.append(
+                            UnresolvedMarket(
+                                market_reference=reference,
+                                provider=market.provider,
+                                reason=exclusion,
+                                detail=detail,
+                            )
+                        )
+                    continue
+                members.setdefault(key, []).append(
+                    self._member(market, reference, observation)
+                )
 
         # The whole read is classified before the ceiling is applied, so the
         # count reported back is what the caller's filters actually observed
@@ -388,17 +415,18 @@ class ComparisonBoardService:
 
     def _retained_markets(
         self, board: Any, filters: ComparisonFilters, observed_at: datetime
-    ) -> tuple[dict[str, tuple[PlayerProjectionMarket, BoardObservation]], set[str]]:
-        """Every normalized market this read keeps, by its stable reference.
+    ) -> dict[str, list[tuple[PlayerProjectionMarket, BoardObservation]]]:
+        """Every normalized observation this read keeps, by stable reference.
 
-        A repeated reference is one market only when every normalized fact --
-        including the observation it came from -- agrees; a repeat that
-        disagrees is malformed rather than a second offering, so the reference
-        it contests is retained as conflicting evidence and enters no group.
+        A repeat collapses only when every normalized fact -- including the
+        observation it came from -- agrees, so an exact repeat is one offering.
+        A repeat that disagrees is malformed rather than a second offering, but
+        it is still evidence: every distinct contradicting observation is kept,
+        ordered by its own content so the result cannot depend on the order the
+        providers were read in, and none of them enters a group.
         """
 
-        retained: dict[str, tuple[PlayerProjectionMarket, BoardObservation]] = {}
-        conflicting: set[str] = set()
+        retained: dict[str, list[tuple[PlayerProjectionMarket, BoardObservation]]] = {}
         for snapshot in board.snapshots:
             if filters.providers and snapshot.provider not in filters.providers:
                 continue
@@ -408,13 +436,12 @@ class ComparisonBoardService:
                     MarketStatus(market.status) not in filters.market_statuses
                 ):
                     continue
-                reference = market_reference(market)
-                previous = retained.get(reference)
-                if previous is None:
-                    retained[reference] = (market, observation)
-                elif previous[0] != market or previous[1] != observation:
-                    conflicting.add(reference)
-        return retained, conflicting
+                observations = retained.setdefault(market_reference(market), [])
+                if (market, observation) not in observations:
+                    observations.append((market, observation))
+        for observations in retained.values():
+            observations.sort(key=_evidence_order)
+        return retained
 
     def _observation(
         self, snapshot: ProviderSnapshot, observed_at: datetime
@@ -595,7 +622,7 @@ class ComparisonBoardService:
             freshness=observation.freshness,
             selection_references=tuple(
                 selection_reference(reference, selection)
-                for selection in market.selections
+                for selection in canonical_selections(market.selections)
             ),
         )
 
@@ -607,6 +634,9 @@ class ComparisonBoardService:
         key: ComparisonKey | None,
         exclusion: ComparisonExclusion | None,
         detail: str | None,
+        *,
+        conflict_ordinal: int | None = None,
+        conflict_count: int | None = None,
     ) -> BoardMarket:
         """Retain one normalized market whole, linked to where it went."""
 
@@ -636,11 +666,13 @@ class ComparisonBoardService:
             appearance=BoardAppearance.of(market.appearance),
             selections=tuple(
                 BoardSelection.of(selection_reference(reference, selection), selection)
-                for selection in market.selections
+                for selection in canonical_selections(market.selections)
             ),
             comparison_reference=None if key is None else key.reference,
             exclusion=exclusion,
             exclusion_detail=detail,
+            conflict_ordinal=conflict_ordinal,
+            conflict_count=conflict_count,
         )
 
     # -- freshness and reporting -------------------------------------------
@@ -711,9 +743,20 @@ class ComparisonBoardService:
                             )
                         )
                     ),
+                    coverage=BoardCoverage.of(coverage),
+                    cache=BoardCacheState.of(outcome),
                 )
             )
         return tuple(sorted(reports, key=lambda report: report.provider))
+
+def _evidence_order(
+    entry: tuple[PlayerProjectionMarket, BoardObservation],
+) -> tuple[bytes, bytes]:
+    """A total order over one retained observation's own normalized content."""
+
+    market, observation = entry
+    return market_evidence_key(market), observation_evidence_key(observation)
+
 
 def _group(key: ComparisonKey, members: Iterable[ComparisonMember]) -> ComparisonGroup:
     ordered = _ordered_members(members)

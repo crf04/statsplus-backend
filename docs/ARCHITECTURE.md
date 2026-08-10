@@ -773,16 +773,28 @@ Canonical Statistic, and scoring period; those four facts are its key. The
 canonical athlete and event come only from the governed mapping outcomes the
 collector reports, so a suppressed, disputed, or withdrawn identity never
 reaches a group. Legitimate multiple thresholds, variants, statuses, and
-same-provider markets stay distinct members of one group. Identity is decided
-once, over whole normalized markets, before any market is reduced to a member,
-so two distinct offerings can never merge because the few facts a member
-happens to state agree. Exact repeated source identities are already
-deduplicated inside `ProviderSnapshot`, where a repeat with conflicting
-normalized content is malformed rather than a second market; the board applies
-the same rule to the references it derives, so a repeated reference is one
-market only when every normalized fact and its observation agree, and a repeat
-that disagrees is retained as `conflicting_market_identity` instead of
-silently collapsing or splitting.
+same-provider markets stay distinct members of one group, and an available and
+a suspended offering of the same line are two offerings rather than one market
+contradicting itself. Identity is decided once, over whole normalized markets,
+before any market is reduced to a member, so two distinct offerings can never
+merge because the few facts a member happens to state agree. Exact repeated
+source identities are already deduplicated inside `ProviderSnapshot`, where a
+repeat with conflicting normalized content is malformed rather than a second
+market; the board applies the same rule to the references it derives, so a
+repeated reference collapses only when every normalized fact and its
+observation agree.
+
+A repeat that disagrees is evidence, not a duplicate to discard. Every distinct
+contradicting observation of one reference is retained as its own
+`BoardMarket`, ordered by its own complete normalized content and observation
+rather than by arrival, and each states `conflict_ordinal` and `conflict_count`
+so an audit reads exactly what contradicted what. All of them are excluded as
+`conflicting_market_identity` and none enters a group; the reference itself is
+reported once in `unresolved`, while `market_count` counts every retained
+observation. `ComparisonBoard.conflicting_markets` lists them, and
+`markets_by_reference` — which can hold only one market per reference — keeps
+the first in board order. The whole result is independent of the order the
+providers, snapshots, and markets were read in.
 
 The board keeps every normalized market it read, not only the facts a
 comparison needs. `ComparisonBoard.markets` holds one `BoardMarket` per
@@ -845,17 +857,30 @@ Market, selection, and comparison references are versioned and deterministic
 encoding: every value is tagged by type and framed by its byte length, and
 every sequence carries its element count, so a field containing a separator can
 never be read as two fields and two distinct structures can never encode alike.
-Decimals take part in one canonical form independent of the scale they were
-written in, so `25.5` and `25.50` are the same number and the same reference.
+Decimals take part in one canonical form read straight off the value's own
+digits, so `25.5` and `25.50` are the same number and the same reference. That
+form performs no arithmetic and no normalization, because both round under the
+ambient decimal context: a value carrying more digits than the context permits
+keeps every one of them, and a reference never depends on the context a caller
+happened to be inside.
 
 A market reference is defined by the provider's own market ID, or — when the
 provider publishes none — by every fact it did report: the athlete evidence,
 the complete event evidence including provider and canonical IDs, team IDs,
 names and abbreviations, start, end, and update times, label and status, the
-statistic evidence, threshold, variant, scoring period, source labels, times,
-appearance, and the offered selections with their modifiers and prices. Market
-availability is deliberately excluded from both, so a market that is suspended
-and available again keeps its reference. A selection reference is defined by
+statistic evidence, the exact threshold, the market status, variant, scoring
+period, source labels, times, appearance, and the offered selections with their
+modifiers and prices. A market ID is the market's own source identity, so a
+market that is suspended and available again keeps that reference; for a market
+with no ID, status is the only fact separating an offering the provider is
+taking from an identically named suspended one, so it takes part. A threshold's
+written spelling never does: `original_value` is retained on the board for
+audit, but `25.50` and `25.5` are one line and one identity. Selections take
+part in an order derived from their own complete normalized facts, so the order
+a provider happened to list two equivalent selections in changes neither the
+market reference nor the selections the board returns, and two selections
+differing in any retained fact stay two selections. A selection reference is
+defined by
 its market reference and every fact that defines the offering — identity,
 labels, direction, status, modifiers, and prices — so two distinctly priced or
 distinctly modified selections are never one reference. A comparison reference
@@ -863,11 +888,26 @@ is defined by its canonical identity alone. Each is stable exactly while its
 defining identity is unchanged; the version is bumped whenever those facts
 change.
 
+Each `ProviderReport` states one provider's whole contribution and the
+provenance a reader needs to judge it: the retrieval status and its bounded
+reason, the observation's retrieval instant, exact decimal age, freshness, and
+snapshot status, the market count, and the closed coverage and skip codes. Its
+`BoardCoverage` carries the collector's own fetched, eligible, normalized, and
+skipped counts, the pagination and fanout completion evidence, the expected
+total, and whether the coverage is complete — counts only, never a rate or an
+inference. Its `BoardCacheState` carries the cache status the observation was
+served from, the cached retrieval instant, its exact decimal age, and, when a
+stale observation was served because a refresh failed, that failure's bounded
+reason and instant. Every one of those reasons is the collector's own
+classification, so no provider exception text, credential, or upstream detail
+reaches a reader through a report.
+
 Ordering is a property of the observations, never of completion order:
 provider reports and warnings sort by provider and code, groups by their key,
 members by provider, threshold, variant, status, and reference, unresolved
-markets by reason, provider, and reference, retained markets by provider and
-reference, and selection references lexicographically.
+markets by reason, provider, and reference, retained markets by provider,
+reference, and contradiction ordinal, and selection references
+lexicographically.
 
 Filters are central and exact: enabled providers, Canonical Athlete IDs,
 Canonical Event IDs, Canonical Statistic IDs, and Market Status. A provider

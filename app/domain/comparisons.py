@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from collections.abc import Iterable, Sequence
+from typing import Any
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
@@ -56,14 +57,35 @@ def canonical_decimal(value: Decimal) -> str:
 
     ``25.5`` and ``25.50`` are the same number, so they must produce the same
     reference; ``0`` and ``-0`` are the same number too.
+
+    The form is read straight off the value's own digits.  No arithmetic and no
+    normalization takes part, because both are performed under the ambient
+    decimal context and would round a value carrying more digits than that
+    context permits -- which would make two distinct provider numbers one
+    reference, and would make a reference depend on the context a caller
+    happened to be inside.
     """
 
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("a reference requires a finite Decimal")
-    normalized = value.normalize()
-    if normalized == 0:
+    sign, digits, exponent = value.as_tuple()
+    significant = list(digits)
+    # Only insignificant fractional zeroes are dropped: a trailing zero left of
+    # the point is part of the number, not its written scale.
+    while exponent < 0 and significant and significant[-1] == 0:
+        significant.pop()
+        exponent += 1
+    if not any(significant):
         return "0"
-    return format(normalized, "f")
+    text = "".join(str(digit) for digit in significant)
+    if exponent >= 0:
+        text += "0" * exponent
+    else:
+        point = len(text) + exponent
+        text = (
+            f"0.{'0' * -point}{text}" if point <= 0 else f"{text[:point]}.{text[point:]}"
+        )
+    return f"-{text}" if sign else text
 
 
 def _framed(tag: str, text: str) -> bytes:
@@ -182,9 +204,16 @@ def _appearance_facts(appearance: AppearanceEvidence | None) -> object:
 
 
 def _threshold_facts(threshold: MarketThreshold | None) -> object:
+    """The exact number a threshold states, never the text it was written as.
+
+    ``original_value`` is retained on the board for audit, but a provider that
+    spells one threshold ``25.50`` and another ``25.5`` is offering the same
+    line, so its spelling must not split one offering into two.
+    """
+
     if threshold is None:
         return None
-    return (threshold.value, threshold.unit, threshold.original_value)
+    return (threshold.value, threshold.unit)
 
 
 def _modifier_facts(modifier: SelectionModifier) -> object:
@@ -206,45 +235,101 @@ def _selection_facts(selection: Selection) -> object:
     )
 
 
+def canonical_selections(selections: Sequence[Selection]) -> tuple[Selection, ...]:
+    """One market's selections in an order derived only from their own facts.
+
+    A provider is free to list two equivalent selections in either order, and
+    that ordering is not a fact about the offering.  Ordering them by their
+    complete normalized facts makes both the market's reference and the
+    selections the board returns independent of the order they arrived in.
+    Nothing is collapsed: two selections that differ in any retained fact --
+    price, modifier, status, direction, or label -- stay two selections.
+    """
+
+    return tuple(
+        sorted(selections, key=lambda selection: _encode(_selection_facts(selection)))
+    )
+
+
+def _reported_evidence_facts(market: PlayerProjectionMarket) -> object:
+    """Every normalized fact one market reports about the offering it names."""
+
+    return (
+        market.provider,
+        _athlete_facts(market.athlete),
+        _event_facts(market.event),
+        _team_facts(market.team),
+        _team_facts(market.opponent),
+        _named_facts(market.league),
+        _competition_facts(market.competition),
+        _named_facts(market.sport),
+        _statistic_facts(market.statistic),
+        _threshold_facts(market.threshold),
+        market.status,
+        market.status_label,
+        market.variant,
+        market.variant_label,
+        market.scoring_period,
+        market.scoring_period_label,
+        market.starts_at,
+        market.updated_at,
+        _appearance_facts(market.appearance),
+        tuple(
+            _selection_facts(selection)
+            for selection in canonical_selections(market.selections)
+        ),
+    )
+
+
 def market_reference(market: PlayerProjectionMarket) -> str:
     """The versioned reference for one normalized market.
 
     A provider market ID is the market's own source identity, so it defines the
-    reference by itself.  A provider that publishes no market ID names the
-    market by every fact it did report -- the athlete, the complete event
-    evidence including its teams and times, the statistic, threshold, variant,
-    scoring period, source labels, and the offered selections with their
-    modifiers and prices -- and those define the reference instead, so two
-    legitimately distinct offerings never collapse into one.  Availability is
-    deliberately absent from both: a market that is suspended and then
-    available again is the same market.
+    reference by itself, and a market that is suspended and then available
+    again keeps that identity.
+
+    A provider that publishes no market ID names the market by every fact it
+    did report -- the athlete, the complete event evidence including its teams
+    and times, the statistic, threshold, status, variant, scoring period,
+    source labels, and the offered selections with their modifiers and prices
+    -- and those define the reference instead.  Status takes part there because
+    it is the only thing that distinguishes an offering the provider is
+    currently taking from a suspended one it names identically, and both are
+    legitimate distinct offerings the board must keep apart rather than read as
+    one market contradicting itself.
     """
 
     if market.market_id is not None:
         return _reference("mkt", ("source_identity", market.provider, market.market_id))
-    return _reference(
-        "mkt",
+    return _reference("mkt", ("reported_evidence", _reported_evidence_facts(market)))
+
+
+def market_evidence_key(market: PlayerProjectionMarket) -> bytes:
+    """A total, content-derived order over one market's normalized evidence.
+
+    Two markets that contest one reference must be retained in an order neither
+    the provider's listing order nor the board's iteration order can change, so
+    they are ordered by their own complete normalized content.
+    """
+
+    return _encode(
         (
-            "reported_evidence",
-            market.provider,
-            _athlete_facts(market.athlete),
-            _event_facts(market.event),
-            _team_facts(market.team),
-            _team_facts(market.opponent),
-            _named_facts(market.league),
-            _competition_facts(market.competition),
-            _named_facts(market.sport),
-            _statistic_facts(market.statistic),
-            _threshold_facts(market.threshold),
-            market.variant,
-            market.variant_label,
-            market.scoring_period,
-            market.scoring_period_label,
-            market.starts_at,
-            market.updated_at,
-            _appearance_facts(market.appearance),
-            tuple(_selection_facts(selection) for selection in market.selections),
-        ),
+            market.market_id,
+            _reported_evidence_facts(market),
+            _statistic_resolution_facts(market.statistic_match),
+        )
+    )
+
+
+def _statistic_resolution_facts(match: object) -> object:
+    if match is None:
+        return None
+    return (
+        getattr(match, "state", None),
+        getattr(match, "scoring_period", None),
+        getattr(match, "canonical_id", None),
+        getattr(getattr(match, "unit", None), "value", None),
+        getattr(getattr(match, "reason", None), "value", None),
     )
 
 
@@ -892,12 +977,34 @@ class BoardObservation:
             raise ValueError("a future observation has no freshness")
 
 
+def observation_evidence_key(observation: BoardObservation) -> bytes:
+    """A total, content-derived order over one retained snapshot observation."""
+
+    return _encode(
+        (
+            observation.provider,
+            observation.snapshot_status,
+            observation.retrieved_at,
+            observation.observed_at,
+            observation.age_seconds,
+            observation.freshness,
+            observation.is_future,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BoardMarket:
     """One retained normalized market, and where it went on this board.
 
     Exactly one of ``comparison_reference`` and ``exclusion`` is set, so a
     market is either part of a stated comparison or visibly, auditably not.
+
+    When several disagreeing normalized observations claim one source identity,
+    every one of them is retained as its own ``BoardMarket``.  Each states its
+    position among the contradicting observations in ``conflict_ordinal`` and
+    how many there were in ``conflict_count``, so an audit reads exactly what
+    contradicted what rather than a single survivor chosen by arrival order.
     """
 
     market_reference: str
@@ -927,6 +1034,8 @@ class BoardMarket:
     comparison_reference: str | None = None
     exclusion: ComparisonExclusion | None = None
     exclusion_detail: str | None = None
+    conflict_ordinal: int | None = None
+    conflict_count: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.observation, BoardObservation):
@@ -945,6 +1054,19 @@ class BoardMarket:
             raise ValueError(
                 "a board market is either compared or excluded, never both or neither"
             )
+        if (self.conflict_ordinal is None) != (self.conflict_count is None):
+            raise ValueError(
+                "contradiction evidence states both an ordinal and a count"
+            )
+        if self.conflict_count is not None:
+            if self.conflict_count < 2:
+                raise ValueError("a contradiction requires at least two observations")
+            if not 0 <= self.conflict_ordinal < self.conflict_count:
+                raise ValueError("a contradiction ordinal must name one observation")
+            if self.exclusion is not ComparisonExclusion.CONFLICTING_MARKET_IDENTITY:
+                raise ValueError(
+                    "a contradicted observation is excluded as a conflicting identity"
+                )
         object.__setattr__(self, "selections", tuple(self.selections))
 
     @property
@@ -952,13 +1074,111 @@ class BoardMarket:
         return self.comparison_reference is not None
 
     @property
-    def order(self) -> tuple[str, str]:
-        return (self.provider, self.market_reference)
+    def order(self) -> tuple[str, str, int]:
+        return (
+            self.provider,
+            self.market_reference,
+            0 if self.conflict_ordinal is None else self.conflict_ordinal,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoardCoverage:
+    """One provider retrieval's counts and completion evidence.
+
+    These are the collector's own bounded counts and closed coverage codes, not
+    an analysis of them: nothing here is a rate, a ratio, or an inference about
+    why a provider covered what it did.
+    """
+
+    fetched_count: int = 0
+    eligible_count: int = 0
+    normalized_count: int = 0
+    skipped_count: int = 0
+    pagination_complete: bool | None = None
+    fanout_complete: bool | None = None
+    expected_total: int | None = None
+    is_complete: bool = False
+    warning_codes: tuple[str, ...] = ()
+    skipped_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("warning_codes", "skipped_reasons"):
+            codes = tuple(
+                sorted({getattr(code, "value", code) for code in getattr(self, name)})
+            )
+            object.__setattr__(self, name, codes)
+
+    @classmethod
+    def of(cls, coverage: Any | None) -> "BoardCoverage | None":
+        if coverage is None:
+            return None
+        return cls(
+            fetched_count=coverage.fetched_count,
+            eligible_count=coverage.eligible_count,
+            normalized_count=coverage.normalized_count,
+            skipped_count=coverage.skipped_count,
+            pagination_complete=coverage.pagination_complete,
+            fanout_complete=coverage.fanout_complete,
+            expected_total=coverage.expected_total,
+            is_complete=coverage.is_complete,
+            warning_codes=coverage.warning_codes,
+            skipped_reasons=coverage.skipped_reasons,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoardCacheState:
+    """Where one provider's observation came from, and a failed refresh.
+
+    The failure reason is the collector's own bounded classification, never
+    provider exception text, so no credential or upstream detail can reach a
+    reader through it.
+    """
+
+    status: str | None = None
+    retrieved_at: datetime | None = None
+    age_seconds: Decimal | None = None
+    failure_reason: str | None = None
+    failure_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("retrieved_at", "failure_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self, name, _aware_utc(value, field=f"provider cache {name}")
+                )
+        if self.age_seconds is not None:
+            if not isinstance(self.age_seconds, Decimal):
+                raise ValueError("provider cache age_seconds must be an exact Decimal")
+            if self.age_seconds < 0:
+                raise ValueError("provider cache age_seconds can never be negative")
+
+    @classmethod
+    def of(cls, outcome: Any) -> "BoardCacheState | None":
+        """One outcome's cache provenance, or None when it names none."""
+
+        age = getattr(outcome, "cache_age_seconds", None)
+        state = cls(
+            status=getattr(outcome, "cache_status", None),
+            retrieved_at=getattr(outcome, "cache_retrieved_at", None),
+            age_seconds=None if age is None else Decimal(str(age)),
+            failure_reason=getattr(outcome, "cache_failure_reason", None),
+            failure_at=getattr(outcome, "cache_failure_at", None),
+        )
+        return None if state == cls() else state
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderReport:
-    """One provider's contribution to the board, with its own warnings."""
+    """One provider's contribution to the board, with its own warnings.
+
+    It carries the provenance a reader needs to judge the contribution: the
+    retrieval outcome and its reason, the observation's age and freshness, the
+    coverage counts and completion evidence behind the market count, and the
+    cache state the observation was served from.
+    """
 
     provider: str
     status: str
@@ -970,6 +1190,8 @@ class ProviderReport:
     warning_codes: tuple[str, ...] = ()
     snapshot_status: str | None = None
     future_observation: bool = False
+    coverage: BoardCoverage | None = None
+    cache: BoardCacheState | None = None
 
     def __post_init__(self) -> None:
         if self.retrieved_at is not None:
@@ -983,6 +1205,10 @@ class ProviderReport:
                 raise ValueError("provider report age_seconds must be an exact Decimal")
             if self.age_seconds < 0:
                 raise ValueError("provider report age_seconds can never be negative")
+        if self.coverage is not None and not isinstance(self.coverage, BoardCoverage):
+            raise ValueError("provider report coverage must be BoardCoverage or None")
+        if self.cache is not None and not isinstance(self.cache, BoardCacheState):
+            raise ValueError("provider report cache must be BoardCacheState or None")
         object.__setattr__(self, "warning_codes", tuple(sorted(self.warning_codes)))
 
 
@@ -1142,9 +1368,25 @@ class ComparisonBoard:
 
     @property
     def markets_by_reference(self) -> dict[str, BoardMarket]:
-        """Every retained market, indexed by the reference its members cite."""
+        """Every retained market, indexed by the reference its members cite.
 
-        return {market.market_reference: market for market in self.markets}
+        A contradicted reference names several retained observations; this
+        index keeps the first in board order, and ``conflicting_markets``
+        exposes them all.
+        """
+
+        index: dict[str, BoardMarket] = {}
+        for market in self.markets:
+            index.setdefault(market.market_reference, market)
+        return index
+
+    @property
+    def conflicting_markets(self) -> tuple[BoardMarket, ...]:
+        """Every retained observation whose source identity was contradicted."""
+
+        return tuple(
+            market for market in self.markets if market.conflict_ordinal is not None
+        )
 
     def markets_for(self, reference: str) -> tuple[BoardMarket, ...]:
         """The retained markets one comparison reference was built from."""
@@ -1159,7 +1401,9 @@ __all__ = [
     "SUPPORTED_NARROWING_FILTERS",
     "BoardAppearance",
     "BoardAthlete",
+    "BoardCacheState",
     "BoardCompetition",
+    "BoardCoverage",
     "BoardEvent",
     "BoardMarket",
     "BoardModifier",
@@ -1185,7 +1429,10 @@ __all__ = [
     "ProviderReport",
     "UnresolvedMarket",
     "canonical_decimal",
+    "canonical_selections",
     "exact_seconds",
+    "market_evidence_key",
     "market_reference",
+    "observation_evidence_key",
     "selection_reference",
 ]

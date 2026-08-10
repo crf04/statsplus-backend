@@ -6,7 +6,7 @@ import dataclasses
 import time
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 import requests
@@ -65,7 +65,13 @@ from app.services.comparison_board import (
     ComparisonBoardService,
     ComparisonBoardTooLargeError,
 )
-from app.services.dfs_board import DFSBoardService
+from app.services.dfs_board import (
+    DFSBoard,
+    DFSBoardService,
+    ProviderFailureReason,
+    ProviderOutcome,
+    ProviderOutcomeStatus,
+)
 from app.services.event_mapping_repository import (
     BoardEventMappingOutcome,
     ProviderEventMappingRecord,
@@ -530,6 +536,26 @@ def test_exact_repeated_source_identities_deduplicate_only_when_content_agrees()
             "dabble",
             (_market(market_id="m-1"), _market(market_id="m-1", threshold="27.5")),
         )
+
+
+def test_id_less_available_and_suspended_markets_are_distinct_offerings():
+    markets = (
+        _market(market_id=None),
+        _market(market_id=None, status=MarketStatus.SUSPENDED),
+    )
+    service, _ = _service([_snapshot("dabble", markets)])
+
+    board = _read(service)
+
+    assert board.market_count == 2
+    assert len(board.groups) == 1
+    assert board.groups[0].summary.market_count == 2
+    assert {member.status for member in board.groups[0].members} == {
+        MarketStatus.AVAILABLE,
+        MarketStatus.SUSPENDED,
+    }
+    assert len({market.market_reference for market in board.markets}) == 2
+    assert board.unresolved == ()
 
 
 # -- unresolved evidence ---------------------------------------------------
@@ -1445,6 +1471,77 @@ def test_a_reference_does_not_depend_on_the_scale_a_number_was_written_in():
     )
 
 
+def test_a_canonical_decimal_is_exact_beyond_the_ambient_context_precision():
+    # Thirty-two significant digits: an ambient-context rounding would make
+    # these two distinct numbers one.
+    fine = Decimal("1." + "0" * 30 + "1")
+    finer = Decimal("1." + "0" * 30 + "2")
+
+    assert canonical_decimal(fine) == "1." + "0" * 30 + "1"
+    assert canonical_decimal(fine) != canonical_decimal(finer)
+    assert market_reference(
+        _market(market_id=None, threshold=str(fine))
+    ) != market_reference(_market(market_id=None, threshold=str(finer)))
+
+
+def test_a_canonical_decimal_does_not_depend_on_the_ambient_decimal_context():
+    value = Decimal("1." + "0" * 30 + "1")
+    trailing = Decimal("25.500000")
+
+    with localcontext() as context:
+        context.prec = 5
+        assert canonical_decimal(value) == "1." + "0" * 30 + "1"
+        assert canonical_decimal(trailing) == "25.5"
+        assert canonical_decimal(Decimal("123456789")) == "123456789"
+        narrow = market_reference(_market(market_id=None, threshold=str(value)))
+
+    assert narrow == market_reference(_market(market_id=None, threshold=str(value)))
+
+
+def test_the_written_spelling_of_a_threshold_never_changes_market_identity():
+    def market(value, original):
+        return dataclasses.replace(
+            _market(market_id=None),
+            threshold=MarketThreshold(value, "count", original_value=original),
+        )
+
+    plain = market("25.5", "25.5")
+    padded = market("25.50", "25.50")
+
+    assert market_reference(plain) == market_reference(padded)
+    assert market_reference(plain) != market_reference(market("25.05", "25.05"))
+
+    service, _ = _service([_snapshot("dabble", (padded,))])
+    retained = _read(service).markets[0]
+
+    assert retained.threshold.original_value == "25.50"
+    assert retained.threshold.value == Decimal("25.50")
+
+
+def test_the_order_selections_arrive_in_never_changes_a_market_or_its_board():
+    first = _rich_selection(selection_id="s-1", decimal_price="1.83")
+    second = _rich_selection(selection_id="s-2", decimal_price="1.91")
+    forward = _market(market_id=None, selections=(first, second))
+    reversed_market = _market(market_id=None, selections=(second, first))
+
+    assert market_reference(forward) == market_reference(reversed_market)
+
+    def retained(market):
+        service, _ = _service([_snapshot("dabble", (market,))])
+        board = _read(service)
+        return board.markets[0]
+
+    assert retained(forward).selections == retained(reversed_market).selections
+    assert len(retained(forward).selections) == 2
+    assert {selection.selection_id for selection in retained(forward).selections} == {
+        "s-1",
+        "s-2",
+    }
+    assert market_reference(
+        _market(market_id=None, selections=(first, first))
+    ) != market_reference(forward)
+
+
 def test_id_less_markets_of_different_events_never_share_a_reference():
     base = EventEvidence(
         label="DEN @ LAL",
@@ -1559,10 +1656,25 @@ def test_exact_repeated_id_less_markets_are_one_offering():
     assert len(board.markets) == 1
 
 
-def test_a_repeated_identity_whose_content_disagrees_stays_unresolved():
+def _forced_reference(monkeypatch, reference="mkt_2_forced"):
+    """Collapse every market onto one reference, whatever facts it reports.
+
+    Two distinct normalized markets never share a derived reference, so the
+    contradiction the board must survive is provoked at the seam that derives
+    it rather than by inventing an impossible market.
+    """
+
+    monkeypatch.setattr(
+        comparison_board, "market_reference", lambda market: reference
+    )
+    return reference
+
+
+def test_a_repeated_identity_whose_content_disagrees_stays_unresolved(monkeypatch):
+    reference = _forced_reference(monkeypatch)
     markets = (
-        _market(market_id=None),
-        _market(market_id=None, status=MarketStatus.SUSPENDED),
+        _market(market_id="m-1", threshold="25.5"),
+        _market(market_id="m-2", threshold="27.5"),
     )
     service, _ = _service([_snapshot("dabble", markets)])
 
@@ -1572,8 +1684,65 @@ def test_a_repeated_identity_whose_content_disagrees_stays_unresolved():
     assert [entry.reason for entry in board.unresolved] == [
         ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
     ]
-    assert board.markets[0].exclusion is ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    assert board.unresolved[0].market_reference == reference
+    assert {market.exclusion for market in board.markets} == {
+        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    }
     assert board.markets[0].exclusion_detail == "conflicting_normalized_content"
+
+
+def test_every_contradicting_observation_of_one_reference_is_retained(monkeypatch):
+    _forced_reference(monkeypatch)
+    markets = (
+        _market(market_id="m-1", threshold="25.5"),
+        _market(market_id="m-2", threshold="27.5"),
+    )
+    service, _ = _service([_snapshot("dabble", markets)])
+
+    board = _read(service)
+
+    assert board.market_count == 2
+    assert len(board.markets) == 2
+    assert len(board.conflicting_markets) == 2
+    assert [market.conflict_ordinal for market in board.markets] == [0, 1]
+    assert {market.conflict_count for market in board.markets} == {2}
+    assert {market.threshold.value for market in board.markets} == {
+        Decimal("25.5"),
+        Decimal("27.5"),
+    }
+
+
+def test_a_contradicted_reference_does_not_depend_on_input_order(monkeypatch):
+    _forced_reference(monkeypatch)
+
+    def read(markets):
+        service, _ = _service([_snapshot("dabble", markets)])
+        return _read(service)
+
+    markets = (
+        _market(market_id="m-1", threshold="25.5", status=MarketStatus.SUSPENDED),
+        _market(market_id="m-2", threshold="27.5"),
+    )
+
+    forward = read(markets)
+    reversed_read = read(tuple(reversed(markets)))
+
+    assert forward.markets == reversed_read.markets
+    assert forward.unresolved == reversed_read.unresolved
+    assert forward.market_count == reversed_read.market_count == 2
+
+
+def test_exact_repeats_of_one_reference_collapse_to_one_observation(monkeypatch):
+    _forced_reference(monkeypatch)
+    repeated = _market(market_id=None)
+    service, _ = _service([_snapshot("dabble", (repeated, repeated))])
+
+    board = _read(service)
+
+    assert board.market_count == 1
+    assert board.markets[0].conflict_ordinal is None
+    assert board.markets[0].conflict_count is None
+    assert board.groups[0].summary.market_count == 1
 
 
 # -- one observation timestamp ---------------------------------------------
@@ -1715,3 +1884,178 @@ def test_a_naive_observation_clock_is_refused():
 
     with pytest.raises(ValueError, match="aware datetime"):
         _read(service)
+
+
+# -- provider and cache provenance -----------------------------------------
+
+
+class FakeCollector:
+    """A collector seam returning one hand-built board read."""
+
+    def __init__(self, board):
+        self.board = board
+
+    def get_board(self, query, context=None, *, providers=None):
+        return self.board
+
+
+def _outcome_service(outcome):
+    board = DFSBoard(
+        query=_query(),
+        provider_outcomes=(outcome,),
+        generated_at=GENERATED_AT,
+    )
+    return ComparisonBoardService(
+        FakeCollector(board),
+        athlete_catalog=_athlete_catalog(),
+        event_catalog=_event_catalog(),
+        clock=lambda: GENERATED_AT,
+    )
+
+
+def test_a_provider_report_states_its_complete_coverage_evidence():
+    snapshot = _snapshot(
+        "dabble",
+        (_market(),),
+        coverage=CoverageEvidence(
+            fetched_count=9,
+            eligible_count=7,
+            normalized_count=5,
+            skipped_count=2,
+            pagination_complete=True,
+            fanout_complete=True,
+            expected_total=9,
+            skipped_reasons=("non_player_market", "ineligible_status"),
+        ),
+    )
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.COMPLETE,
+        snapshot=snapshot,
+        cache_status="hit",
+        cache_retrieved_at=RETRIEVED_AT,
+        cache_age_seconds=30.5,
+    )
+
+    report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
+
+    assert report.coverage.fetched_count == 9
+    assert report.coverage.eligible_count == 7
+    assert report.coverage.normalized_count == 5
+    assert report.coverage.skipped_count == 2
+    assert report.coverage.expected_total == 9
+    assert report.coverage.pagination_complete is True
+    assert report.coverage.fanout_complete is True
+    assert report.coverage.is_complete is True
+    assert report.coverage.skipped_reasons == ("ineligible_status", "non_player_market")
+    assert report.coverage.warning_codes == ()
+    assert report.cache.status == "hit"
+    assert report.cache.retrieved_at == RETRIEVED_AT
+    assert report.cache.age_seconds == Decimal("30.5")
+    assert report.cache.failure_reason is None
+
+
+def test_a_provider_report_states_partial_completion_evidence():
+    snapshot = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.PARTIAL,
+        markets=(_market(),),
+        coverage=CoverageEvidence(
+            fetched_count=3,
+            eligible_count=3,
+            normalized_count=1,
+            pagination_complete=False,
+            expected_total=8,
+            warning_codes=("page_fetch_failed",),
+        ),
+        retrieved_at=RETRIEVED_AT,
+    )
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.PARTIAL,
+        snapshot=snapshot,
+        reason=ProviderFailureReason.UPSTREAM_ERROR,
+    )
+
+    report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
+
+    assert report.status == "partial"
+    assert report.reason == "upstream_error"
+    assert report.coverage.pagination_complete is False
+    assert report.coverage.fanout_complete is None
+    assert report.coverage.is_complete is False
+    assert report.coverage.expected_total == 8
+    assert report.coverage.warning_codes == ("page_fetch_failed",)
+    assert report.warning_codes == ("page_fetch_failed",)
+    assert report.cache is None
+
+
+def test_a_provider_report_states_a_stale_cache_and_its_refresh_failure():
+    failed_at = RETRIEVED_AT + timedelta(seconds=10)
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.COMPLETE,
+        snapshot=_snapshot("dabble", (_market(),)),
+        cache_status="stale",
+        cache_retrieved_at=RETRIEVED_AT,
+        cache_age_seconds=1200.25,
+        cache_failure_reason="deadline_exceeded",
+        cache_failure_at=failed_at,
+    )
+
+    report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
+
+    assert report.cache.status == "stale"
+    assert report.cache.age_seconds == Decimal("1200.25")
+    assert report.cache.failure_reason == "deadline_exceeded"
+    assert report.cache.failure_at == failed_at
+
+
+def test_a_failed_provider_report_states_its_cache_state_without_a_snapshot():
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.FAILED,
+        reason=ProviderFailureReason.TIMEOUT,
+        cache_status="error",
+        cache_failure_reason="timeout",
+    )
+
+    report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
+
+    assert report.status == "failed"
+    assert report.coverage is None
+    assert report.cache.status == "error"
+    assert report.cache.failure_reason == "timeout"
+    assert report.market_count == 0
+
+
+def test_provider_reports_serialize_deterministically():
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.COMPLETE,
+        snapshot=_snapshot("dabble", (_market(),)),
+        cache_status="hit",
+        cache_retrieved_at=RETRIEVED_AT,
+        cache_age_seconds=30.5,
+    )
+    service = _outcome_service(outcome)
+
+    first = service.get_comparisons(_query(), _context()).provider_reports
+    second = service.get_comparisons(_query(), _context()).provider_reports
+
+    assert first == second
+    assert dataclasses.asdict(first[0]) == dataclasses.asdict(second[0])
+    assert {field.name for field in fields(comparisons.ProviderReport)} == {
+        "provider",
+        "status",
+        "reason",
+        "retrieved_at",
+        "age_seconds",
+        "freshness",
+        "market_count",
+        "warning_codes",
+        "snapshot_status",
+        "future_observation",
+        "coverage",
+        "cache",
+    }
