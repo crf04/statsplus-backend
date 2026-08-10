@@ -20,14 +20,25 @@ _GAME_TYPE_BY_ID_PREFIX = {
 
 
 def event_classification(game_id: str, provider_classification: str = "") -> str:
-    """Return provider evidence, or infer the official type from a real game ID."""
+    """Return provider display evidence, or infer it from a real game ID."""
 
     classification = provider_classification.strip()
     if classification and classification.casefold() != "unknown":
         return classification
-    if len(game_id) == 10:
-        return _GAME_TYPE_BY_ID_PREFIX.get(game_id[:3], "unknown")
+    return event_kind(game_id)
+
+
+def event_kind(game_id: str, provider_classification: str = "") -> str:
+    """Return canonical event kind, with a real game ID as authority."""
+
+    if len(game_id) == 10 and game_id.isdigit():
+        game_type = _GAME_TYPE_BY_ID_PREFIX.get(game_id[:3])
+        if game_type is not None:
+            return game_type
+    classification = provider_classification.strip()
+    if classification and classification.casefold() != "unknown":
+        return classification
     return "unknown"
 
 
-__all__ = ["NBAGameStatus", "event_classification"]
+__all__ = ["NBAGameStatus", "event_classification", "event_kind"]

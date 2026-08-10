@@ -93,6 +93,6 @@ def test_recorded_schedule_preserves_provider_and_game_type_classification():
     assert parsed["classification"].tolist() == [
         "Regular Season",
         "Regular Season",
-        "Preseason",
-        "All-Star Celebrity Game",
+        "International Series",
+        "Skills Challenge",
     ]

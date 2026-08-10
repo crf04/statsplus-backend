@@ -38,7 +38,7 @@ def _event(game_id, scheduled_at, *, classification="Regular Season", **override
     return event
 
 
-def _service(events, *, freshness=None, now=None):
+def _service(events, *, freshness=None, now=None, schedule_max_age=None):
     settings = RuntimeSettings(
         environment="testing",
         nba=NBASeasonSettings(current_season="2025-26"),
@@ -56,6 +56,7 @@ def _service(events, *, freshness=None, now=None):
         catalog,
         settings=settings,
         clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=timezone.utc),
+        schedule_max_age=schedule_max_age,
     )
 
 
@@ -140,6 +141,29 @@ def test_slate_treats_unknown_as_ordinary_and_detects_preseason_game_id():
     assert games[1]["preseason"] is True
 
 
+def test_game_id_kind_overrides_conflicting_provider_classification():
+    service = _service(
+        [
+            _event(
+                "0032500001",
+                "2026-02-15T01:00:00+00:00",
+                classification="Rising Stars",
+            ),
+            _event(
+                "0012500001",
+                "2026-02-15T02:00:00+00:00",
+                classification="International Series",
+            ),
+        ]
+    )
+
+    games = service.get_slate("2026-02-14")["games"]
+
+    assert [game["game_id"] for game in games] == ["0012500001"]
+    assert games[0]["classification"] == "International Series"
+    assert games[0]["preseason"] is True
+
+
 def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     service = _service(
         [_event("late", "2026-01-03T04:30:00+00:00")],
@@ -184,6 +208,24 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
 
     assert at_boundary["freshness"]["schedule"]["status"] == "fresh"
     assert past_boundary["freshness"]["schedule"]["status"] == "stale"
+
+
+def test_schedule_freshness_accepts_a_valid_injected_max_age():
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    payload = _service(
+        [],
+        freshness={"last_success_at": retrieved_at.isoformat()},
+        now=retrieved_at + timedelta(hours=2),
+        schedule_max_age=timedelta(hours=1),
+    ).get_slate("2026-01-02")
+
+    assert payload["freshness"]["schedule"]["status"] == "stale"
+
+
+@pytest.mark.parametrize("schedule_max_age", ["one hour", timedelta(0)])
+def test_schedule_freshness_rejects_invalid_injected_max_age(schedule_max_age):
+    with pytest.raises(ValueError):
+        _service([], schedule_max_age=schedule_max_age)
 
 
 def test_slate_returns_an_empty_success_for_a_date_without_games():

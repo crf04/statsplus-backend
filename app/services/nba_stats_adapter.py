@@ -43,8 +43,8 @@ import requests
 from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.errors import ProviderUnavailableError
 from app.domain.nba_events import event_classification
+from app.errors import ProviderUnavailableError
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
     CACHE_DISABLED,
@@ -135,6 +135,7 @@ CANONICAL_SCHEDULE_COLUMNS: tuple[str, ...] = (
     "away_team_name",
     "away_team_tricode",
 )
+
 
 def validate_canonical_season(season: str) -> str:
     """Validate and return one explicit NBA ``YYYY-YY`` season label."""
@@ -311,7 +312,6 @@ def normalize_whole_season_schedule(
             _text_value(row.get("classification"))
             or _text_value(row.get("gameSubtype"))
             or _text_value(row.get("gameLabel"))
-            or _text_value(row.get("gameSubLabel"))
         )
         classification = event_classification(game_id, provider_classification)
         evidence: dict[str, object] = {}
