@@ -3923,11 +3923,14 @@ def test_contradicting_observations_must_state_one_exclusion():
                 ),
             ),
             markets=(
-                _conflicted_market(conflict_ordinal=0, conflict_count=2),
+                _conflicted_market(
+                    conflict_ordinal=0, conflict_count=2, **_disagreement(0)
+                ),
                 _conflicted_market(
                     conflict_ordinal=1,
                     conflict_count=2,
                     exclusion_detail="conflicting_normalized_content",
+                    **_disagreement(1),
                 ),
             ),
         )
@@ -4065,6 +4068,24 @@ def _disagreement(ordinal):
     return {"threshold": _threshold(f"2{ordinal}.5")}
 
 
+def _board_modifier(value, **overrides):
+    values = {"value": Decimal(value), "kind": "boost", "scope": "selection"}
+    return comparisons.BoardModifier(**{**values, **overrides})
+
+
+def _board_selection(reference="sel_1_a", **overrides):
+    return comparisons.BoardSelection(selection_reference=reference, **overrides)
+
+
+def _board_resolution(**overrides):
+    values = {
+        "state": MatchState.CANONICAL,
+        "scoring_period": ScoringPeriod.FULL_GAME,
+        "canonical_id": "points",
+    }
+    return comparisons.BoardStatisticResolution(**{**values, **overrides})
+
+
 def test_observations_that_state_the_same_evidence_are_not_a_contradiction():
     """Two markets alike apart from their bookkeeping contradict nothing."""
 
@@ -4098,10 +4119,6 @@ def test_one_repeat_inside_a_contradiction_is_still_a_repeat():
 CONTRADICTING_FACTS = {
     "market_id": ({"market_id": "m-1"}, {"market_id": "m-2"}),
     "threshold": ({"threshold": _threshold("25.5")}, {"threshold": _threshold("27.5")}),
-    "threshold_scale": (
-        {"threshold": _threshold("25.5")},
-        {"threshold": _threshold("25.50")},
-    ),
     "threshold_unit": (
         {"threshold": _threshold("25.5")},
         {"threshold": _threshold("25.5", unit="points")},
@@ -4151,10 +4168,18 @@ CONTRADICTING_FACTS = {
         {
             "selections": (
                 comparisons.BoardSelection(
-                    selection_reference="sel_1_a", decimal_price=Decimal("1.90")
+                    selection_reference="sel_1_a", decimal_price=Decimal("2.5")
                 ),
             )
         },
+    ),
+    "selection_modifier": (
+        {"selections": (_board_selection(modifiers=(_board_modifier("1.25"),)),)},
+        {"selections": (_board_selection(modifiers=(_board_modifier("1.5"),)),)},
+    ),
+    "statistic_resolution": (
+        {"statistic_resolution": _board_resolution(comparable=True)},
+        {"statistic_resolution": _board_resolution(comparable=False)},
     ),
 }
 
@@ -4172,6 +4197,91 @@ def test_observations_that_disagree_in_any_published_fact_contradict(disagreemen
 
     assert board.market_count == 2
     assert len(board.conflicting_markets) == 2
+
+
+#: Each pair states one offering twice.  The two differ only in a retained
+#: audit fact -- the text a provider wrote a threshold as, the scale an exact
+#: decimal was written at, or the order equivalent selections were listed in --
+#: which the upstream retention seam already reads as one semantic repeat, so a
+#: board that published them as a contradiction would invent a disagreement.
+FAKE_CONTRADICTIONS = {
+    "threshold_scale": (
+        {"threshold": _threshold("25.5")},
+        {"threshold": _threshold("25.50")},
+    ),
+    "threshold_original_value": (
+        {"threshold": comparisons.BoardThreshold(Decimal("25.5"), "count", "25.5")},
+        {"threshold": comparisons.BoardThreshold(Decimal("25.5"), "count", "25.50")},
+    ),
+    "selection_price_scale": (
+        {"selections": (_board_selection(decimal_price=Decimal("1.9")),)},
+        {"selections": (_board_selection(decimal_price=Decimal("1.90")),)},
+    ),
+    "selection_modifier_scale": (
+        {"selections": (_board_selection(modifiers=(_board_modifier("1.25"),)),)},
+        {"selections": (_board_selection(modifiers=(_board_modifier("1.250"),)),)},
+    ),
+    "selection_order": (
+        {
+            "selections": (
+                _board_selection("sel_1_a", direction="higher"),
+                _board_selection("sel_1_b", direction="lower"),
+            )
+        },
+        {
+            "selections": (
+                _board_selection("sel_1_b", direction="lower"),
+                _board_selection("sel_1_a", direction="higher"),
+            )
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "repeat", sorted(FAKE_CONTRADICTIONS), ids=sorted(FAKE_CONTRADICTIONS)
+)
+def test_observations_alike_but_for_an_audit_fact_are_not_a_contradiction(repeat):
+    left, right = FAKE_CONTRADICTIONS[repeat]
+
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        _conflict_board(
+            _conflict_observation(0, 2, **left),
+            _conflict_observation(1, 2, **right),
+        )
+
+
+def test_a_rewritten_scale_inside_a_contradiction_is_still_a_repeat():
+    """Two lines and one of them written again is a contradiction of two."""
+
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        _conflict_board(
+            _conflict_observation(0, 3, threshold=_threshold("25.5")),
+            _conflict_observation(1, 3, threshold=_threshold("27.5")),
+            _conflict_observation(2, 3, threshold=_threshold("25.50")),
+        )
+
+
+def test_a_contradiction_retains_the_audit_facts_it_never_argues_from():
+    """Distinctness ignores a spelling; the board still publishes it exactly."""
+
+    board = _conflict_board(
+        _conflict_observation(
+            0, 2, threshold=comparisons.BoardThreshold(Decimal("25.5"), "count", "25.50")
+        ),
+        _conflict_observation(
+            1, 2, threshold=comparisons.BoardThreshold(Decimal("27.5"), "count", "27.5")
+        ),
+    )
+
+    assert [market.threshold.original_value for market in board.markets] == [
+        "25.50",
+        "27.5",
+    ]
+    assert [market.threshold.value.as_tuple() for market in board.markets] == [
+        Decimal("25.5").as_tuple(),
+        Decimal("27.5").as_tuple(),
+    ]
 
 
 # -- board read evidence states relationships it could have observed --------

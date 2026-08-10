@@ -1123,16 +1123,27 @@ for a lone observation with nothing to disagree with.
 Structure is not disagreement. A structurally complete cluster whose retained
 observations state the same evidence is a repeat that failed to collapse, so
 the board requires the cluster's `count` observations to state `count` distinct
-facts. Distinctness is read from a canonical evidence key over every field a
-`BoardMarket` retains, taken from the dataclass itself so a fact retained later
-takes part from the day it exists, with only `conflict_ordinal` and
-`conflict_count` left out — an ordinal is a statement about the cluster, never
-evidence the cluster is one. The key is scale-aware, because a board writes a
-threshold in the scale its provider published: `Decimal("25.50")` and
-`Decimal("25.5")` reach a caller as different numbers and are therefore a
-contradiction, exactly as a differing name, team, status, or selection price is.
-An exact semantic repeat has already collapsed at the retention seam, so a
-cluster the board assembles always satisfies this.
+facts. Distinctness is read in exactly the semantics the retention seam
+collapses repeats by, and by the same authorities: `market_content_key` from
+`app.domain.market_content`, which a `BoardMarket` answers by the same
+attribute names a normalized market does, paired with `observation_evidence_key`
+over the snapshot observation it was read in. There is no second list of what
+counts as a difference, so a fact proves a disagreement here exactly when it
+proves one upstream. A differing market ID, threshold value or unit, status,
+variant, name, team, event, statistic, resolved comparability, direction, exact
+price, or modifier is a contradiction; a differing retrieval instant, snapshot
+status, age, or freshness is one too, because the observation is part of what
+the retention seam keeps apart.
+
+Audit content proves nothing here. The scale an exact decimal was written at,
+the provider's own `original_value` text, and the order equivalent selections
+were listed in are all retained, published exactly, and still order the
+evidence — but `Decimal("25.50")` and `Decimal("25.5")` are one line, so a
+cluster separated only by them is a repeat the board refuses rather than a
+disagreement it invents. An exact semantic repeat has already collapsed at the
+retention seam, so a cluster the board assembles always satisfies this. Where an
+observation sits in the cluster takes no part either: an ordinal is a
+statement about the cluster, never evidence the cluster is one.
 
 `BoardReadEvidence` carries counts without the collections behind them, so it
 enforces that same relation directly: a read cannot have established more

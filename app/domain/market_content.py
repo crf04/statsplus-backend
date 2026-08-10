@@ -292,6 +292,17 @@ def selection_facts(selection: Any) -> object:
     )
 
 
+def _stated_value(value: object) -> object:
+    """One resolved fact, whether it is still an enum or already its value.
+
+    A normalized market carries the catalog's own enums; a board retains the
+    values it published them as.  Reading both as the value keeps one fact list
+    answering for both seams rather than two lists that could drift.
+    """
+
+    return value.value if isinstance(value, Enum) else value
+
+
 def statistic_resolution_facts(match: object) -> object:
     """What a catalog resolved about a market's statistic, if anything.
 
@@ -315,8 +326,8 @@ def statistic_resolution_facts(match: object) -> object:
         getattr(match, "state", None),
         getattr(match, "scoring_period", None),
         getattr(match, "canonical_id", None),
-        getattr(getattr(match, "unit", None), "value", None),
-        getattr(getattr(match, "reason", None), "value", None),
+        _stated_value(getattr(match, "unit", None)),
+        _stated_value(getattr(match, "reason", None)),
         None if comparable is None else bool(comparable),
     )
 
@@ -425,6 +436,19 @@ def _retained_audit_facts(market: Any) -> object:
     )
 
 
+def _resolution_of(market: Any) -> object:
+    """The statistic resolution one market carries, whichever seam named it.
+
+    A normalized market carries the catalog's ``statistic_match``; a board
+    retains the same resolution as ``statistic_resolution``.  Both are the same
+    fact about the same offering, so one lookup reads either and one fact list
+    answers for both.
+    """
+
+    match = getattr(market, "statistic_match", None)
+    return getattr(market, "statistic_resolution", None) if match is None else match
+
+
 def market_content_key(market: Any) -> bytes:
     """What one market says, in the semantics its identity is decided in.
 
@@ -434,13 +458,18 @@ def market_content_key(market: Any) -> bytes:
     read as the exact number it states, so ``25.50`` and ``25.5`` are one line.
     An exact semantic repeat therefore collapses instead of being read as a
     conflicting market identity.
+
+    It reads a market by the attributes both seams name, so a retained board
+    observation answers here exactly as the normalized market it was read from
+    did: the seam that collapses a repeat and the seam that judges a retained
+    contradiction distinct cannot disagree about what one offering is.
     """
 
     return encode_canonical(
         (
             market.market_id,
             reported_evidence_facts(market),
-            statistic_resolution_facts(getattr(market, "statistic_match", None)),
+            statistic_resolution_facts(_resolution_of(market)),
         )
     )
 

@@ -22,7 +22,7 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -641,6 +641,12 @@ class BoardStatisticResolution:
     reason: str | None = None
     comparable: bool = False
 
+    @property
+    def is_comparable(self) -> bool:
+        """The comparability the shared market semantics ask every match for."""
+
+        return self.comparable
+
     @classmethod
     def of(cls, match: StatisticMatch | None) -> "BoardStatisticResolution | None":
         if match is None:
@@ -1249,57 +1255,29 @@ def _by_reference(
     return clusters
 
 
-#: The two fields that state where an observation sits in a contradiction
-#: rather than what it observed.  They are the only fields a contradiction is
-#: allowed to differ in by itself, so they take no part in the evidence key.
-CONFLICT_BOOKKEEPING_FIELDS = frozenset({"conflict_ordinal", "conflict_count"})
+def board_market_evidence_key(market: BoardMarket) -> bytes:
+    """What one retained observation says, in the semantics a repeat is read in.
 
+    A contradiction is a disagreement about an offering, so distinctness is
+    read in exactly the pair the retention seam collapses repeats by: the
+    shared canonical market semantics of ``market_content_key``, which a
+    ``BoardMarket`` answers by the same attribute names a normalized market
+    does, and ``observation_evidence_key`` over the snapshot observation the
+    market was read in.  Nothing else takes part, and nothing is listed here
+    twice: a fact is substantive at this seam exactly when it is substantive at
+    the one upstream.
 
-def _stated_fact(value: Any) -> Any:
-    """One hashable rendering of a retained fact, at the scale it is published.
-
-    Type-tagged, so ``1`` and ``"1"`` are two facts; scale-aware, because a
-    board writes a threshold in the scale its provider published and
-    ``Decimal("25.50")`` reaches a caller as another number than
-    ``Decimal("25.5")``; and recursive through nested retained evidence, so a
-    disagreement about an athlete's canonical id counts exactly as much as a
-    disagreement about a threshold.
+    Audit content therefore proves nothing.  A provider that writes one
+    threshold ``25.50`` and another ``25.5``, pads an exact price or modifier,
+    or relists equivalent selections the other way round has restated one
+    offering; those spellings are still retained, published exactly, and still
+    order the evidence, but they never make a repeat read as a disagreement.
+    Where an observation sits in a contradiction takes no part either: an
+    ordinal is a statement about the cluster, never evidence the cluster is one.
     """
 
-    if isinstance(value, Decimal):
-        return ("decimal", value.as_tuple())
-    if isinstance(value, bool):
-        return ("bool", value)
-    if isinstance(value, Enum):
-        return ("enum", type(value).__name__, value.value)
-    if isinstance(value, (tuple, list)):
-        return ("sequence", tuple(_stated_fact(item) for item in value))
-    if is_dataclass(value):
-        return (
-            type(value).__name__,
-            tuple(
-                (field.name, _stated_fact(getattr(value, field.name)))
-                for field in fields(value)
-            ),
-        )
-    return (type(value).__name__, value)
-
-
-def board_market_evidence_key(market: BoardMarket) -> tuple:
-    """Everything one retained observation states, apart from its bookkeeping.
-
-    Every field takes part, read from the dataclass itself, so a fact retained
-    on a board later distinguishes two observations from the day it exists
-    rather than the day someone remembers to list it here.  Only where an
-    observation sits in a contradiction is left out: an ordinal is a statement
-    about the cluster, never evidence the cluster is one.
-    """
-
-    return tuple(
-        (field.name, _stated_fact(getattr(market, field.name)))
-        for field in fields(market)
-        if field.name not in CONFLICT_BOOKKEEPING_FIELDS
-    )
+    # Both halves are self-delimiting, so their concatenation stays injective.
+    return market_content_key(market) + observation_evidence_key(market.observation)
 
 
 def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
