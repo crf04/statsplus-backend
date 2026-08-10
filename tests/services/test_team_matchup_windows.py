@@ -223,6 +223,16 @@ def _publish_snapshot_batch(
     )
 
 
+class _CountingTeamMatchupRepository(TeamMatchupRepository):
+    def __init__(self, engine):
+        super().__init__(engine)
+        self.snapshot_calls = []
+
+    def get_snapshot(self, scope):
+        self.snapshot_calls.append(scope)
+        return super().get_snapshot(scope)
+
+
 def _one_game_for_every_team(played_on: date) -> list[dict]:
     team_ids = _fixture_team_ids()
     return [
@@ -914,6 +924,73 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     assert not any(fact.base == "play_types" for fact in last_15.facts)
 
 
+def test_refresh_persists_production_shape_opponent_shot_locations(tmp_path):
+    class MultiIndexShotZonesNBA(_FakeMatchupNBA):
+        def fetch_opponent_shooting_zone(self, date_from, **kwargs):
+            self.calls.append(("shot_zones", date_from, kwargs))
+            columns = pd.MultiIndex.from_tuples(
+                [
+                    ("", "TEAM_ID"),
+                    ("", "TEAM_NAME"),
+                    ("Restricted Area", "OPP_FGM"),
+                    ("Restricted Area", "OPP_FGA"),
+                    ("Restricted Area", "OPP_FG_PCT"),
+                    ("Backcourt", "OPP_FGM"),
+                    ("Backcourt", "OPP_FGA"),
+                ]
+            )
+            return pd.DataFrame(
+                [
+                    [
+                        team_id,
+                        f"Team {team_id}",
+                        200 if team_id == BOS else 300 + index,
+                        350 if team_id == BOS else 450 + index,
+                        0.571,
+                        1,
+                        2,
+                    ]
+                    for index, team_id in enumerate(self._teams(kwargs["team_id"]))
+                ],
+                columns=columns,
+            )
+
+    team_ids = _fixture_team_ids()
+    as_of = date(2025, 4, 15)
+    engine = create_engine(f"sqlite:///{tmp_path / 'multi-index-zones.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    service = TeamMatchupRefreshService(
+        repository,
+        FakeEventCatalog(_one_game_for_every_team(as_of)),
+        MultiIndexShotZonesNBA(team_ids),
+        _FakeMatchupPBP(team_ids),
+        clock=lambda: datetime(2025, 4, 15, 10, tzinfo=timezone.utc),
+    )
+
+    service.refresh("2024-25", as_of=as_of)
+
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", as_of))
+    zone_observation = next(
+        item for item in snapshot.observations if item.surface == "shot_zones"
+    )
+    bos_zones = {
+        (fact.slice_key, fact.stat_key): fact.raw_value
+        for fact in snapshot.facts
+        if fact.team_id == BOS and fact.base == "shot_zones"
+    }
+    assert zone_observation.status == "available"
+    assert bos_zones == {
+        ("Restricted Area", "FGA"): 350,
+        ("Restricted Area", "FGM"): 200,
+    }
+    assert not any(
+        fact.base == "shot_zones"
+        and (fact.slice_key == "Backcourt" or fact.stat_key == "FG_PCT")
+        for fact in snapshot.facts
+    )
+
+
 def test_refresh_publishes_season_and_honest_missing_last_15_early_in_season(
     tmp_path,
 ):
@@ -1025,6 +1102,43 @@ def test_refresh_records_malformed_nba_surface_and_preserves_prior_facts(tmp_pat
     assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {
         77
     }
+
+
+def test_backdated_unbounded_play_types_keep_their_truthful_failure_reason(tmp_path):
+    class MalformedTraditionalNBA(_FakeMatchupNBA):
+        def fetch_opponent_team_stats(self, date_from, **kwargs):
+            raise ProviderResponseError("bad traditional schema")
+
+    team_ids = _fixture_team_ids()
+    observed_at = datetime(2025, 4, 16, 10, tzinfo=timezone.utc)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    engine = create_engine(f"sqlite:///{tmp_path / 'backdated-malformed.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    service = TeamMatchupRefreshService(
+        repository,
+        FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        MalformedTraditionalNBA(team_ids),
+        _FakeMatchupPBP(team_ids),
+        clock=lambda: observed_at,
+    )
+
+    service.refresh("2024-25", as_of=scope.as_of)
+
+    observations = {
+        item.surface: item for item in repository.get_snapshot(scope).observations
+    }
+    assert observations["play_types"].status == "unavailable"
+    assert (
+        observations["play_types"].unavailable_reason
+        == "provider_unbounded_as_of"
+    )
+    for surface in ("traditional", "shot_types", "shot_zones"):
+        assert observations[surface].status == "unavailable"
+        assert (
+            observations[surface].unavailable_reason
+            == "provider_malformed_response"
+        )
 
 
 def test_refresh_records_malformed_pbp_surface_and_continues_nba_surfaces(tmp_path):
@@ -1510,6 +1624,131 @@ def test_latest_window_resolution_is_deterministic_and_keeps_snapshot_freshness(
         )
         is None
     )
+
+
+def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
+    surfaces = (
+        "assist_locations",
+        "play_types",
+        "shot_types",
+        "shot_zones",
+        "traditional",
+    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'latest-query-count.sqlite3'}")
+    run_migrations(engine)
+    repository = _CountingTeamMatchupRepository(engine)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    facts = [
+        TeamMatchupFact(
+            team_id=team_id,
+            base=surface,
+            slice_key="governed",
+            stat_key="raw",
+            raw_value=surface_index + 1,
+            denominator_value=48,
+            denominator_unit="minutes",
+            provider="recorded",
+        )
+        for surface_index, surface in enumerate(surfaces)
+        for team_id in _fixture_team_ids()
+    ]
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=facts,
+        observations=[
+            TeamMatchupObservation(surface, "available") for surface in surfaces
+        ],
+        retrieved_at=datetime(2025, 4, 15, 15, tzinfo=timezone.utc),
+    )
+
+    latest = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
+    ).get_latest_window("2024-25", window_games=15)
+
+    assert latest is not None
+    assert latest.scope == scope
+    assert latest.fact_scopes == {surface: scope for surface in surfaces}
+    assert len(latest.league_metrics) == 5
+    assert len(latest.team_metrics) == 30
+    assert repository.snapshot_calls == [scope]
+
+
+def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'distinct-query-count.sqlite3'}")
+    run_migrations(engine)
+    repository = _CountingTeamMatchupRepository(engine)
+    traditional_scope = TeamMatchupSnapshotScope(
+        "2024-25", date(2025, 4, 13), 15
+    )
+    zone_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 14), 15)
+    observation_scope = TeamMatchupSnapshotScope(
+        "2024-25", date(2025, 4, 15), 15
+    )
+    _publish_snapshot_batch(
+        repository,
+        traditional_scope,
+        facts=_complete_traditional_facts(value=10),
+        observations=[TeamMatchupObservation("traditional", "available")],
+        retrieved_at=datetime(2025, 4, 13, 15, tzinfo=timezone.utc),
+    )
+    zone_facts = [
+        TeamMatchupFact(
+            team_id=team_id,
+            base="shot_zones",
+            slice_key="Restricted Area",
+            stat_key="FGM",
+            raw_value=20,
+            denominator_value=48,
+            denominator_unit="minutes",
+            provider="nba_stats",
+        )
+        for team_id in _fixture_team_ids()
+    ]
+    _publish_snapshot_batch(
+        repository,
+        zone_scope,
+        facts=zone_facts,
+        observations=[TeamMatchupObservation("shot_zones", "available")],
+        retrieved_at=datetime(2025, 4, 14, 15, tzinfo=timezone.utc),
+    )
+    _publish_snapshot_batch(
+        repository,
+        observation_scope,
+        facts=[],
+        observations=[
+            TeamMatchupObservation(
+                "shot_zones", "unavailable", "provider_malformed_response"
+            ),
+            TeamMatchupObservation(
+                "traditional", "unavailable", "provider_malformed_response"
+            ),
+        ],
+        retrieved_at=datetime(2025, 4, 15, 15, tzinfo=timezone.utc),
+    )
+
+    latest = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
+    ).get_latest_window("2024-25", window_games=15)
+
+    assert latest is not None
+    assert latest.fact_scopes == {
+        "shot_zones": zone_scope,
+        "traditional": traditional_scope,
+    }
+    assert {
+        (metric.base, metric.average_allowed_per_48)
+        for metric in latest.league_metrics
+    } == {("shot_zones", 20), ("traditional", 10)}
+    assert repository.snapshot_calls[0] == observation_scope
+    assert len(repository.snapshot_calls) == 3
+    assert set(repository.snapshot_calls) == {
+        observation_scope,
+        zone_scope,
+        traditional_scope,
+    }
 
 
 def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_path):

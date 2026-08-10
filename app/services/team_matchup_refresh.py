@@ -337,7 +337,10 @@ class TeamMatchupRefreshService:
             minutes_by_team = self._minutes_by_team(traditional_frame)
         except (ProviderResponseError, ValueError) as error:
             minutes_by_team = None
-            for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
+            dependent_surfaces = ["traditional", "shot_types", "shot_zones"]
+            if include_play_types:
+                dependent_surfaces.append("play_types")
+            for surface in dependent_surfaces:
                 failures[surface] = self._provider_failure(error)
         if minutes_by_team is not None:
             try:

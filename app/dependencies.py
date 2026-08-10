@@ -210,6 +210,7 @@ def build_dependencies(
             mapping_repository=event_mapping_repository,
             settings=settings,
         )
+
     dfs_board_service = DFSBoardService(
         provider_registry=cached_dfs_providers,
         max_concurrency=3,

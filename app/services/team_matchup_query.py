@@ -83,18 +83,27 @@ class TeamMatchupQueryService:
         )
         if observation_scope is None:
             return None
-        observations = self.repository.get_snapshot(observation_scope).observations
+        observation_snapshot = self.repository.get_snapshot(observation_scope)
+        observations = observation_snapshot.observations
         fact_scopes = self.repository.get_latest_fact_scopes(
             season,
             window_games=window_games,
             as_of=cutoff,
         )
-        facts = []
+        surfaces_by_scope = defaultdict(set)
         for surface, fact_scope in fact_scopes.items():
+            surfaces_by_scope[fact_scope].add(surface)
+        snapshots_by_scope = {observation_scope: observation_snapshot}
+        facts = []
+        for fact_scope, surfaces in surfaces_by_scope.items():
+            if fact_scope not in snapshots_by_scope:
+                snapshots_by_scope[fact_scope] = self.repository.get_snapshot(
+                    fact_scope
+                )
             facts.extend(
                 fact
-                for fact in self.repository.get_snapshot(fact_scope).facts
-                if fact.base == surface
+                for fact in snapshots_by_scope[fact_scope].facts
+                if fact.base in surfaces
             )
         return self._build_window(
             observation_scope,
