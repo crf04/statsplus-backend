@@ -247,6 +247,43 @@ def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 0
 
 
+def test_slate_uses_live_pool_counts_and_provider_freshness():
+    pool = type(
+        "RecordedPool",
+        (),
+        {
+            "get_pool": lambda self, *, season, game_ids: type(
+                "Pool",
+                (),
+                {
+                    "team_counts": {1: 2, 2: 3},
+                    "freshness": {
+                        "status": "fresh",
+                        "retrieved_at": "2026-01-02T14:59:00+00:00",
+                        "providers": {
+                            "prizepicks": {
+                                "status": "fresh",
+                                "retrieved_at": "2026-01-02T14:59:00+00:00",
+                            },
+                            "underdog": {"status": "missing", "retrieved_at": None},
+                        },
+                    },
+                },
+            )(),
+        },
+    )()
+    service = _service([_event("0022500001", "2026-01-03T00:00:00+00:00")])
+    service.player_pool = pool
+
+    payload = service.get_slate("2026-01-02")
+
+    assert payload["games"][0]["away_team"]["targetable_player_count"] == 2
+    assert payload["games"][0]["home_team"]["targetable_player_count"] == 3
+    assert payload["freshness"]["pool"] == pool.get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    ).freshness
+
+
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():
     retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
     freshness = {

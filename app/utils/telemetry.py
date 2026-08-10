@@ -111,6 +111,7 @@ _request_id_local = threading.local()
 _event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_request_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
+_player_pool_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _buffer_lock = threading.Lock()
 
 _provider_events_total = 0
@@ -225,6 +226,21 @@ class BoardTelemetryEvent:
             raise ValueError("board telemetry started_at must be timezone-aware")
         if self.request_id is not None and not is_valid_request_id(self.request_id):
             raise ValueError("board telemetry request_id is invalid")
+
+
+@dataclass(frozen=True)
+class PlayerPoolTelemetryEvent:
+    """Bounded counts for markets dropped while building a Player Pool."""
+
+    unknown_stat_label_count: int
+    unjoined_athlete_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.unknown_stat_label_count, self.unjoined_athlete_count)
+        ):
+            raise ValueError("player pool telemetry counts must be non-negative integers")
 
 
 #: Closed label vocabularies for one published board read.  Everything an
@@ -417,6 +433,27 @@ class BoundedBoardTelemetryRecorder(BoardTelemetryRecorder):
 
     def record(self, event: BoardTelemetryEvent) -> None:
         record_board_telemetry(event)
+
+
+class BoundedPlayerPoolTelemetryRecorder:
+    """Record Player Pool drop counts in a bounded scalar-only buffer."""
+
+    def record(self, event: PlayerPoolTelemetryEvent) -> None:
+        payload = asdict(event)
+        logger.info(
+            "player_pool_event unknown_stat_label_count=%d unjoined_athlete_count=%d",
+            event.unknown_stat_label_count,
+            event.unjoined_athlete_count,
+        )
+        with _buffer_lock:
+            _player_pool_event_buffer.append(payload)
+
+
+def snapshot_recent_player_pool_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Return recent scalar-only Player Pool drop aggregates."""
+
+    with _buffer_lock:
+        return list(_player_pool_event_buffer)[-limit:]
 
 
 def record_board_telemetry(event: BoardTelemetryEvent) -> None:
@@ -689,6 +726,7 @@ def clear_recorded_provider_events() -> None:
         _event_buffer.clear()
         _board_event_buffer.clear()
         _board_request_event_buffer.clear()
+        _player_pool_event_buffer.clear()
         _provider_events_total = 0
         _board_events_total = 0
         _board_request_events_total = 0
@@ -851,6 +889,9 @@ __all__ = [
     "get_recorded_board_events",
     "record_board_telemetry",
     "snapshot_recent_board_events",
+    "PlayerPoolTelemetryEvent",
+    "BoundedPlayerPoolTelemetryRecorder",
+    "snapshot_recent_player_pool_events",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",

@@ -7,6 +7,7 @@ from ..utils.telemetry import (
     snapshot_recent_board_events,
     snapshot_recent_board_request_events,
     snapshot_recent_events,
+    snapshot_recent_player_pool_events,
 )
 from ._service_proxy import CurrentAppService
 
@@ -77,4 +78,5 @@ def provider_telemetry():
     body["recent_provider_events"] = snapshot_recent_events(limit=50)
     body["recent_board_events"] = snapshot_recent_board_events(limit=50)
     body["recent_board_request_events"] = snapshot_recent_board_request_events(limit=50)
+    body["recent_player_pool_events"] = snapshot_recent_player_pool_events(limit=50)
     return jsonify(body)

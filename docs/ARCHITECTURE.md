@@ -255,8 +255,9 @@ during snapshot resolution, so every market on `board.snapshots` carries an
 explicit match; the provider's coverage evidence and observation remain
 unchanged.
 
-The initial catalog maps full-game points, rebounds, assists, three-pointers
-made, steals, blocks, turnovers, PRA, PA, PR, and RA. Composite identities use
+The catalog maps full-game points, rebounds, assists, three-pointers made,
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
+three-pointer, and two-pointer attempts. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, and Underdog labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
@@ -269,6 +270,24 @@ fantasy labels return `MatchState.UNMAPPED` with a closed `MatchReason`, retain
 the original provider evidence, and are not included in the board's
 canonical-market view. This slice does not create
 comparison groups or a public route.
+
+### Live Player Pool
+
+`PlayerPoolService` consumes one `DFSBoardService` result for the current
+season and the exact canonical game IDs on an ET Slate. It admits only
+available, standard, full-game markets whose Statistic Catalog match belongs
+to the closed Market Category vocabulary. Governed athlete and event mapping
+outcomes join provider identities to canonical NBA player and game IDs; a
+market without both joins cannot affect a slate count. Pool membership is the
+union by canonical player ID, with deterministic Market Categories and
+per-provider provenance retained on each internal `PoolPlayer`.
+
+The live slice does not synthesize players and does not persist snapshots. A
+usable empty provider snapshot is `fresh`; a failed provider is `missing`; at
+least one usable observation makes the aggregate `fresh`, while total failure
+is `unavailable`. Unknown provider stat identities and unjoined athlete
+identities are counted once per bounded Player Pool telemetry event, without
+logging names, labels, or provider IDs.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

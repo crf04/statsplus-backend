@@ -7,6 +7,9 @@ component_order:
   - steals
   - blocks
   - turnovers
+  - field_goals_attempted
+  - three_pointers_attempted
+  - two_pointers_attempted
 statistics:
   - id: points
     label: Points
@@ -113,3 +116,39 @@ statistics:
       dabble: [assists+rebounds, rebounds+assists]
       prizepicks: [RA, Rebounds + Assists, Rebs+Asts]
       underdog: [RA, Rebounds + Assists, Rebs+Asts]
+  - id: stks
+    label: Steals + Blocks
+    unit: count
+    scoring_periods: [full_game]
+    components: [steals, blocks]
+    provider_mappings:
+      dabble: [blocks+steals, steals+blocks]
+      prizepicks: [STKS, Steals + Blocks, Blks+Stls]
+      underdog: [STKS, Steals + Blocks, Blks+Stls]
+  - id: field_goals_attempted
+    label: Field Goals Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [field_goals_attempted]
+    provider_mappings:
+      dabble: [field-goals-attempted, FGA]
+      prizepicks: [Field Goals Attempted, FGA]
+      underdog: [Field Goals Attempted, FGA]
+  - id: three_pointers_attempted
+    label: Three-Pointers Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [three_pointers_attempted]
+    provider_mappings:
+      dabble: [three-pointers-attempted, threes-attempted, FG3A]
+      prizepicks: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
+      underdog: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
+  - id: two_pointers_attempted
+    label: Two-Pointers Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [two_pointers_attempted]
+    provider_mappings:
+      dabble: [two-pointers-attempted, FG2A]
+      prizepicks: [2-Pointers Attempted, Two Pointers Attempted, FG2A]
+      underdog: [2-Pointers Attempted, Two Pointers Attempted, FG2A]

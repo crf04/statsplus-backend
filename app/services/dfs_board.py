@@ -30,6 +30,7 @@ from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_resolver import (
     MappingResolutionState,
     normalize_athlete_name,
+    normalize_team_abbreviation,
 )
 from app.services.event_mapping_errors import EventMappingPersistenceError
 from app.services.event_resolver import EventResolutionState, normalize_team_label
@@ -179,7 +180,9 @@ def _evidence_facts(resolution: Any) -> dict[str, Any]:
             None if team is None else (team.provider_id or "").strip() or None
         ),
         "team_abbreviation": (
-            None if team is None else (team.abbreviation or "").strip().casefold() or None
+            None
+            if team is None
+            else normalize_team_abbreviation(team.abbreviation).casefold() or None
         ),
         "team_name": (None if team is None else normalize_athlete_name(team.name) or None),
     }

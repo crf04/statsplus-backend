@@ -72,6 +72,7 @@ def build_dependencies(
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
+    from app.services.player_pool import PlayerPoolService
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
     from app.services.statistic_catalog import StatisticCatalog
@@ -229,7 +230,12 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
-    slate_service = SlateService(event_catalog_service, settings=settings)
+    player_pool_service = PlayerPoolService(dfs_board_service)
+    slate_service = SlateService(
+        event_catalog_service,
+        settings=settings,
+        player_pool=player_pool_service,
+    )
 
     return ApplicationDependencies(
         settings=settings,
