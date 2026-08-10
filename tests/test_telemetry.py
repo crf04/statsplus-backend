@@ -328,3 +328,53 @@ def test_recent_events_include_cache_hit_and_failure_outcomes():
         telemetry.OUTCOME_SUCCESS,
         telemetry.OUTCOME_MALFORMED,
     }
+
+
+def _board_request_event(**overrides):
+    values = {
+        "duration_ms": 12.5,
+        "outcome": "served",
+        "status_code": 200,
+        "comparison_availability": "available",
+        "provider_status_counts": (("complete", 2),),
+        "failure_reason_counts": (),
+        "freshness_counts": (("fresh", 2),),
+        "cache_counts": (("hit", 1), ("miss", 1)),
+        "group_count": 1,
+        "market_count": 2,
+        "unresolved_count": 0,
+        "disabled_provider_count": 1,
+        "started_at": "2026-08-09T20:00:30+00:00",
+        "request_id": "board-1",
+    }
+    values.update(overrides)
+    return telemetry.BoardRequestEvent(**values)
+
+
+def test_board_request_events_are_recorded_and_counted():
+    telemetry.record_board_request_event(_board_request_event())
+
+    recorded = telemetry.get_recorded_board_request_events()
+    assert len(recorded) == 1
+    assert recorded[0]["outcome"] == "served"
+    assert recorded[0]["cache_counts"] == {"hit": 1, "miss": 1}
+    assert telemetry.snapshot_metrics()["board_request_events_total"] == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"outcome": "truncated"},
+        {"comparison_availability": "nikola-jokic"},
+        {"provider_status_counts": (("player-203999", 1),)},
+        {"failure_reason_counts": (("connection refused by host", 1),)},
+        {"freshness_counts": (("0022500001", 1),)},
+        {"cache_counts": (("mkt_2_abc", 1),)},
+        {"duration_ms": -1.0},
+        {"started_at": "2026-08-09T20:00:30"},
+        {"request_id": "not a valid id"},
+    ],
+)
+def test_a_board_request_event_refuses_unbounded_labels(overrides):
+    with pytest.raises(ValueError):
+        _board_request_event(**overrides)
