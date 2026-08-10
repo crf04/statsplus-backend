@@ -325,11 +325,24 @@ are refused rather than ignored.
 ```json
 {
   "player_id": 2544,
+  "freshness": {
+    "player_pool": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-05T18:00:00+00:00",
+      "providers": {}
+    },
+    "player_game_logs": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-05T18:00:00+00:00"
+    }
+  },
   "h2h": {
     "thin": false,
     "rows": [
       {
         "row_type": "game",
+        "player_id": 2544,
+        "player_name": "LeBron James",
         "game_date": "2026-01-05",
         "matchup": "LAL @ BOS",
         "minutes": 36.0,
@@ -338,6 +351,8 @@ are refused rather than ignored.
       },
       {
         "row_type": "average",
+        "player_id": null,
+        "player_name": null,
         "game_date": null,
         "matchup": null,
         "minutes": 36.0,
@@ -354,6 +369,9 @@ Both tables carry backend-owned `thin` booleans. A nonempty table contains
 newest-first `game` rows followed by exactly one `average` row; an empty table
 contains no rows. Game rows always carry ISO game date and stored team/opponent
 matchup identity. The average row always carries null date and matchup.
+Game rows also identify the sampled canonical player; this makes archetype peer
+rows attributable. Average-row player identity is null because it is an
+aggregate across the delivered sample.
 
 Each row's `stats` and `deltas` maps contain every Market Category posted for
 the selected player, including PRA/PA/PR/RA/STKS and FGA/FG3A/FG2A. A delta is
@@ -374,13 +392,26 @@ response. The request consumes persisted Player Pool facts, `player_clusters`,
 and durable `player_game_logs`; it never calls NBA Stats per player and never
 uses recorded test fixtures in production.
 
+`freshness.player_game_logs.status` is `fresh`, `stale`, or `missing`, and its
+`retrieved_at` is the timezone-aware durable publication timestamp when one
+exists. Stale or missing logs degrade to an honest `200` empty/thin response,
+so consumers can distinguish unavailable history from genuinely empty history
+under a fresh publication. `freshness.player_pool` preserves the governed
+Player Pool freshness document. Mixed provider truth may omit its aggregate
+`status`; the per-provider states remain authoritative. The selection lookup
+reads the newest reusable stored slate scope containing the game and may serve
+it as `stale-served` only within the existing six-hour stale window. It never
+acquires a refresh lease or invokes a DFS provider.
+
 | Case | Response |
 | --- | --- |
 | Known selection with no usable H2H or archetype rows | `200` with the affected `rows: []`, `thin: true` |
-| Unknown game or player outside that game's Player Pool | `404 resource_not_found` |
+| Unknown game in a nonempty Event Catalog, or player absent from a usable stored Player Pool | `404 resource_not_found` |
 | Missing, empty, repeated, noncanonical, or extra query parameter | `400 invalid_input` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
-| Schedule dependency is unavailable | `503 provider_unavailable` |
+| Event Catalog is unavailable or empty | `503 provider_unavailable` |
+| No contract-valid stored Player Pool contains the valid game | `503 provider_unavailable` |
+| Stored Player Pool category is absent from the current Statistic Catalog | `503 provider_unavailable` |
 
 ### Get Game Logs
 

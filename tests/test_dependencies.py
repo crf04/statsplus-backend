@@ -126,10 +126,12 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
         dependencies.matchup_selection_service.event_catalog
         is dependencies.event_catalog_service
     )
-    assert (
-        dependencies.matchup_selection_service.player_pool
-        is dependencies.slate_service.player_pool
-    )
+    selection_pool = dependencies.matchup_selection_service.player_pool
+    assert selection_pool is not dependencies.slate_service.player_pool
+    assert selection_pool.snapshot_repository is not None
+    assert not hasattr(selection_pool, "board_service")
+    assert not hasattr(selection_pool, "provider_registry")
+    assert not hasattr(selection_pool, "get_pool")
     assert (
         dependencies.matchup_selection_service.player_logs.engine is dependencies.engine
     )

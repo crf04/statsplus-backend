@@ -19,8 +19,12 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
 )
-from app.services.player_pool import PlayerPool, PoolPlayer
-from app.services.statistic_catalog import StatisticCatalog
+from app.services.player_pool import StoredPlayerPoolReader
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+)
+from app.services.statistic_catalog import CanonicalStatistic, StatisticCatalog
 from app.services.matchup_selection import MatchupSelectionService
 
 
@@ -35,29 +39,8 @@ class RecordedEventCatalog:
     def get_events(self, season):
         return [{"season": season, **self.game}]
 
-
-class RecordedPool:
-    def __init__(self, player):
-        self.player = player
-
-    def get_pool(self, *, season, game_ids):
-        return PlayerPool(
-            players=(
-                PoolPlayer(
-                    canonical_player_id=self.player["canonical_player_id"],
-                    name=self.player["name"],
-                    team_id=self.player["team_id"],
-                    market_categories=tuple(self.player["market_categories"]),
-                    provenance={"recorded": tuple(self.player["market_categories"])},
-                ),
-            ),
-            team_counts={self.player["team_id"]: 1},
-            freshness={
-                "status": "fresh",
-                "retrieved_at": RETRIEVED_AT.isoformat(),
-                "providers": {},
-            },
-        )
+    def count_events(self, season):
+        return 1
 
 
 class RecordedArchetypePeers:
@@ -68,17 +51,28 @@ class RecordedArchetypePeers:
         return self.peer_ids
 
 
-def _client(tmp_path, *, peer_ids=(), pool_player=None):
+def _client(
+    tmp_path,
+    *,
+    peer_ids=(),
+    pool_player=None,
+    event_catalog=None,
+    seed_pool=True,
+    clock=lambda: RETRIEVED_AT,
+    statistic_catalog=None,
+    publish_logs=True,
+):
     fixture = json.loads(FIXTURE.read_text())
+    tmp_path.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{tmp_path / 'selection.sqlite3'}")
     run_migrations(engine)
-    catalog = StatisticCatalog.load_default()
+    catalog = statistic_catalog or StatisticCatalog.load_default()
     repository = PlayerGameLogRepository(
         engine,
         statistic_catalog=catalog,
         stats_surface_max_age=timedelta(hours=30),
         stats_surface_season=fixture["season"],
-        clock=lambda: RETRIEVED_AT,
+        clock=clock,
     )
     records = [
         PlayerGameLogRecord(
@@ -90,13 +84,49 @@ def _client(tmp_path, *, peer_ids=(), pool_player=None):
         )
         for row in fixture["logs"]
     ]
-    repository.publish(
-        fixture["season"],
-        records,
-        retrieved_at=RETRIEVED_AT,
-        source_provider="recorded",
-        source_row_count=len(records),
-    )
+    if publish_logs:
+        repository.publish(
+            fixture["season"],
+            records,
+            retrieved_at=RETRIEVED_AT,
+            source_provider="recorded",
+            source_row_count=len(records),
+        )
+    snapshot_repository = PlayerPoolSnapshotRepository(engine)
+    if seed_pool:
+        player = pool_player or fixture["player"]
+        scope = PlayerPoolSnapshotScope.create(
+            fixture["season"],
+            (fixture["game"]["nba_game_id"], "0022500999"),
+        )
+        assert snapshot_repository.try_acquire_refresh(
+            scope,
+            owner="fixture",
+            now=RETRIEVED_AT,
+            lease_seconds=60,
+        )
+        assert snapshot_repository.replace_owned(
+            scope,
+            owner="fixture",
+            payload={
+                "players": [
+                    {
+                        **player,
+                        "provenance": {
+                            "recorded": player["market_categories"],
+                        },
+                    }
+                ],
+                "team_counts": {str(player["team_id"]): 1},
+                "freshness": {
+                    "status": "fresh",
+                    "retrieved_at": RETRIEVED_AT.isoformat(),
+                    "providers": {},
+                },
+            },
+            retrieved_at=RETRIEVED_AT,
+            now=RETRIEVED_AT,
+        )
     settings = RuntimeSettings(
         environment="testing",
         auth=AuthenticationSettings(firebase_admin_disabled=True),
@@ -104,8 +134,10 @@ def _client(tmp_path, *, peer_ids=(), pool_player=None):
         nba=NBASeasonSettings(current_season=fixture["season"]),
     )
     service = MatchupSelectionService(
-        event_catalog=RecordedEventCatalog(fixture["game"]),
-        player_pool=RecordedPool(pool_player or fixture["player"]),
+        event_catalog=event_catalog or RecordedEventCatalog(fixture["game"]),
+        player_pool=StoredPlayerPoolReader(
+            snapshot_repository, clock=lambda: RETRIEVED_AT
+        ),
         player_logs=repository,
         archetypes=RecordedArchetypePeers(peer_ids),
         statistic_catalog=catalog,
@@ -139,6 +171,17 @@ def test_selection_uses_regular_season_rate_for_combined_phase_h2h_rows(tmp_path
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["player_id"] == 101
+    assert payload["freshness"] == {
+        "player_pool": {
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+            "providers": {},
+        },
+        "player_game_logs": {
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+        },
+    }
     assert payload["h2h"]["thin"] is False
     assert [row["row_type"] for row in payload["h2h"]["rows"]] == [
         "game",
@@ -207,6 +250,12 @@ def test_archetype_rows_use_each_sample_players_own_regular_season_rate(tmp_path
         "average",
     ]
     playoff, peer_two, peer_one, average = archetype["rows"]
+    assert [(row["player_id"], row["player_name"]) for row in archetype["rows"]] == [
+        (202, "Peer One"),
+        (303, "Peer Two"),
+        (202, "Peer One"),
+        (None, None),
+    ]
     assert [row["game_date"] for row in archetype["rows"]] == [
         "2026-05-02",
         "2026-01-12",
@@ -242,6 +291,17 @@ def test_known_pool_player_without_stored_logs_gets_honest_empty_tables(tmp_path
     assert response.status_code == 200
     assert response.get_json() == {
         "player_id": 404,
+        "freshness": {
+            "player_pool": {
+                "status": "fresh",
+                "retrieved_at": RETRIEVED_AT.isoformat(),
+                "providers": {},
+            },
+            "player_game_logs": {
+                "status": "fresh",
+                "retrieved_at": RETRIEVED_AT.isoformat(),
+            },
+        },
         "h2h": {"thin": True, "rows": []},
         "archetype": {"thin": True, "rows": []},
     }
@@ -262,3 +322,114 @@ def test_unknown_game_and_player_ids_return_resource_not_found(tmp_path):
     assert unknown_game.get_json()["error"]["code"] == "resource_not_found"
     assert unknown_player.status_code == 404
     assert unknown_player.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_empty_event_catalog_and_missing_stored_pool_are_unavailable(tmp_path):
+    class EmptyEventCatalog:
+        def count_events(self, season):
+            return 0
+
+        def get_events(self, season):
+            raise AssertionError("an empty catalog must fail before an event read")
+
+    empty_catalog_client, _ = _client(tmp_path / "empty", event_catalog=EmptyEventCatalog())
+    missing_pool_client, fixture = _client(tmp_path / "pool", seed_pool=False)
+
+    empty_catalog = empty_catalog_client.get(
+        "/api/games/matchup/selection?game_id=0022500001&player_id=101"
+    )
+    missing_pool = missing_pool_client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert empty_catalog.status_code == 503
+    assert empty_catalog.get_json()["error"]["code"] == "provider_unavailable"
+    assert missing_pool.status_code == 503
+    assert missing_pool.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_stale_player_logs_are_distinct_from_fresh_empty_history(tmp_path):
+    client, fixture = _client(
+        tmp_path,
+        clock=lambda: RETRIEVED_AT + timedelta(hours=31),
+    )
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["freshness"]["player_game_logs"] == {
+        "status": "stale",
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+    }
+    assert payload["h2h"] == {"thin": True, "rows": []}
+    assert payload["archetype"] == {"thin": True, "rows": []}
+
+
+def test_missing_player_log_publication_is_explicit_and_degraded_200(tmp_path):
+    client, fixture = _client(tmp_path, publish_logs=False)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["freshness"]["player_game_logs"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
+    assert payload["h2h"] == {"thin": True, "rows": []}
+
+
+def test_removed_stored_pool_market_is_explicitly_unavailable(tmp_path):
+    player = json.loads(FIXTURE.read_text())["player"]
+    player["market_categories"] = [*player["market_categories"], "REMOVED"]
+    client, fixture = _client(tmp_path, pool_player=player)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_sanctioned_derived_component_catalog_extension_is_computed(tmp_path):
+    default = StatisticCatalog.load_default()
+    catalog = StatisticCatalog(
+        statistics=(
+            *default.statistics,
+            CanonicalStatistic(
+                id="two_pointer_attempt_volume",
+                label="Two Pointer Attempt Volume",
+                unit="count",
+                scoring_periods=("full_game",),
+                components=("two_pointers_attempted",),
+                market_category="X2A",
+            ),
+        )
+    )
+    player = json.loads(FIXTURE.read_text())["player"]
+    player["market_categories"] = [*player["market_categories"], "X2A"]
+    client, fixture = _client(
+        tmp_path,
+        pool_player=player,
+        statistic_catalog=catalog,
+    )
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 200
+    regular = response.get_json()["h2h"]["rows"][1]
+    assert regular["stats"]["X2A"] == 12.0
+    assert regular["deltas"]["X2A"] == 0.0

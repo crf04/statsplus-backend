@@ -25,11 +25,17 @@ from app.providers.dfs import (
 )
 from app.migrations import run_migrations
 from app.errors import ProviderUnavailableError
-from app.services.player_pool import PlayerPool, PlayerPoolService
+from app.services.player_pool import (
+    PlayerPool,
+    PlayerPoolService,
+    PoolPlayer,
+    StoredPlayerPoolReader,
+)
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotRepository,
     PlayerPoolSnapshotScope,
+    ScopedStoredPlayerPoolSnapshot,
     StoredPlayerPoolSnapshot,
 )
 from app.services.athlete_resolver import (
@@ -848,6 +854,56 @@ def test_follower_uses_bounded_read_only_backoff_while_lease_is_healthy(tmp_path
 def test_snapshot_repository_refuses_demo_database():
     with pytest.raises(ValueError, match="demo database"):
         PlayerPoolSnapshotRepository(create_engine("sqlite:///nba_play_types.db"))
+
+
+def test_stored_pool_reader_prefers_latest_fresh_scope_then_governed_stale():
+    scope = PlayerPoolSnapshotScope.create(
+        "2025-26", ("0022500001", "0022500002")
+    )
+
+    def stored(player_id, retrieved_at):
+        pool = PlayerPool(
+            players=(
+                PoolPlayer(player_id, f"Player {player_id}", 1, ("PTS",), {}),
+            ),
+            team_counts={1: 1},
+            freshness={
+                "status": "fresh",
+                "retrieved_at": retrieved_at.isoformat(),
+                "providers": {},
+            },
+        )
+        return ScopedStoredPlayerPoolSnapshot(
+            scope,
+            PlayerPoolService._encode_pool(pool),
+            retrieved_at,
+        )
+
+    class Repository:
+        def __init__(self, snapshots):
+            self.snapshots = snapshots
+            self.calls = []
+
+        def list_containing_game(self, season, game_id):
+            self.calls.append((season, game_id))
+            return self.snapshots
+
+    fresh_repository = Repository(
+        (stored(202, NOW - timedelta(minutes=1)), stored(101, NOW - timedelta(minutes=5)))
+    )
+    stale_repository = Repository((stored(303, NOW - timedelta(minutes=16)),))
+
+    fresh = StoredPlayerPoolReader(fresh_repository, clock=lambda: NOW).get_pool_for_game(
+        season="2025-26", game_id="0022500001"
+    )
+    stale = StoredPlayerPoolReader(stale_repository, clock=lambda: NOW).get_pool_for_game(
+        season="2025-26", game_id="0022500001"
+    )
+
+    assert fresh.players[0].canonical_player_id == 202
+    assert fresh_repository.calls == [("2025-26", "0022500001")]
+    assert stale.players[0].canonical_player_id == 303
+    assert stale.freshness["status"] == "stale-served"
 
 
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])

@@ -23,6 +23,10 @@ from app.domain.freshness import (
 from app.domain.utc import assume_utc
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
 from app.services.nba_stats_adapter import validate_canonical_season
+from app.services.player_game_log_values import (
+    player_game_log_market_values,
+    validate_player_game_log_components,
+)
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
@@ -56,15 +60,6 @@ class PlayerGameLogRecord:
     blocks: int
 
 
-def _two_pointer_attempts(record: PlayerGameLogRecord) -> float:
-    return record.field_goals_attempted - record.three_pointers_attempted
-
-
-_DERIVED_COMPONENT_VALUES: dict[str, Callable[[PlayerGameLogRecord], float]] = {
-    "two_pointers_attempted": _two_pointer_attempts
-}
-
-
 @dataclass(frozen=True, slots=True)
 class PlayerGameLogFreshness:
     season: str
@@ -73,6 +68,12 @@ class PlayerGameLogFreshness:
     row_count: int
     source_row_count: int
     identity_source_row_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerGameLogReadFreshness:
+    status: str
+    retrieved_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,17 +135,9 @@ class PlayerGameLogRepository:
             for component in statistic.components
         }
         stored_components = set(PlayerGameLogRecord.__dataclass_fields__)
-        unsupported = {
-            component
-            for component in required_components
-            if component not in stored_components
-            and component not in _DERIVED_COMPONENT_VALUES
-        }
-        if unsupported:
-            raise ValueError(
-                "player game logs cannot derive governed statistic components: "
-                f"{sorted(unsupported)}"
-            )
+        validate_player_game_log_components(
+            required_components, stored_components=stored_components
+        )
 
     def publish(
         self,
@@ -309,6 +302,27 @@ class PlayerGameLogRepository:
             source_row_count=int(row["source_row_count"]),
             identity_source_row_count=int(row["identity_source_row_count"]),
         )
+
+    def get_read_freshness(self, season: str) -> PlayerGameLogReadFreshness:
+        canonical_season = validate_canonical_season(season)
+        publication = self.get_freshness(canonical_season)
+        if publication.retrieved_at is None:
+            return PlayerGameLogReadFreshness("missing", None)
+        if canonical_season != self._stats_surface_season:
+            return PlayerGameLogReadFreshness("fresh", publication.retrieved_at)
+        completed_at = self._surface_freshness.get().last_successful_completion
+        if completed_at is None:
+            return PlayerGameLogReadFreshness("missing", publication.retrieved_at)
+        elapsed = exact_seconds(assume_utc(self._clock()) - completed_at)
+        age = exact_age_seconds(
+            max(elapsed, Decimal(0)), field="player game log publication age"
+        )
+        status = (
+            "fresh"
+            if within_max_age(age, self._stats_surface_max_age_seconds)
+            else "stale"
+        )
+        return PlayerGameLogReadFreshness(status, publication.retrieved_at)
 
     def get_season_rate(
         self,
@@ -491,26 +505,13 @@ class PlayerGameLogRepository:
         )
 
     def _market_values(self, record: PlayerGameLogRecord) -> dict[str, float]:
-        return {
-            statistic.market_category: sum(
-                self._component_value(record, component)
-                for component in statistic.components
-            )
-            for statistic in self._market_statistics
-            if statistic.market_category is not None
-        }
-
-    @staticmethod
-    def _component_value(record: PlayerGameLogRecord, component: str) -> float:
-        derived = _DERIVED_COMPONENT_VALUES.get(component)
-        if derived is not None:
-            return derived(record)
-        return float(getattr(record, component))
+        return player_game_log_market_values(record, self._market_statistics)
 
 
 __all__ = [
     "PlayerGameLogFreshness",
     "PlayerGameLogPublication",
+    "PlayerGameLogReadFreshness",
     "PlayerGameLogRecord",
     "PlayerGameLogRepository",
     "PlayerSeasonLogSummary",

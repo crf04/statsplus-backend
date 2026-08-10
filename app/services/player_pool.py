@@ -33,6 +33,7 @@ from app.services.event_mapping_errors import EventMappingPersistenceError
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotScope,
+    ScopedStoredPlayerPoolSnapshot,
     StoredPlayerPoolSnapshot,
 )
 from app.services.statistic_catalog import StatisticCatalog
@@ -152,6 +153,49 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
 
 class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
+
+
+class StoredPlayerPoolSnapshotReader(Protocol):
+    def list_containing_game(
+        self, season: str, game_id: str
+    ) -> tuple[ScopedStoredPlayerPoolSnapshot, ...]: ...
+
+
+class StoredPlayerPoolReader:
+    """Read a governed stored slate scope without leases or provider access."""
+
+    def __init__(
+        self,
+        snapshot_repository: StoredPlayerPoolSnapshotReader,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.snapshot_repository = snapshot_repository
+        self._clock = clock
+
+    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+        try:
+            candidates = self.snapshot_repository.list_containing_game(season, game_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        now = self._clock()
+        for stored in candidates:
+            try:
+                if PlayerPoolService._within_age(
+                    stored, now, POOL_REUSE_MAX_AGE_SECONDS
+                ):
+                    return PlayerPoolService._decode_pool(stored.payload)
+            except (KeyError, TypeError, ValueError):
+                continue
+        for stored in candidates:
+            try:
+                if PlayerPoolService._within_age(
+                    stored, now, POOL_STALE_MAX_AGE_SECONDS
+                ):
+                    return PlayerPoolService._stale_pool(stored.payload, {})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return None
 
 
 class PlayerPoolService:
@@ -647,4 +691,5 @@ __all__ = [
     "PlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
+    "StoredPlayerPoolReader",
 ]

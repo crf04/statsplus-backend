@@ -74,7 +74,7 @@ def build_dependencies(
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
-    from app.services.player_pool import PlayerPoolService
+    from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -266,7 +266,11 @@ def build_dependencies(
     )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
-        player_pool=player_pool_service,
+        player_pool=(
+            StoredPlayerPoolReader(player_pool_snapshot_repository)
+            if player_pool_snapshot_repository is not None
+            else None
+        ),
         player_logs=player_game_log_repository,
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,

@@ -40,6 +40,13 @@ class StoredPlayerPoolSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopedStoredPlayerPoolSnapshot:
+    scope: PlayerPoolSnapshotScope
+    payload: Mapping[str, Any]
+    retrieved_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerPoolRefreshResult:
     version: int
     outcome: str | None
@@ -75,6 +82,45 @@ class PlayerPoolSnapshotRepository:
         if not isinstance(payload, dict):
             raise ValueError("stored Player Pool snapshot must be an object")
         return StoredPlayerPoolSnapshot(payload, assume_utc(row["retrieved_at"]))
+
+    def list_containing_game(
+        self, season: str, game_id: str
+    ) -> tuple[ScopedStoredPlayerPoolSnapshot, ...]:
+        """Read newest stored slate snapshots whose canonical scope contains a game."""
+
+        table = PlayerPoolSnapshot.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table.c.game_ids, table.c.payload, table.c.retrieved_at)
+                .where(
+                    table.c.season == str(season),
+                    table.c.payload.is_not(None),
+                    table.c.retrieved_at.is_not(None),
+                )
+                .order_by(table.c.retrieved_at.desc(), table.c.game_ids.asc())
+            ).mappings()
+            candidates = []
+            for row in rows:
+                game_ids = json.loads(row["game_ids"])
+                payload = json.loads(row["payload"])
+                if (
+                    not isinstance(game_ids, list)
+                    or not all(isinstance(value, str) for value in game_ids)
+                    or not isinstance(payload, dict)
+                ):
+                    raise ValueError("stored Player Pool snapshot is invalid")
+                scope = PlayerPoolSnapshotScope.create(str(season), game_ids)
+                if scope.storage_game_ids != row["game_ids"]:
+                    raise ValueError("stored Player Pool scope is not canonical")
+                if str(game_id) in scope.game_ids:
+                    candidates.append(
+                        ScopedStoredPlayerPoolSnapshot(
+                            scope,
+                            payload,
+                            assume_utc(row["retrieved_at"]),
+                        )
+                    )
+        return tuple(candidates)
 
     def get_refresh_result(self, scope: PlayerPoolSnapshotScope) -> PlayerPoolRefreshResult:
         table = PlayerPoolSnapshot.__table__
@@ -214,5 +260,6 @@ __all__ = [
     "PlayerPoolSnapshotRepository",
     "PlayerPoolSnapshotScope",
     "PlayerPoolRefreshResult",
+    "ScopedStoredPlayerPoolSnapshot",
     "StoredPlayerPoolSnapshot",
 ]
