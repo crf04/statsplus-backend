@@ -40,10 +40,10 @@ class StoredPlayerPoolSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class ScopedStoredPlayerPoolSnapshot:
+class StoredPlayerPoolSnapshotCandidate:
     scope: PlayerPoolSnapshotScope
-    payload: Mapping[str, Any]
     retrieved_at: datetime
+    refresh_outcome: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,13 +85,17 @@ class PlayerPoolSnapshotRepository:
 
     def list_containing_game(
         self, season: str, game_id: str
-    ) -> tuple[ScopedStoredPlayerPoolSnapshot, ...]:
-        """Read newest stored slate snapshots whose canonical scope contains a game."""
+    ) -> tuple[StoredPlayerPoolSnapshotCandidate, ...]:
+        """Read candidate metadata without loading season-wide snapshot payloads."""
 
         table = PlayerPoolSnapshot.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(table.c.game_ids, table.c.payload, table.c.retrieved_at)
+                select(
+                    table.c.game_ids,
+                    table.c.retrieved_at,
+                    table.c.refresh_outcome,
+                )
                 .where(
                     table.c.season == str(season),
                     table.c.payload.is_not(None),
@@ -101,23 +105,23 @@ class PlayerPoolSnapshotRepository:
             ).mappings()
             candidates = []
             for row in rows:
-                game_ids = json.loads(row["game_ids"])
-                payload = json.loads(row["payload"])
-                if (
-                    not isinstance(game_ids, list)
-                    or not all(isinstance(value, str) for value in game_ids)
-                    or not isinstance(payload, dict)
+                try:
+                    game_ids = json.loads(row["game_ids"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(game_ids, list) or not all(
+                    isinstance(value, str) for value in game_ids
                 ):
-                    raise ValueError("stored Player Pool snapshot is invalid")
+                    continue
                 scope = PlayerPoolSnapshotScope.create(str(season), game_ids)
                 if scope.storage_game_ids != row["game_ids"]:
-                    raise ValueError("stored Player Pool scope is not canonical")
+                    continue
                 if str(game_id) in scope.game_ids:
                     candidates.append(
-                        ScopedStoredPlayerPoolSnapshot(
+                        StoredPlayerPoolSnapshotCandidate(
                             scope,
-                            payload,
                             assume_utc(row["retrieved_at"]),
+                            row["refresh_outcome"],
                         )
                     )
         return tuple(candidates)
@@ -260,6 +264,6 @@ __all__ = [
     "PlayerPoolSnapshotRepository",
     "PlayerPoolSnapshotScope",
     "PlayerPoolRefreshResult",
-    "ScopedStoredPlayerPoolSnapshot",
+    "StoredPlayerPoolSnapshotCandidate",
     "StoredPlayerPoolSnapshot",
 ]
