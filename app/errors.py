@@ -158,6 +158,19 @@ class AppError(Exception):
         self.detail = str(detail) if detail is not None else None
         super().__init__(self.public_message)
 
+    @property
+    def public_details(self) -> dict[str, Any] | None:
+        """Safe, structured facts a caller needs to act on this failure.
+
+        Almost every failure is fully described by its code and message.  A
+        subclass overrides this only when a caller cannot act without one --
+        the counts and filters that would narrow a refused board, say -- and
+        what it returns is bounded, closed-vocabulary data the client contract
+        documents, never provider text, configuration, or ``detail``.
+        """
+
+        return None
+
 
 class InvalidInputError(AppError):
     """The request could not be parsed or fails input validation."""
@@ -284,10 +297,18 @@ def route_error_boundary(
     return decorator
 
 
-def _error_response(code: str, message: str, status_code: int):
+def _error_response(
+    code: str,
+    message: str,
+    status_code: int,
+    details: dict[str, Any] | None = None,
+):
     """Build the one public JSON shape used for application errors."""
 
-    return jsonify({"error": {"code": code, "message": message}}), status_code
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = details
+    return jsonify({"error": error}), status_code
 
 
 def register_error_handlers(app: Flask) -> None:
@@ -302,7 +323,12 @@ def register_error_handlers(app: Flask) -> None:
         if error.code != "provider_unavailable":
             record_application_failure(error.code)
 
-        return _error_response(error.code, error.public_message, error.status_code)
+        return _error_response(
+            error.code,
+            error.public_message,
+            error.status_code,
+            error.public_details,
+        )
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException):  # type: ignore[no-untyped-def]

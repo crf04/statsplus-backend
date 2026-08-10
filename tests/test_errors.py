@@ -471,3 +471,42 @@ def test_user_route_exception_details_are_not_exposed(client, monkeypatch) -> No
         }
     }
     assert "user-database-secret" not in response.get_data(as_text=True)
+
+
+def test_error_details_are_omitted_unless_a_failure_states_them(error_app):
+    client = error_app.test_client()
+
+    payload = client.get("/invalid-input").get_json()
+
+    assert payload["error"].keys() == {"code", "message"}
+
+
+def test_error_details_carry_safe_structured_facts():
+    class NarrowMeError(InvalidInputError):
+        code = "narrow_me"
+
+        @property
+        def public_details(self):
+            return {"observed_market_count": 12345, "supported_filters": ["providers"]}
+
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    register_error_handlers(app)
+
+    @app.get("/too-large")
+    def too_large() -> None:
+        raise NarrowMeError("Narrow it.", detail="secret=abc")
+
+    response = app.test_client().get("/too-large")
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {
+            "code": "narrow_me",
+            "message": "Narrow it.",
+            "details": {
+                "observed_market_count": 12345,
+                "supported_filters": ["providers"],
+            },
+        }
+    }
