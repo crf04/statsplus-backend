@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -178,6 +178,101 @@ Common query types:
 - Stat thresholds: "25+ points and 10+ assists"
 
 ## Game Endpoints
+
+### Get Slate
+
+```http
+GET /api/games/slate?date=YYYY-MM-DD
+```
+
+Requires Firebase bearer authentication. `date` is optional only by omission
+and defaults to today's Slate Date in US Eastern time; an explicitly empty
+`?date=` is malformed input. The route reads the configured current season's
+persisted Event Catalog. It converts the requested day's two US Eastern
+midnights to a half-open UTC query window, including across DST transitions,
+so it does not read the whole season per request. Games are ordered by tip
+time, then `game_id`.
+
+```json
+{
+  "slate_date": "2026-01-02",
+  "freshness": {
+    "schedule": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-02T10:00:00+00:00"
+    },
+    "pool": {
+      "status": "unavailable",
+      "retrieved_at": null,
+      "providers": {}
+    }
+  },
+  "games": [
+    {
+      "game_id": "0022500001",
+      "away_team": {
+        "team_id": 1610612747,
+        "tricode": "LAL",
+        "name": "Los Angeles Lakers",
+        "targetable_player_count": 0
+      },
+      "home_team": {
+        "team_id": 1610612759,
+        "tricode": "SAS",
+        "name": "San Antonio Spurs",
+        "targetable_player_count": 0
+      },
+      "scheduled_at": "2026-01-03T00:00:00+00:00",
+      "status": {
+        "state": "scheduled",
+        "label": "7:00 pm ET"
+      },
+      "classification": null,
+      "preseason": false
+    }
+  ]
+}
+```
+
+`status.state` is `scheduled`, `postponed`, or `final`; `status.label` retains
+the Event Catalog label. `classification` is `null` for an ordinary Regular
+Season game and contains meaningful provider display classification for
+unusual games, including reviewed event sublabels such as `Emirates NBA Cup`
+and `NBA Mexico City Series`. Generic series-state/record text such as
+`LAL leads 2-1` or `LAL wins series 4-2`, game-number text, and postponement
+sublabels are not badges. Recognized `001` through `004` game-ID prefixes
+determine canonical kind before the stored display classification is
+considered, so an arbitrary badge cannot turn a known regular-season or
+playoff game into an All-Star exclusion. Stored display classification is the
+kind fallback only for an unknown prefix. Thus `001` games are included with
+`preseason: true`, and `003` All-Star exhibitions are excluded even when the
+display classification is branded differently. Postponed games remain on
+their ET slate. Output is always ordered by UTC tip and then game ID,
+independently of repository row order.
+
+Until the Player Pool surface is implemented, both team counts are truthfully
+zero and `freshness.pool` is the sole pool-status authority: it reports an
+unavailable surface with no retrieval time or providers. A stale but populated
+schedule remains a `200` with `freshness.schedule.status: "stale"`. Stored
+catalog rows without successful-refresh metadata remain servable and report
+`freshness.schedule` as `{ "status": "missing", "retrieved_at": null }`.
+Availability is determined from actual stored Event Catalog rows, not the
+refresh record's informational `event_count`.
+Schedule freshness uses the nightly schedule surface's independent
+`SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default), not the broader
+Event Catalog eligibility TTL. The exact boundary is fresh; an older retrieval
+is stale.
+
+Empty and error behavior:
+
+| Case | Response |
+| --- | --- |
+| Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
+| `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
+| Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
+| No catalog events are stored | `503 provider_unavailable` |
+| Authentication is missing or invalid | existing `401` authentication error contract |
 
 ### Get Game Logs
 

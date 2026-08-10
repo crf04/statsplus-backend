@@ -74,6 +74,7 @@ the most important variables:
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
+| `SLATE_SCHEDULE_MAX_AGE_HOURS` | No | `30`; freshness window for the nightly slate schedule surface |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
@@ -300,7 +301,7 @@ returned to clients.
 The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
-- Protected routes include `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Protected routes include `GET /api/games/slate`, `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
 - For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.

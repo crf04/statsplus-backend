@@ -344,6 +344,52 @@ home/away team IDs and identities, UTC scheduled time, status text,
 postponement evidence, and provider classification. Recorded fixtures use
 `parse_recorded_schedule` and never make a network request.
 
+Schedule normalization separates canonical event kind from display
+classification. A recognized 10-digit game-ID prefix is authoritative for the
+kind (preseason, regular season, All-Star, or playoffs), which drives slate
+exclusion and the preseason flag even when provider branding conflicts. The
+catalog's display classification prefers provider classification, subtype, or
+label, then a meaningful sublabel such as `Emirates NBA Cup` or
+`NBA Mexico City Series`; generic series-state/record text such as
+`LAL leads 2-1` or `LAL wins series 4-2`, game-number text, and postponement
+sublabels remain status/evidence rather than badges. When no display evidence
+remains, the canonical kind supplies the classification.
+
+On a slate read, `resolve_stored_event_classification` returns that canonical
+kind and display label together exactly once. Recognized `001` through `004`
+prefixes remain authoritative; only an unknown prefix falls back to the stored
+display classification for kind, so a badge cannot reclassify a known game.
+`is_postponed_event` likewise owns postponement truth across catalog
+serialization, event resolution, and slate shaping: an explicit normalized
+flag, a postponement status, or non-empty structured evidence is sufficient.
+
+Authenticated slate read:
+
+```text
+GET /api/games/slate?date=YYYY-MM-DD
+  → require_auth
+  → SlateService parses/defaults one US-Eastern Slate Date
+  → EventCatalogService reads the last successful refresh and only the ET day's
+    half-open UTC event window from the configured season
+  → SlateService filters All-Star exhibitions
+  → response orders UTC tips and reports schedule/pool freshness independently
+```
+
+`SlateService` is assembled once in `ApplicationDependencies` beside the game
+service and reads no provider at request time. The window query uses ET
+midnights converted to UTC, so spring and fall DST days remain correct without
+reading or decoding the whole season. Its schedule status uses the
+surface-specific `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default),
+while Event Catalog matching continues to use `EVENT_CATALOG_MAX_AGE_HOURS`.
+An absent runtime Event Catalog dependency or a catalog with zero stored events
+is unavailable. Stored catalog rows remain servable when successful-refresh
+metadata is missing, with schedule freshness reported as `missing`. A populated
+catalog can return an empty date, and populated but
+older schedule data remains servable and is marked stale. The player-pool
+surface remains an explicit unavailable aggregate until its owning service is
+implemented. Availability uses an efficient count of actual season rows; the
+refresh record's `event_count` remains metadata and does not gate the read.
+
 Natural-language query:
 
 ```text

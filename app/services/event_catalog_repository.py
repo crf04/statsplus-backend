@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -12,17 +12,15 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.domain.freshness import exact_seconds
+from app.domain.nba_events import is_postponed_event
+from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 
 DEFAULT_FAILURE_SUMMARY = "The event catalog refresh could not complete."
 
 
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
-
 def _iso(value: datetime | None) -> str | None:
-    return _utc(value).isoformat() if value is not None else None
+    return assume_utc(value).isoformat() if value is not None else None
 
 
 class EventCatalogRepository:
@@ -99,6 +97,35 @@ class EventCatalogRepository:
                 table.c.season == season).order_by(table.c.scheduled_at, table.c.nba_game_id)).mappings()
             return [self._serialize(row) for row in rows]
 
+    def count_events(self, season: str) -> int:
+        """Count actual persisted events for one season."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(
+                    select(func.count()).select_from(table).where(table.c.season == season)
+                ).scalar_one()
+            )
+
+    def list_events_between(
+        self, season: str, starts_at: datetime, ends_at: datetime
+    ) -> list[dict[str, Any]]:
+        """Read events in one half-open UTC window without decoding a season."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    table.c.scheduled_at >= assume_utc(starts_at),
+                    table.c.scheduled_at < assume_utc(ends_at),
+                )
+                .order_by(table.c.scheduled_at, table.c.nba_game_id)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
     def freshness(self, season: str, observed_at: datetime, max_age: timedelta) -> dict[str, Any]:
         table = EventCatalogRefresh.__table__
         with self.engine.connect() as connection:
@@ -110,7 +137,7 @@ class EventCatalogRepository:
         # hours made a third of an hour gate at 1200 seconds and report
         # 1199.99999999999988, so an age and its own ceiling disagreed at the
         # boundary they were compared at.
-        return {"season": season, "fresh": bool(success and _utc(observed_at) - _utc(success) <= max_age),
+        return {"season": season, "fresh": bool(success and assume_utc(observed_at) - assume_utc(success) <= max_age),
                 "max_age_seconds": exact_seconds(max_age),
                 "last_attempt_at": _iso(row["last_attempt_at"]) if row else None,
                 "last_success_at": _iso(success), "last_failure_at": _iso(row["last_failure_at"]) if row else None,
@@ -125,11 +152,10 @@ class EventCatalogRepository:
                 evidence = json.loads(evidence)
             except (TypeError, ValueError):
                 pass
-        return {"nba_game_id": row["nba_game_id"], "season": row["season"],
+        event = {"nba_game_id": row["nba_game_id"], "season": row["season"],
                 "scheduled_at": _iso(row["scheduled_at"]), "status_text": row["status_text"],
                 "status_code": row["status_code"], "postponed_status": row["postponed_status"],
                 "postponement_evidence": evidence,
-                "is_postponed": bool(row["postponed_status"] or evidence),
                 "classification": row["classification"],
                 "home_team_id": row["home_team_id"], "home_team_name": row["home_team_name"],
                 "home_team_tricode": row["home_team_tricode"], "away_team_id": row["away_team_id"],
@@ -137,3 +163,5 @@ class EventCatalogRepository:
                 "home_team": {"id": row["home_team_id"], "name": row["home_team_name"], "tricode": row["home_team_tricode"]},
                 "away_team": {"id": row["away_team_id"], "name": row["away_team_name"], "tricode": row["away_team_tricode"]},
                 "first_seen_at": _iso(row["first_seen_at"]), "last_seen_at": _iso(row["last_seen_at"])}
+        event["is_postponed"] = is_postponed_event(event)
+        return event

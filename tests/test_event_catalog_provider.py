@@ -17,6 +17,9 @@ from app.utils import telemetry
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.valid.json"
+CLASSIFICATION_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.classifications.json"
+)
 
 
 def _frame() -> pd.DataFrame:
@@ -80,3 +83,61 @@ def test_recorded_schedule_fixture_uses_the_production_parser():
     payload = json.loads(FIXTURE_PATH.read_text())
     parsed = parse_recorded_schedule(payload, season="2025-26")
     assert parsed.loc[1, "postponed_status"] == "Postponed"
+
+
+def test_recorded_schedule_preserves_provider_and_game_type_classification():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed["classification"].tolist() == [
+        "NBA Finals",
+        "Emirates NBA Cup",
+        "International Series",
+        "Skills Challenge",
+    ]
+
+
+def test_schedule_sublabel_filters_generic_series_and_postponement_evidence():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][0][sublabel_index] = "Series tied 1-1"
+    result_set["rowSet"][1][sublabel_index] = "Postponed due to weather"
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed["classification"].tolist()[:2] == [
+        "Regular Season",
+        "Regular Season",
+    ]
+
+
+@pytest.mark.parametrize(
+    "sublabel",
+    [
+        "LAL leads 2-1",
+        "LAL wins series 4-2",
+        "Los Angeles leads series 3-2",
+    ],
+)
+def test_schedule_sublabel_filters_team_series_records(sublabel):
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][1][sublabel_index] = sublabel
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed.loc[1, "classification"] == "Regular Season"
+
+
+def test_schedule_sublabel_preserves_a_branded_series_name():
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][1][sublabel_index] = "NBA Mexico City Series"
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed.loc[1, "classification"] == "NBA Mexico City Series"

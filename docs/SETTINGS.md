@@ -18,7 +18,7 @@ The model is intentionally grouped by responsibility:
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
-| `CatalogSettings` | `athlete_freshness_days` (whole days, `int`), `event_max_age_hours` and `event_match_window_hours` (exact `Decimal` hours) | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`) |
+| `CatalogSettings` | `athlete_freshness_days` (whole days, `int`), `event_max_age_hours`, `event_match_window_hours`, and `slate_schedule_max_age_hours` (exact `Decimal` hours) | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`), `SLATE_SCHEDULE_MAX_AGE_HOURS` (default `30`) |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,

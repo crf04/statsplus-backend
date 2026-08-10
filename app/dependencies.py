@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ class ApplicationDependencies:
     dfs_providers: dict[str, Any]
     dfs_board_service: Any
     game_service: Any
+    slate_service: Any
     player_service: Any
     team_service: Any
     data_service: Any
@@ -53,28 +54,29 @@ def build_dependencies(
 ) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
-    from app.services.data_service import DataService
-    from app.services.game_service import GameService
-    from app.services.nl_service import NLService
-    from app.services.player_service import PlayerService
-    from app.services.team_service import TeamService
-    from app.services.user_service import UserService
-    from app.services.job_service import build_data_refresh_job_service
-    from app.services.provider_health_service import ProviderHealthService
+    from app.providers.dabble import DabbleAdapter
+    from app.providers.nba_stats import NBAStatsAdapter
+    from app.providers.pbp_stats import PBPStatsAdapter
+    from app.providers.prizepicks import PrizePicksAdapter
+    from app.providers.underdog import UnderdogAdapter
     from app.services.athlete_catalog_service import AthleteCatalogService
-    from app.services.statistic_catalog import StatisticCatalog
     from app.services.comparison_board import ComparisonBoardService
-    from app.services.dfs_board_response import DFSBoardResponseService
+    from app.services.data_service import DataService
     from app.services.dfs_board import DFSBoardService
+    from app.services.dfs_board_response import DFSBoardResponseService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
         ProviderSnapshotCacheCoordinator,
     )
-    from app.providers.nba_stats import NBAStatsAdapter
-    from app.providers.pbp_stats import PBPStatsAdapter
-    from app.providers.dabble import DabbleAdapter
-    from app.providers.prizepicks import PrizePicksAdapter
-    from app.providers.underdog import UnderdogAdapter
+    from app.services.game_service import GameService
+    from app.services.job_service import build_data_refresh_job_service
+    from app.services.nl_service import NLService
+    from app.services.player_service import PlayerService
+    from app.services.provider_health_service import ProviderHealthService
+    from app.services.slate_service import SlateService
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.team_service import TeamService
+    from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
 
@@ -227,6 +229,7 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
+    slate_service = SlateService(event_catalog_service, settings=settings)
 
     return ApplicationDependencies(
         settings=settings,
@@ -237,6 +240,7 @@ def build_dependencies(
         dfs_providers=dfs_providers,
         dfs_board_service=dfs_board_service,
         game_service=game_service,
+        slate_service=slate_service,
         player_service=player_service,
         team_service=team_service,
         data_service=data_service,

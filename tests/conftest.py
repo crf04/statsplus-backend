@@ -96,6 +96,7 @@ def dependencies(runtime_settings, mock_db_engine):
     }
     services["data_refresh_jobs"] = Mock(name="data_refresh_jobs_service")
     services["provider_health"] = Mock(name="provider_health_service")
+    services["slate"] = Mock(name="slate_service")
     services["provider_health"].check_database.return_value = {
         "status": "healthy",
         "dialect": "sqlite",
