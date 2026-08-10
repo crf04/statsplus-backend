@@ -153,6 +153,9 @@ class ProviderSettings(BaseModel):
     dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
     dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
+    # The post-filter comparison-board ceiling.  A larger board is refused with
+    # the observed count and the supported narrowing filters, never truncated.
+    dfs_comparison_max_markets: int = Field(default=10000, ge=1)
     # A scalar applies to every enabled DFS provider.  A mapping may override
     # one or more providers when their publication cadence differs.
     dfs_cache_fresh_seconds: float | dict[str, float] = Field(default=300.0)
@@ -506,6 +509,9 @@ def _build_settings(
         ),
         dfs_dabble_detail_concurrency=reader.integer(
             "DFS_DABBLE_DETAIL_CONCURRENCY", 3
+        ),
+        dfs_comparison_max_markets=reader.integer(
+            "DFS_COMPARISON_MAX_MARKETS", 10000
         ),
         dfs_cache_fresh_seconds=(
             {"*": dfs_cache_fresh, **fresh_overrides}

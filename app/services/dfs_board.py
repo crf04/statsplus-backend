@@ -1028,6 +1028,8 @@ class DFSBoardService:
         self,
         query: NBAMarketQuery,
         context: RetrievalContext | None = None,
+        *,
+        providers: Iterable[str] | None = None,
     ) -> DFSBoard:
         """Retrieve enabled snapshots with one shared absolute deadline.
 
@@ -1035,6 +1037,10 @@ class DFSBoardService:
         raises an implementation defect is deliberately not caught.  Running
         provider threads are daemonized and their late results are isolated
         from the returned board.
+
+        ``providers`` narrows this read to a subset of the enabled registry.
+        It is answered before any retrieval starts, so an excluded provider is
+        not called at all and is reported as disabled for this board.
         """
 
         if not isinstance(query, NBAMarketQuery):
@@ -1058,7 +1064,15 @@ class DFSBoardService:
         start = self.monotonic()
         remaining = context.remaining_seconds(now=generated_at)
         board_deadline = start + remaining
-        names = list(self.enabled_providers)
+        if providers is None:
+            names = list(self.enabled_providers)
+            disabled = self.disabled_providers
+        else:
+            requested = set(_normalize_names(providers))
+            names = [name for name in self.enabled_providers if name in requested]
+            disabled = tuple(
+                sorted(set(self.disabled_providers) | (set(self.enabled_providers) - set(names)))
+            )
         outcomes: dict[str, ProviderOutcome] = {}
         pending = list(names)
         active: dict[str, tuple[threading.Thread, dict[str, Any]]] = {}
@@ -1129,7 +1143,7 @@ class DFSBoardService:
         board = DFSBoard(
             query=query,
             provider_outcomes=ordered,
-            disabled_providers=self.disabled_providers,
+            disabled_providers=disabled,
             generated_at=generated_at,
         )
         board = self._resolve_athlete_mappings(board)

@@ -760,6 +760,76 @@ untouched, and every normalized market stays on the board. The disagreement is
 withheld rather than resolved away, and fails closed as a conflict again on the
 next read with a usable catalog.
 
+### Comparison Groups
+
+`ComparisonBoardService.get_comparisons(query, context, filters=...)` is the
+seam above the collector. It turns one board read into deterministic Comparison
+Groups, explicit Comparison Availability, and visible unresolved evidence. The
+immutable value types live in `app.domain.comparisons`, which imports no
+service and states no opinion.
+
+A Comparison Group requires the same Canonical Event, Canonical Athlete,
+Canonical Statistic, and scoring period; those four facts are its key. The
+canonical athlete and event come only from the governed mapping outcomes the
+collector reports, so a suppressed, disputed, or withdrawn identity never
+reaches a group. Legitimate multiple thresholds, variants, statuses, and
+same-provider markets stay distinct members of one group; only members whose
+every fact agrees collapse into one. Exact repeated source identities are
+already deduplicated inside `ProviderSnapshot`, where a repeat with conflicting
+normalized content is malformed rather than a second market.
+
+Every market the read retains but cannot compare stays visible as an
+`UnresolvedMarket` with one closed `ComparisonExclusion` reason and the
+governed state as its detail: ambiguous, unmatched, mapping-conflict,
+stale-catalog, and unmapped-statistic markets are all reported rather than
+dropped, and none of them enters a group. The checks run in a fixed order —
+availability, freshness, statistic, athlete, event, threshold — so a market
+that fails several always reports the same reason.
+
+Comparison Availability is decided before any group is built. A missing or
+over-age Athlete or Event Catalog makes the whole board unavailable, and each
+`CatalogAvailability` carries the catalog's identity (name and season), its
+last successful refresh, its exact decimal age, and the configured maximum age.
+The normalized markets are retained throughout; only their comparability is
+withheld until a refresh.
+
+Freshness uses the reviewed provider cache windows. A snapshot inside its
+provider's fresh window is contemporaneous; one past it enters comparisons only
+while it is inside the permitted stale window and says so; beyond that window
+its markets stay visible as `stale_snapshot`. A group whose members are not
+contemporaneous — different retrieval instants, or a mix of fresh and stale
+observations — is an explicit Mixed-Freshness Comparison.
+
+A summary states only exact decimal minimum, maximum, and Threshold Spread,
+the provider and market counts, the freshness, and the sorted market
+references. Thresholds are `Decimal` throughout, so a serialized value is the
+provider's own exact number. No probability, expected value, recommendation,
+average, preferred market, entry payout, or cross-provider fantasy assumption
+is produced anywhere in this seam.
+
+Market, selection, and comparison references are versioned and deterministic
+(`mkt_1_…`, `sel_1_…`, `cmp_1_…`). A market reference is defined by the
+provider's own market ID, or — when the provider publishes none — by the facts
+it did report; market availability is deliberately excluded, so a market that
+is suspended and available again keeps its reference. A comparison reference is
+defined by its canonical identity alone. Each is stable exactly while its
+defining identity is unchanged.
+
+Ordering is a property of the observations, never of completion order:
+provider reports and warnings sort by provider and code, groups by their key,
+members by provider, threshold, variant, status, and reference, unresolved
+markets by reason, provider, and reference, and selection references
+lexicographically.
+
+Filters are central and exact: enabled providers, Canonical Athlete IDs,
+Canonical Event IDs, Canonical Statistic IDs, and Market Status. A provider
+filter is answered before retrieval, so an excluded provider is never called
+and is reported as disabled for that board. There is deliberately no fuzzy or
+partial name filter. The post-filter market ceiling is
+`DFS_COMPARISON_MAX_MARKETS` (default 10000); a larger read raises
+`ComparisonBoardTooLargeError` (`board_too_large`) carrying the observed count
+and the supported narrowing filters, and nothing is ever truncated.
+
 PBP Stats:
 
 ```text

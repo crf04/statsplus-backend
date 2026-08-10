@@ -13,7 +13,7 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
+| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -56,6 +56,15 @@ returned only after a later expected upstream failure, with bounded cache
 provenance on the provider outcome. Redis errors fail open to direct upstream
 work and never create an in-process stale store; single-flight suppression is
 per worker only.
+
+Those same two windows decide comparison freshness. A snapshot inside its
+provider's fresh window is contemporaneous; one past it may still enter a
+Comparison Group as explicitly stale while it is inside the stale-if-error
+window; beyond that window its markets stay visible on the board but enter no
+group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter comparison-board
+ceiling and defaults to 10000. A read that observes more markets than the
+ceiling is refused with `board_too_large`, the observed count, and the
+supported narrowing filters; it is never truncated.
 
 ## Defaults and validation
 
