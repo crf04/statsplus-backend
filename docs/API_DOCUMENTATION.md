@@ -449,9 +449,10 @@ this mechanism.
 The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
 endpoint. It refreshes the stats tables, current-season Event Catalog,
 current-season Athlete Catalog, and then durable current-season player game logs,
-retrying that ordered unit once. The player-log step uses one season-wide
-provider read and publishes normalized player/game facts plus its season
-sidecar transactionally. For the configured current season, that transaction
+retrying that ordered unit once. The player-log step uses exactly two
+season-wide provider reads—one `Regular Season`, one `Playoffs`—and publishes
+their normalized player/game facts plus the season sidecar as one transaction.
+For the configured current season, that transaction
 also advances the named `player_game_logs` stats freshness; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. Every result requires a present, fresh, nonempty Event
@@ -466,8 +467,9 @@ Failed, wholly unjoinable, malformed, or eligible-identity-removing cumulative
 data preserves the last valid publication; individual well-formed unjoined
 athlete, game, or team rows are excluded and counted without exposing their
 identities.
-Every completed, non-postponed governed Regular Season game through the source
-observation time must have logs for both exact teams and at least the configured
+Every completed, non-postponed governed `Regular Season` or `Playoffs` game
+through the source observation time must have logs from its exact phase for
+both exact teams and at least the configured
 `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` distinct positive-minute
 players per team (default `5`). This rejects a truncated first publication
 without estimating a season total and does not require future games or DNPs.
@@ -488,20 +490,26 @@ their games were removed from the fresh Event Catalog or made ineligible by
 phase/postponement; an eligible-game removal fails even if additions create net
 growth. Recovery telemetry exposes the actual bounded admitted removed-key
 count rather than the net row-count change.
-Empty Regular Season results require a present schedule with no completed
-Regular Season events; completed preseason, exhibition, All-Star, playoff, or
-other-phase games do not count, and a postponed event with a terminal-looking
-status is not completed evidence. The empty-snapshot Regular Season predicate
-normalizes fallback season-type case and separators when no canonical game-ID
-phase is available; public stored/display classification spelling remains
-unchanged, and a known NBA game-ID prefix remains authoritative. Empty results
-cannot replace nonempty facts. Configured-current-season reads also require the
+An empty phase result requires a present schedule with no completed event in
+that exact phase, so empty Playoffs is valid before the postseason but not after
+a completed playoff game. Completed preseason, exhibition, All-Star, or other
+unsupported-phase games do not count, and a postponed event with a terminal-
+looking status is not completed evidence. Phase matching normalizes fallback
+season-type case and separators when no canonical game-ID phase is available;
+public stored/display classification spelling remains unchanged, and a known
+NBA game-ID prefix remains authoritative. Empty union results cannot replace
+nonempty facts. Configured-current-season reads also require the
 named `stats_refreshes.player_game_logs` observation to exist and be no older
 than `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 by default). Historical reads remain
 governed only by their season sidecar and are not hidden by missing, stale, or
 newer current-season observations.
 These stored facts back future matchup rail and selection reads; this slice
 adds no public matchup route and does not change `GET /api/games/game_logs`.
+Internal season rates default to Regular Season only unless a caller explicitly
+requests Playoffs or all phases. Last-ten minutes and H2H rows include both
+stored phases in deterministic chronology. The batch query seam returns
+Regular Season rates and oldest-to-newest combined-phase last tens for multiple
+canonical player IDs with one player-log rows query.
 
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),

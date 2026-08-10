@@ -126,6 +126,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         column["name"] for column in inspect(engine).get_columns("player_game_logs")
     } == {
         "season",
+        "season_type",
         "player_id",
         "game_id",
         "player_name",
@@ -147,6 +148,12 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "steals",
         "blocks",
     }
+    assert inspect(engine).get_check_constraints("player_game_logs") == [
+        {
+            "name": "ck_player_game_logs_season_type",
+            "sqltext": "season_type IN ('Regular Season', 'Playoffs')",
+        }
+    ]
     assert {
         column["name"]
         for column in inspect(engine).get_columns("player_game_log_refreshes")

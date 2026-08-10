@@ -11,6 +11,7 @@ from app.domain.nba_events import (
     is_postponed_event,
     is_preseason_kind,
     is_regular_season_event,
+    player_game_log_season_type,
     resolve_stored_event_classification,
 )
 
@@ -42,6 +43,21 @@ def test_regular_season_event_uses_canonical_game_id_authority():
 )
 def test_regular_season_event_normalizes_fallback_season_type_labels(label):
     assert is_regular_season_event({"nba_game_id": "", "classification": label})
+
+
+@pytest.mark.parametrize(
+    ("event", "season_type"),
+    [
+        ({"nba_game_id": "0022500001", "classification": "Playoffs"}, "Regular Season"),
+        ({"nba_game_id": "0042500001", "classification": "Regular Season"}, "Playoffs"),
+        ({"nba_game_id": "provider-id", "classification": " PLAY_OFFS "}, "Playoffs"),
+        ({"nba_game_id": "0032500001", "classification": "Playoffs"}, None),
+    ],
+)
+def test_player_game_log_phase_uses_game_id_authority_then_normalized_fallback(
+    event, season_type
+):
+    assert player_game_log_season_type(event) == season_type
 
 
 def test_canonical_event_kind_preserves_fallback_label_spelling():

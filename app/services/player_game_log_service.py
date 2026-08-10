@@ -13,12 +13,13 @@ import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_events import (
+    PLAYER_GAME_LOG_SEASON_TYPES,
     is_final_event,
     is_postponed_event,
-    is_regular_season_event,
+    player_game_log_season_type,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.providers.nba_stats import DEFAULT_SEASON_TYPE, NBAStatsProvider
+from app.providers.nba_stats import NBAStatsProvider
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.player_game_log_repository import (
     PlayerGameLogFreshness,
@@ -111,7 +112,7 @@ class EventCatalogReader(Protocol):
 
 
 class PlayerGameLogService:
-    """Fetch a complete season once and atomically replace its stored facts."""
+    """Fetch both supported season phases and atomically replace stored facts."""
 
     def __init__(
         self,
@@ -148,45 +149,89 @@ class PlayerGameLogService:
         self, season: str, *, now: datetime | None = None
     ) -> PlayerGameLogRefreshResult:
         canonical_season = validate_canonical_season(season)
-        frame = self.provider.get_season_player_game_logs(
-            season=canonical_season,
-            season_type=DEFAULT_SEASON_TYPE,
-        )
-        retrieved_at = assume_utc(now or self._clock())
-        if not isinstance(frame, pd.DataFrame):
-            self._reject(
-                "player game logs must be a normalized provider data frame",
-                source=0,
+        frames: dict[str, pd.DataFrame] = {}
+        observed_source_rows = 0
+        for season_type in PLAYER_GAME_LOG_SEASON_TYPES:
+            frame = self.provider.get_season_player_game_logs(
+                season=canonical_season,
+                season_type=season_type,
             )
-        return self._refresh_dataframe(canonical_season, frame, retrieved_at)
+            if not isinstance(frame, pd.DataFrame):
+                self._reject(
+                    "player game logs must be a normalized provider data frame",
+                    source=observed_source_rows,
+                )
+            frames[season_type] = frame
+            observed_source_rows += len(frame.index)
+        retrieved_at = assume_utc(now or self._clock())
+        return self._refresh_dataframes(canonical_season, frames, retrieved_at)
 
-    def _refresh_dataframe(
-        self, canonical_season: str, frame: pd.DataFrame, retrieved_at: datetime
+    def _refresh_dataframes(
+        self,
+        canonical_season: str,
+        frames: dict[str, pd.DataFrame],
+        retrieved_at: datetime,
     ) -> PlayerGameLogRefreshResult:
         canonicalized: _CanonicalizationResult | None = None
+        source_row_count = sum(len(frame.index) for frame in frames.values())
         try:
             events = self._require_complete_event_catalog(
-                canonical_season, frame, retrieved_at
+                canonical_season, source_row_count, retrieved_at
             )
-            completed_events = self._completed_regular_season_events(
-                events, observed_at=retrieved_at
-            )
-            if frame.empty:
+            completed_events = {
+                season_type: self._completed_events(
+                    events,
+                    season_type=season_type,
+                    observed_at=retrieved_at,
+                )
+                for season_type in PLAYER_GAME_LOG_SEASON_TYPES
+            }
+            if all(frame.empty for frame in frames.values()):
                 return self._publish_empty(
                     canonical_season,
                     retrieved_at,
-                    completed_events=completed_events,
+                    completed_events=tuple(
+                        event
+                        for phase_events in completed_events.values()
+                        for event in phase_events
+                    ),
                 )
+            for season_type, frame in frames.items():
+                if frame.empty and completed_events[season_type]:
+                    self._reject(
+                        f"an empty {season_type} snapshot cannot represent completed games",
+                        source=source_row_count,
+                    )
 
             athletes = self._require_fresh_athlete_catalog(
-                canonical_season, frame, retrieved_at
+                canonical_season, source_row_count, retrieved_at
             )
+            phase_results: list[_CanonicalizationResult] = []
             try:
-                canonicalized = self._canonicalize(
-                    canonical_season,
-                    frame,
-                    athletes=athletes,
-                    events=events,
+                for season_type, frame in frames.items():
+                    if frame.empty:
+                        continue
+                    try:
+                        phase_results.append(
+                            self._canonicalize(
+                                canonical_season,
+                                frame,
+                                season_type=season_type,
+                                athletes=athletes,
+                                events=events,
+                            )
+                        )
+                    except _CanonicalizationAbort as error:
+                        combined = self._combine_canonicalizations(
+                            (*phase_results, error.result)
+                        )
+                        raise _CanonicalizationAbort(
+                            str(error),
+                            combined,
+                            malformed_row_count=error.malformed_row_count,
+                        ) from error
+                canonicalized = self._combine_canonicalizations(
+                    tuple(phase_results)
                 )
             except _CanonicalizationAbort as error:
                 self._emit_telemetry(
@@ -200,13 +245,19 @@ class PlayerGameLogService:
                     "a non-empty player game log snapshot produced no canonical rows",
                     result=canonicalized,
                 )
-            if not self._has_complete_game_coverage(
-                canonicalized.records, completed_events
-            ):
-                self._reject(
-                    "player game logs do not provide complete completed game coverage",
-                    result=canonicalized,
+            for season_type, phase_events in completed_events.items():
+                phase_records = tuple(
+                    record
+                    for record in canonicalized.records
+                    if record.season_type == season_type
                 )
+                if not self._has_complete_game_coverage(
+                    phase_records, phase_events
+                ):
+                    self._reject(
+                        "player game logs do not provide complete completed game coverage",
+                        result=canonicalized,
+                    )
             prior = self.repository.get_freshness(canonical_season)
             if self._growth_hidden_by_unjoined_identity(canonicalized, prior):
                 self._reject(
@@ -226,7 +277,7 @@ class PlayerGameLogService:
                     recoverable_game_ids=frozenset(
                         str(event["nba_game_id"])
                         for event in events
-                        if not is_regular_season_event(event)
+                        if player_game_log_season_type(event) is None
                         or is_postponed_event(event)
                     ),
                 )
@@ -245,7 +296,7 @@ class PlayerGameLogService:
             )
         except SQLAlchemyError:
             self._emit_telemetry(
-                source=len(frame.index), result=canonicalized, rejected=1
+                source=source_row_count, result=canonicalized, rejected=1
             )
             raise
 
@@ -267,7 +318,7 @@ class PlayerGameLogService:
         )
 
     def _require_complete_event_catalog(
-        self, season: str, frame: pd.DataFrame, retrieved_at: datetime
+        self, season: str, source_row_count: int, retrieved_at: datetime
     ) -> list[dict[str, Any]]:
         events = self.event_catalog.get_events(season)
         freshness = self.event_catalog.get_freshness(season, now=retrieved_at)
@@ -275,12 +326,12 @@ class PlayerGameLogService:
         if not freshness.get("fresh") or not event_count or event_count != len(events):
             self._reject(
                 "the Event Catalog must be present, fresh, and complete before publication",
-                source=len(frame.index),
+                source=source_row_count,
             )
         return events
 
     def _require_fresh_athlete_catalog(
-        self, season: str, frame: pd.DataFrame, retrieved_at: datetime
+        self, season: str, source_row_count: int, retrieved_at: datetime
     ) -> list[dict[str, Any]]:
         freshness = self.athlete_catalog.get_freshness(
             season, now=retrieved_at
@@ -288,7 +339,7 @@ class PlayerGameLogService:
         if not freshness.get("is_fresh") or not freshness.get("row_count"):
             self._reject(
                 "the Athlete Catalog must be present and fresh before publication",
-                source=len(frame.index),
+                source=source_row_count,
             )
         return self.athlete_catalog.get_catalog(season, active_only=False)
 
@@ -327,6 +378,7 @@ class PlayerGameLogService:
         season: str,
         frame: pd.DataFrame,
         *,
+        season_type: str,
         athletes: list[dict[str, Any]],
         events: list[dict[str, Any]],
     ) -> _CanonicalizationResult:
@@ -388,6 +440,7 @@ class PlayerGameLogService:
                 outcome = self._canonicalize_row(
                     season,
                     row,
+                    season_type=season_type,
                     athlete_map=athlete_map,
                     event_map=event_map,
                 )
@@ -421,13 +474,51 @@ class PlayerGameLogService:
         return observed_result()
 
     @staticmethod
-    def _completed_regular_season_events(
-        events: list[dict[str, Any]], *, observed_at: datetime
+    def _combine_canonicalizations(
+        results: tuple[_CanonicalizationResult, ...],
+    ) -> _CanonicalizationResult:
+        records: dict[tuple[int, str], PlayerGameLogRecord] = {}
+        duplicate_row_count = sum(result.duplicate_row_count for result in results)
+
+        def combined_result() -> _CanonicalizationResult:
+            return _CanonicalizationResult(
+                records=tuple(records.values()),
+                source_row_count=sum(result.source_row_count for result in results),
+                unjoined_athlete_count=sum(
+                    result.unjoined_athlete_count for result in results
+                ),
+                unjoined_event_count=sum(
+                    result.unjoined_event_count for result in results
+                ),
+                team_mismatch_count=sum(
+                    result.team_mismatch_count for result in results
+                ),
+                duplicate_row_count=duplicate_row_count,
+            )
+
+        for result in results:
+            for record in result.records:
+                key = (record.player_id, record.game_id)
+                existing = records.get(key)
+                if existing is not None and existing != record:
+                    raise _CanonicalizationAbort(
+                        "conflicting player game log facts share one identity",
+                        combined_result(),
+                    )
+                records[key] = record
+        return combined_result()
+
+    @staticmethod
+    def _completed_events(
+        events: list[dict[str, Any]],
+        *,
+        season_type: str,
+        observed_at: datetime,
     ) -> tuple[dict[str, Any], ...]:
         return tuple(
             event
             for event in events
-            if is_regular_season_event(event)
+            if player_game_log_season_type(event) == season_type
             and is_final_event(event)
             and not is_postponed_event(event)
             and parse_utc_iso(str(event["scheduled_at"])) <= observed_at
@@ -456,6 +547,7 @@ class PlayerGameLogService:
         season: str,
         row: dict[str, Any],
         *,
+        season_type: str,
         athlete_map: dict[int, dict[str, Any]],
         event_map: dict[str, dict[str, Any]],
     ) -> _CanonicalRow:
@@ -472,6 +564,10 @@ class PlayerGameLogService:
         event = event_map.get(game_id)
         if event is None:
             return _Excluded(_ExclusionReason.EVENT)
+        if player_game_log_season_type(event) != season_type:
+            raise PlayerGameLogIdentityError(
+                "a player game log phase does not match its governed event"
+            )
         team_id = int(
             self._number(
                 row["TEAM_ID"], "team identity", integral=True, minimum=1
@@ -523,6 +619,7 @@ class PlayerGameLogService:
         return _Joined(
             PlayerGameLogRecord(
                 season=season,
+                season_type=season_type,
                 player_id=player_id,
                 game_id=game_id,
                 player_name=player_name,

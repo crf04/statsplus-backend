@@ -23,6 +23,7 @@ class PlayerGameLog(Base):
     season = Column(String(7), primary_key=True)
     player_id = Column(Integer, primary_key=True)
     game_id = Column(String(32), primary_key=True)
+    season_type = Column(String(20), nullable=False)
 
     player_name = Column(String(255), nullable=False)
     game_date = Column(Date, nullable=False)
@@ -45,6 +46,10 @@ class PlayerGameLog(Base):
     blocks = Column(Integer, nullable=False)
 
     __table_args__ = (
+        CheckConstraint(
+            "season_type IN ('Regular Season', 'Playoffs')",
+            name="ck_player_game_logs_season_type",
+        ),
         Index(
             "ix_player_game_logs_player_date",
             "season",

@@ -23,6 +23,7 @@ import pandas as pd
 from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings
+from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.errors import ProviderUnavailableError
 from app.services.nba_stats_adapter import (
     CANONICAL_SCHEDULE_COLUMNS,
@@ -35,7 +36,7 @@ from app.utils.telemetry import ProviderResponseError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SEASON_TYPE = "Regular Season"
+DEFAULT_SEASON_TYPE = REGULAR_SEASON_TYPE
 _CANONICAL_SEASON = re.compile(r"^(?P<start>\d{4})-(?P<end>\d{2})$")
 
 ROSTER_COLUMNS = (
@@ -589,7 +590,7 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         season: str,
         season_type: str = DEFAULT_SEASON_TYPE,
     ) -> pd.DataFrame:
-        """Fetch all player rows for one season in one provider call."""
+        """Fetch all player rows for one season phase in one provider call."""
 
         return self._get_normalized_game_logs(
             normalize=normalize_season_player_game_logs,

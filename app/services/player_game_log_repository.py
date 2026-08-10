@@ -10,6 +10,10 @@ from decimal import Decimal
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
+from app.domain.nba_events import (
+    REGULAR_SEASON_TYPE,
+    validate_player_game_log_season_type,
+)
 from app.domain.freshness import (
     exact_age_seconds,
     exact_seconds,
@@ -29,6 +33,7 @@ from app.services.stats_freshness_repository import (
 @dataclass(frozen=True, slots=True)
 class PlayerGameLogRecord:
     season: str
+    season_type: str
     player_id: int
     game_id: str
     player_name: str
@@ -83,6 +88,14 @@ class PlayerSeasonRate:
     total_minutes: float
     per_game: dict[str, float]
     per_minute: dict[str, float]
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerSeasonLogSummary:
+    season: str
+    player_id: int
+    season_rate: PlayerSeasonRate | None
+    last_ten_minutes: tuple[float, ...]
 
 
 class PlayerGameLogRepository:
@@ -160,6 +173,7 @@ class PlayerGameLogRepository:
             canonical_input_count += 1
             if record.season != canonical_season:
                 raise ValueError("every player game log must belong to the publication season")
+            validate_player_game_log_season_type(record.season_type)
             key = (record.player_id, record.game_id)
             existing = unique.get(key)
             # The service rejects provider conflicts for telemetry; publish repeats
@@ -278,9 +292,83 @@ class PlayerGameLogRepository:
         )
 
     def get_season_rate(
-        self, season: str, player_id: int
+        self,
+        season: str,
+        player_id: int,
+        *,
+        season_type: str | None = REGULAR_SEASON_TYPE,
     ) -> PlayerSeasonRate | None:
-        rows = self.list_player_rows(season, player_id)
+        return self.get_player_summaries(
+            season,
+            (player_id,),
+            rate_season_type=season_type,
+        )[player_id].season_rate
+
+    def get_player_summaries(
+        self,
+        season: str,
+        player_ids: Iterable[int],
+        *,
+        rate_season_type: str | None = REGULAR_SEASON_TYPE,
+    ) -> dict[int, PlayerSeasonLogSummary]:
+        """Return per-player rates and chronological combined-phase last tens."""
+
+        canonical_season = validate_canonical_season(season)
+        canonical_ids = tuple(sorted(set(player_ids)))
+        if not canonical_ids:
+            return {}
+        if rate_season_type is not None:
+            rate_season_type = validate_player_game_log_season_type(
+                rate_season_type
+            )
+        rows_by_player: dict[int, list[PlayerGameLogRecord]] = {
+            player_id: [] for player_id in canonical_ids
+        }
+        if self._season_is_readable(canonical_season):
+            log_table = PlayerGameLog.__table__
+            with self.engine.connect() as connection:
+                rows = connection.execute(
+                    self._published_rows_statement()
+                    .where(
+                        log_table.c.season == canonical_season,
+                        log_table.c.player_id.in_(canonical_ids),
+                    )
+                    .order_by(
+                        log_table.c.player_id.asc(),
+                        log_table.c.game_date.asc(),
+                        log_table.c.game_id.asc(),
+                    )
+                ).mappings()
+                for row in rows:
+                    record = PlayerGameLogRecord(**dict(row))
+                    rows_by_player[record.player_id].append(record)
+        return {
+            player_id: PlayerSeasonLogSummary(
+                season=canonical_season,
+                player_id=player_id,
+                season_rate=self._season_rate(
+                    canonical_season,
+                    player_id,
+                    tuple(
+                        row
+                        for row in rows_by_player[player_id]
+                        if rate_season_type is None
+                        or row.season_type == rate_season_type
+                    ),
+                ),
+                last_ten_minutes=tuple(
+                    row.minutes for row in rows_by_player[player_id][-10:]
+                ),
+            )
+            for player_id in canonical_ids
+        }
+
+    def _season_rate(
+        self,
+        season: str,
+        player_id: int,
+        rows: tuple[PlayerGameLogRecord, ...],
+    ) -> PlayerSeasonRate | None:
         total_minutes = sum(row.minutes for row in rows)
         if not rows or total_minutes <= 0:
             return None
@@ -293,7 +381,7 @@ class PlayerGameLogRepository:
             if statistic.market_category is not None
         }
         return PlayerSeasonRate(
-            season=validate_canonical_season(season),
+            season=season,
             player_id=player_id,
             game_count=len(rows),
             total_minutes=total_minutes,
@@ -306,8 +394,9 @@ class PlayerGameLogRepository:
     def get_last_ten_minutes(
         self, season: str, player_id: int
     ) -> tuple[float, ...]:
-        recent_first = self.list_player_rows(season, player_id)[:10]
-        return tuple(row.minutes for row in reversed(recent_first))
+        return self.get_player_summaries(season, (player_id,))[
+            player_id
+        ].last_ten_minutes
 
     def list_h2h_rows(
         self, season: str, player_id: int, opponent_team_id: int
@@ -405,5 +494,6 @@ __all__ = [
     "PlayerGameLogPublication",
     "PlayerGameLogRecord",
     "PlayerGameLogRepository",
+    "PlayerSeasonLogSummary",
     "PlayerSeasonRate",
 ]

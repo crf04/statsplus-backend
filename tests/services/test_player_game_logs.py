@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import create_engine, delete, event, insert, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
@@ -44,6 +45,7 @@ RETRIEVED_AT = datetime(2026, 1, 20, 10, tzinfo=timezone.utc)
 def _record(
     *,
     season: str = SEASON,
+    season_type: str = "Regular Season",
     player_id: int = 101,
     game_id: str = "0022500001",
     game_date: date = date(2026, 1, 2),
@@ -56,6 +58,7 @@ def _record(
 ) -> PlayerGameLogRecord:
     return PlayerGameLogRecord(
         season=season,
+        season_type=season_type,
         player_id=player_id,
         game_id=game_id,
         player_name=f"Player {player_id}",
@@ -130,6 +133,14 @@ def _recorded_season_frame():
     return normalize_season_player_game_logs(
         parse_recorded_game_logs(json.loads(path.read_text()))
     )
+
+
+def _recorded_playoff_frame():
+    frame = _recorded_season_frame()
+    frame = frame[frame["GAME_ID"] == "0022500001"].copy()
+    frame["GAME_ID"] = "0042500001"
+    frame["GAME_DATE"] = "2026-01-15"
+    return frame.reset_index(drop=True)
 
 
 def _seed_identities(
@@ -229,6 +240,36 @@ def _seed_identities(
                 failure_summary=None,
                 event_count=4,
             )
+        )
+
+
+def _seed_completed_playoff_event(repository: PlayerGameLogRepository) -> None:
+    published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__).values(
+                nba_game_id="0042500001",
+                season=SEASON,
+                home_team_id=1,
+                home_team_name="AAA",
+                home_team_tricode="AAA",
+                away_team_id=2,
+                away_team_name="BBB",
+                away_team_tricode="BBB",
+                scheduled_at=datetime(2026, 1, 15, tzinfo=timezone.utc),
+                status_text="Final",
+                status_code=3,
+                postponed_status=None,
+                postponement_evidence=None,
+                classification="Playoffs",
+                first_seen_at=published_at,
+                last_seen_at=published_at,
+            )
+        )
+        connection.execute(
+            update(EventCatalogRefresh.__table__)
+            .where(EventCatalogRefresh.season == SEASON)
+            .values(event_count=5)
         )
 
 
@@ -332,6 +373,21 @@ def test_publish_rejects_a_record_from_another_season(tmp_path):
         repository.publish(
             SEASON,
             [_record(season=HISTORICAL_SEASON)],
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=1,
+        )
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_publish_rejects_an_unsupported_game_log_phase(tmp_path):
+    repository = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="governed player game log phases"):
+        repository.publish(
+            SEASON,
+            [_record(season_type="Preseason")],
             retrieved_at=RETRIEVED_AT,
             source_provider="nba_stats",
             source_row_count=1,
@@ -745,14 +801,117 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
     ]
 
 
+def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
+    repository = _repository(tmp_path)
+    start = date(2026, 1, 1)
+    regular_rows = [
+        replace(
+            _record(),
+            game_id=f"002250{i:04d}",
+            game_date=start + timedelta(days=i - 1),
+            minutes=float(i),
+            points=i * 2,
+        )
+        for i in range(1, 13)
+    ]
+    playoff_rows = [
+        replace(
+            _record(),
+            season_type="Playoffs",
+            game_id=f"004250000{i}",
+            game_date=start + timedelta(days=11 + i),
+            minutes=float(39 + i),
+            points=100,
+        )
+        for i in (1, 2)
+    ]
+    other_player_rows = [
+        replace(_record(player_id=202), game_id="0022500202"),
+        replace(
+            _record(player_id=202),
+            season_type="Playoffs",
+            game_id="0042500202",
+            game_date=start + timedelta(days=13),
+            minutes=28,
+        ),
+    ]
+    repository.publish(
+        SEASON,
+        [*regular_rows, *playoff_rows, *other_player_rows],
+        retrieved_at=RETRIEVED_AT,
+        source_provider="nba_stats",
+        source_row_count=16,
+    )
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(repository.engine, "before_cursor_execute", record_statement)
+    try:
+        summaries = repository.get_player_summaries(SEASON, [202, 101, 101])
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", record_statement)
+
+    assert list(summaries) == [101, 202]
+    assert summaries[101].season_rate is not None
+    assert summaries[101].season_rate.game_count == 12
+    assert summaries[101].season_rate.per_game["PTS"] == 13
+    assert summaries[101].last_ten_minutes == (
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0,
+        40.0,
+        41.0,
+    )
+    assert summaries[202].last_ten_minutes == (32.5, 28.0)
+    assert len(
+        [statement for statement in statements if "player_game_logs" in statement]
+    ) == 1
+    assert len(statements) == 2
+    assert repository.get_season_rate(SEASON, 101) == summaries[101].season_rate
+    playoff_rate = repository.get_season_rate(
+        SEASON, 101, season_type="Playoffs"
+    )
+    assert playoff_rate is not None
+    assert playoff_rate.game_count == 2
+    assert playoff_rate.per_game["PTS"] == 100
+    all_phase_rate = repository.get_season_rate(SEASON, 101, season_type=None)
+    assert all_phase_rate is not None
+    assert all_phase_rate.game_count == 14
+    assert repository.get_last_ten_minutes(SEASON, 101) == (
+        summaries[101].last_ten_minutes
+    )
+    assert [
+        row.season_type for row in repository.list_h2h_rows(SEASON, 101, 2)[:3]
+    ] == ["Playoffs", "Playoffs", "Regular Season"]
+
+
 class _RecordedSeasonProvider:
-    def __init__(self, frame=None):
+    def __init__(self, frame=None, playoff_frame=None):
         self.frame = frame if frame is not None else _recorded_season_frame()
+        self.playoff_frame = (
+            playoff_frame
+            if playoff_frame is not None
+            else (
+                self.frame.iloc[0:0].copy()
+                if isinstance(self.frame, pd.DataFrame)
+                else _recorded_season_frame().iloc[0:0].copy()
+            )
+        )
         self.calls = []
 
     def get_season_player_game_logs(self, *, season, season_type="Regular Season"):
         self.calls.append((season, season_type))
-        return self.frame.copy()
+        frame = (
+            self.frame if season_type == "Regular Season" else self.playoff_frame
+        )
+        return frame.copy()
 
 
 class _RecordingTelemetry:
@@ -788,7 +947,9 @@ def _service(
     )
 
 
-def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp_path):
+def test_pre_playoff_refresh_canonicalizes_both_phase_observations_without_per_player_calls(
+    tmp_path,
+):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     provider = _RecordedSeasonProvider()
@@ -798,7 +959,10 @@ def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp
 
     assert result.row_count == 22
     assert result.retrieved_at == RETRIEVED_AT.isoformat()
-    assert provider.calls == [(SEASON, "Regular Season")]
+    assert provider.calls == [
+        (SEASON, "Regular Season"),
+        (SEASON, "Playoffs"),
+    ]
     player_rows = repository.list_player_rows(SEASON, 101)
     assert [row.team_id for row in player_rows] == [1, 3, 1]
     assert [row.opponent_team_id for row in player_rows] == [2, 4, 2]
@@ -817,6 +981,130 @@ def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp
         ("0022500004", 202),
         ("0022500001", 101),
     ]
+
+
+def test_refresh_publishes_complete_regular_season_and_playoff_logs_atomically(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_completed_playoff_event(repository)
+    provider = _RecordedSeasonProvider(playoff_frame=_recorded_playoff_frame())
+
+    result = _service(repository, provider).refresh(SEASON)
+
+    assert result.row_count == 32
+    assert provider.calls == [
+        (SEASON, "Regular Season"),
+        (SEASON, "Playoffs"),
+    ]
+    rows = repository.list_player_rows(SEASON, 101)
+    assert [(row.game_id, row.season_type) for row in rows] == [
+        ("0042500001", "Playoffs"),
+        ("0022500004", "Regular Season"),
+        ("0022500002", "Regular Season"),
+        ("0022500001", "Regular Season"),
+    ]
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=RETRIEVED_AT,
+        row_count=32,
+        source_row_count=32,
+    )
+    assert StatsFreshnessRepository(
+        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
+    ).get().last_successful_completion == RETRIEVED_AT
+
+
+def test_refresh_rejects_incomplete_completed_playoff_coverage(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_completed_playoff_event(repository)
+    playoff_frame = _recorded_playoff_frame().iloc[:-1].copy()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="completed game coverage"):
+        _service(
+            repository,
+            _RecordedSeasonProvider(playoff_frame=playoff_frame),
+        ).refresh(SEASON)
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_completed_playoff_event_rejects_an_empty_playoff_response(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_completed_playoff_event(repository)
+
+    with pytest.raises(PlayerGameLogIdentityError, match="empty Playoffs snapshot"):
+        _service(repository, _RecordedSeasonProvider()).refresh(SEASON)
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_refresh_rejects_a_provider_row_whose_phase_disagrees_with_its_event(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider(
+        playoff_frame=_recorded_season_frame().iloc[[0]].copy()
+    )
+
+    with pytest.raises(PlayerGameLogIdentityError, match="phase.*governed event"):
+        _service(repository, provider).refresh(SEASON)
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_malformed_playoff_rejection_reports_union_source_coverage(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_completed_playoff_event(repository)
+    playoff_frame = _recorded_playoff_frame()
+    playoff_frame["MIN"] = playoff_frame["MIN"].astype(object)
+    playoff_frame.loc[0, "MIN"] = "not-a-number"
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="invalid minutes"):
+        _service(
+            repository,
+            _RecordedSeasonProvider(playoff_frame=playoff_frame),
+            telemetry_recorder=telemetry,
+        ).refresh(SEASON)
+
+    assert telemetry.events[0].source_row_count == 32
+    assert telemetry.events[0].malformed_row_count == 1
+    assert telemetry.events[0].rejected_publication_count == 1
+
+
+@pytest.mark.parametrize("failure_phase", ["Regular Season", "Playoffs"])
+def test_either_phase_provider_failure_preserves_the_prior_atomic_publication(
+    tmp_path, failure_phase
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    initial_provider = _RecordedSeasonProvider()
+    _service(repository, initial_provider).refresh(SEASON)
+    prior_freshness = repository.get_freshness(SEASON)
+    prior_rows = repository.list_player_rows(SEASON, 101)
+
+    class FailingPhaseProvider(_RecordedSeasonProvider):
+        def get_season_player_game_logs(self, *, season, season_type="Regular Season"):
+            if season_type == failure_phase:
+                raise ProviderUnavailableError("The NBA Stats provider is unavailable.")
+            return super().get_season_player_game_logs(
+                season=season, season_type=season_type
+            )
+
+    with pytest.raises(ProviderUnavailableError):
+        _service(repository, FailingPhaseProvider()).refresh(
+            SEASON, now=RETRIEVED_AT + timedelta(hours=1)
+        )
+
+    assert repository.get_freshness(SEASON) == prior_freshness
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
 
 
 def test_first_publication_rejects_a_truncated_completed_game_snapshot(tmp_path):
@@ -1027,7 +1315,7 @@ def test_refresh_timestamp_is_observed_after_provider_fetch(tmp_path):
 
     _service(repository, provider, clock=clock).refresh(SEASON)
 
-    assert observations == ["provider", "clock"]
+    assert observations == ["provider", "provider", "clock"]
 
 
 def test_non_dataframe_provider_result_records_rejected_publication(tmp_path):

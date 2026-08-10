@@ -389,10 +389,12 @@ telemetry, response normalization, and provider error translation. Tests inject
 the protocol into `GameService` or `PlayerService` rather than patching
 `nba_api`.
 
-`get_season_player_game_logs` is the refresh-only durable-log seam. It makes
-one season-wide `PlayerGameLogs` call, retains canonical `PLAYER_ID`, and keeps
-the provider's exact minutes rather than the request-time game-log route's
-historical whole-minute presentation. It is never called from an HTTP request.
+`get_season_player_game_logs` is the refresh-only durable-log seam. Each call
+fetches one explicit phase for the whole season, retains canonical `PLAYER_ID`,
+and keeps the provider's exact minutes rather than the request-time game-log
+route's historical whole-minute presentation. Nightly calls it exactly twice,
+once for `Regular Season` and once for `Playoffs`; it is never called per player
+or from an HTTP request.
 
 `NBAStatsAdapter.fetch_whole_season_schedule(season=...)` is the provider seam
 for the canonical event catalog. It accepts only an explicit canonical
@@ -498,25 +500,26 @@ HTTP/authentication dependency.
 ### Durable player game logs
 
 `PlayerGameLogService.refresh(season)` consumes the season-wide NBA Stats seam
-once during Nightly Refresh and stamps retrieval only after that provider call
-returns. It reads canonical identities through `AthleteCatalogService` and
+once for `Regular Season` and once for `Playoffs` during Nightly Refresh, then
+stamps retrieval only after both provider calls return. It reads canonical
+identities through `AthleteCatalogService` and
 `EventCatalogService`; the player-log module does not query their tables
 directly. Every snapshot, including an empty preseason observation, requires a
 present, fresh, nonempty, internally complete Event Catalog for the same season
 observation; its freshness metadata must agree with the actual governed
-event-row count. A nonempty snapshot also requires a present, fresh, nonempty
-Athlete Catalog before canonicalization. Each provider `PLAYER_ID`
+event-row count. A nonempty union snapshot also requires a present, fresh,
+nonempty Athlete Catalog before canonicalization. Each provider `PLAYER_ID`
 must join exactly to the requested season's Athlete Catalog, and each `GAME_ID`
 plus per-game `TEAM_ID` must join exactly to the Event Catalog. Team and
 opponent tricodes and home/away identity come from that canonical event.
 Individual well-formed rows that do not join are excluded and counted in
 bounded scalar-only telemetry; no name or matchup-text guess is accepted. A
 nonempty snapshot that yields no canonical rows fails the refresh before
-publication. For every non-postponed governed Regular Season event that is
-final and scheduled no later than the source observation time, the canonical
-snapshot must cover both exact event teams with at least the configured number
-of distinct players recording positive minutes per team (five by default). The
-positive whole-number minimum is injected from
+publication. For every non-postponed governed `Regular Season` or `Playoffs`
+event that is final and scheduled no later than the source observation time,
+that exact phase's canonical snapshot must cover both exact event teams with at
+least the configured number of distinct players recording positive minutes per
+team (five by default). The positive whole-number minimum is injected from
 `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME`; it is named configuration,
 not an implicit sport constant. This exact completed-game invariant makes a
 truncated first publication fail closed without guessing an expected season
@@ -536,9 +539,11 @@ unjoined snapshot can be republished idempotently and later recover when its
 governed catalog identities arrive.
 
 Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
-and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
-replacement and its `nba_stats` source, timezone-aware retrieval time, and row
-count commit in the same transaction. The sidecar also records the bounded,
+and NBA game ID, with an explicit governed `season_type` constrained to
+`Regular Season` or `Playoffs`, plus `player_game_log_refreshes`, keyed by
+season. Both phase observations form one season replacement; its `nba_stats`
+source, timezone-aware retrieval time, and union row count commit in the same
+transaction. The sidecar also records the bounded,
 nonnegative raw `source_row_count`; it can exceed the canonical row count after
 exact duplicates or governed exclusions but never be smaller. Exact duplicate
 provider rows collapse to one fact and increment bounded duplicate telemetry;
@@ -552,20 +557,20 @@ accepted only when every removed key belongs to a game that the fresh Event
 Catalog has removed or explicitly made ineligible by phase/postponement;
 removing a fact for an eligible game always fails. Recovery telemetry records
 the actual admitted removed-key count, never a net row-count delta or a game or
-athlete identifier. One
-service-boundary SQLAlchemy handler covers prerequisite catalog, identity, and
+athlete identifier. One service-boundary SQLAlchemy handler covers prerequisite
+catalog, identity, and
 freshness reads plus publication after repository rollback, without swallowing
-the error or counting it twice. An empty Regular Season
-provider snapshot is publishable only when the governed Event Catalog is
-present and contains no Regular Season event classified final by the shared
-governed NBA event predicates. A postponed event does not become completed
-evidence merely because its feed status code or text says final. Completed
-preseason, exhibition, All-Star, playoff, and other-phase events do not block
-that empty Regular Season publication. An empty snapshot can never replace a
-prior nonempty publication. A missing Event Catalog or an empty snapshot after
-a completed Regular Season game within the source observation boundary fails
-closed and preserves the last valid facts and freshness. Because a season-wide
-log snapshot is cumulative, any unexplained removal of an eligible canonical
+the error or counting it twice. An empty phase response is publishable only
+when the governed Event Catalog contains no completed event in that exact
+phase. This permits an empty `Playoffs` response before the postseason and an
+empty `Regular Season` response before opening night, but not either response
+after a completed event in its phase. A postponed event does not become
+completed evidence merely because its feed status code or text says final.
+Preseason, exhibition, All-Star, and other unsupported phases are never stored.
+An empty union snapshot can never replace a prior nonempty publication. A
+missing Event Catalog or an invalid empty phase within the source observation
+boundary fails closed and preserves the last valid facts and freshness. Because
+a season-wide log snapshot is cumulative, any unexplained removal of an eligible canonical
 identity fails closed even when additions produce net growth. Corrections that
 retain all identities, pure growth, and the exact governed recovery above
 remain publishable. Every rejected refresh records
@@ -576,14 +581,18 @@ FG2A, season rates, and rolling selections are derived at read time rather
 than persisted in redundant tables.
 
 `PlayerGameLogRepository` is the internal query seam used by later matchup
-services. It returns Season-only per-game and per-minute Market Category
-rates using the reviewed category spellings and component definitions from
-`statistic_catalog.yaml`, the last ten games' minutes in chronological
-sparkline order, H2H rows in deterministic recent-first order, and
-deterministic multi-player H2H rows for archetype sampling. Publication writes
-the season sidecar for every season. When that season is the configured current
-season, the same transaction also advances the named `player_game_logs` row in
-`stats_refreshes`. Season reads require their own sidecar completeness; the
+services. Season rates default to `Regular Season` only; callers may explicitly
+request `Playoffs` or all phases. Rates use the reviewed Market Category
+spellings and component definitions from `statistic_catalog.yaml`. Last-ten
+minutes use the combined Regular Season-plus-Playoffs chronology in
+oldest-to-newest sparkline order, while H2H and deterministic multi-player
+archetype rows also include both phases. `get_player_summaries` accepts
+canonical player IDs and returns every player's default Regular Season rate plus combined-phase
+last-ten minutes with one player-log rows query and in-memory grouping; the
+single-player rate and last-ten APIs are thin wrappers over that batch seam.
+Publication writes the season sidecar for every season. When that season is the
+configured current season, the same transaction also advances the named
+`player_game_logs` row in `stats_refreshes`. Season reads require their own sidecar completeness; the
 configured current season additionally requires that named stats observation
 to exist and remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by
 default), otherwise reads fail closed. That global observation never gates or
@@ -1618,8 +1627,8 @@ The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
 opening it for writes. Migration 009 creates the surface-keyed
 `stats_refreshes` completion records; migration 010 creates Player Pool
-snapshots; migration 011 creates normalized player-game-log facts and their
-season freshness record.
+snapshots; migration 011 creates normalized phase-aware player-game-log facts
+and their season freshness record.
 Migration tests must use a temporary database, and the validator must not be
 used to repair the fixture.
 

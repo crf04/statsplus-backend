@@ -157,6 +157,9 @@ tables, Event Catalog schedule, Athlete Catalog, then durable player game logs.
 If a step fails, later steps in that attempt do not run and the whole unit
 starts over once. A failed Athlete Catalog therefore never suppresses the
 required schedule refresh that precedes it, while player logs remain untouched.
+The player-log step makes one whole-season NBA Stats request for Regular Season
+and one for Playoffs, then publishes both phases and current freshness
+atomically.
 After the single retry the process exits nonzero and names the failed step;
 success exits zero. Each owning service preserves its prior publication on
 failure. The admin `POST /api/data/update_database` path uses the same stats

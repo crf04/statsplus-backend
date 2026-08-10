@@ -578,7 +578,10 @@ def test_adapter_fetches_and_filters_archetype_logs_through_provider_seam():
     ]
 
 
-def test_adapter_fetches_complete_season_logs_in_one_provider_call():
+@pytest.mark.parametrize("season_type", ["Regular Season", "Playoffs"])
+def test_adapter_fetches_each_complete_season_phase_in_one_provider_call(
+    season_type,
+):
     calls: list[dict] = []
 
     class RecordedEndpoint:
@@ -592,14 +595,16 @@ def test_adapter_fetches_complete_season_logs_in_one_provider_call():
         settings=_test_settings(), endpoint_factory=RecordedEndpoint
     )
 
-    normalized = adapter.get_season_player_game_logs(season="2025-26")
+    normalized = adapter.get_season_player_game_logs(
+        season="2025-26", season_type=season_type
+    )
 
     assert normalized.loc[0, "PLAYER_ID"] == 203076
     assert normalized.loc[0, "MIN"] == 35.233333333333334
     assert calls == [
         {
             "season_nullable": "2025-26",
-            "season_type_nullable": "Regular Season",
+            "season_type_nullable": season_type,
             "timeout": 2.5,
         }
     ]

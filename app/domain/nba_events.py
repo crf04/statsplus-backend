@@ -14,11 +14,16 @@ class NBAGameStatus(IntEnum):
     FINAL = 3
 
 
+REGULAR_SEASON_TYPE = "Regular Season"
+PLAYOFFS_SEASON_TYPE = "Playoffs"
+PLAYER_GAME_LOG_SEASON_TYPES = (REGULAR_SEASON_TYPE, PLAYOFFS_SEASON_TYPE)
+
+
 _GAME_TYPE_BY_ID_PREFIX = {
     "001": "Preseason",
-    "002": "Regular Season",
+    "002": REGULAR_SEASON_TYPE,
     "003": "All-Star",
-    "004": "Playoffs",
+    "004": PLAYOFFS_SEASON_TYPE,
 }
 
 
@@ -82,6 +87,33 @@ def is_regular_season_event(event: Mapping[str, object]) -> bool:
             str(classification) if classification is not None else "",
         )
     ) == "regular season"
+
+
+def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
+    """Return the durable game-log phase for one governed catalog event."""
+
+    game_id = event.get("nba_game_id")
+    classification = event.get("classification")
+    kind = canonical_event_kind(
+        str(game_id) if game_id is not None else "",
+        str(classification) if classification is not None else "",
+    )
+    normalized = _normalized_words(kind)
+    if normalized == "regular season":
+        return REGULAR_SEASON_TYPE
+    if normalized in {"playoffs", "play offs"}:
+        return PLAYOFFS_SEASON_TYPE
+    return None
+
+
+def validate_player_game_log_season_type(value: object) -> str:
+    """Require one exact governed durable game-log phase."""
+
+    if value not in PLAYER_GAME_LOG_SEASON_TYPES:
+        raise ValueError(
+            "season_type must be one of the governed player game log phases"
+        )
+    return str(value)
 
 
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
@@ -148,6 +180,9 @@ def _known_classification(value: str) -> str:
 __all__ = [
     "EventClassification",
     "NBAGameStatus",
+    "PLAYER_GAME_LOG_SEASON_TYPES",
+    "PLAYOFFS_SEASON_TYPE",
+    "REGULAR_SEASON_TYPE",
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
@@ -156,5 +191,7 @@ __all__ = [
     "is_postponed_event",
     "is_preseason_kind",
     "is_regular_season_event",
+    "player_game_log_season_type",
     "resolve_stored_event_classification",
+    "validate_player_game_log_season_type",
 ]
