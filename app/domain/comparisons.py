@@ -944,8 +944,12 @@ class BoardCacheState:
                     self, name, _aware_utc(value, field=f"provider cache {name}")
                 )
         if self.age_seconds is not None:
-            if not isinstance(self.age_seconds, Decimal):
-                raise ValueError("provider cache age_seconds must be an exact Decimal")
+            if not isinstance(self.age_seconds, Decimal) or not (
+                self.age_seconds.is_finite()
+            ):
+                raise ValueError(
+                    "provider cache age_seconds must be an exact finite Decimal"
+                )
             if self.age_seconds < 0:
                 raise ValueError("provider cache age_seconds can never be negative")
 
@@ -957,7 +961,9 @@ class BoardCacheState:
         state = cls(
             status=getattr(outcome, "cache_status", None),
             retrieved_at=getattr(outcome, "cache_retrieved_at", None),
-            age_seconds=None if age is None else Decimal(str(age)),
+            # ``ProviderOutcome`` already normalized this to an exact finite
+            # Decimal, so no reader re-derives it from a float here.
+            age_seconds=age,
             failure_reason=getattr(outcome, "cache_failure_reason", None),
             failure_at=getattr(outcome, "cache_failure_at", None),
         )

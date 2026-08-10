@@ -17,19 +17,21 @@ from __future__ import annotations
 import json
 import os
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from app.dfs_catalog import DFS_PROVIDER_NAME_SET
-from app.domain.freshness import time_window_seconds
+from app.domain.freshness import cache_window_policy, time_window_seconds
+from app.domain.market_content import NumericDomainError
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -214,12 +216,10 @@ class ProviderSettings(BaseModel):
     def validate_dfs_cache_window_order(self) -> "ProviderSettings":
         """A fresh window can never outlast the age its provider may be served at.
 
-        The two windows are one policy: a value is served as a hit while it is
-        inside the fresh window and as an explicit stale fallback while it is
-        within the maximum age.  A fresh window longer than that maximum would
-        make a snapshot both contemporaneous and past the age its provider
-        permits, so the ordering is settled here, for every provider the
-        resolution can actually select, rather than left to a request.
+        The ordering itself is stated once, by
+        :func:`app.domain.freshness.cache_window_policy`, and is checked here
+        for every provider the resolution can actually select -- so the policy
+        a configuration accepts is exactly the policy a runtime cache accepts.
         """
 
         names = {
@@ -237,13 +237,12 @@ class ProviderSettings(BaseModel):
             ),
         }
         for name in sorted(names):
-            if self.dfs_cache_fresh_seconds_for(name) > (
-                self.dfs_cache_stale_if_error_seconds_for(name)
-            ):
-                raise ValueError(
-                    "the DFS cache fresh window cannot exceed the stale-if-error "
-                    f"age (provider {name!r})"
-                )
+            cache_window_policy(
+                self.dfs_cache_fresh_seconds_for(name),
+                self.dfs_cache_stale_if_error_seconds_for(name),
+                fresh_field=f"the DFS cache fresh window (provider {name!r})",
+                stale_field="the stale-if-error age",
+            )
         return self
 
     def dfs_cache_fresh_seconds_for(self, provider: str) -> Decimal:
@@ -376,25 +375,64 @@ class NBASeasonSettings(BaseModel):
     current_season: str = Field(default_factory=current_nba_season)
 
 
+#: Every configured catalog window, with the unit it is stated in and the
+#: variable an operator writes it in.  Each one is a time window, so each one
+#: is bounded by the same authority in the same place -- none of them reaches a
+#: service through a float or an unchecked domain.
+CATALOG_WINDOW_UNITS: dict[str, tuple[int, str]] = {
+    "athlete_freshness_days": (86400, "ATHLETE_CATALOG_FRESHNESS_DAYS"),
+    "event_max_age_hours": (3600, "EVENT_CATALOG_MAX_AGE_HOURS"),
+    "event_match_window_hours": (3600, "EVENT_MAPPING_MATCH_WINDOW_HOURS"),
+}
+
+
+def _exact_quantity(value: Any, *, field: str) -> Decimal:
+    """One configured quantity as the exact decimal it was written as.
+
+    The value is read from its own digits rather than through a float, so a
+    window an operator wrote is the window a service compares against, and an
+    unsupported or unparsable setting is one typed domain error naming the
+    variable rather than its value.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int, float, str)):
+        raise NumericDomainError(f"{field} must be a finite decimal")
+    try:
+        return value if isinstance(value, Decimal) else Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as error:
+        raise NumericDomainError(f"{field} must be a finite decimal") from error
+
+
 class CatalogSettings(BaseModel):
     """Independent freshness policies and reviewed matching windows."""
 
     model_config = ConfigDict(frozen=True)
 
-    athlete_freshness_days: int = Field(default=7, ge=0)
-    event_max_age_hours: float = Field(default=72.0, gt=0)
-
-    @field_validator("event_max_age_hours", mode="after")
-    @classmethod
-    def validate_event_max_age(cls, value: float) -> float:
-        """The event catalog TTL is a time window, bounded by the one authority."""
-
-        time_window_seconds(value, unit_seconds=3600, field="EVENT_CATALOG_MAX_AGE_HOURS")
-        return value
+    athlete_freshness_days: int = 7
+    event_max_age_hours: Decimal = Decimal(72)
     #: How far a provider's reported start time may sit from a scheduled NBA
     #: game before the two are no longer evidence of the same event.  The
     #: boundary itself is inside the window.
-    event_match_window_hours: float = Field(default=6.0, gt=0)
+    event_match_window_hours: Decimal = Decimal(6)
+
+    @field_validator(*CATALOG_WINDOW_UNITS, mode="before")
+    @classmethod
+    def validate_catalog_window(cls, value: Any, info: ValidationInfo) -> Any:
+        """Every catalog window is bounded once, in its own unit, at startup.
+
+        A window this accepts can always be turned into the exact duration its
+        service compares against, so nothing a configuration admitted is
+        refused later by a request, and nothing absurd reaches a ``timedelta``.
+        """
+
+        unit_seconds, variable = CATALOG_WINDOW_UNITS[info.field_name]
+        quantity = _exact_quantity(value, field=variable)
+        time_window_seconds(quantity, unit_seconds=unit_seconds, field=variable)
+        if info.field_name == "athlete_freshness_days":
+            if quantity != quantity.to_integral_value():
+                raise NumericDomainError(f"{variable} must be a whole number of days")
+            return int(quantity)
+        return quantity
 
 
 class RuntimeSettings(BaseModel):
@@ -623,16 +661,19 @@ def _build_settings(
             llm=llm,
             cors=cors,
             nba=_validated_model(NBASeasonSettings),
+            # Every catalog window is read as written and bounded by the one
+            # time-window authority, so none of them is ever rounded through a
+            # float on the way to the duration a service compares against.
             catalog=_validated_model(
                 CatalogSettings,
-                athlete_freshness_days=reader.integer(
+                athlete_freshness_days=reader.raw(
                     "ATHLETE_CATALOG_FRESHNESS_DAYS", 7
                 ),
-                event_max_age_hours=reader.decimal(
-                    "EVENT_CATALOG_MAX_AGE_HOURS", 72.0
+                event_max_age_hours=reader.raw(
+                    "EVENT_CATALOG_MAX_AGE_HOURS", Decimal(72)
                 ),
-                event_match_window_hours=reader.decimal(
-                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", 6.0
+                event_match_window_hours=reader.raw(
+                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", Decimal(6)
                 ),
             ),
             port=reader.integer("PORT", 5000),

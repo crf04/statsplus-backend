@@ -38,6 +38,7 @@ from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
     deserialize_provider_snapshot,
     ProviderSnapshotCache,
+    ProviderSnapshotCacheCoordinator,
     SnapshotCacheError,
     SnapshotCacheResult,
     serialize_provider_snapshot,
@@ -2174,3 +2175,66 @@ def test_cache_windows_outside_the_time_window_domain_are_refused(windows) -> No
             redis_client=FakeRedis(),
             **windows,
         )
+
+
+# -- one cache-window policy, wherever a runtime cache is built --------------
+
+
+def test_a_direct_fresh_window_can_never_outlast_its_stale_ceiling() -> None:
+    with pytest.raises(ValueError) as error:
+        ProviderSnapshotCache(
+            FakeProvider(_snapshot()),
+            provider_name="dabble",
+            redis_client=FakeRedis(),
+            fresh_seconds=300,
+            stale_if_error_seconds="299.999999",
+        )
+
+    assert "fresh_seconds" in str(error.value)
+    assert "stale_if_error_seconds" in str(error.value)
+
+
+def test_an_injected_coordinator_cannot_decorate_an_inverted_policy() -> None:
+    coordinator = ProviderSnapshotCacheCoordinator(
+        redis_client=FakeRedis(),
+        fresh_seconds=1800,
+        stale_if_error_seconds=1800,
+    )
+
+    with pytest.raises(ValueError):
+        coordinator.decorate(
+            "dabble", FakeProvider(_snapshot()), stale_if_error_seconds=300
+        )
+    coordinator.shutdown()
+
+
+def test_a_coordinator_refuses_an_inverted_policy_when_it_is_built() -> None:
+    with pytest.raises(ValueError):
+        ProviderSnapshotCacheCoordinator(
+            fresh_seconds=600, stale_if_error_seconds=300
+        )
+
+
+def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        fresh_seconds=300,
+        stale_if_error_seconds=300,
+    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+
+    clock.advance(300)
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    assert cache.last_result.cache_status == "stale"
+
+    clock.advance(0.000001)
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())

@@ -33,6 +33,7 @@ from app.domain.comparisons import (
     REFERENCE_VERSION,
     SUPPORTED_NARROWING_FILTERS,
     NumericDomainError,
+    BoardCacheState,
     ComparisonBoard,
     ComparisonGroup,
     ComparisonMember,
@@ -2766,3 +2767,88 @@ def test_a_catalog_states_its_ttl_as_the_exact_duration_it_gated_on():
     assert entry.max_age_seconds == ttl
     assert entry.age_seconds == ttl
     assert entry.available is True
+
+
+# -- one finite, exact cache age -------------------------------------------
+
+
+def _cache_outcome(age):
+    return ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.FAILED,
+        reason=ProviderFailureReason.UPSTREAM_ERROR,
+        cache_status="error",
+        cache_age_seconds=age,
+    )
+
+
+@pytest.mark.parametrize(
+    ("age", "expected"),
+    [
+        (Decimal("30.5"), "30.5"),
+        ("30.5", "30.5"),
+        (30, "30"),
+        (30.5, "30.5"),
+        (0, "0"),
+        ("1E+128", "1E+128"),
+        ("1E-128", "1E-128"),
+    ],
+)
+def test_a_provider_outcome_holds_one_exact_finite_cache_age(age, expected):
+    outcome = _cache_outcome(age)
+
+    assert isinstance(outcome.cache_age_seconds, Decimal)
+    assert outcome.cache_age_seconds == Decimal(expected)
+    assert BoardCacheState.of(outcome).age_seconds == Decimal(expected)
+
+
+@pytest.mark.parametrize(
+    "age",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        "nan",
+        "inf",
+        -1,
+        Decimal("-0.000001"),
+        True,
+        "1E+129",
+        "1E-129",
+        "not-a-number",
+        object(),
+    ],
+)
+def test_an_unusable_cache_age_is_one_sanitized_provider_outcome_error(age):
+    with pytest.raises(ValueError) as error:
+        _cache_outcome(age)
+
+    assert "cache_age_seconds" in str(error.value)
+    assert str(age) not in str(error.value)
+
+
+def test_a_cache_age_is_exact_inside_a_hostile_decimal_context():
+    with localcontext() as context:
+        context.prec = 1
+        context.traps[InvalidOperation] = True
+        outcome = _cache_outcome("1234.5678")
+
+    assert outcome.cache_age_seconds == Decimal("1234.5678")
+
+
+def test_a_comparison_board_reports_an_exact_cache_age_from_a_float():
+    outcome = ProviderOutcome(
+        provider="dabble",
+        status=ProviderOutcomeStatus.FAILED,
+        reason=ProviderFailureReason.TIMEOUT,
+        cache_status="error",
+        cache_age_seconds=30.5,
+    )
+
+    report = _outcome_service(outcome).get_comparisons(_query(), _context()).provider_reports[0]
+
+    assert report.cache.age_seconds == Decimal("30.5")

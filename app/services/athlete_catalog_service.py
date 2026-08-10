@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -20,7 +20,12 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.domain.freshness import exact_seconds
+from app.domain.freshness import (
+    exact_scaled_seconds,
+    exact_seconds,
+    time_window_timedelta,
+)
+from app.domain.market_content import NumericDomainError
 from app.errors import InvalidConfigurationError
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.providers.nba_stats import ROSTER_COLUMNS, validate_canonical_season
@@ -109,17 +114,27 @@ class AthleteCatalogService:
             if freshness_days is not None
             else self.settings.catalog.athlete_freshness_days
         )
+        # A direct override enters the same time-window authority the
+        # configuration boundary uses, in the same unit, so a service built by
+        # hand can never hold a TTL an operator could not configure.
         try:
-            configured_days = int(configured_days)
-        except (TypeError, ValueError) as error:
-            raise InvalidConfigurationError(
-                "ATHLETE_CATALOG_FRESHNESS_DAYS must be an integer."
-            ) from error
-        if configured_days < 0:
-            raise InvalidConfigurationError(
-                "ATHLETE_CATALOG_FRESHNESS_DAYS must not be negative."
+            self._max_age = time_window_timedelta(
+                configured_days,
+                unit_seconds=86400,
+                field="ATHLETE_CATALOG_FRESHNESS_DAYS",
             )
-        self.freshness_days = configured_days
+            days = exact_scaled_seconds(
+                configured_days,
+                unit_seconds=1,
+                field="ATHLETE_CATALOG_FRESHNESS_DAYS",
+            )
+            if days != days.to_integral_value():
+                raise NumericDomainError(
+                    "ATHLETE_CATALOG_FRESHNESS_DAYS must be a whole number of days"
+                )
+        except ValueError as error:
+            raise InvalidConfigurationError(str(error)) from error
+        self.freshness_days = int(days)
 
     def refresh(
         self,
@@ -202,7 +217,7 @@ class AthleteCatalogService:
         # One duration decides freshness and is reported: the TTL is stated as
         # the exact seconds of the very timedelta it was compared against, so a
         # reader can never see an age past a ceiling this catalog called fresh.
-        max_age = timedelta(days=self.freshness_days)
+        max_age = self._max_age
         is_fresh = bool(last_success is not None and observed_at <= last_success + max_age)
         return {
             "season": season,

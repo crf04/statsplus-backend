@@ -139,7 +139,18 @@ stale fallback. Both canonical catalog TTLs are maximum ages and are inclusive
 in the same way. The module also owns the exact time-window domain every
 configured window is admitted through — no finer than one microsecond, no
 longer than `1E+9` seconds — enforced at startup, so nothing a configuration
-accepted can be refused by a request.
+accepted can be refused by a request. Every window reaches its service through
+that authority and only then becomes a whole-microsecond `timedelta`: the two
+cache windows, both catalog TTLs, and the event-mapping match window, whether
+they came from the environment or from a direct constructor override. The same
+authority states the cache policy itself — a fresh window may never exceed the
+stale-if-error age — wherever a cache is constructed, not only where settings
+are read, so an injected coordinator cannot serve a value as fresh past the age
+its provider permits it to be served at all. An observation age crosses these
+seams the same way: `ProviderOutcome` normalizes `cache_age_seconds` once, on
+construction, to an exact finite non-negative decimal, so no reader, comparison,
+or serialized document is ever handed a NaN, an infinity, or a number that only
+fails when a board finally compares it.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a
 stale-if-error fallback after a later expected total refresh failure. Redis

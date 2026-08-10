@@ -302,3 +302,49 @@ def test_a_catalog_freshness_document_states_no_lossy_window(tmp_path):
     service.refresh("2025-26")
 
     assert "max_age_hours" not in service.get_freshness("2025-26")
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"max_age": 0},
+        {"max_age": -1},
+        {"max_age": 1e129},
+        {"max_age": float("nan")},
+        {"max_age": float("inf")},
+        {"max_age": True},
+        {"max_age_hours": 1e9},
+        {"max_age_hours": "1e-200"},
+        {"max_age": timedelta(0)},
+        {"max_age": timedelta(days=365 * 100)},
+    ],
+)
+def test_a_direct_catalog_ttl_override_uses_the_one_window_authority(
+    tmp_path, override
+):
+    with pytest.raises(ValueError) as error:
+        EventCatalogService(
+            _engine(tmp_path), FakeScheduleProvider(), **override
+        )
+
+    assert not isinstance(error.value, OverflowError)
+    assert "EVENT_CATALOG_MAX_AGE_HOURS" in str(error.value) or "event catalog" in str(
+        error.value
+    )
+
+
+def test_a_configured_catalog_ttl_is_the_exact_duration_it_gates_on(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    settings = RuntimeSettings(
+        environment="testing",
+        catalog=CatalogSettings(event_max_age_hours=Decimal("0.5")),
+    )
+    service = EventCatalogService(
+        _engine(tmp_path), FakeScheduleProvider(), settings=settings, clock=lambda: now
+    )
+    service.refresh("2025-26")
+
+    assert service.max_age == timedelta(minutes=30)
+    assert service.get_freshness("2025-26", now=now + timedelta(seconds=1800))[
+        "max_age_seconds"
+    ] == Decimal(1800)

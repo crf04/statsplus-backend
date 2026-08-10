@@ -30,6 +30,7 @@ most* the permitted maximum.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import (
     MAX_EMAX,
     MIN_EMIN,
@@ -81,6 +82,13 @@ MIN_TIME_WINDOW_SECONDS = Decimal("1E-6")
 MAX_TIME_WINDOW_SECONDS = Decimal("1E+9")
 
 
+#: The resolution every duration here is finally decided at.  A window becomes
+#: a ``timedelta`` on this grid, which is the grid every observation age is
+#: measured on, so two windows closer together than one microsecond classify
+#: every observation identically.
+_MICROSECONDS_PER_SECOND = Decimal(1_000_000)
+
+
 class TimeWindowDomainError(NumericDomainError):
     """One configured time window outside the exact time-window domain.
 
@@ -88,6 +96,16 @@ class TimeWindowDomainError(NumericDomainError):
     configuration boundary already converts a ``ValueError`` into one
     sanitized ``ConfigurationError``.  Its message names the field and the
     domain, never the offending value.
+    """
+
+
+class TimeWindowPolicyError(NumericDomainError):
+    """Two configured windows that cannot both be one cache policy.
+
+    A fresh window longer than the age its value may still be served at is not
+    an out-of-domain number -- each window is inside the domain on its own --
+    so it is stated separately, and it is settled where the pair is built
+    rather than where a request would first read the contradiction.
     """
 
 
@@ -184,6 +202,106 @@ def time_window_seconds(
     return seconds
 
 
+def exact_timedelta(seconds: Decimal, *, field: str) -> timedelta:
+    """One whole-microsecond ``timedelta`` from exact seconds, built without a float.
+
+    A duration handed to a service is compared against ages counted in whole
+    microseconds, so the window becomes a ``timedelta`` on that same grid.  The
+    seconds are bounded first, so the construction can never raise
+    ``OverflowError`` for a duration no operator meant, and the scaling is
+    performed by a fully stated context rather than by float arithmetic that
+    would round a window differently than the age it decides.
+    """
+
+    value = _exact(seconds, field=field)
+    if value < MIN_TIME_WINDOW_SECONDS or value > MAX_TIME_WINDOW_SECONDS:
+        raise TimeWindowDomainError(
+            f"{field} must be a duration between {MIN_TIME_WINDOW_SECONDS} and "
+            f"{MAX_TIME_WINDOW_SECONDS} seconds"
+        )
+    precision = MAX_EXACT_DIFFERENCE_SPAN + len(str(_MICROSECONDS_PER_SECOND))
+    scaled = exact_context(precision).multiply(value, _MICROSECONDS_PER_SECOND)
+    # The one place a number is deliberately resolved rather than kept exact:
+    # the microsecond grid the ages are already counted on.
+    grid = exact_context(precision)
+    grid.traps[Inexact] = False
+    grid.traps[Rounded] = False
+    return timedelta(microseconds=int(grid.to_integral_value(scaled)))
+
+
+def time_window_timedelta(
+    quantity: object, *, unit_seconds: int = 1, field: str
+) -> timedelta:
+    """One configured window as the exact duration a service compares with.
+
+    This is the whole path a configured window takes: the normalized numeric
+    domain, the time-window domain, and finally the microsecond grid.  Every
+    seam that turns a setting or a direct override into a duration goes through
+    it, so an operator, a service constructor, and a request all mean the same
+    window, and an absurd one is one typed error rather than an
+    ``OverflowError`` from the ``timedelta`` constructor.
+    """
+
+    return exact_timedelta(
+        time_window_seconds(quantity, unit_seconds=unit_seconds, field=field),
+        field=field,
+    )
+
+
+def cache_window_policy(
+    fresh_seconds: object,
+    stale_if_error_seconds: object,
+    *,
+    fresh_field: str = "fresh_seconds",
+    stale_field: str = "stale_if_error_seconds",
+) -> tuple[Decimal, Decimal]:
+    """One cache policy: two windows in the domain, in the only usable order.
+
+    The two windows are a single policy.  A value is served as a hit while it
+    is inside the fresh window and as an explicit stale fallback while it is
+    within the maximum age, so a fresh window longer than that maximum would
+    make one observation both contemporaneous and past the age it may be
+    served at.  Configuration and every runtime construction settle it here, so
+    a directly built cache cannot hold a policy the configuration would refuse.
+    """
+
+    fresh_window = time_window_seconds(fresh_seconds, field=fresh_field)
+    stale_window = time_window_seconds(stale_if_error_seconds, field=stale_field)
+    if fresh_window > stale_window:
+        raise TimeWindowPolicyError(
+            f"{fresh_field} can never exceed {stale_field}"
+        )
+    return fresh_window, stale_window
+
+
+def exact_age_seconds(value: object, *, field: str) -> Decimal:
+    """One observation age as an exact, finite, non-negative decimal.
+
+    An age crosses seams as evidence a reader is shown and a board compares, so
+    it is normalized once, where it enters, rather than being re-judged by each
+    reader.  A float or a string is admitted for the adapters that still
+    produce one and is converted through its own digits, never through decimal
+    arithmetic that would read an ambient context; a boolean, a nonfinite, a
+    negative, or an absurdly scaled value is one typed error whose message
+    names the field and never the value.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int, float, str)):
+        raise NumericDomainError(f"{field} must be an exact finite decimal")
+    try:
+        candidate = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise NumericDomainError(
+            f"{field} must be an exact finite decimal"
+        ) from error
+    if not candidate.is_finite():
+        raise NumericDomainError(f"{field} must be an exact finite decimal")
+    normalized_decimal(candidate, field=field)
+    if candidate < 0:
+        raise NumericDomainError(f"{field} can never be negative")
+    return candidate
+
+
 def _exact(value: object, *, field: str) -> Decimal:
     """One exact decimal, because a float would compare inexactly at a boundary."""
 
@@ -224,10 +342,15 @@ __all__ = [
     "MAX_TIME_WINDOW_SECONDS",
     "MIN_TIME_WINDOW_SECONDS",
     "TimeWindowDomainError",
+    "TimeWindowPolicyError",
+    "cache_window_policy",
+    "exact_age_seconds",
     "exact_context",
     "exact_scaled_seconds",
     "exact_seconds",
+    "exact_timedelta",
     "time_window_seconds",
+    "time_window_timedelta",
     "within_fresh_window",
     "within_max_age",
 ]

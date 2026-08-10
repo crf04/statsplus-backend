@@ -24,8 +24,8 @@ from typing import Any, Callable, Mapping, Protocol
 import requests
 
 from app.domain.freshness import (
+    cache_window_policy,
     exact_seconds,
-    time_window_seconds,
     within_fresh_window,
     within_max_age,
 )
@@ -692,8 +692,12 @@ class ProviderSnapshotCacheCoordinator:
         self._flights: dict[str, _Flight] = {}
         self.redis_client = redis_client
         self.enabled = enabled
-        self.fresh_seconds = fresh_seconds
-        self.stale_if_error_seconds = stale_if_error_seconds
+        # The coordinator hands these to every cache it decorates, so the
+        # policy is settled where it is configured rather than once per
+        # decorated provider.
+        self.fresh_seconds, self.stale_if_error_seconds = cache_window_policy(
+            fresh_seconds, stale_if_error_seconds
+        )
         self.contract_version = contract_version
         self.clock = clock
         if self._owned_executor:
@@ -779,11 +783,12 @@ class ProviderSnapshotCache:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("provider_name must be a non-empty string")
         name = name.strip().casefold()
-        # Both windows enter the one shared time-window domain, so a window
-        # this cache accepts is a window the comparison board can also use.
-        fresh_window = time_window_seconds(fresh_seconds, field="fresh_seconds")
-        stale_window = time_window_seconds(
-            stale_if_error_seconds, field="stale_if_error_seconds"
+        # Both windows enter the one shared cache-window policy, so a window
+        # this cache accepts is a window the comparison board can also use, and
+        # a directly built cache can never serve a value as fresh past the age
+        # its provider permits it to be served at all.
+        fresh_window, stale_window = cache_window_policy(
+            fresh_seconds, stale_if_error_seconds
         )
         provider_contract = getattr(provider, "adapter_contract_version", None)
         if provider_contract is None:

@@ -17,7 +17,7 @@ The model is intentionally grouped by responsibility:
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
-| `CatalogSettings` | `athlete_freshness_days`, `event_max_age_hours` | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`) |
+| `CatalogSettings` | `athlete_freshness_days` (whole days, `int`), `event_max_age_hours` and `event_match_window_hours` (exact `Decimal` hours) | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`) |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
@@ -63,10 +63,26 @@ seconds (the microsecond every age is measured at) and at most `1E+9` seconds
 (about thirty-one years), and a provider's fresh window may never exceed its
 stale-if-error age. A boolean, a nonfinite value, a value outside that domain,
 or a fresh window past its own ceiling raises `ConfigurationError` naming the
-variable and the domain, never quoting the value. The same domain admits the
-event-catalog TTL (`EVENT_CATALOG_MAX_AGE_HOURS`). Because the cache and the
-comparison board read the identical authority, every configuration the process
-starts with can be used by both.
+variable and the domain, never quoting the value.
+
+The ordering is a runtime invariant, not only a configuration check: the same
+`cache_window_policy` decides it wherever a cache is built, so a directly
+constructed `ProviderSnapshotCache`, a `ProviderSnapshotCacheCoordinator`, and
+a coordinator-decorated provider are all refused a fresh window past their
+stale-if-error age. Equal windows are accepted, because a fresh window is
+exclusive at its endpoint and a maximum age is inclusive at its own.
+
+Every catalog and mapping window enters the same domain in its own unit and is
+kept exactly: `EVENT_CATALOG_MAX_AGE_HOURS` and `EVENT_MAPPING_MATCH_WINDOW_HOURS`
+in hours, `ATHLETE_CATALOG_FRESHNESS_DAYS` in whole days. They are read as
+exact decimals rather than through a float, bounded once at startup, and only
+then converted to a whole-microsecond `timedelta` — so an absurd window is one
+typed configuration error rather than an `OverflowError` from a service
+constructor. Direct service overrides (`EventCatalogService(max_age=...)`,
+`event_match_window(...)`, `AthleteCatalogService(freshness_days=...)`) use the
+same authority, so a service built by hand can hold no window an operator could
+not configure. Because the cache and the comparison board read the identical
+authority, every configuration the process starts with can be used by both.
 
 Those same two windows decide comparison freshness, through one shared boundary:
 a fresh window is exclusive at its endpoint and a maximum age is inclusive at

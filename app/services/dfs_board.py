@@ -24,6 +24,7 @@ import requests
 
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
+from app.domain.freshness import exact_age_seconds
 from app.errors import ProviderUnavailableError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_resolver import (
@@ -696,7 +697,10 @@ class ProviderOutcome:
     reason: ProviderFailureReason | str | None = None
     cache_status: str | None = None
     cache_retrieved_at: datetime | str | None = None
-    cache_age_seconds: Decimal | float | None = None
+    #: Exact seconds.  A float, an int, or a decimal string is still accepted
+    #: from the cache seams that produce one, and is normalized to an exact
+    #: finite Decimal here, once.
+    cache_age_seconds: Decimal | int | float | str | None = None
     cache_failure_reason: str | None = None
     cache_failure_at: datetime | str | None = None
 
@@ -754,13 +758,14 @@ class ProviderOutcome:
             not isinstance(cache_failure_reason, str) or not cache_failure_reason.strip()
         ):
             raise ValueError("provider outcome cache_failure_reason is invalid")
+        # One exact, finite, non-negative age enters here, so no reader of
+        # this outcome can be handed a NaN, an infinity, or a number that only
+        # fails when a board finally tries to compare it.
         cache_age = self.cache_age_seconds
-        if cache_age is not None and (
-            isinstance(cache_age, bool)
-            or not isinstance(cache_age, (int, float, Decimal))
-            or cache_age < 0
-        ):
-            raise ValueError("provider outcome cache_age_seconds must be non-negative")
+        if cache_age is not None:
+            cache_age = exact_age_seconds(
+                cache_age, field="provider outcome cache_age_seconds"
+            )
         cache_retrieved_at = self.cache_retrieved_at
         if cache_retrieved_at is not None:
             if isinstance(cache_retrieved_at, str):

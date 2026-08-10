@@ -433,3 +433,102 @@ def test_settings_reject_event_catalog_ttl_outside_the_time_window_domain(value)
         load_settings(
             environ={"FLASK_ENV": "testing", "EVENT_CATALOG_MAX_AGE_HOURS": value}
         )
+
+
+@pytest.mark.parametrize(
+    ("variable", "unit_seconds"),
+    [
+        ("EVENT_CATALOG_MAX_AGE_HOURS", 3600),
+        ("EVENT_MAPPING_MATCH_WINDOW_HOURS", 3600),
+        ("ATHLETE_CATALOG_FRESHNESS_DAYS", 86400),
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    ["0", "-1", "1e129", "1e-200", "nan", "inf", "true", "not-a-number"],
+)
+def test_settings_reject_a_catalog_window_outside_the_time_window_domain(
+    variable, unit_seconds, value
+):
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+    message = str(error.value)
+    assert variable in message
+    # The refusal names the variable and the domain, never the value read.
+    assert "got" not in message
+    assert value not in message.replace("0.000001", "").replace("1E+9", "")
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "attribute"),
+    [
+        (
+            "EVENT_CATALOG_MAX_AGE_HOURS",
+            "277777.777777777777777",
+            "event_max_age_hours",
+        ),
+        (
+            "EVENT_MAPPING_MATCH_WINDOW_HOURS",
+            "0.000000000277777778",
+            "event_match_window_hours",
+        ),
+    ],
+)
+def test_a_catalog_window_just_inside_the_domain_is_kept_exactly(
+    variable, value, attribute
+):
+    from decimal import Decimal
+
+    settings = load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+    assert getattr(settings.catalog, attribute) == Decimal(value)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("EVENT_CATALOG_MAX_AGE_HOURS", "277777.777777777778"),
+        ("EVENT_MAPPING_MATCH_WINDOW_HOURS", "0.00000000027777777"),
+        ("ATHLETE_CATALOG_FRESHNESS_DAYS", "11575"),
+    ],
+)
+def test_a_catalog_window_just_outside_the_domain_is_refused(variable, value):
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+
+def test_catalog_windows_are_exact_decimals_never_floats():
+    from decimal import Decimal
+
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "EVENT_CATALOG_MAX_AGE_HOURS": "0.1",
+            "EVENT_MAPPING_MATCH_WINDOW_HOURS": "0.3",
+        }
+    )
+
+    assert isinstance(settings.catalog.event_max_age_hours, Decimal)
+    assert isinstance(settings.catalog.event_match_window_hours, Decimal)
+    assert settings.catalog.event_max_age_hours == Decimal("0.1")
+    assert settings.catalog.event_match_window_hours == Decimal("0.3")
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"event_max_age_hours": 0},
+        {"event_max_age_hours": float("nan")},
+        {"event_max_age_hours": True},
+        {"event_match_window_hours": "1e129"},
+        {"event_match_window_hours": -1},
+        {"athlete_freshness_days": 0},
+        {"athlete_freshness_days": 11575},
+    ],
+)
+def test_catalog_settings_refuse_a_direct_window_outside_the_domain(values):
+    from app.config.settings import CatalogSettings
+
+    with pytest.raises(ValueError):
+        CatalogSettings(**values)
