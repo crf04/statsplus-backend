@@ -25,6 +25,8 @@ from app.domain.comparisons import (
     ComparisonSummary,
     MarketFreshness,
     canonical_decimal,
+    canonical_selections,
+    market_evidence_key,
     market_reference,
     selection_reference,
 )
@@ -1732,6 +1734,83 @@ def test_one_threshold_written_at_two_scales_is_one_semantic_repeat():
     assert forward.groups[0].summary.market_count == 1
     # The one retained spelling is chosen by content, not by arrival order.
     assert forward.markets == backward.markets
+
+
+def _scaled_selection(price, modifier):
+    """One selection whose exact prices carry the scale the provider wrote."""
+
+    return _rich_selection(
+        decimal_price=price,
+        modifiers=(SelectionModifier(value=modifier, kind="boost", scope="selection"),),
+    )
+
+
+def _written_prices(selections):
+    return [
+        (
+            selection.decimal_price.as_tuple(),
+            tuple(modifier.value.as_tuple() for modifier in selection.modifiers),
+        )
+        for selection in selections
+    ]
+
+
+def test_selections_of_one_semantic_offering_are_ordered_by_retained_audit_facts():
+    # Both selections state the same offering; only the scale each exact price
+    # was written at tells them apart, and that is a retained audit fact.
+    plain = _scaled_selection("1.9", "1.25")
+    padded = _scaled_selection("1.90", "1.250")
+
+    forward = canonical_selections((plain, padded))
+    backward = canonical_selections((padded, plain))
+
+    assert len(forward) == 2
+    assert _written_prices(forward) == _written_prices(backward)
+    assert market_evidence_key(
+        _market(market_id=None, selections=(plain, padded))
+    ) == market_evidence_key(_market(market_id=None, selections=(padded, plain)))
+
+
+def test_the_scale_a_price_was_written_at_never_changes_market_identity():
+    plain = _scaled_selection("1.9", "1.25")
+    padded = _scaled_selection("1.90", "1.250")
+
+    assert market_reference(
+        _market(market_id=None, selections=(plain,))
+    ) == market_reference(_market(market_id=None, selections=(padded,)))
+    assert market_reference(
+        _market(market_id=None, selections=(plain, padded))
+    ) == market_reference(_market(market_id=None, selections=(padded, plain)))
+
+
+def test_a_boards_retained_selections_do_not_depend_on_their_arrival_order():
+    plain = _scaled_selection("1.9", "1.25")
+    padded = _scaled_selection("1.90", "1.250")
+
+    def retained(selections):
+        board = _read_markets((_market(market_id=None, selections=selections),))
+        return board.markets[0].selections
+
+    forward = retained((plain, padded))
+    backward = retained((padded, plain))
+
+    assert len(forward) == 2
+    assert _written_prices(forward) == _written_prices(backward)
+    assert [entry.selection_reference for entry in forward] == [
+        entry.selection_reference for entry in backward
+    ]
+
+
+def test_selections_that_differ_in_a_stated_fact_are_never_collapsed():
+    variants = (
+        _rich_selection(selection_id="s-1"),
+        _rich_selection(selection_id="s-2"),
+        _rich_selection(selection_id="s-1", decimal_price="1.91"),
+        _rich_selection(selection_id="s-1", status="suspended"),
+        _rich_selection(selection_id="s-1", modifiers=()),
+    )
+
+    assert len(canonical_selections(variants)) == len(variants)
 
 
 def test_a_contradiction_among_semantic_repeats_does_not_depend_on_input_order(

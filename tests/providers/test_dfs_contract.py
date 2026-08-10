@@ -39,6 +39,8 @@ from app.providers.dfs import (
     normalize_selection_direction,
     normalize_scoring_period,
 )
+from app.domain.market_content import market_evidence_key
+from app.providers.dfs import _SnapshotMarketCollector
 
 
 @pytest.mark.parametrize(
@@ -428,6 +430,148 @@ def test_snapshot_rejects_conflicting_content_for_the_same_source_identity():
             ),
             retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
         )
+
+
+def _repeatable_market(**overrides):
+    """One normalized market, varied only in the facts a repeat may restate."""
+
+    values = {
+        "provider": "underdog",
+        "market_id": "line-1",
+        "athlete": AthleteEvidence(provider_id="player-1", name="LeBron James"),
+        "statistic": StatisticEvidence(label="Points"),
+        "threshold": MarketThreshold("25.5", unit="points", original_value="25.5"),
+    }
+    return PlayerProjectionMarket(**{**values, **overrides})
+
+
+def _repeat_snapshot(markets):
+    return ProviderSnapshot(
+        provider="underdog",
+        status="complete",
+        markets=tuple(markets),
+        coverage=CoverageEvidence(
+            fetched_count=len(markets),
+            eligible_count=len(markets),
+            normalized_count=len(markets),
+            skipped_count=0,
+            pagination_complete=True,
+            fanout_complete=True,
+        ),
+        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
+    )
+
+
+def test_a_snapshot_repeat_that_only_reorders_selections_is_one_market():
+    higher = Selection(selection_id="s-1", label="Higher", direction="higher")
+    lower = Selection(selection_id="s-2", label="Lower", direction="lower")
+    forward = _repeat_snapshot(
+        (
+            _repeatable_market(selections=(higher, lower)),
+            _repeatable_market(selections=(lower, higher)),
+        )
+    )
+    backward = _repeat_snapshot(
+        (
+            _repeatable_market(selections=(lower, higher)),
+            _repeatable_market(selections=(higher, lower)),
+        )
+    )
+
+    assert len(forward.markets) == 1
+    assert len(backward.markets) == 1
+    # The snapshot retains the provider's own listing rather than rewriting it,
+    # and the retained evidence of both readings says exactly the same thing.
+    assert market_evidence_key(forward.markets[0]) == market_evidence_key(
+        backward.markets[0]
+    )
+    assert set(forward.markets[0].selections) == {higher, lower}
+
+
+def test_a_snapshot_repeat_written_at_another_scale_is_one_market():
+    plain = _repeatable_market()
+    padded = _repeatable_market(
+        threshold=MarketThreshold("25.50", unit="points", original_value="25.50")
+    )
+
+    forward = _repeat_snapshot((plain, padded))
+    backward = _repeat_snapshot((padded, plain))
+
+    assert len(forward.markets) == len(backward.markets) == 1
+    # The one retained spelling is chosen by content, never by arrival order.
+    retained = forward.markets[0].threshold
+    assert retained.original_value == backward.markets[0].threshold.original_value
+    assert retained.value.as_tuple() == backward.markets[0].threshold.value.as_tuple()
+
+
+def test_a_snapshot_repeat_that_changes_a_stated_fact_is_still_malformed():
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(),
+                _repeatable_market(
+                    threshold=MarketThreshold(
+                        "26.5", unit="points", original_value="26.5"
+                    )
+                ),
+            )
+        )
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(),
+                _repeatable_market(status=MarketStatus.SUSPENDED),
+            )
+        )
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(selections=(Selection(selection_id="s-1"),)),
+                _repeatable_market(selections=(Selection(selection_id="s-2"),)),
+            )
+        )
+
+
+def test_the_market_collector_reads_a_repeat_in_the_same_semantics():
+    higher = Selection(selection_id="s-1", label="Higher", direction="higher")
+    lower = Selection(selection_id="s-2", label="Lower", direction="lower")
+    padded = _repeatable_market(
+        threshold=MarketThreshold("25.50", unit="points", original_value="25.50"),
+        selections=(lower, higher),
+    )
+    plain = _repeatable_market(selections=(higher, lower))
+
+    def collected(markets):
+        collector = _SnapshotMarketCollector()
+        collector.extend(markets)
+        return collector
+
+    forward = collected((plain, padded))
+    backward = collected((padded, plain))
+
+    assert len(forward.markets) == len(backward.markets) == 1
+    assert forward.warning_codes == (CoverageCode.DUPLICATE_SOURCE_IDENTITY,)
+    assert (
+        forward.markets[0].threshold.original_value
+        == backward.markets[0].threshold.original_value
+    )
+    assert forward.markets[0].selections == backward.markets[0].selections
+
+
+def test_the_market_collector_still_rejects_a_changed_repeat():
+    collector = _SnapshotMarketCollector()
+    collector.add(_repeatable_market())
+
+    with pytest.raises(CoverageRecordMalformed) as error:
+        collector.add(
+            _repeatable_market(
+                threshold=MarketThreshold("26.5", unit="points", original_value="26.5")
+            )
+        )
+
+    assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
+    assert collector.markets == ()
+    assert CoverageCode.CONFLICTING_SOURCE_IDENTITY in collector.warning_codes
 
 
 def test_partial_snapshot_requires_usable_market_and_known_incomplete_work():

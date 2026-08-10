@@ -777,12 +777,24 @@ same-provider markets stay distinct members of one group, and an available and
 a suspended offering of the same line are two offerings rather than one market
 contradicting itself. Identity is decided once, over whole normalized markets,
 before any market is reduced to a member, so two distinct offerings can never
-merge because the few facts a member happens to state agree. Exact repeated
-source identities are already deduplicated inside `ProviderSnapshot`, where a
-repeat with conflicting normalized content is malformed rather than a second
-market; the board applies the same rule to the references it derives, so a
-repeated reference collapses only when every normalized fact and its
-observation agree.
+merge because the few facts a member happens to state agree. Repeated source
+identities are already collapsed inside `ProviderSnapshot` and the shared
+adapter collector, where a repeat that changed what the market says is
+malformed rather than a second market; the board applies the same rule to the
+references it derives, so a repeated reference collapses only when every
+normalized fact and its observation agree.
+
+All three seams read a repeat through one authority, `app.domain.market_content`,
+which imports no provider or service module and so cannot drift from either
+side. It separates what a market *says* — exact numbers whatever scale they
+were written at, selections in an order derived from their own content — from
+the audit spellings a board retains beyond that. A provider that relists one
+market with its selections the other way round, or rewrites `25.5` as `25.50`,
+has therefore restated one offering at every seam, and the repeat that survives
+is the least by complete retained evidence rather than the first to arrive. A
+repeat that changes a stated fact — another threshold, status, variant, or
+selection — remains `conflicting_source_identity` at the provider boundary and
+`conflicting_market_identity` on the board.
 
 A repeat that disagrees is evidence, not a duplicate to discard. Every distinct
 contradicting observation of one reference is retained as its own
@@ -876,10 +888,14 @@ with no ID, status is the only fact separating an offering the provider is
 taking from an identically named suspended one, so it takes part. A threshold's
 written spelling never does: `original_value` is retained on the board for
 audit, but `25.50` and `25.5` are one line and one identity. Selections take
-part in an order derived from their own complete normalized facts, so the order
-a provider happened to list two equivalent selections in changes neither the
-market reference nor the selections the board returns, and two selections
-differing in any retained fact stay two selections. A selection reference is
+part in an order derived from their own complete retained content — their
+normalized facts first, then the audit spellings kept beyond them — so the
+order a provider happened to list two equivalent selections in changes neither
+the market reference nor the selections the board returns, even when the only
+thing separating them is the scale one exact price was written at, and two
+selections differing in any retained fact stay two selections. The spelling
+tiebreak applies only inside a semantic tie, so a reference stays
+scale-independent. A selection reference is
 defined by
 its market reference and every fact that defines the offering — identity,
 labels, direction, status, modifiers, and prices — so two distinctly priced or

@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
+from app.domain.market_content import market_content_key, market_evidence_key
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 
 from app.utils.request_id import is_valid_request_id
@@ -997,6 +998,35 @@ class CoverageEvidence:
             return False
         return self.expected_total is None or self.fetched_count >= self.expected_total
 
+class _RetainedRepeat:
+    """The market one source identity is currently retained by, and where.
+
+    Both seams that collapse a repeated identity need the same three things:
+    what the retained market says, how its complete retained evidence orders
+    against a repeat, and which position in the retained sequence it holds.
+    Keeping them together computes each key once and keeps the choice between
+    two semantic repeats a function of their content alone.
+    """
+
+    __slots__ = ("market", "position", "content_key", "_evidence_key")
+
+    def __init__(self, market: PlayerProjectionMarket, position: int) -> None:
+        self.market = market
+        self.position = position
+        self.content_key = market_content_key(market)
+        self._evidence_key = market_evidence_key(market)
+
+    def supersede(self, market: PlayerProjectionMarket) -> bool:
+        """Whether this semantic repeat is the one to retain, and retain it."""
+
+        evidence_key = market_evidence_key(market)
+        if evidence_key >= self._evidence_key:
+            return False
+        self.market = market
+        self._evidence_key = evidence_key
+        return True
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderSnapshot:
     """Immutable, temporally coherent normalized provider observation."""
@@ -1033,7 +1063,13 @@ class ProviderSnapshot:
         if not isinstance(self.contract_version, str) or not self.contract_version.strip():
             raise ValueError("snapshot contract_version must be a non-empty string")
 
-        by_identity: dict[tuple[str, str], PlayerProjectionMarket] = {}
+        # A repeated source identity is read in the shared canonical semantics
+        # (see app.domain.market_content), so a market merely relisted with its
+        # selections the other way round, or with one exact number written at
+        # another scale, is one market rather than a contradiction.  Where two
+        # such repeats differ only in retained audit spelling, the one kept is
+        # the least by complete evidence content, never the first to arrive.
+        by_identity: dict[tuple[str, str], _RetainedRepeat] = {}
         deduplicated: list[PlayerProjectionMarket] = []
         for market in markets:
             identity = market.source_identity
@@ -1042,12 +1078,15 @@ class ProviderSnapshot:
                 continue
             previous = by_identity.get(identity)
             if previous is None:
-                by_identity[identity] = market
+                by_identity[identity] = _RetainedRepeat(market, len(deduplicated))
                 deduplicated.append(market)
-            elif previous != market:
+                continue
+            if previous.content_key != market_content_key(market):
                 raise MalformedProviderResponseError(
                     "repeated provider market identity has conflicting normalized content"
                 )
+            if previous.supersede(market):
+                deduplicated[previous.position] = market
 
         retrieved_at = normalize_timestamp(self.retrieved_at)
         if retrieved_at is None:
@@ -1059,16 +1098,21 @@ class ProviderSnapshot:
         object.__setattr__(self, "contract_version", self.contract_version.strip())
 
 class _SnapshotMarketCollector:
-    """Collect normalized markets with exact source-identity semantics."""
+    """Collect normalized markets with exact source-identity semantics.
+
+    A repeated identity is judged in the same shared canonical semantics
+    :class:`ProviderSnapshot` validates in, so an adapter never rejects a
+    market the snapshot it is building would have accepted as one offering.
+    """
 
     def __init__(self) -> None:
         self._markets: list[PlayerProjectionMarket] = []
-        self._seen: dict[tuple[str, str], PlayerProjectionMarket] = {}
+        self._seen: dict[tuple[str, str], _RetainedRepeat] = {}
         self._conflicting: set[tuple[str, str]] = set()
         self._warning_codes: list[CoverageCode] = []
 
     def add(self, market: PlayerProjectionMarket) -> None:
-        """Add one normalized market, recording exact duplicates or conflicts."""
+        """Add one normalized market, recording semantic repeats or conflicts."""
 
         identity = market.source_identity
         if identity is None:
@@ -1076,11 +1120,13 @@ class _SnapshotMarketCollector:
             return
         previous = self._seen.get(identity)
         if previous is None:
-            self._seen[identity] = market
+            self._seen[identity] = _RetainedRepeat(market, len(self._markets))
             self._markets.append(market)
             return
-        if previous == market:
+        if previous.content_key == market_content_key(market):
             self._warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
+            if previous.supersede(market):
+                self._markets[previous.position] = market
             return
         self._conflicting.add(identity)
         self._warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
