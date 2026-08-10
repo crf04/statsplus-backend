@@ -70,6 +70,7 @@ class StatisticCatalogSchemaError(StatisticCatalogError):
 
 
 _IDENTIFIER_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+_MARKET_CATEGORY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 
 def _identifier(value: Any, *, field_name: str) -> str:
@@ -296,8 +297,10 @@ class CanonicalStatistic:
         if market_category is not None and (
             not isinstance(market_category, str)
             or not market_category
-            or market_category != market_category.strip().upper()
-            or not market_category.replace("3", "").isalnum()
+            or any(
+                character not in _MARKET_CATEGORY_CHARS
+                for character in market_category
+            )
         ):
             raise StatisticCatalogSchemaError(
                 f"statistic {statistic_id} market_category must be an uppercase token"

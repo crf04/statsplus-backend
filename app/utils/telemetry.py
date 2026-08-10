@@ -235,11 +235,18 @@ class PlayerPoolTelemetryEvent:
 
     unknown_stat_label_count: int
     unjoined_athlete_count: int
+    unjoined_event_count: int
+    team_mismatch_count: int
 
     def __post_init__(self) -> None:
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in (self.unknown_stat_label_count, self.unjoined_athlete_count)
+            for value in (
+                self.unknown_stat_label_count,
+                self.unjoined_athlete_count,
+                self.unjoined_event_count,
+                self.team_mismatch_count,
+            )
         ):
             raise ValueError("player pool telemetry counts must be non-negative integers")
 
@@ -449,9 +456,12 @@ class BoundedPlayerPoolTelemetryRecorder(PlayerPoolTelemetryRecorder):
     def record(self, event: PlayerPoolTelemetryEvent) -> None:
         payload = asdict(event)
         logger.info(
-            "player_pool_event unknown_stat_label_count=%d unjoined_athlete_count=%d",
+            "player_pool_event unknown_stat_label_count=%d unjoined_athlete_count=%d "
+            "unjoined_event_count=%d team_mismatch_count=%d",
             event.unknown_stat_label_count,
             event.unjoined_athlete_count,
+            event.unjoined_event_count,
+            event.team_mismatch_count,
         )
         with _buffer_lock:
             global _player_pool_events_total

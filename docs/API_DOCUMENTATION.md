@@ -275,6 +275,8 @@ aggregate `status` is omitted so the frontend derives its documented partial
 presentation from the provider entries. The union uses every usable observation. This route
 performs a live board collection on every request; stored-snapshot and
 stale-served behavior belongs to the later persistence slice.
+Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
+never understates any provider observation included in the union.
 
 A stale but populated schedule remains a `200` with
 `freshness.schedule.status: "stale"`. Stored
@@ -456,7 +458,8 @@ GET /api/data/telemetry
 application telemetry counters on the documented seams, with the most recent
 50 provider events, internal board-collection events, published board request
 events, and `recent_player_pool_events`. Player Pool entries contain only the
-per-request `unknown_stat_label_count` and `unjoined_athlete_count`; the
+per-request `unknown_stat_label_count`, `unjoined_athlete_count`,
+`unjoined_event_count`, and `team_mismatch_count`; the
 corresponding `player_pool_events_total` and `player_pool_buffered_events`
 metrics describe their total and bounded buffer. Board aggregates are kept in separate bounded scalar
 collections and do not increment provider event or provider-failure

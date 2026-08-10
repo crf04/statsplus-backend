@@ -7,6 +7,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.slate_service import SlateService
+from app.services.player_pool import PlayerPool
 
 
 class RecordedCatalog:
@@ -49,7 +50,7 @@ def _event(game_id, scheduled_at, *, classification="Regular Season", **override
     return event
 
 
-def _service(events, *, freshness=None, now=None, schedule_max_age=None):
+def _service(events, *, freshness=None, now=None, schedule_max_age=None, player_pool=None):
     settings = RuntimeSettings(
         environment="testing",
         nba=NBASeasonSettings(current_season="2025-26"),
@@ -68,7 +69,18 @@ def _service(events, *, freshness=None, now=None, schedule_max_age=None):
         settings=settings,
         clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=timezone.utc),
         schedule_max_age=schedule_max_age,
+        player_pool=player_pool,
     )
+
+
+class RecordedPlayerPool:
+    def __init__(self, pool):
+        self.pool = pool
+        self.calls = []
+
+    def get_pool(self, *, season, game_ids):
+        self.calls.append((season, game_ids))
+        return self.pool
 
 
 def test_slate_orders_tip_then_game_id_independently_of_repository_order():
@@ -248,40 +260,32 @@ def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
 
 
 def test_slate_uses_live_pool_counts_and_provider_freshness():
-    pool = type(
-        "RecordedPool",
-        (),
-        {
-            "get_pool": lambda self, *, season, game_ids: type(
-                "Pool",
-                (),
-                {
-                    "team_counts": {1: 2, 2: 3},
-                    "freshness": {
-                        "status": "fresh",
-                        "retrieved_at": "2026-01-02T14:59:00+00:00",
-                        "providers": {
-                            "prizepicks": {
-                                "status": "fresh",
-                                "retrieved_at": "2026-01-02T14:59:00+00:00",
-                            },
-                            "underdog": {"status": "missing", "retrieved_at": None},
-                        },
-                    },
+    expected = PlayerPool(
+        players=(),
+        team_counts={1: 2, 2: 3},
+        freshness={
+            "retrieved_at": "2026-01-02T14:59:00+00:00",
+            "providers": {
+                "prizepicks": {
+                    "status": "fresh",
+                    "retrieved_at": "2026-01-02T14:59:00+00:00",
                 },
-            )(),
+                "underdog": {"status": "missing", "retrieved_at": None},
+            },
         },
-    )()
-    service = _service([_event("0022500001", "2026-01-03T00:00:00+00:00")])
-    service.player_pool = pool
+    )
+    pool = RecordedPlayerPool(expected)
+    service = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        player_pool=pool,
+    )
 
     payload = service.get_slate("2026-01-02")
 
     assert payload["games"][0]["away_team"]["targetable_player_count"] == 2
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 3
-    assert payload["freshness"]["pool"] == pool.get_pool(
-        season="2025-26", game_ids={"0022500001"}
-    ).freshness
+    assert payload["freshness"]["pool"] == expected.freshness
+    assert pool.calls == [("2025-26", {"0022500001"})]
 
 
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():

@@ -1,7 +1,7 @@
 """Behavioral tests for the live Player Pool assembled from DFS boards."""
 
 from datetime import datetime, timezone
-from dataclasses import fields
+from dataclasses import fields, replace
 import json
 from pathlib import Path
 import pytest
@@ -140,32 +140,39 @@ def _athlete_outcome(provider, provider_id, player_id, team_id, name):
         provider=provider, provider_evidence=evidence, season="2025-26",
         state=MappingResolutionState.AUTO, canonical_athlete=canonical,
     )
-    mapping = _record(
-        ProviderAthleteMappingRecord, provider=provider,
-        provider_athlete_id=provider_id, mapping_state="auto", is_active=True,
-        season="2025-26", canonical_player_id=player_id,
-        canonical_name=name, canonical_team_id=team_id,
-        first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
-    )
+    mapping = None
+    if provider_id:
+        mapping = _record(
+            ProviderAthleteMappingRecord, provider=provider,
+            provider_athlete_id=provider_id, mapping_state="auto", is_active=True,
+            season="2025-26", canonical_player_id=player_id,
+            canonical_name=name, canonical_team_id=team_id,
+            first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+        )
     return BoardMappingOutcome(
         resolution=resolution, state=MappingResolutionState.AUTO,
         persisted=True, mapping=mapping,
     )
 
 
-def _event_outcome(provider, provider_id, game_id):
+def _event_outcome(provider, provider_id, game_id, team_ids=(1, 2)):
     evidence = EventEvidence(provider_id=provider_id)
     resolution = EventResolution(
         provider=provider, provider_evidence=evidence, season="2025-26",
         state=EventResolutionState.AUTO,
-        canonical_event=CanonicalEvent(game_id, "2025-26", None),
+        canonical_event=CanonicalEvent(
+            game_id, "2025-26", None,
+            home_team_id=team_ids[0], away_team_id=team_ids[1],
+        ),
     )
-    mapping = _record(
-        ProviderEventMappingRecord, provider=provider,
-        provider_event_id=provider_id, mapping_state="auto", is_active=True,
-        season="2025-26", canonical_event_id=game_id,
-        first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
-    )
+    mapping = None
+    if provider_id:
+        mapping = _record(
+            ProviderEventMappingRecord, provider=provider,
+            provider_event_id=provider_id, mapping_state="auto", is_active=True,
+            season="2025-26", canonical_event_id=game_id,
+            first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+        )
     return BoardEventMappingOutcome(
         resolution=resolution, state=EventResolutionState.AUTO,
         persisted=True, mapping=mapping,
@@ -306,6 +313,121 @@ def test_pool_excludes_nonqualifying_unknown_unjoined_and_other_slate_markets():
     assert pool.players[0].market_categories == ("PTS",)
     assert telemetry.events[-1].unknown_stat_label_count == 2
     assert telemetry.events[-1].unjoined_athlete_count == 1
+    assert telemetry.events[-1].unjoined_event_count == 0
+    assert telemetry.events[-1].team_mismatch_count == 0
+
+
+def test_null_provider_identities_never_join_or_collide():
+    markets = (
+        _market("prizepicks", None, "points", event_id=None),
+        _market("prizepicks", None, "assists", event_id=None),
+    )
+    board = _board(
+        (_provider_outcome("prizepicks", markets),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", None, 101, 1, "First Player"),
+            _athlete_outcome("prizepicks", None, 202, 2, "Second Player"),
+        ),
+        event_outcomes=(
+            _event_outcome("prizepicks", None, "0022500001"),
+            _event_outcome("prizepicks", None, "0022500002"),
+        ),
+    )
+    telemetry = RecordedTelemetry()
+
+    pool = PlayerPoolService(
+        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
+    ).get_pool(season="2025-26", game_ids={"0022500001", "0022500002"})
+
+    assert pool.players == ()
+    assert telemetry.events[-1].unjoined_event_count == 2
+
+    with pytest.raises(ValueError, match="non-empty identifier"):
+        AthleteEvidence(provider_id="")
+    with pytest.raises(ValueError, match="non-empty identifier"):
+        EventEvidence(provider_id=" ")
+
+
+def test_drop_telemetry_is_slate_scoped_and_distinguishes_unjoined_events():
+    markets = (
+        _market("prizepicks", "joined", None, event_id="current"),
+        _market("prizepicks", "joined", None, event_id="other"),
+        _market("prizepicks", "joined", None, event_id="missing"),
+    )
+    board = _board(
+        (_provider_outcome("prizepicks", markets),),
+        event_outcomes=(
+            _event_outcome("prizepicks", "current", "0022500001"),
+            _event_outcome("prizepicks", "other", "0022500002"),
+        ),
+    )
+    telemetry = RecordedTelemetry()
+
+    PlayerPoolService(
+        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
+    ).get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert telemetry.events[-1].unknown_stat_label_count == 1
+    assert telemetry.events[-1].unjoined_event_count == 1
+
+
+def test_joined_athlete_on_neither_governed_game_team_is_excluded_and_counted():
+    market = _market("prizepicks", "traded", "points")
+    board = _board(
+        (_provider_outcome("prizepicks", (market,)),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", "traded", 303, 3, "Traded Player"),
+        ),
+        event_outcomes=(
+            _event_outcome("prizepicks", "game-1", "0022500001", (1, 2)),
+        ),
+    )
+    telemetry = RecordedTelemetry()
+
+    pool = PlayerPoolService(
+        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
+    ).get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert pool.players == ()
+    assert telemetry.events[-1].team_mismatch_count == 1
+
+
+def test_mapped_noncomparable_market_category_still_qualifies():
+    definition = {
+        "schema_version": 1,
+        "statistics": [{
+            "id": "points", "label": "Points", "unit": "count",
+            "scoring_periods": ["full_game"], "components": ["points"],
+            "market_category": "PTS", "comparable": False,
+            "provider_mappings": {"prizepicks": ["Points"]},
+        }],
+    }
+    catalog = StatisticCatalog.from_mapping(definition)
+    market = replace(
+        _market("prizepicks", "pp-1", "points"),
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=StatisticEvidence(label="Points"),
+            provider="prizepicks",
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=catalog.by_id["points"],
+        ),
+    )
+    board = _board(
+        (_provider_outcome("prizepicks", (market,)),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
+        ),
+        event_outcomes=(
+            _event_outcome("prizepicks", "game-1", "0022500001"),
+        ),
+    )
+
+    pool = PlayerPoolService(RecordedBoardService(board), catalog).get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    )
+
+    assert pool.players[0].market_categories == ("PTS",)
 
 
 def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_failure():

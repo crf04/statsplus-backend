@@ -25,7 +25,7 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
-from app.services.player_pool import PlayerPool
+from app.services.player_pool import PlayerPool, PlayerPoolReader
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -41,7 +41,7 @@ class SlateService:
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
         schedule_max_age: timedelta | None = None,
-        player_pool: Any | None = None,
+        player_pool: PlayerPoolReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()

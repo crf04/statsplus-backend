@@ -443,14 +443,19 @@ def test_a_board_request_outcome_cannot_claim_another_status(outcome, status_cod
 
 def test_player_pool_recorder_counts_and_bounds_scalar_drop_events():
     recorder = telemetry.BoundedPlayerPoolTelemetryRecorder()
-    recorder.record(telemetry.PlayerPoolTelemetryEvent(2, 1))
+    recorder.record(telemetry.PlayerPoolTelemetryEvent(2, 1, 3, 4))
 
     metrics = telemetry.snapshot_metrics()
 
     assert metrics["player_pool_events_total"] == 1
     assert metrics["player_pool_buffered_events"] == 1
     assert telemetry.snapshot_recent_player_pool_events() == [
-        {"unknown_stat_label_count": 2, "unjoined_athlete_count": 1}
+        {
+            "unknown_stat_label_count": 2,
+            "unjoined_athlete_count": 1,
+            "unjoined_event_count": 3,
+            "team_mismatch_count": 4,
+        }
     ]
 
 

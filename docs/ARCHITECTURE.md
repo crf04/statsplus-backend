@@ -290,8 +290,15 @@ Unanimously usable observations make the aggregate `fresh`, mixed usable and
 missing observations omit aggregate status for the frontend's partial
 derivation, and total failure is `unavailable`. Unknown provider stat market
 occurrences and unjoined athlete
-identities are counted in a bounded Player Pool telemetry event, without
+or event occurrences, plus canonical athletes whose team is not one of the
+governed game's teams, are counted in a bounded Player Pool telemetry event,
+without
 logging names, labels, or provider IDs.
+Drop telemetry is slate-scoped: an event must first join to the requested Slate
+before unknown-stat and athlete/team counters apply; an unjoined event is
+counted separately, while a governed event on another Slate is irrelevant and
+not counted. Aggregate pool `retrieved_at` is the oldest usable contributor
+snapshot.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

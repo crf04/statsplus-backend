@@ -232,6 +232,36 @@ def test_catalog_rejects_duplicate_conflicting_and_invalid_definitions() -> None
         StatisticCatalog.from_mapping(invalid_unit)
 
 
+@pytest.mark.parametrize("market_category", ["3PM", "FG3A"])
+def test_market_category_accepts_explicit_ascii_tokens(market_category):
+    definition = {
+        "schema_version": 1,
+        "statistics": [{
+            "id": "points", "label": "Points", "unit": "count",
+            "scoring_periods": ["full_game"], "components": ["points"],
+            "market_category": market_category,
+        }],
+    }
+
+    catalog = StatisticCatalog.from_mapping(definition)
+    assert catalog.by_id["points"].market_category == market_category
+
+
+@pytest.mark.parametrize("market_category", ["PTS-REB", "PTS_REB", "ΡTS", "ＰＴＳ", "pts"])
+def test_market_category_rejects_non_ascii_delimiters_and_case(market_category):
+    definition = {
+        "schema_version": 1,
+        "statistics": [{
+            "id": "points", "label": "Points", "unit": "count",
+            "scoring_periods": ["full_game"], "components": ["points"],
+            "market_category": market_category,
+        }],
+    }
+
+    with pytest.raises(StatisticCatalogError, match="market_category"):
+        StatisticCatalog.from_mapping(definition)
+
+
 def test_catalog_rejects_inconsistent_ordered_components() -> None:
     definition = {
         "schema_version": 1,
