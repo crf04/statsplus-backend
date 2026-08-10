@@ -145,6 +145,18 @@ def test_recorded_pbp_totals_parse_through_the_live_path():
     }
 
 
+def test_recorded_bounded_opponent_totals_carry_window_verification_fields():
+    frame = PBPTotalsAdapter.parse_totals(
+        _load("pbp_stats/opponent_bos_bounded.valid.json"),
+        data_type="opponent",
+    )
+
+    assert frame.loc[0, "TeamId"] == "1610612738"
+    assert frame.loc[0, "SecondsPlayed"] == 63660.0
+    assert frame.loc[0, "GamesPlayed"] == 22
+    assert frame.loc[0, "Assists"] == 525
+
+
 def test_malformed_pbp_totals_are_provider_response_error():
     with pytest.raises(telemetry.ProviderResponseError):
         PBPTotalsAdapter.parse_totals(_load("pbp_stats/totals.malformed.json"))

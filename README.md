@@ -166,14 +166,11 @@ Recorded Regular Season and Playoffs payloads under
 parser without network access.
 After the single retry the process exits nonzero and names the failed step;
 success exits zero. Each owning service preserves its prior publication on
-failure. The admin `POST /api/data/update_database` path uses the same stats
-publication service and remains the manual backstop.
-
-The two matchup windows publish together with per-surface observations. Early
-in a season, the successful step publishes Season facts and explicit missing
-Last-15 observations until every team has 15 governed completed games; it never
-substitutes a shorter or mixed-phase window. Failed or incomplete surface
-observations do not replace the most recent usable facts.
+failure. The two matchup windows publish together. Matchup reads distinguish
+each surface's last fact-bearing scope and retrieval time from the newest
+availability observation, so a failed same-day rerun cannot make older facts
+look newly retrieved. The admin `POST /api/data/update_database` path uses the
+same stats publication service and remains the manual backstop.
 
 Current-season player-log reads require the named Nightly stats observation to
 remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by default). Historical

@@ -224,7 +224,8 @@ def _create_player_game_log_tables(connection: Connection) -> None:
 def _create_team_matchup_fact_tables(connection: Connection) -> None:
     """Create raw team-window facts and per-surface observations.
 
-    Migration 012 follows the canonical player-log migration 011 from #56.
+    Migration 012 is reserved for issue #57 and follows the player-log
+    prerequisite's migration 011 (#56) in integrated history.
     """
     from app.models.team_matchup import (
         TeamMatchupFactRow,

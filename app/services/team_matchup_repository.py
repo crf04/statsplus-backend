@@ -56,8 +56,6 @@ class TeamMatchupFact:
     denominator_value: float | None
     denominator_unit: str | None
     provider: str
-    status: str = "available"
-    unavailable_reason: str | None = None
     window_start_date: date | None = None
 
 
@@ -101,19 +99,6 @@ class TeamMatchupRepository:
             table.c.as_of_date == scope.as_of,
             table.c.window_kind == scope.window_kind,
             table.c.window_games == scope.stored_window_games,
-        )
-
-    def replace_snapshot(
-        self,
-        scope: TeamMatchupSnapshotScope,
-        *,
-        facts: Iterable[TeamMatchupFact],
-        observations: Iterable[TeamMatchupObservation],
-        retrieved_at: datetime,
-    ) -> None:
-        self.replace_snapshots(
-            ((scope, tuple(facts), tuple(observations)),),
-            retrieved_at=retrieved_at,
         )
 
     def replace_snapshots(
@@ -182,8 +167,6 @@ class TeamMatchupRepository:
                                 "denominator_value": fact.denominator_value,
                                 "denominator_unit": fact.denominator_unit,
                                 "provider": fact.provider,
-                                "status": fact.status,
-                                "unavailable_reason": fact.unavailable_reason,
                                 "window_start_date": fact.window_start_date,
                                 "window_end_date": scope.as_of,
                                 "retrieved_at": observed_at,
@@ -265,8 +248,6 @@ class TeamMatchupRepository:
 
     @staticmethod
     def _has_valid_numeric_values(fact: TeamMatchupFact) -> bool:
-        if fact.status != "available":
-            return False
         if fact.denominator_unit not in {"minutes", "seconds"}:
             return False
         try:
@@ -282,7 +263,7 @@ class TeamMatchupRepository:
 
     @staticmethod
     def _has_complete_metrics(facts: tuple[TeamMatchupFact, ...]) -> bool:
-        if not facts or any(fact.status != "available" for fact in facts):
+        if not facts:
             return False
         teams_by_metric: dict[tuple[str, str], set[int]] = defaultdict(set)
         counts_by_metric: dict[tuple[str, str], int] = defaultdict(int)
@@ -337,8 +318,6 @@ class TeamMatchupRepository:
                     denominator_value=row["denominator_value"],
                     denominator_unit=row["denominator_unit"],
                     provider=row["provider"],
-                    status=row["status"],
-                    unavailable_reason=row["unavailable_reason"],
                     window_start_date=row["window_start_date"],
                     retrieved_at=assume_utc(row["retrieved_at"]),
                 )

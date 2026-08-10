@@ -38,18 +38,12 @@ class TeamMatchupFactRow(Base):
     denominator_value = Column(Float, nullable=True)
     denominator_unit = Column(String(16), nullable=True)
     provider = Column(String(32), nullable=False)
-    status = Column(String(16), nullable=False)
-    unavailable_reason = Column(String(64), nullable=True)
     window_start_date = Column(Date, nullable=True)
     window_end_date = Column(Date, nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_facts_window"),
-        CheckConstraint(
-            "status IN ('available', 'unavailable')",
-            name="ck_team_matchup_facts_status",
-        ),
         CheckConstraint(
             "denominator_unit IS NULL OR denominator_unit IN ('minutes', 'seconds')",
             name="ck_team_matchup_facts_denominator_unit",

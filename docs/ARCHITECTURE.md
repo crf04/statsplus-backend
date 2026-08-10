@@ -661,7 +661,11 @@ selects the greatest observation date no later than an optional Slate Date,
 while resolving each surface's most recent fact-bearing scope independently.
 It therefore returns the last usable facts alongside the newest persisted
 failure or freshness observation instead of letting a fact-free failed run
-hide yesterday's valid values. Future cutoffs are rejected and the default
+hide yesterday's valid values. Each surface reports both the scope and
+`retrieved_at` of those facts separately from the latest observation's
+`retrieved_at`, status, and reason, including when a later failure happened on
+the same Slate Date. Consumers can therefore label stale-served metrics
+without overstating their freshness. Future cutoffs are rejected and the default
 cutoff is the injected clock's current ET date, so future-dated rows cannot
 shadow current data.
 
@@ -686,9 +690,14 @@ Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
 ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
 team and expose an aggregate count of exactly 15 games. A date-bounded PBP
 response without that proof is `unavailable/provider_window_unverified`; one
-league-wide cutoff is never used. Synergy exposes neither Last-N nor date
+league-wide cutoff is never used. The recorded BOS `2025-03-01` through
+`2025-04-15` response demonstrates why: it reports 525 assists but also
+`GamesPlayed=22`, so it is valid provider data and explicitly not a Last-15
+aggregate. Synergy exposes neither Last-N nor date
 bounds, so its fact-free Last-15 play-type observation is
 `unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
+Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
+each governed slice; `GP` is provider evidence rather than a display metric.
 
 Before every team has 15 governed completions, the same transaction publishes
 the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces
@@ -707,7 +716,8 @@ Migration 012 creates `team_matchup_facts` and
 player-log migration 011 from #56; #57 must be rebased after #56 so fresh
 databases apply 011 and then 012.
 A fact is identified by season, as-of date, window kind plus rolling game
-count, team, Base, slice, and stat. Available facts retain the provider's raw
+count, team, Base, slice, and stat. The fact table contains available facts
+only; availability and reasons belong solely to the observation table. Facts retain the provider's raw
 numerator and its raw minutes or seconds denominator; they do not
 persist a previously normalized ratio or rank. Surface observations retain a
 timezone-aware collection time and an `available`, `unavailable`, or `missing`
@@ -721,7 +731,10 @@ seconds; partial, non-finite, or mislabeled data becomes a fact-free unavailable
 observation and leaves prior valid facts intact. A provider transport,
 constraint, or transaction failure likewise leaves both prior snapshots
 intact; the Nightly Refresh retries the complete stats → schedule →
-team-matchups unit once. The query service defensively degrades only an
+team-matchups unit once. A provider response that reaches its adapter but is
+malformed instead degrades only that surface as
+`unavailable/provider_malformed_response`, preserves its prior valid facts,
+and allows other surfaces to publish. The query service defensively degrades only an
 affected incomplete legacy surface and derives allowed-per-48 from valid raw
 facts. It then computes the 30-team mean, population sigma, percent versus
 average, sigma deviation, and defensive rank. Player scoring and Diet Shares
@@ -1752,7 +1765,7 @@ used to repair the fixture.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.
-- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
+- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. Opponent totals require `TeamId`, `SecondsPlayed`, and `GamesPlayed` in addition to assist numerators, so exact rolling-window publication can fail closed on absent or mismatched game-count evidence. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.

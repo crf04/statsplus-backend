@@ -27,6 +27,7 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+from app.utils.telemetry import ProviderResponseError
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -273,16 +274,27 @@ class TeamMatchupRefreshService:
         overrides: Mapping[str, tuple[str, str | None]] | None = None,
     ) -> tuple[TeamMatchupObservation, ...]:
         resolved = overrides or {}
-        return tuple(
-            TeamMatchupObservation(
-                surface=surface,
-                status=resolved.get(surface, (default_status, default_reason))[0],
-                unavailable_reason=resolved.get(
-                    surface, (default_status, default_reason)
-                )[1],
+        observations = []
+        for surface in MATCHUP_SURFACES:
+            status, reason = resolved.get(surface, (default_status, default_reason))
+            observations.append(
+                TeamMatchupObservation(
+                    surface=surface,
+                    status=status,
+                    unavailable_reason=reason,
+                )
             )
-            for surface in MATCHUP_SURFACES
-        )
+        return tuple(observations)
+
+    @staticmethod
+    def _provider_failure(
+        error: ProviderResponseError | ValueError,
+    ) -> tuple[str, str]:
+        if isinstance(error, _ProviderWindowUnverified):
+            return "unavailable", "provider_window_unverified"
+        if isinstance(error, ProviderResponseError):
+            return "unavailable", "provider_malformed_response"
+        return "unavailable", "provider_invalid_response"
 
     @staticmethod
     def _team_ids(events: list[dict[str, Any]]) -> tuple[int, ...]:
@@ -303,7 +315,9 @@ class TeamMatchupRefreshService:
         *,
         snapshot_date: date,
         include_play_types: bool,
-    ) -> tuple[list[TeamMatchupFact], dict[str, tuple[str, str | None]]]:
+    ) -> tuple[
+        list[TeamMatchupFact], dict[str, tuple[str, str | None]]
+    ]:
         date_to = self._nba_date(snapshot_date)
         common = {
             "season": season,
@@ -321,20 +335,17 @@ class TeamMatchupRefreshService:
                 None, per_mode_detailed="Totals", **common
             )
             minutes_by_team = self._minutes_by_team(traditional_frame)
-        except ValueError:
+        except (ProviderResponseError, ValueError) as error:
             minutes_by_team = None
             for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
-                failures[surface] = ("unavailable", "provider_invalid_response")
+                failures[surface] = self._provider_failure(error)
         if minutes_by_team is not None:
             try:
                 facts_by_surface["traditional"] = self._traditional_facts(
                     traditional_frame
                 )
-            except ValueError:
-                failures["traditional"] = (
-                    "unavailable",
-                    "provider_invalid_response",
-                )
+            except (ProviderResponseError, ValueError) as error:
+                failures["traditional"] = self._provider_failure(error)
             try:
                 for shooting_type in SHOOTING_TYPES:
                     facts_by_surface["shot_types"].extend(
@@ -349,11 +360,8 @@ class TeamMatchupRefreshService:
                             minutes_by_team=minutes_by_team,
                         )
                     )
-            except ValueError:
-                failures["shot_types"] = (
-                    "unavailable",
-                    "provider_invalid_response",
-                )
+            except (ProviderResponseError, ValueError) as error:
+                failures["shot_types"] = self._provider_failure(error)
             try:
                 facts_by_surface["shot_zones"] = self._shot_zone_facts(
                     self.nba_stats.fetch_opponent_shooting_zone(
@@ -361,11 +369,8 @@ class TeamMatchupRefreshService:
                     ),
                     minutes_by_team=minutes_by_team,
                 )
-            except ValueError:
-                failures["shot_zones"] = (
-                    "unavailable",
-                    "provider_invalid_response",
-                )
+            except (ProviderResponseError, ValueError) as error:
+                failures["shot_zones"] = self._provider_failure(error)
             if include_play_types:
                 try:
                     for play_type in PLAY_TYPES:
@@ -382,11 +387,8 @@ class TeamMatchupRefreshService:
                                 minutes_by_team=minutes_by_team,
                             )
                         )
-                except ValueError:
-                    failures["play_types"] = (
-                        "unavailable",
-                        "provider_invalid_response",
-                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["play_types"] = self._provider_failure(error)
         try:
             facts_by_surface["assist_locations"] = self._assist_facts(
                 self.pbp_stats.fetch_totals_frame(
@@ -398,11 +400,8 @@ class TeamMatchupRefreshService:
                     to_date=snapshot_date.isoformat(),
                 )
             )
-        except ValueError:
-            failures["assist_locations"] = (
-                "unavailable",
-                "provider_invalid_response",
-            )
+        except (ProviderResponseError, ValueError) as error:
+            failures["assist_locations"] = self._provider_failure(error)
         return (
             [
                 fact
@@ -420,9 +419,7 @@ class TeamMatchupRefreshService:
         snapshot_date: date,
         team_ids: tuple[int, ...],
         boundaries: Mapping[int, TeamWindowBoundary],
-    ) -> tuple[
-        list[TeamMatchupFact], dict[str, tuple[str, str | None]]
-    ]:
+    ) -> tuple[list[TeamMatchupFact], dict[str, tuple[str, str | None]]]:
         facts_by_surface: dict[str, list[TeamMatchupFact]] = {
             surface: [] for surface in MATCHUP_SURFACES
         }
@@ -463,18 +460,8 @@ class TeamMatchupRefreshService:
                                 boundary.from_date,
                             )
                         )
-                except _ProviderWindowUnverified:
-                    failures["traditional"] = (
-                        "unavailable",
-                        "provider_window_unverified",
-                    )
-                    failures["shot_types"] = failures["traditional"]
-                    failures["shot_zones"] = failures["traditional"]
-                except ValueError:
-                    failures["traditional"] = (
-                        "unavailable",
-                        "provider_invalid_response",
-                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["traditional"] = self._provider_failure(error)
                     if minutes_by_team is None:
                         failures["shot_types"] = failures["traditional"]
                         failures["shot_zones"] = failures["traditional"]
@@ -505,16 +492,8 @@ class TeamMatchupRefreshService:
                     facts_by_surface["shot_types"].extend(
                         self._with_start(team_shot_type_facts, boundary.from_date)
                     )
-                except _ProviderWindowUnverified:
-                    failures["shot_types"] = (
-                        "unavailable",
-                        "provider_window_unverified",
-                    )
-                except ValueError:
-                    failures["shot_types"] = (
-                        "unavailable",
-                        "provider_invalid_response",
-                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["shot_types"] = self._provider_failure(error)
 
             if minutes_by_team is not None and "shot_zones" not in failures:
                 try:
@@ -538,16 +517,8 @@ class TeamMatchupRefreshService:
                             boundary.from_date,
                         )
                     )
-                except _ProviderWindowUnverified:
-                    failures["shot_zones"] = (
-                        "unavailable",
-                        "provider_window_unverified",
-                    )
-                except ValueError:
-                    failures["shot_zones"] = (
-                        "unavailable",
-                        "provider_invalid_response",
-                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["shot_zones"] = self._provider_failure(error)
 
             if "assist_locations" not in failures:
                 try:
@@ -571,16 +542,8 @@ class TeamMatchupRefreshService:
                             boundary.from_date,
                         )
                     )
-                except _ProviderWindowUnverified:
-                    failures["assist_locations"] = (
-                        "unavailable",
-                        "provider_window_unverified",
-                    )
-                except ValueError:
-                    failures["assist_locations"] = (
-                        "unavailable",
-                        "provider_invalid_response",
-                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["assist_locations"] = self._provider_failure(error)
         facts = [
             fact
             for surface in MATCHUP_SURFACES
@@ -679,10 +642,8 @@ class TeamMatchupRefreshService:
     def _denominator_for_team(
         cls,
         row: Mapping[str, Any],
-        minutes_by_team: Mapping[int, float] | None,
+        minutes_by_team: Mapping[int, float],
     ) -> tuple[float, str]:
-        if minutes_by_team is None:
-            return cls._denominator(row)
         team_id = cls._team_id(row)
         try:
             return minutes_by_team[team_id], "minutes"
@@ -719,7 +680,7 @@ class TeamMatchupRefreshService:
         frame: pd.DataFrame,
         shooting_type: str,
         *,
-        minutes_by_team: Mapping[int, float] | None = None,
+        minutes_by_team: Mapping[int, float],
     ) -> list[TeamMatchupFact]:
         facts = []
         slice_key = shooting_type.replace(" ", "_").casefold()
@@ -747,7 +708,7 @@ class TeamMatchupRefreshService:
         cls,
         frame: pd.DataFrame,
         *,
-        minutes_by_team: Mapping[int, float] | None = None,
+        minutes_by_team: Mapping[int, float],
     ) -> list[TeamMatchupFact]:
         facts = []
         for row in cls._flat_frame(frame).to_dict(orient="records"):
@@ -784,23 +745,26 @@ class TeamMatchupRefreshService:
         frame: pd.DataFrame,
         play_type: str,
         *,
-        minutes_by_team: Mapping[int, float] | None = None,
+        minutes_by_team: Mapping[int, float],
     ) -> list[TeamMatchupFact]:
         facts = []
         for row in cls._flat_frame(frame).to_dict(orient="records"):
             denominator, unit = cls._denominator_for_team(row, minutes_by_team)
-            facts.append(
-                TeamMatchupFact(
-                    cls._team_id(row),
-                    "play_types",
-                    play_type,
-                    "PTS",
-                    float(row["PTS"]),
-                    denominator,
-                    unit,
-                    "nba_synergy",
+            for stat_key in ("PTS", "POSS"):
+                if stat_key not in row:
+                    raise ValueError(f"play-type provider row is missing {stat_key}")
+                facts.append(
+                    TeamMatchupFact(
+                        cls._team_id(row),
+                        "play_types",
+                        play_type,
+                        stat_key,
+                        float(row[stat_key]),
+                        denominator,
+                        unit,
+                        "nba_synergy",
+                    )
                 )
-            )
         return facts
 
     @classmethod

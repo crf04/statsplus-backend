@@ -30,6 +30,7 @@ from app.utils.telemetry import (
 )
 
 PBP_TOTALS_URL = "https://api.pbpstats.com/get-totals/nba"
+PBP_REGULAR_SEASON = "Regular+Season"
 
 # These are the columns consumed by the publication and assist-table
 # transforms in ``DataService``.  Keep the provider contract at this seam so
@@ -45,7 +46,10 @@ PBP_PLAYER_REQUIRED_COLUMNS: tuple[str, ...] = (
     "LongMidRangeAssists",
 )
 PBP_OPPONENT_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "TeamId",
     "Name",
+    "SecondsPlayed",
+    "GamesPlayed",
     "Assists",
     "AssistPoints",
     "TwoPtAssists",
@@ -106,7 +110,7 @@ class PBPTotalsAdapter:
         data_type: PBPDataKind = "player",
         *,
         season: str | None = None,
-        season_type: str = "Regular Season",
+        season_type: str = PBP_REGULAR_SEASON,
         team_id: int | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
@@ -123,9 +127,14 @@ class PBPTotalsAdapter:
                 f"Unsupported PBP data type {data_type!r}. "
                 f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
+        provider_season_type = (
+            PBP_REGULAR_SEASON
+            if season_type in {"Regular Season", PBP_REGULAR_SEASON}
+            else season_type
+        )
         params = {
             "Season": season or self.settings.nba.current_season,
-            "SeasonType": season_type,
+            "SeasonType": provider_season_type,
             "Type": "Player" if data_type == "player" else "Opponent",
         }
         if team_id is not None:
@@ -151,7 +160,7 @@ class PBPTotalsAdapter:
             "health_probe",
             {
                 "Season": self.settings.nba.current_season,
-                "SeasonType": "Regular Season",
+                "SeasonType": PBP_REGULAR_SEASON,
                 "Type": "Player",
             },
         ) as response:
@@ -203,6 +212,7 @@ class PBPTotalsAdapter:
 
 __all__ = [
     "PBP_TOTALS_URL",
+    "PBP_REGULAR_SEASON",
     "PBP_PLAYER_REQUIRED_COLUMNS",
     "PBP_OPPONENT_REQUIRED_COLUMNS",
     "PBP_REQUIRED_COLUMNS",

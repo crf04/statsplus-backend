@@ -44,6 +44,27 @@ VALID_PAYLOAD = {
     ]
 }
 
+VALID_OPPONENT_PAYLOAD = {
+    "single_row_table_data": [],
+    "multi_row_table_data": [
+        {
+            "TeamId": "1610612738",
+            "Name": "BOS",
+            "SecondsPlayed": 63660.0,
+            "GamesPlayed": 22,
+            "Assists": 525,
+            "AssistPoints": 1297,
+            "TwoPtAssists": 278,
+            "ThreePtAssists": 247,
+            "Arc3Assists": 172,
+            "Corner3Assists": 75,
+            "AtRimAssists": 135,
+            "ShortMidRangeAssists": 104,
+            "LongMidRangeAssists": 39,
+        }
+    ],
+}
+
 
 def _settings() -> RuntimeSettings:
     return RuntimeSettings(
@@ -117,7 +138,7 @@ def test_fetch_totals_records_full_event_and_valid_frame(monkeypatch):
 
 def test_fetch_totals_opponent_uses_opponent_operation():
     fake_session = requests.Session()
-    fake_session.get = lambda *a, **k: FakeResponse(payload=VALID_PAYLOAD)
+    fake_session.get = lambda *a, **k: FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
 
     adapter = _adapter(fake_session)
     adapter.fetch_totals_frame("opponent")
@@ -132,7 +153,7 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
 
     def get(*args, **kwargs):
         calls.append((args, kwargs))
-        return FakeResponse(payload=VALID_PAYLOAD)
+        return FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
 
     fake_session.get = get
     adapter = _adapter(fake_session)
@@ -176,7 +197,28 @@ def test_health_probe_uses_the_same_canonical_season_type_as_totals():
     adapter = _adapter(fake_session)
 
     assert adapter.health_probe() == 200
-    assert calls[0][1]["params"]["SeasonType"] == "Regular Season"
+    assert calls[0][1]["params"]["SeasonType"] == "Regular+Season"
+
+
+def test_regular_season_totals_preserve_the_existing_provider_parameter_spelling():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    adapter.fetch_totals_frame(
+        "opponent",
+        season="2024-25",
+        season_type="Regular Season",
+        team_id=1610612738,
+    )
+
+    assert calls[0][1]["params"]["SeasonType"] == "Regular+Season"
 
 
 def test_fetch_totals_rejects_unsupported_data_type():
@@ -284,3 +326,15 @@ def test_parse_totals_valid_and_malformed():
 
     with pytest.raises(telemetry.ProviderResponseError):
         PBPTotalsAdapter.parse_totals(None)
+
+
+@pytest.mark.parametrize("missing", ["TeamId", "SecondsPlayed", "GamesPlayed"])
+def test_parse_opponent_totals_requires_exact_window_evidence(missing):
+    row = dict(VALID_OPPONENT_PAYLOAD["multi_row_table_data"][0])
+    del row[missing]
+
+    with pytest.raises(telemetry.ProviderResponseError):
+        PBPTotalsAdapter.parse_totals(
+            {"multi_row_table_data": [row]},
+            data_type="opponent",
+        )

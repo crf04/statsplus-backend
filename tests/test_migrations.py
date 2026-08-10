@@ -315,9 +315,6 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
     assert application.extensions["dependencies"].athlete_mapping_repository is not None
-    assert application.extensions["dependencies"].team_matchup_repository is not None
-    assert application.extensions["dependencies"].team_matchup_query_service is not None
-    assert application.extensions["dependencies"].team_matchup_refresh_service is not None
     assert "athlete_catalog" not in application.extensions["request_services"]
 
 

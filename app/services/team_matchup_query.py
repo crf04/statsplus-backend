@@ -47,6 +47,7 @@ class TeamMatchupMetric:
 class TeamMatchupWindow:
     scope: TeamMatchupSnapshotScope
     fact_scopes: dict[str, TeamMatchupSnapshotScope]
+    fact_retrieved_at: dict[str, datetime]
     league_metrics: tuple[LeagueMatchupMetric, ...]
     team_metrics: dict[int, tuple[TeamMatchupMetric, ...]]
     observations: tuple[StoredTeamMatchupObservation, ...]
@@ -123,8 +124,6 @@ class TeamMatchupQueryService:
         invalid_surfaces: dict[str, str] = {}
         fact_rows = tuple(facts)
         for fact in fact_rows:
-            if fact.status != "available":
-                continue
             try:
                 value = self._allowed_per_48(
                     fact.raw_value, fact.denominator_value, fact.denominator_unit
@@ -198,6 +197,13 @@ class TeamMatchupQueryService:
             fact_scopes={
                 surface: fact_scope
                 for surface, fact_scope in fact_scopes.items()
+                if surface not in invalid_surfaces
+            },
+            fact_retrieved_at={
+                surface: max(
+                    fact.retrieved_at for fact in fact_rows if fact.base == surface
+                )
+                for surface in fact_scopes
                 if surface not in invalid_surfaces
             },
             league_metrics=tuple(league_metrics),
