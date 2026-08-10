@@ -363,6 +363,58 @@ def test_malformed_underdog_row_is_partial_when_another_row_is_valid() -> None:
     assert "line appearance could not be resolved" in snapshot.coverage.diagnostic_details
 
 
+@pytest.mark.parametrize(
+    "price",
+    [
+        -112.5,
+        "-112.5",
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        "Infinity",
+        "NaN",
+        1e400,
+        "1E+400",
+        True,
+    ],
+)
+def test_an_unusable_underdog_american_price_is_one_typed_malformed_record(price):
+    payload = _payload()
+    row = copy.deepcopy(payload["over_under_lines"][0])
+    row["id"] = "line-2"
+    row["over_under"]["appearance_stat"]["display_stat"] = "Assists"
+    row["options"] = [
+        dict(row["options"][0], id="selection-higher-2", american_price=price)
+    ]
+    payload["over_under_lines"].append(row)
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert [market.market_id for market in snapshot.markets] == ["line-1"]
+    assert snapshot.coverage.skipped_count == 1
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
+    assert all(
+        str(price) not in detail for detail in snapshot.coverage.diagnostic_details
+    )
+
+
+@pytest.mark.parametrize(
+    ("price", "expected"), [(-112, -112), ("-112", -112), (-112.0, -112)]
+)
+def test_an_integral_underdog_american_price_is_kept_exactly(price, expected):
+    payload = _payload()
+    payload["over_under_lines"][0]["options"][0]["american_price"] = price
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].selections[0].american_price == expected
+
+
 def test_all_malformed_underdog_records_emit_one_malformed_event() -> None:
     payload = _payload()
     row = payload["over_under_lines"][0]

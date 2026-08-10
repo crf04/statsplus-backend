@@ -15,7 +15,7 @@ from app.config.settings import (
     CacheSettings,
     RuntimeSettings,
 )
-from app.errors import ProviderUnavailableError
+from app.errors import InvalidConfigurationError, ProviderUnavailableError
 from app.migrations import run_migrations
 from app.services.athlete_catalog_service import (
     CATALOG_FAILURE_SUMMARY,
@@ -287,3 +287,38 @@ def test_demo_database_is_rejected_before_catalog_write():
         AthleteCatalogService(engine, settings=_settings(), nba_stats_provider=FakeRosterProvider({}))
 
     assert hashlib.sha256(demo_path.read_bytes()).digest() == before
+
+
+def test_athlete_catalog_freshness_states_its_ttl_in_exact_seconds(catalog_db):
+    from decimal import Decimal
+
+    service = AthleteCatalogService(
+        catalog_db,
+        settings=_settings(freshness_days=7),
+        nba_stats_provider=FakeRosterProvider({}),
+    )
+    document = service.get_freshness("2024-25")
+
+    assert document["max_age_seconds"] == Decimal(604800)
+    assert isinstance(document["max_age_seconds"], Decimal)
+    assert document["freshness_days"] == 7
+
+
+@pytest.mark.parametrize(
+    "freshness_days",
+    [0, -1, 11575, 10**30, "seven", True, 1.5, float("nan")],
+)
+def test_a_direct_freshness_override_uses_the_one_window_authority(
+    catalog_db, freshness_days
+):
+    with pytest.raises(InvalidConfigurationError) as error:
+        AthleteCatalogService(
+            catalog_db,
+            _settings(),
+            nba_stats_provider=FakeRosterProvider({}),
+            freshness_days=freshness_days,
+        )
+
+    assert "ATHLETE_CATALOG_FRESHNESS_DAYS" in str(error.value)
+    assert "11575" not in str(error.value)
+    assert "seven" not in str(error.value)

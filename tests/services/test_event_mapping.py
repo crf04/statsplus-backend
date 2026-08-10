@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, insert, inspect, select
@@ -44,6 +45,7 @@ from app.services.event_resolver import (
     EventResolution,
     EventResolutionState,
     EventResolver,
+    event_match_window,
     normalize_team_label,
 )
 
@@ -2246,3 +2248,44 @@ def test_the_manual_recheck_uses_the_configured_match_window(event_db):
     assert repository.get_mapping("underdog", "ud-1").mapping_state == (
         "mapping_conflict"
     )
+
+
+# -- one match-window authority, wherever the window enters ------------------
+
+
+@pytest.mark.parametrize(
+    "match_window",
+    [
+        0,
+        -1,
+        1e129,
+        "1e-200",
+        float("nan"),
+        float("inf"),
+        True,
+        timedelta(0),
+        timedelta(days=365 * 100),
+    ],
+)
+def test_a_direct_match_window_override_uses_the_one_window_authority(match_window):
+    with pytest.raises(ValueError) as error:
+        event_match_window(match_window)
+
+    assert not isinstance(error.value, OverflowError)
+    assert "EVENT_MAPPING_MATCH_WINDOW_HOURS" in str(error.value)
+    assert "1e129" not in str(error.value)
+    assert "36500" not in str(error.value)
+
+
+def test_a_configured_match_window_is_the_exact_duration_it_compares_with():
+    settings = RuntimeSettings(
+        environment="testing",
+        catalog=CatalogSettings(event_match_window_hours=Decimal("0.5")),
+    )
+
+    assert event_match_window(None, settings) == timedelta(minutes=30)
+
+
+def test_a_configured_match_window_outside_the_domain_never_reaches_a_resolver():
+    with pytest.raises(ValueError):
+        CatalogSettings(event_match_window_hours="1e129")

@@ -17,14 +17,24 @@ from __future__ import annotations
 import json
 import os
 from datetime import date
-from math import isfinite
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from app.dfs_catalog import DFS_PROVIDER_NAME_SET
+from app.domain.freshness import cache_window_policy, time_window_seconds
+from app.domain.market_content import NumericDomainError
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 DEFAULT_SQLITE_URL = "sqlite:///nba_play_types.db"
 LOCAL_ENVIRONMENTS = frozenset({"development", "testing", "test", "local"})
@@ -90,36 +100,31 @@ class AuthenticationSettings(BaseModel):
 
 
 def _provider_window(
-    value: float | Mapping[str, float], provider: str, *, default: float
-) -> float:
+    value: Decimal | Mapping[str, Decimal], provider: str, *, default: Decimal
+) -> Decimal:
     """Resolve one scalar-or-provider-map cache setting."""
 
     if isinstance(value, Mapping):
         selected = value.get(str(provider).strip().casefold())
         if selected is not None:
-            return float(selected)
+            return selected
         if "*" in value:
-            return float(value["*"])
+            return value["*"]
         return default
-    return float(value)
+    return value
 
 
-def _cache_window_number(value: Any) -> float:
-    """Parse one positive cache window, rejecting booleans as numbers.
+def _cache_window_number(value: Any, *, field: str = "DFS cache windows") -> Decimal:
+    """Parse one cache window through the shared exact time-window domain.
 
-    ``True`` is an ``int`` in Python, so an unguarded ``float()`` would turn a
-    misconfigured flag into a one-second window instead of a startup error.
+    The comparison board and the snapshot cache both read these windows through
+    :func:`app.domain.freshness.time_window_seconds`, so the same authority
+    decides here, once, at startup: a window this accepts can always be used by
+    both, and a boolean, nonfinite, absurdly small, or absurdly large value is
+    a configuration error rather than a request-time refusal.
     """
 
-    if isinstance(value, bool):
-        raise ValueError("DFS cache windows must be numbers")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError("DFS cache windows must be numbers") from error
-    if number <= 0 or not isfinite(number):
-        raise ValueError("DFS cache windows must be positive")
-    return number
+    return time_window_seconds(value, field=field)
 
 
 class CacheSettings(BaseModel):
@@ -153,10 +158,17 @@ class ProviderSettings(BaseModel):
     dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
     dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
+    # The post-filter comparison-board ceiling.  A larger board is refused with
+    # the observed count and the supported narrowing filters, never truncated.
+    dfs_comparison_max_markets: int = Field(default=10000, ge=1)
     # A scalar applies to every enabled DFS provider.  A mapping may override
-    # one or more providers when their publication cadence differs.
-    dfs_cache_fresh_seconds: float | dict[str, float] = Field(default=300.0)
-    dfs_cache_stale_if_error_seconds: float | dict[str, float] = Field(default=1800.0)
+    # one or more providers when their publication cadence differs.  Both are
+    # exact decimal seconds inside the shared time-window domain, so the window
+    # a request compares an age against is the window an operator configured.
+    dfs_cache_fresh_seconds: Decimal | dict[str, Decimal] = Field(default=Decimal(300))
+    dfs_cache_stale_if_error_seconds: Decimal | dict[str, Decimal] = Field(
+        default=Decimal(1800)
+    )
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -189,9 +201,9 @@ class ProviderSettings(BaseModel):
         "dfs_cache_fresh_seconds", "dfs_cache_stale_if_error_seconds", mode="before"
     )
     @classmethod
-    def validate_dfs_cache_window(cls, value: Any) -> float | dict[str, float]:
+    def validate_dfs_cache_window(cls, value: Any) -> Decimal | dict[str, Decimal]:
         if isinstance(value, Mapping):
-            normalized: dict[str, float] = {}
+            normalized: dict[str, Decimal] = {}
             for provider, window in value.items():
                 name = str(provider).strip().casefold()
                 if not name:
@@ -200,18 +212,53 @@ class ProviderSettings(BaseModel):
             return normalized
         return _cache_window_number(value)
 
-    def dfs_cache_fresh_seconds_for(self, provider: str) -> float:
+    @model_validator(mode="after")
+    def validate_dfs_cache_window_order(self) -> "ProviderSettings":
+        """A fresh window can never outlast the age its provider may be served at.
+
+        The ordering itself is stated once, by
+        :func:`app.domain.freshness.cache_window_policy`, and is checked here
+        for every provider the resolution can actually select -- so the policy
+        a configuration accepts is exactly the policy a runtime cache accepts.
+        """
+
+        names = {
+            *DFS_PROVIDER_NAME_SET,
+            "*",
+            *(
+                self.dfs_cache_fresh_seconds
+                if isinstance(self.dfs_cache_fresh_seconds, Mapping)
+                else ()
+            ),
+            *(
+                self.dfs_cache_stale_if_error_seconds
+                if isinstance(self.dfs_cache_stale_if_error_seconds, Mapping)
+                else ()
+            ),
+        }
+        for name in sorted(names):
+            cache_window_policy(
+                self.dfs_cache_fresh_seconds_for(name),
+                self.dfs_cache_stale_if_error_seconds_for(name),
+                fresh_field=f"the DFS cache fresh window (provider {name!r})",
+                stale_field="the stale-if-error age",
+            )
+        return self
+
+    def dfs_cache_fresh_seconds_for(self, provider: str) -> Decimal:
         """Return the configured fresh window for one provider."""
 
-        return _provider_window(self.dfs_cache_fresh_seconds, provider, default=300.0)
+        return _provider_window(
+            self.dfs_cache_fresh_seconds, provider, default=Decimal(300)
+        )
 
-    def dfs_cache_stale_if_error_seconds_for(self, provider: str) -> float:
+    def dfs_cache_stale_if_error_seconds_for(self, provider: str) -> Decimal:
         """Return the configured stale-if-error age for one provider."""
 
         return _provider_window(
             self.dfs_cache_stale_if_error_seconds,
             provider,
-            default=1800.0,
+            default=Decimal(1800),
         )
 
 
@@ -328,17 +375,64 @@ class NBASeasonSettings(BaseModel):
     current_season: str = Field(default_factory=current_nba_season)
 
 
+#: Every configured catalog window, with the unit it is stated in and the
+#: variable an operator writes it in.  Each one is a time window, so each one
+#: is bounded by the same authority in the same place -- none of them reaches a
+#: service through a float or an unchecked domain.
+CATALOG_WINDOW_UNITS: dict[str, tuple[int, str]] = {
+    "athlete_freshness_days": (86400, "ATHLETE_CATALOG_FRESHNESS_DAYS"),
+    "event_max_age_hours": (3600, "EVENT_CATALOG_MAX_AGE_HOURS"),
+    "event_match_window_hours": (3600, "EVENT_MAPPING_MATCH_WINDOW_HOURS"),
+}
+
+
+def _exact_quantity(value: Any, *, field: str) -> Decimal:
+    """One configured quantity as the exact decimal it was written as.
+
+    The value is read from its own digits rather than through a float, so a
+    window an operator wrote is the window a service compares against, and an
+    unsupported or unparsable setting is one typed domain error naming the
+    variable rather than its value.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int, float, str)):
+        raise NumericDomainError(f"{field} must be a finite decimal")
+    try:
+        return value if isinstance(value, Decimal) else Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as error:
+        raise NumericDomainError(f"{field} must be a finite decimal") from error
+
+
 class CatalogSettings(BaseModel):
     """Independent freshness policies and reviewed matching windows."""
 
     model_config = ConfigDict(frozen=True)
 
-    athlete_freshness_days: int = Field(default=7, ge=0)
-    event_max_age_hours: float = Field(default=72.0, gt=0)
+    athlete_freshness_days: int = 7
+    event_max_age_hours: Decimal = Decimal(72)
     #: How far a provider's reported start time may sit from a scheduled NBA
     #: game before the two are no longer evidence of the same event.  The
     #: boundary itself is inside the window.
-    event_match_window_hours: float = Field(default=6.0, gt=0)
+    event_match_window_hours: Decimal = Decimal(6)
+
+    @field_validator(*CATALOG_WINDOW_UNITS, mode="before")
+    @classmethod
+    def validate_catalog_window(cls, value: Any, info: ValidationInfo) -> Any:
+        """Every catalog window is bounded once, in its own unit, at startup.
+
+        A window this accepts can always be turned into the exact duration its
+        service compares against, so nothing a configuration admitted is
+        refused later by a request, and nothing absurd reaches a ``timedelta``.
+        """
+
+        unit_seconds, variable = CATALOG_WINDOW_UNITS[info.field_name]
+        quantity = _exact_quantity(value, field=variable)
+        time_window_seconds(quantity, unit_seconds=unit_seconds, field=variable)
+        if info.field_name == "athlete_freshness_days":
+            if quantity != quantity.to_integral_value():
+                raise NumericDomainError(f"{variable} must be a whole number of days")
+            return int(quantity)
+        return quantity
 
 
 class RuntimeSettings(BaseModel):
@@ -433,6 +527,25 @@ class _EnvironmentReader:
             ) from error
 
 
+def _configured_window(
+    reader: _EnvironmentReader, name: str, default: Decimal | None
+) -> Decimal:
+    """Read one configured time window exactly, or fail startup naming it.
+
+    The raw text is converted straight to an exact decimal rather than through
+    a float, so the window a request compares against is the one written in the
+    environment, and the refusal names the variable rather than its value.
+    """
+
+    value = reader.raw(name)
+    if value is None and default is not None:
+        return default
+    try:
+        return _cache_window_number(value, field=name)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from error
+
+
 def _build_settings(
     reader: _EnvironmentReader,
 ) -> RuntimeSettings:
@@ -443,28 +556,23 @@ def _build_settings(
 
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
 
-    dfs_cache_fresh = reader.decimal("DFS_CACHE_FRESH_SECONDS", 300.0)
-    dfs_cache_stale = reader.decimal("DFS_CACHE_STALE_IF_ERROR_SECONDS", 1800.0)
-    fresh_overrides: dict[str, float] = {}
-    stale_overrides: dict[str, float] = {}
+    dfs_cache_fresh = _configured_window(
+        reader, "DFS_CACHE_FRESH_SECONDS", Decimal(300)
+    )
+    dfs_cache_stale = _configured_window(
+        reader, "DFS_CACHE_STALE_IF_ERROR_SECONDS", Decimal(1800)
+    )
+    fresh_overrides: dict[str, Decimal] = {}
+    stale_overrides: dict[str, Decimal] = {}
     for provider_name in DFS_PROVIDER_NAME_SET:
         env_name = provider_name.upper()
-        fresh_value = reader.raw(f"DFS_{env_name}_CACHE_FRESH_SECONDS")
-        stale_value = reader.raw(f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS")
-        if fresh_value is not None:
-            try:
-                fresh_overrides[provider_name] = _cache_window_number(fresh_value)
-            except ValueError as error:
-                raise ConfigurationError(
-                    f"DFS_{env_name}_CACHE_FRESH_SECONDS must be a number"
-                ) from error
-        if stale_value is not None:
-            try:
-                stale_overrides[provider_name] = _cache_window_number(stale_value)
-            except ValueError as error:
-                raise ConfigurationError(
-                    f"DFS_{env_name}_CACHE_STALE_IF_ERROR_SECONDS must be a number"
-                ) from error
+        for suffix, overrides in (
+            ("CACHE_FRESH_SECONDS", fresh_overrides),
+            ("CACHE_STALE_IF_ERROR_SECONDS", stale_overrides),
+        ):
+            variable = f"DFS_{env_name}_{suffix}"
+            if reader.raw(variable) is not None:
+                overrides[provider_name] = _configured_window(reader, variable, None)
 
     auth = _validated_model(
         AuthenticationSettings,
@@ -506,6 +614,9 @@ def _build_settings(
         ),
         dfs_dabble_detail_concurrency=reader.integer(
             "DFS_DABBLE_DETAIL_CONCURRENCY", 3
+        ),
+        dfs_comparison_max_markets=reader.integer(
+            "DFS_COMPARISON_MAX_MARKETS", 10000
         ),
         dfs_cache_fresh_seconds=(
             {"*": dfs_cache_fresh, **fresh_overrides}
@@ -550,16 +661,19 @@ def _build_settings(
             llm=llm,
             cors=cors,
             nba=_validated_model(NBASeasonSettings),
+            # Every catalog window is read as written and bounded by the one
+            # time-window authority, so none of them is ever rounded through a
+            # float on the way to the duration a service compares against.
             catalog=_validated_model(
                 CatalogSettings,
-                athlete_freshness_days=reader.integer(
+                athlete_freshness_days=reader.raw(
                     "ATHLETE_CATALOG_FRESHNESS_DAYS", 7
                 ),
-                event_max_age_hours=reader.decimal(
-                    "EVENT_CATALOG_MAX_AGE_HOURS", 72.0
+                event_max_age_hours=reader.raw(
+                    "EVENT_CATALOG_MAX_AGE_HOURS", Decimal(72)
                 ),
-                event_match_window_hours=reader.decimal(
-                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", 6.0
+                event_match_window_hours=reader.raw(
+                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", Decimal(6)
                 ),
             ),
             port=reader.integer("PORT", 5000),

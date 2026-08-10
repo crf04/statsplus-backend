@@ -13,11 +13,11 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
+| `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
-| `CatalogSettings` | `athlete_freshness_days`, `event_max_age_hours` | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`) |
+| `CatalogSettings` | `athlete_freshness_days` (whole days, `int`), `event_max_age_hours` and `event_match_window_hours` (exact `Decimal` hours) | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`) |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
@@ -56,6 +56,44 @@ returned only after a later expected upstream failure, with bounded cache
 provenance on the provider outcome. Redis errors fail open to direct upstream
 work and never create an in-process stale store; single-flight suppression is
 per worker only.
+
+Both windows are exact decimal seconds inside one **time-window domain**, owned
+by `app.domain.freshness` and enforced at startup: a window is at least `1E-6`
+seconds (the microsecond every age is measured at) and at most `1E+9` seconds
+(about thirty-one years), and a provider's fresh window may never exceed its
+stale-if-error age. A boolean, a nonfinite value, a value outside that domain,
+or a fresh window past its own ceiling raises `ConfigurationError` naming the
+variable and the domain, never quoting the value.
+
+The ordering is a runtime invariant, not only a configuration check: the same
+`cache_window_policy` decides it wherever a cache is built, so a directly
+constructed `ProviderSnapshotCache`, a `ProviderSnapshotCacheCoordinator`, and
+a coordinator-decorated provider are all refused a fresh window past their
+stale-if-error age. Equal windows are accepted, because a fresh window is
+exclusive at its endpoint and a maximum age is inclusive at its own.
+
+Every catalog and mapping window enters the same domain in its own unit and is
+kept exactly: `EVENT_CATALOG_MAX_AGE_HOURS` and `EVENT_MAPPING_MATCH_WINDOW_HOURS`
+in hours, `ATHLETE_CATALOG_FRESHNESS_DAYS` in whole days. They are read as
+exact decimals rather than through a float, bounded once at startup, and only
+then converted to a whole-microsecond `timedelta` — so an absurd window is one
+typed configuration error rather than an `OverflowError` from a service
+constructor. Direct service overrides (`EventCatalogService(max_age=...)`,
+`event_match_window(...)`, `AthleteCatalogService(freshness_days=...)`) use the
+same authority, so a service built by hand can hold no window an operator could
+not configure. Because the cache and the comparison board read the identical
+authority, every configuration the process starts with can be used by both.
+
+Those same two windows decide comparison freshness, through one shared boundary:
+a fresh window is exclusive at its endpoint and a maximum age is inclusive at
+its own. A snapshot inside its provider's fresh window is contemporaneous — an
+observation exactly one window old is not, at the cache and on the board alike;
+one past it may still enter a Comparison Group as explicitly stale while its age
+is at most the stale-if-error age; beyond that its markets stay visible on the
+board but enter no group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter comparison-board
+ceiling and defaults to 10000. A read that observes more markets than the
+ceiling is refused with `board_too_large`, the observed count, and the
+supported narrowing filters; it is never truncated.
 
 ## Defaults and validation
 

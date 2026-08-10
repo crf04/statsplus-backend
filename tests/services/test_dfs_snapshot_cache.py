@@ -28,6 +28,7 @@ from app.providers.dfs import (
     ProviderSnapshot,
     RetrievalContext,
     Selection,
+    SelectionDirection,
     SelectionModifier,
     StatisticEvidence,
     TeamEvidence,
@@ -37,6 +38,7 @@ from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
     deserialize_provider_snapshot,
     ProviderSnapshotCache,
+    ProviderSnapshotCacheCoordinator,
     SnapshotCacheError,
     SnapshotCacheResult,
     serialize_provider_snapshot,
@@ -218,6 +220,75 @@ def _market_payload_snapshot() -> ProviderSnapshot:
 def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) -> None:
     payload = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
     mutate(payload["markets"][0])
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(
+            _canonical(payload),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+def _selection_snapshot(selection: Selection) -> ProviderSnapshot:
+    return replace(
+        _market_payload_snapshot(),
+        markets=(replace(_market_payload_snapshot().markets[0], selections=(selection,)),),
+    )
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        # The provider named no direction at all, so the market carries the
+        # closed UNKNOWN value and no provider label to preserve.
+        Selection(selection_id="s-1"),
+        Selection(selection_id="s-1", direction=SelectionDirection.UNKNOWN),
+        Selection(selection_id="s-1", direction=SelectionDirection.HIGHER),
+        Selection(selection_id="s-1", direction="higher"),
+        # An unfamiliar provider word is retained verbatim as the label.
+        Selection(selection_id="s-1", direction="over"),
+        Selection(selection_id="s-1", direction="provider-specific"),
+        Selection(selection_id="s-1", direction=None, direction_label="unknown"),
+    ],
+)
+def test_snapshot_codec_round_trips_every_selection_direction(selection) -> None:
+    original = _selection_snapshot(selection)
+
+    payload = serialize_provider_snapshot(original)
+    restored = deserialize_provider_snapshot(
+        payload,
+        expected_contract_version="1",
+        expected_provider="dabble",
+        expected_query=NBAMarketQuery(),
+    )
+
+    assert restored == original
+    decoded = restored.markets[0].selections[0]
+    assert decoded.direction is selection.direction
+    assert decoded.direction_label == selection.direction_label
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # An alias the constructor would canonicalize into a different pair of
+        # values is corrupt wire data, not a value this codec ever wrote.
+        lambda selection: selection.update({"direction": "over", "direction_label": None}),
+        lambda selection: selection.update(
+            {"direction": "Unknown", "direction_label": None}
+        ),
+        lambda selection: selection.update(
+            {"direction": "unknown", "direction_label": "higher"}
+        ),
+        lambda selection: selection.update({"direction": 1, "direction_label": None}),
+    ],
+)
+def test_snapshot_codec_rejects_a_noncanonical_wire_direction(mutate) -> None:
+    payload = json.loads(
+        serialize_provider_snapshot(_selection_snapshot(Selection(selection_id="s-1")))
+    )
+    mutate(payload["markets"][0]["selections"][0])
 
     with pytest.raises(ValueError):
         deserialize_provider_snapshot(
@@ -2003,3 +2074,167 @@ def test_future_dated_refresh_is_never_published_or_served() -> None:
     assert redis.set_calls == []
     assert cache.get_last_result() is None
     assert cache.coordinator.pending_count() == 0
+
+
+# -- one freshness boundary, shared with the comparison board ----------------
+
+
+def _boundary_cache(redis, clock, *, provider, fresh=300, stale=1800):
+    return ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        fresh_seconds=fresh,
+        stale_if_error_seconds=stale,
+    )
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "expected_status"),
+    [
+        (299.999999, "hit"),
+        (300, "miss"),
+        (300.000001, "miss"),
+    ],
+)
+def test_the_fresh_window_endpoint_is_outside_the_window(
+    elapsed, expected_status
+) -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(elapsed)
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    result = cache.last_result
+
+    assert result.cache_status == expected_status
+    assert isinstance(result.age_seconds, Decimal)
+    assert result.age_seconds == Decimal(str(elapsed))
+    assert len(provider.calls) == (0 if expected_status == "hit" else 1)
+
+
+@pytest.mark.parametrize("elapsed", [1799.999999, 1800])
+def test_the_stale_ceiling_endpoint_is_still_a_permitted_fallback(elapsed) -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(elapsed)
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    result = cache.last_result
+
+    assert result.cache_status == "stale"
+    assert result.age_seconds == Decimal(str(elapsed))
+    assert result.refresh_failure_reason == "timeout"
+    assert result.refresh_failed_at == clock.now_value
+
+
+def test_one_microsecond_past_the_stale_ceiling_is_no_longer_served() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(1800.000001)
+
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+    assert cache.get_last_result() is None
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        {"fresh_seconds": 1e129},
+        {"fresh_seconds": 1e-200},
+        {"stale_if_error_seconds": 1e129},
+        {"stale_if_error_seconds": 1e-200},
+        {"fresh_seconds": float("inf")},
+        {"fresh_seconds": True},
+        {"fresh_seconds": 0},
+        {"fresh_seconds": -1},
+    ],
+)
+def test_cache_windows_outside_the_time_window_domain_are_refused(windows) -> None:
+    with pytest.raises(ValueError):
+        ProviderSnapshotCache(
+            FakeProvider(_snapshot()),
+            provider_name="dabble",
+            redis_client=FakeRedis(),
+            **windows,
+        )
+
+
+# -- one cache-window policy, wherever a runtime cache is built --------------
+
+
+def test_a_direct_fresh_window_can_never_outlast_its_stale_ceiling() -> None:
+    with pytest.raises(ValueError) as error:
+        ProviderSnapshotCache(
+            FakeProvider(_snapshot()),
+            provider_name="dabble",
+            redis_client=FakeRedis(),
+            fresh_seconds=300,
+            stale_if_error_seconds="299.999999",
+        )
+
+    assert "fresh_seconds" in str(error.value)
+    assert "stale_if_error_seconds" in str(error.value)
+
+
+def test_an_injected_coordinator_cannot_decorate_an_inverted_policy() -> None:
+    coordinator = ProviderSnapshotCacheCoordinator(
+        redis_client=FakeRedis(),
+        fresh_seconds=1800,
+        stale_if_error_seconds=1800,
+    )
+
+    with pytest.raises(ValueError):
+        coordinator.decorate(
+            "dabble", FakeProvider(_snapshot()), stale_if_error_seconds=300
+        )
+    coordinator.shutdown()
+
+
+def test_a_coordinator_refuses_an_inverted_policy_when_it_is_built() -> None:
+    with pytest.raises(ValueError):
+        ProviderSnapshotCacheCoordinator(
+            fresh_seconds=600, stale_if_error_seconds=300
+        )
+
+
+def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        fresh_seconds=300,
+        stale_if_error_seconds=300,
+    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+
+    clock.advance(300)
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    assert cache.last_result.cache_status == "stale"
+
+    clock.advance(0.000001)
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())

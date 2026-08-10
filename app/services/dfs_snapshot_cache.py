@@ -18,12 +18,17 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
-from math import isfinite
 from threading import Lock, local
 from typing import Any, Callable, Mapping, Protocol
 
 import requests
 
+from app.domain.freshness import (
+    cache_window_policy,
+    exact_seconds,
+    within_fresh_window,
+    within_max_age,
+)
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
@@ -42,6 +47,7 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     Selection,
+    SelectionDirection,
     SelectionModifier,
     SnapshotStatus,
     SportEvidence,
@@ -57,6 +63,9 @@ DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
 
 _SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
+_SELECTION_DIRECTION_VALUES = frozenset(
+    direction.value for direction in SelectionDirection
+)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
@@ -328,6 +337,13 @@ def _selection(value: Any) -> Selection:
         raise SnapshotCacheError("snapshot selection modifiers schema is invalid")
     decoded = dict(data)
     decoded["modifiers"] = tuple(_modifier(item) for item in modifiers)
+    # A canonical wire value names the closed direction it was written from, so
+    # it is decoded as that member rather than read back as a provider label
+    # the snapshot never carried.  A provider alias stays a string, so the
+    # canonical check rejects it.
+    direction = decoded["direction"]
+    if isinstance(direction, str) and direction in _SELECTION_DIRECTION_VALUES:
+        decoded["direction"] = SelectionDirection(direction)
     result = _nested(
         decoded,
         Selection,
@@ -616,7 +632,9 @@ class SnapshotCacheResult:
 
     snapshot: ProviderSnapshot
     cache_status: str
-    age_seconds: float
+    #: Exact decimal seconds, counted from whole microseconds, so this age and
+    #: the comparison board's own age of the same snapshot are one number.
+    age_seconds: Decimal
     refresh_failure_reason: str | None = None
     refresh_failed_at: datetime | None = None
 
@@ -658,8 +676,8 @@ class ProviderSnapshotCacheCoordinator:
         max_workers: int = 3,
         redis_client: Any | None = None,
         enabled: bool | None = None,
-        fresh_seconds: float = DEFAULT_FRESH_SECONDS,
-        stale_if_error_seconds: float = DEFAULT_STALE_IF_ERROR_SECONDS,
+        fresh_seconds: Decimal | int | float | str = DEFAULT_FRESH_SECONDS,
+        stale_if_error_seconds: Decimal | int | float | str = DEFAULT_STALE_IF_ERROR_SECONDS,
         contract_version: str = "1",
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -674,8 +692,12 @@ class ProviderSnapshotCacheCoordinator:
         self._flights: dict[str, _Flight] = {}
         self.redis_client = redis_client
         self.enabled = enabled
-        self.fresh_seconds = fresh_seconds
-        self.stale_if_error_seconds = stale_if_error_seconds
+        # The coordinator hands these to every cache it decorates, so the
+        # policy is settled where it is configured rather than once per
+        # decorated provider.
+        self.fresh_seconds, self.stale_if_error_seconds = cache_window_policy(
+            fresh_seconds, stale_if_error_seconds
+        )
         self.contract_version = contract_version
         self.clock = clock
         if self._owned_executor:
@@ -747,8 +769,8 @@ class ProviderSnapshotCache:
         provider_name: str | None = None,
         redis_client: Any | None = None,
         enabled: bool | None = None,
-        fresh_seconds: float = DEFAULT_FRESH_SECONDS,
-        stale_if_error_seconds: float = DEFAULT_STALE_IF_ERROR_SECONDS,
+        fresh_seconds: Decimal | int | float | str = DEFAULT_FRESH_SECONDS,
+        stale_if_error_seconds: Decimal | int | float | str = DEFAULT_STALE_IF_ERROR_SECONDS,
         contract_version: str = "1",
         adapter_contract_version: str | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -761,19 +783,13 @@ class ProviderSnapshotCache:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("provider_name must be a non-empty string")
         name = name.strip().casefold()
-        if isinstance(fresh_seconds, bool) or not isinstance(fresh_seconds, (int, float)):
-            raise ValueError("fresh_seconds must be a positive number")
-        if isinstance(stale_if_error_seconds, bool) or not isinstance(
-            stale_if_error_seconds, (int, float)
-        ):
-            raise ValueError("stale_if_error_seconds must be a positive number")
-        if (
-            fresh_seconds <= 0
-            or stale_if_error_seconds <= 0
-            or not isfinite(float(fresh_seconds))
-            or not isfinite(float(stale_if_error_seconds))
-        ):
-            raise ValueError("snapshot cache windows must be positive")
+        # Both windows enter the one shared cache-window policy, so a window
+        # this cache accepts is a window the comparison board can also use, and
+        # a directly built cache can never serve a value as fresh past the age
+        # its provider permits it to be served at all.
+        fresh_window, stale_window = cache_window_policy(
+            fresh_seconds, stale_if_error_seconds
+        )
         provider_contract = getattr(provider, "adapter_contract_version", None)
         if provider_contract is None:
             provider_contract = getattr(provider, "contract_version", None)
@@ -793,8 +809,8 @@ class ProviderSnapshotCache:
             if enabled is None
             else bool(enabled) and redis_client is not None
         )
-        self.fresh_seconds = float(fresh_seconds)
-        self.stale_if_error_seconds = float(stale_if_error_seconds)
+        self.fresh_seconds = fresh_window
+        self.stale_if_error_seconds = stale_window
         self.contract_version = contract.strip()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.coordinator = coordinator or ProviderSnapshotCacheCoordinator(executor=executor)
@@ -909,15 +925,15 @@ class ProviderSnapshotCache:
 
         if cached is not None:
             age = self._age_seconds(cached, now)
-            if age < self.fresh_seconds:
+            if within_fresh_window(age, self.fresh_seconds):
                 self._last_result.value = SnapshotCacheResult(
                     snapshot=cached,
                     cache_status="hit",
-                    age_seconds=max(0.0, age),
+                    age_seconds=age,
                 )
                 decision.status = "hit"
                 return cached
-            if age <= self.stale_if_error_seconds:
+            if within_max_age(age, self.stale_if_error_seconds):
                 return self._direct_refresh(
                     query,
                     context,
@@ -950,7 +966,7 @@ class ProviderSnapshotCache:
         query: NBAMarketQuery,
         context: RetrievalContext,
         *,
-        stale: tuple[ProviderSnapshot, float] | None,
+        stale: tuple[ProviderSnapshot, Decimal] | None,
         cache_status: str,
         decision: _CacheDecision,
     ) -> ProviderSnapshot:
@@ -1033,7 +1049,7 @@ class ProviderSnapshotCache:
         return SnapshotCacheResult(
             snapshot=snapshot,
             cache_status=status,
-            age_seconds=max(0.0, self._age_seconds(snapshot, self._clock_utc())),
+            age_seconds=self._age_seconds(snapshot, self._clock_utc()),
         )
 
     def _validate_refresh(self, snapshot: Any) -> ProviderSnapshot:
@@ -1053,7 +1069,7 @@ class ProviderSnapshotCache:
 
     def _stale_fallback(
         self,
-        stale: tuple[ProviderSnapshot, float] | None,
+        stale: tuple[ProviderSnapshot, Decimal] | None,
         context: RetrievalContext,
         error: BaseException,
     ) -> SnapshotCacheResult | None:
@@ -1064,12 +1080,12 @@ class ProviderSnapshotCache:
             return None
         cached, _initial_age = stale
         age = self._age_seconds(cached, failure_at)
-        if age > self.stale_if_error_seconds:
+        if not within_max_age(age, self.stale_if_error_seconds):
             return None
         return SnapshotCacheResult(
             snapshot=cached,
             cache_status="stale",
-            age_seconds=max(0.0, age),
+            age_seconds=age,
             refresh_failure_reason=self._failure_reason(error),
             refresh_failed_at=failure_at,
         )
@@ -1231,8 +1247,10 @@ class ProviderSnapshotCache:
         return value.astimezone(timezone.utc)
 
     @staticmethod
-    def _age_seconds(snapshot: ProviderSnapshot, now: datetime) -> float:
-        return max(0.0, (now - snapshot.retrieved_at).total_seconds())
+    def _age_seconds(snapshot: ProviderSnapshot, now: datetime) -> Decimal:
+        """One snapshot's age as exact decimal seconds, never negative."""
+
+        return max(Decimal(0), exact_seconds(now - snapshot.retrieved_at))
 
     @staticmethod
     def _failure_reason(error: BaseException) -> str:

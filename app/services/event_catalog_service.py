@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -12,6 +13,11 @@ from requests import exceptions as request_errors
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.freshness import (
+    exact_seconds,
+    exact_timedelta,
+    time_window_timedelta,
+)
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsProvider
 from app.services.event_catalog_repository import EventCatalogRepository
@@ -58,14 +64,28 @@ class EventCatalogService:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("The canonical event catalog requires a writable application database.")
         configured = getattr(
-            getattr(self.settings, "catalog", None), "event_max_age_hours", 72.0
+            getattr(self.settings, "catalog", None), "event_max_age_hours", Decimal(72)
         )
-        self.max_age = (timedelta(hours=float(max_age_hours)) if max_age_hours is not None else
-                        max_age if isinstance(max_age, timedelta) else
-                        timedelta(hours=float(max_age)) if max_age is not None else
-                        timedelta(hours=float(configured)))
-        if self.max_age.total_seconds() <= 0:
-            raise ValueError("event catalog max age must be greater than zero")
+        # A configured setting, a direct hours override, and a direct timedelta
+        # all become the TTL through the one time-window authority, so the
+        # duration this catalog gates on and reports is a duration every other
+        # seam can read as a window too -- and an absurd override is one typed
+        # domain error rather than an OverflowError from timedelta.
+        field = "EVENT_CATALOG_MAX_AGE_HOURS"
+        if max_age_hours is not None:
+            self.max_age = time_window_timedelta(
+                max_age_hours, unit_seconds=3600, field=field
+            )
+        elif isinstance(max_age, timedelta):
+            self.max_age = exact_timedelta(exact_seconds(max_age), field=field)
+        elif max_age is not None:
+            self.max_age = time_window_timedelta(
+                max_age, unit_seconds=3600, field=field
+            )
+        else:
+            self.max_age = time_window_timedelta(
+                configured, unit_seconds=3600, field=field
+            )
 
     def refresh(self, seasons: str | Iterable[str], *, now: datetime | None = None) -> EventCatalogRefreshResult | EventCatalogBatchResult:
         requested = self._canonical_seasons(seasons)

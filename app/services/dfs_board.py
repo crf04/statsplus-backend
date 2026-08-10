@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable
@@ -23,6 +24,7 @@ import requests
 
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
+from app.domain.freshness import exact_age_seconds
 from app.errors import ProviderUnavailableError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_resolver import (
@@ -695,7 +697,10 @@ class ProviderOutcome:
     reason: ProviderFailureReason | str | None = None
     cache_status: str | None = None
     cache_retrieved_at: datetime | str | None = None
-    cache_age_seconds: float | None = None
+    #: Exact seconds.  A float, an int, or a decimal string is still accepted
+    #: from the cache seams that produce one, and is normalized to an exact
+    #: finite Decimal here, once.
+    cache_age_seconds: Decimal | int | float | str | None = None
     cache_failure_reason: str | None = None
     cache_failure_at: datetime | str | None = None
 
@@ -753,13 +758,14 @@ class ProviderOutcome:
             not isinstance(cache_failure_reason, str) or not cache_failure_reason.strip()
         ):
             raise ValueError("provider outcome cache_failure_reason is invalid")
+        # One exact, finite, non-negative age enters here, so no reader of
+        # this outcome can be handed a NaN, an infinity, or a number that only
+        # fails when a board finally tries to compare it.
         cache_age = self.cache_age_seconds
-        if cache_age is not None and (
-            isinstance(cache_age, bool)
-            or not isinstance(cache_age, (int, float))
-            or cache_age < 0
-        ):
-            raise ValueError("provider outcome cache_age_seconds must be non-negative")
+        if cache_age is not None:
+            cache_age = exact_age_seconds(
+                cache_age, field="provider outcome cache_age_seconds"
+            )
         cache_retrieved_at = self.cache_retrieved_at
         if cache_retrieved_at is not None:
             if isinstance(cache_retrieved_at, str):
@@ -1028,6 +1034,8 @@ class DFSBoardService:
         self,
         query: NBAMarketQuery,
         context: RetrievalContext | None = None,
+        *,
+        providers: Iterable[str] | None = None,
     ) -> DFSBoard:
         """Retrieve enabled snapshots with one shared absolute deadline.
 
@@ -1035,6 +1043,10 @@ class DFSBoardService:
         raises an implementation defect is deliberately not caught.  Running
         provider threads are daemonized and their late results are isolated
         from the returned board.
+
+        ``providers`` narrows this read to a subset of the enabled registry.
+        It is answered before any retrieval starts, so an excluded provider is
+        not called at all and is reported as disabled for this board.
         """
 
         if not isinstance(query, NBAMarketQuery):
@@ -1058,7 +1070,15 @@ class DFSBoardService:
         start = self.monotonic()
         remaining = context.remaining_seconds(now=generated_at)
         board_deadline = start + remaining
-        names = list(self.enabled_providers)
+        if providers is None:
+            names = list(self.enabled_providers)
+            disabled = self.disabled_providers
+        else:
+            requested = set(_normalize_names(providers))
+            names = [name for name in self.enabled_providers if name in requested]
+            disabled = tuple(
+                sorted(set(self.disabled_providers) | (set(self.enabled_providers) - set(names)))
+            )
         outcomes: dict[str, ProviderOutcome] = {}
         pending = list(names)
         active: dict[str, tuple[threading.Thread, dict[str, Any]]] = {}
@@ -1129,7 +1149,7 @@ class DFSBoardService:
         board = DFSBoard(
             query=query,
             provider_outcomes=ordered,
-            disabled_providers=self.disabled_providers,
+            disabled_providers=disabled,
             generated_at=generated_at,
         )
         board = self._resolve_athlete_mappings(board)

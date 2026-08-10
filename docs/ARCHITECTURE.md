@@ -93,13 +93,64 @@ without guessing missing facts; they expose no provider-specific public routes.
 two-digit end year must be the calendar year after the four-digit start year,
 so `2024-99` fails at construction rather than reaching an adapter.
 
+Every provider number — a `MarketThreshold` value, a `SelectionModifier`
+value, and a selection's decimal price — is converted once, at that single
+boundary, into the **normalized numeric domain**: a finite `Decimal` whose
+leading significant digit sits no higher than `1E+128` and whose last written
+digit no lower than `1E-128`, the reviewed
+`NORMALIZED_DECIMAL_PLACE_LIMIT`. The bound exists because an exact difference
+costs one digit per base-ten place between its operands, so two accepted
+values whose exponents were far apart would allocate that separation rather
+than the digits a provider actually wrote. The range is far wider than any
+real projection line, price, or multiplier; a value outside it is one
+malformed provider field, refused with a typed `NumericDomainError` — a
+`ValueError`, so each adapter's existing conversion into a typed malformed
+record and `malformed_record` coverage code applies unchanged, and the message
+never quotes the offending value. Membership is decided from a value's own
+exponent and digit count, never by materializing the places between them, so
+`1E+999999999` is rejected at the cost of its own two digits. Because the
+domain is enforced there, nothing the contract accepts can later refuse to
+enter a Comparison Group.
+
+A selection's **American price** passes through that same boundary and is then
+required to be a whole number: an integer, or a numeric value or numeric string
+naming an integer exactly. A fractional value is refused rather than truncated
+into a price the provider never quoted, and so are a boolean, a nonfinite value,
+and a magnitude outside the normalized numeric domain. Each refusal is the same
+`NumericDomainError`, so it reaches an adapter as the `ValueError` it already
+converts into one typed malformed record instead of escaping as an
+`OverflowError` past that translation.
+
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
 includes the adapter-contract version; it never serializes a `DFSBoard`. The
 cache sits below Statistic Catalog resolution, so a cached market carries
 provider evidence only: a resolved market is refused on the way in, and a wire
 value with a `statistic_match` is rejected as corrupt rather than decoded.
-Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
+Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata
+as exact decimal seconds counted from whole microseconds, so the cache and the
+comparison board state one number for one observation.
+
+`app.domain.freshness` owns that boundary for every seam, and it states it once:
+**a fresh window is exclusive at its endpoint and a maximum age is inclusive at
+its own.** An observation exactly one fresh window old is therefore a miss
+rather than a hit, and exactly `stale_if_error_seconds` old is still a permitted
+stale fallback. Both canonical catalog TTLs are maximum ages and are inclusive
+in the same way. The module also owns the exact time-window domain every
+configured window is admitted through — no finer than one microsecond, no
+longer than `1E+9` seconds — enforced at startup, so nothing a configuration
+accepted can be refused by a request. Every window reaches its service through
+that authority and only then becomes a whole-microsecond `timedelta`: the two
+cache windows, both catalog TTLs, and the event-mapping match window, whether
+they came from the environment or from a direct constructor override. The same
+authority states the cache policy itself — a fresh window may never exceed the
+stale-if-error age — wherever a cache is constructed, not only where settings
+are read, so an injected coordinator cannot serve a value as fresh past the age
+its provider permits it to be served at all. An observation age crosses these
+seams the same way: `ProviderOutcome` normalizes `cache_age_seconds` once, on
+construction, to an exact finite non-negative decimal, so no reader, comparison,
+or serialized document is ever handed a NaN, an infinity, or a number that only
+fails when a board finally compares it.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a
 stale-if-error fallback after a later expected total refresh failure. Redis
@@ -136,7 +187,11 @@ carry a second, conflicting document. Anything a constructor would normalize,
 drop, canonicalize from an alias, or deduplicate is corrupt too, as is a value
 no domain constructor can represent — a wire number whose conversion raises
 `OverflowError`, for example. Every such failure is contained at this seam: the
-key is deleted and the request becomes a miss.
+key is deleted and the request becomes a miss. A closed vocabulary the codec
+itself wrote — a scoring period, a selection direction — is decoded as the
+member it names rather than as a provider label the snapshot never carried, so
+the canonical check compares like with like; a provider alias stays a string
+and is rejected by that same check.
 
 Cache decisions are recorded once per request as bounded cache counters only;
 the cache never emits a provider-operation event, and provider events never
@@ -759,6 +814,210 @@ against an operator's standing decision, the mapping row and its history are
 untouched, and every normalized market stays on the board. The disagreement is
 withheld rather than resolved away, and fails closed as a conflict again on the
 next read with a usable catalog.
+
+### Comparison Groups
+
+`ComparisonBoardService.get_comparisons(query, context, filters=...)` is the
+seam above the collector. It turns one board read into deterministic Comparison
+Groups, explicit Comparison Availability, and visible unresolved evidence. The
+immutable value types live in `app.domain.comparisons`, which imports no
+service and states no opinion.
+
+A Comparison Group requires the same Canonical Event, Canonical Athlete,
+Canonical Statistic, and scoring period; those four facts are its key. The
+canonical athlete and event come only from the governed mapping outcomes the
+collector reports, so a suppressed, disputed, or withdrawn identity never
+reaches a group. Legitimate multiple thresholds, variants, statuses, and
+same-provider markets stay distinct members of one group, and an available and
+a suspended offering of the same line are two offerings rather than one market
+contradicting itself. Identity is decided once, over whole normalized markets,
+before any market is reduced to a member, so two distinct offerings can never
+merge because the few facts a member happens to state agree. Repeated source
+identities are already collapsed inside `ProviderSnapshot` and the shared
+adapter collector, where a repeat that changed what the market says is
+malformed rather than a second market; the board applies the same rule to the
+references it derives, so a repeated reference collapses only when every
+normalized fact and its observation agree.
+
+All three seams read a repeat through one authority, `app.domain.market_content`,
+which imports no provider or service module and so cannot drift from either
+side. It separates what a market *says* — exact numbers whatever scale they
+were written at, selections in an order derived from their own content — from
+the audit spellings a board retains beyond that. A provider that relists one
+market with its selections the other way round, or rewrites `25.5` as `25.50`,
+has therefore restated one offering at every seam, and the repeat that survives
+is the least by complete retained evidence rather than the first to arrive. A
+repeat that changes a stated fact — another threshold, status, variant, or
+selection — remains `conflicting_source_identity` at the provider boundary and
+`conflicting_market_identity` on the board. The comparability the catalog
+resolved the statistic to is one of those stated facts, because it decides
+whether a resolved market may enter a group at all: two readings of one
+identity that agree on everything else but disagree there are a content
+conflict at every seam, never one offering restated.
+
+A repeat that disagrees is evidence, not a duplicate to discard. Every distinct
+contradicting observation of one reference is retained as its own
+`BoardMarket`, ordered by its own complete normalized content and observation
+rather than by arrival, and each states `conflict_ordinal` and `conflict_count`
+so an audit reads exactly what contradicted what. All of them are excluded as
+`conflicting_market_identity` and none enters a group; the reference itself is
+reported once in `unresolved`, while `market_count` counts every retained
+observation. `ComparisonBoard.conflicting_markets` lists them, and
+`markets_by_reference` — which can hold only one market per reference — keeps
+the first in board order. The whole result is independent of the order the
+providers, snapshots, and markets were read in.
+
+The board keeps every normalized market it read, not only the facts a
+comparison needs. `ComparisonBoard.markets` holds one `BoardMarket` per
+retained market: typed athlete, event, team, league, competition, sport,
+appearance, and statistic evidence, the catalog's statistic resolution, the
+exact threshold, the status, variant, and scoring period with the provider's
+own original labels, every selection with its stable reference, modifiers, and
+prices, and the snapshot observation it came from — provider, snapshot status,
+retrieval instant, exact decimal age, and freshness. Exactly one of
+`comparison_reference` and `exclusion` is set on each, so `markets_for(...)`
+reads a group's evidence and `markets_by_reference` reads the whole market
+behind any member or unresolved entry. Unresolved, stale, unmapped, and
+catalog-blocked markets are therefore auditable in full rather than named by an
+opaque reference.
+
+Every market the read retains but cannot compare stays visible as an
+`UnresolvedMarket` with one closed `ComparisonExclusion` reason and the
+governed state as its detail: ambiguous, unmatched, mapping-conflict,
+stale-catalog, and unmapped-statistic markets are all reported rather than
+dropped, and none of them enters a group. The checks run in a fixed order —
+conflicting identity, future observation, availability, freshness, statistic,
+athlete, event, threshold — so a market that fails several always reports the
+same reason.
+
+Comparison Availability is decided before any group is built. A missing or
+over-age Athlete or Event Catalog makes the whole board unavailable, and each
+`CatalogAvailability` carries the catalog's identity (name and season), its
+last successful refresh, its exact decimal age, and the configured maximum age.
+Both catalogs report that maximum as `max_age_seconds`: the exact seconds of the
+very `timedelta` they gated on, counted from its whole microseconds. A TTL
+rewritten as floating-point hours is not that duration — a third of an hour
+gates at exactly 1200 seconds and was reported as 1199.99999999999988 — so an
+age and the ceiling it was compared against can no longer disagree at the
+boundary.
+The normalized markets are retained throughout; only their comparability is
+withheld until a refresh.
+
+One timezone-aware observation timestamp, read from
+`ComparisonBoardService.clock` after the collector returns, is the instant the
+whole board is measured against: it is the board's `generated_at`, it ages
+every provider snapshot and retained market, and it is passed as `now=` to both
+canonical catalogs, so a reported age and the availability derived from it can
+never disagree at a TTL boundary and a slow collection can never report a
+market as fresher than the board that states it.
+
+Freshness uses the reviewed provider cache windows, read through the one shared
+predicate in `app.domain.freshness` and compared as exact decimals, so the cache
+and the board can never classify one observation two ways. A snapshot inside its
+provider's fresh window is contemporaneous; one past it enters comparisons only
+while it is inside the permitted stale window and says so; beyond that window
+its markets stay visible as `stale_snapshot`. A snapshot the provider timestamped after the board
+observed it cannot be aged, so it fails closed: no negative age is ever
+reported, the observation carries no freshness, and its markets stay visible as
+`future_snapshot`. A group whose members are not contemporaneous — different
+retrieval instants, or a mix of fresh and stale observations — is an explicit
+Mixed-Freshness Comparison.
+
+A summary states only exact decimal minimum, maximum, and Threshold Spread,
+the provider and market counts, the freshness, and the sorted market
+references. Thresholds are `Decimal` throughout, so a serialized value is the
+provider's own exact number. The Threshold Spread is the exact difference of
+the stated minimum and maximum, and a summary validates its spread against
+that same exact difference, so neither a stored nor an accepted spread can be
+a rounded one. That difference inherits nothing from the ambient decimal
+context: it is computed by a fresh `decimal.Context` that states its own
+precision, exponent range, rounding, capitals, clamping, and a trap for every
+signal, using that context's own method rather than an operator, so no
+thread-local precision, clamp, or trap can change or refuse it. Its precision
+is `MAX_EXACT_DIFFERENCE_SPAN`, the widest exact difference the normalized
+numeric domain admits, so every threshold the provider contract accepted
+subtracts exactly.
+
+How old an observation or a catalog is inherits nothing either. `exact_seconds`
+counts a duration in whole microseconds and writes the result straight from
+those digits, so no decimal operation and therefore no ambient precision takes
+part; `exact_scaled_seconds` converts a configured window stated in hours,
+days, or seconds through the same fully stated context, after the configured
+quantity enters the normalized numeric domain. A caller's narrow precision or
+trapping context can no longer age one snapshot two ways, or refuse to age it
+at all. No probability, expected value, recommendation,
+average, preferred market, entry payout, or cross-provider fantasy assumption
+is produced anywhere in this seam.
+
+Market, selection, and comparison references are versioned and deterministic
+(`mkt_2_…`, `sel_2_…`, `cmp_2_…`). Each is a digest over a canonical injective
+encoding: every value is tagged by type and framed by its byte length, and
+every sequence carries its element count, so a field containing a separator can
+never be read as two fields and two distinct structures can never encode alike.
+Decimals take part in one canonical form read straight off the value's own
+digits, so `25.5` and `25.50` are the same number and the same reference. That
+form performs no arithmetic and no normalization, because both round under the
+ambient decimal context: a value carrying more digits than the context permits
+keeps every one of them, and a reference never depends on the context a caller
+happened to be inside.
+
+A market reference is defined by the provider's own market ID, or — when the
+provider publishes none — by every fact it did report: the athlete evidence,
+the complete event evidence including provider and canonical IDs, team IDs,
+names and abbreviations, start, end, and update times, label and status, the
+statistic evidence, the exact threshold, the market status, variant, scoring
+period, source labels, times, appearance, and the offered selections with their
+modifiers and prices. A market ID is the market's own source identity, so a
+market that is suspended and available again keeps that reference; for a market
+with no ID, status is the only fact separating an offering the provider is
+taking from an identically named suspended one, so it takes part. A threshold's
+written spelling never does: `original_value` is retained on the board for
+audit, but `25.50` and `25.5` are one line and one identity. Selections take
+part in an order derived from their own complete retained content — their
+normalized facts first, then the audit spellings kept beyond them — so the
+order a provider happened to list two equivalent selections in changes neither
+the market reference nor the selections the board returns, even when the only
+thing separating them is the scale one exact price was written at, and two
+selections differing in any retained fact stay two selections. The spelling
+tiebreak applies only inside a semantic tie, so a reference stays
+scale-independent. A selection reference is
+defined by
+its market reference and every fact that defines the offering — identity,
+labels, direction, status, modifiers, and prices — so two distinctly priced or
+distinctly modified selections are never one reference. A comparison reference
+is defined by its canonical identity alone. Each is stable exactly while its
+defining identity is unchanged; the version is bumped whenever those facts
+change.
+
+Each `ProviderReport` states one provider's whole contribution and the
+provenance a reader needs to judge it: the retrieval status and its bounded
+reason, the observation's retrieval instant, exact decimal age, freshness, and
+snapshot status, the market count, and the closed coverage and skip codes. Its
+`BoardCoverage` carries the collector's own fetched, eligible, normalized, and
+skipped counts, the pagination and fanout completion evidence, the expected
+total, and whether the coverage is complete — counts only, never a rate or an
+inference. Its `BoardCacheState` carries the cache status the observation was
+served from, the cached retrieval instant, its exact decimal age, and, when a
+stale observation was served because a refresh failed, that failure's bounded
+reason and instant. Every one of those reasons is the collector's own
+classification, so no provider exception text, credential, or upstream detail
+reaches a reader through a report.
+
+Ordering is a property of the observations, never of completion order:
+provider reports and warnings sort by provider and code, groups by their key,
+members by provider, threshold, variant, status, and reference, unresolved
+markets by reason, provider, and reference, retained markets by provider,
+reference, and contradiction ordinal, and selection references
+lexicographically.
+
+Filters are central and exact: enabled providers, Canonical Athlete IDs,
+Canonical Event IDs, Canonical Statistic IDs, and Market Status. A provider
+filter is answered before retrieval, so an excluded provider is never called
+and is reported as disabled for that board. There is deliberately no fuzzy or
+partial name filter. The post-filter market ceiling is
+`DFS_COMPARISON_MAX_MARKETS` (default 10000); a larger read raises
+`ComparisonBoardTooLargeError` (`board_too_large`) carrying the observed count
+and the supported narrowing filters, and nothing is ever truncated.
 
 PBP Stats:
 

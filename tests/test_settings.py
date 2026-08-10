@@ -306,3 +306,229 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         first_app.extensions["dependencies"].user_service
         is not second_app.extensions["dependencies"].user_service
     )
+
+
+# -- the exact time-window domain -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["DFS_CACHE_FRESH_SECONDS", "DFS_CACHE_STALE_IF_ERROR_SECONDS"],
+)
+@pytest.mark.parametrize(
+    "value",
+    ["1e129", "1e-200", "0", "-1", "nan", "inf", "", "not-a-number", "1000000000.000001"],
+)
+def test_settings_reject_window_env_values_outside_the_time_window_domain(
+    variable, value
+):
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+    assert variable in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DFS_DABBLE_CACHE_FRESH_SECONDS",
+        "DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS",
+    ],
+)
+def test_settings_reject_provider_overrides_outside_the_time_window_domain(variable):
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(environ={"FLASK_ENV": "testing", variable: "1e129"})
+
+    assert variable in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        ("0.000001", True),
+        ("0.0000009", False),
+        ("1000000000", True),  # the domain ceiling, and equal to the stale ceiling
+        ("1000000001", False),
+        ("300", True),
+    ],
+)
+def test_settings_accept_the_time_window_domain_boundaries(value, accepted):
+    from decimal import Decimal
+
+    environ = {
+        "FLASK_ENV": "testing",
+        "DFS_CACHE_FRESH_SECONDS": value,
+        "DFS_CACHE_STALE_IF_ERROR_SECONDS": "1000000000",
+    }
+    if not accepted:
+        with pytest.raises(ConfigurationError):
+            load_settings(environ=environ)
+        return
+
+    settings = load_settings(environ=environ)
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == Decimal(value)
+
+
+def test_a_configured_window_keeps_every_digit_it_was_written_with():
+    from decimal import Decimal
+
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "DFS_CACHE_FRESH_SECONDS": "300.000001",
+        }
+    )
+
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == Decimal(
+        "300.000001"
+    )
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        {"dfs_cache_fresh_seconds": 1801},
+        {"dfs_cache_fresh_seconds": {"dabble": 1801}},
+        {
+            "dfs_cache_fresh_seconds": {"*": 100, "dabble": 400},
+            "dfs_cache_stale_if_error_seconds": {"*": 500, "dabble": 300},
+        },
+    ],
+)
+def test_provider_settings_reject_a_fresh_window_past_the_stale_ceiling(windows):
+    from app.config.settings import ProviderSettings
+
+    with pytest.raises(ValueError):
+        ProviderSettings(**windows)
+
+
+def test_settings_reject_an_environment_fresh_window_past_the_stale_ceiling():
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            environ={
+                "FLASK_ENV": "testing",
+                "DFS_CACHE_FRESH_SECONDS": "600",
+                "DFS_DABBLE_CACHE_STALE_IF_ERROR_SECONDS": "300",
+            }
+        )
+
+
+def test_provider_settings_accept_ordinary_windows_and_overrides():
+    from decimal import Decimal
+
+    from app.config.settings import ProviderSettings
+
+    settings = ProviderSettings(
+        dfs_cache_fresh_seconds={"*": 300, "dabble": 45},
+        dfs_cache_stale_if_error_seconds={"*": 1800, "dabble": 240},
+    )
+
+    assert settings.dfs_cache_fresh_seconds_for("dabble") == Decimal(45)
+    assert settings.dfs_cache_stale_if_error_seconds_for("underdog") == Decimal(1800)
+
+
+@pytest.mark.parametrize("value", ["1e129", "0", "-1", "1e-200"])
+def test_settings_reject_event_catalog_ttl_outside_the_time_window_domain(value):
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            environ={"FLASK_ENV": "testing", "EVENT_CATALOG_MAX_AGE_HOURS": value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("variable", "unit_seconds"),
+    [
+        ("EVENT_CATALOG_MAX_AGE_HOURS", 3600),
+        ("EVENT_MAPPING_MATCH_WINDOW_HOURS", 3600),
+        ("ATHLETE_CATALOG_FRESHNESS_DAYS", 86400),
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    ["0", "-1", "1e129", "1e-200", "nan", "inf", "true", "not-a-number"],
+)
+def test_settings_reject_a_catalog_window_outside_the_time_window_domain(
+    variable, unit_seconds, value
+):
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+    message = str(error.value)
+    assert variable in message
+    # The refusal names the variable and the domain, never the value read.
+    assert "got" not in message
+    assert value not in message.replace("0.000001", "").replace("1E+9", "")
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "attribute"),
+    [
+        (
+            "EVENT_CATALOG_MAX_AGE_HOURS",
+            "277777.777777777777777",
+            "event_max_age_hours",
+        ),
+        (
+            "EVENT_MAPPING_MATCH_WINDOW_HOURS",
+            "0.000000000277777778",
+            "event_match_window_hours",
+        ),
+    ],
+)
+def test_a_catalog_window_just_inside_the_domain_is_kept_exactly(
+    variable, value, attribute
+):
+    from decimal import Decimal
+
+    settings = load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+    assert getattr(settings.catalog, attribute) == Decimal(value)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("EVENT_CATALOG_MAX_AGE_HOURS", "277777.777777777778"),
+        ("EVENT_MAPPING_MATCH_WINDOW_HOURS", "0.00000000027777777"),
+        ("ATHLETE_CATALOG_FRESHNESS_DAYS", "11575"),
+    ],
+)
+def test_a_catalog_window_just_outside_the_domain_is_refused(variable, value):
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing", variable: value})
+
+
+def test_catalog_windows_are_exact_decimals_never_floats():
+    from decimal import Decimal
+
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "EVENT_CATALOG_MAX_AGE_HOURS": "0.1",
+            "EVENT_MAPPING_MATCH_WINDOW_HOURS": "0.3",
+        }
+    )
+
+    assert isinstance(settings.catalog.event_max_age_hours, Decimal)
+    assert isinstance(settings.catalog.event_match_window_hours, Decimal)
+    assert settings.catalog.event_max_age_hours == Decimal("0.1")
+    assert settings.catalog.event_match_window_hours == Decimal("0.3")
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"event_max_age_hours": 0},
+        {"event_max_age_hours": float("nan")},
+        {"event_max_age_hours": True},
+        {"event_match_window_hours": "1e129"},
+        {"event_match_window_hours": -1},
+        {"athlete_freshness_days": 0},
+        {"athlete_freshness_days": 11575},
+    ],
+)
+def test_catalog_settings_refuse_a_direct_window_outside_the_domain(values):
+    from app.config.settings import CatalogSettings
+
+    with pytest.raises(ValueError):
+        CatalogSettings(**values)

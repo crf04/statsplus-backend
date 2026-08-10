@@ -39,6 +39,14 @@ from app.providers.dfs import (
     normalize_selection_direction,
     normalize_scoring_period,
 )
+from app.domain.market_content import (
+    NORMALIZED_DECIMAL_PLACE_LIMIT,
+    NumericDomainError,
+    market_content_key,
+    market_evidence_key,
+)
+from app.domain.statistics import MatchReason, MatchState, StatisticMatch
+from app.providers.dfs import _SnapshotMarketCollector
 
 
 @pytest.mark.parametrize(
@@ -107,6 +115,127 @@ def test_threshold_keeps_exact_decimal_and_source_value():
 
     with pytest.raises((AttributeError, TypeError)):
         threshold.value = Decimal("26")  # type: ignore[misc]
+
+
+def test_the_normalized_numeric_domain_accepts_its_documented_boundary():
+    limit = NORMALIZED_DECIMAL_PLACE_LIMIT
+    highest = f"1E+{limit}"
+    lowest = f"1E-{limit}"
+    widest = "9" * (2 * limit + 1) + f"E-{limit}"
+
+    assert MarketThreshold(value=highest, unit="points").value == Decimal(highest)
+    assert MarketThreshold(value=lowest, unit="points").value == Decimal(lowest)
+    assert MarketThreshold(value=widest, unit="points").value == Decimal(widest)
+    assert SelectionModifier(
+        value=highest, kind="multiplier", scope="selection"
+    ).value == Decimal(highest)
+    assert Selection(
+        selection_id="s-1", decimal_price=lowest
+    ).decimal_price == Decimal(lowest)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"-1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        f"-1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        "9" * (2 * NORMALIZED_DECIMAL_PLACE_LIMIT + 2)
+        + f"E-{NORMALIZED_DECIMAL_PLACE_LIMIT}",
+        "1E+999999999",
+    ],
+)
+def test_a_provider_number_beyond_the_numeric_domain_is_refused(value):
+    assert issubclass(NumericDomainError, ValueError)
+    for build in (
+        lambda: MarketThreshold(value=value, unit="points"),
+        lambda: SelectionModifier(value=value, kind="multiplier", scope="selection"),
+        lambda: Selection(selection_id="s-1", decimal_price=value),
+    ):
+        with pytest.raises(NumericDomainError, match="normalized numeric domain") as raised:
+            build()
+        assert value not in str(raised.value)
+
+
+def test_an_unknown_direction_enum_carries_no_provider_label():
+    # ``SelectionDirection.UNKNOWN`` is this application's own word for "the
+    # provider did not say", so it is not a label the provider wrote.
+    normalized = normalize_selection_direction(SelectionDirection.UNKNOWN)
+
+    assert normalized.value is SelectionDirection.UNKNOWN
+    assert normalized.original_label is None
+    assert (
+        normalize_selection_direction(SelectionDirection.HIGHER).original_label
+        == "higher"
+    )
+    assert Selection(selection_id="s-1").direction_label is None
+    assert (
+        Selection(
+            selection_id="s-1", direction=SelectionDirection.UNKNOWN
+        ).direction_label
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (110, 110),
+        (-110, -110),
+        (0, 0),
+        ("110", 110),
+        ("-110", -110),
+        (110.0, 110),
+        (Decimal("-110"), -110),
+        (Decimal("1.10E+2"), 110),
+        ("-0", 0),
+        (f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT}", 10**NORMALIZED_DECIMAL_PLACE_LIMIT),
+    ],
+)
+def test_an_american_price_accepts_every_exactly_integral_value(value, expected):
+    selection = Selection(selection_id="s-1", american_price=value)
+
+    assert selection.american_price == expected
+    assert isinstance(selection.american_price, int)
+    assert not isinstance(selection.american_price, bool)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        110.5,
+        -110.5,
+        "110.5",
+        Decimal("1.5"),
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        "Infinity",
+        "-Infinity",
+        "NaN",
+        1e400,
+        "1E+400",
+        f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        Decimal("Infinity"),
+        Decimal("NaN"),
+        True,
+        False,
+        "",
+        "  ",
+        "even",
+        object(),
+    ],
+)
+def test_an_american_price_that_is_not_exactly_integral_is_refused(value):
+    # Every rejection is a ValueError, because that is what each provider
+    # adapter converts into one typed malformed record, and none of them quotes
+    # the value it refused.
+    with pytest.raises(ValueError) as raised:
+        Selection(selection_id="s-1", american_price=value)
+
+    if str(value).strip():
+        assert str(value) not in str(raised.value)
 
 
 def test_selection_modifier_is_decimal_evidence_not_a_payout():
@@ -428,6 +557,229 @@ def test_snapshot_rejects_conflicting_content_for_the_same_source_identity():
             ),
             retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
         )
+
+
+def _repeatable_market(**overrides):
+    """One normalized market, varied only in the facts a repeat may restate."""
+
+    values = {
+        "provider": "underdog",
+        "market_id": "line-1",
+        "athlete": AthleteEvidence(provider_id="player-1", name="LeBron James"),
+        "statistic": StatisticEvidence(label="Points"),
+        "threshold": MarketThreshold("25.5", unit="points", original_value="25.5"),
+    }
+    return PlayerProjectionMarket(**{**values, **overrides})
+
+
+def _repeat_snapshot(markets):
+    return ProviderSnapshot(
+        provider="underdog",
+        status="complete",
+        markets=tuple(markets),
+        coverage=CoverageEvidence(
+            fetched_count=len(markets),
+            eligible_count=len(markets),
+            normalized_count=len(markets),
+            skipped_count=0,
+            pagination_complete=True,
+            fanout_complete=True,
+        ),
+        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
+    )
+
+
+def test_a_snapshot_repeat_that_only_reorders_selections_is_one_market():
+    higher = Selection(selection_id="s-1", label="Higher", direction="higher")
+    lower = Selection(selection_id="s-2", label="Lower", direction="lower")
+    forward = _repeat_snapshot(
+        (
+            _repeatable_market(selections=(higher, lower)),
+            _repeatable_market(selections=(lower, higher)),
+        )
+    )
+    backward = _repeat_snapshot(
+        (
+            _repeatable_market(selections=(lower, higher)),
+            _repeatable_market(selections=(higher, lower)),
+        )
+    )
+
+    assert len(forward.markets) == 1
+    assert len(backward.markets) == 1
+    # The snapshot retains the provider's own listing rather than rewriting it,
+    # and the retained evidence of both readings says exactly the same thing.
+    assert market_evidence_key(forward.markets[0]) == market_evidence_key(
+        backward.markets[0]
+    )
+    assert set(forward.markets[0].selections) == {higher, lower}
+
+
+def test_a_snapshot_repeat_written_at_another_scale_is_one_market():
+    plain = _repeatable_market()
+    padded = _repeatable_market(
+        threshold=MarketThreshold("25.50", unit="points", original_value="25.50")
+    )
+
+    forward = _repeat_snapshot((plain, padded))
+    backward = _repeat_snapshot((padded, plain))
+
+    assert len(forward.markets) == len(backward.markets) == 1
+    # The one retained spelling is chosen by content, never by arrival order.
+    retained = forward.markets[0].threshold
+    assert retained.original_value == backward.markets[0].threshold.original_value
+    assert retained.value.as_tuple() == backward.markets[0].threshold.value.as_tuple()
+
+
+def test_a_snapshot_repeat_that_changes_a_stated_fact_is_still_malformed():
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(),
+                _repeatable_market(
+                    threshold=MarketThreshold(
+                        "26.5", unit="points", original_value="26.5"
+                    )
+                ),
+            )
+        )
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(),
+                _repeatable_market(status=MarketStatus.SUSPENDED),
+            )
+        )
+    with pytest.raises(MalformedProviderResponseError):
+        _repeat_snapshot(
+            (
+                _repeatable_market(selections=(Selection(selection_id="s-1"),)),
+                _repeatable_market(selections=(Selection(selection_id="s-2"),)),
+            )
+        )
+
+
+def test_the_market_collector_reads_a_repeat_in_the_same_semantics():
+    higher = Selection(selection_id="s-1", label="Higher", direction="higher")
+    lower = Selection(selection_id="s-2", label="Lower", direction="lower")
+    padded = _repeatable_market(
+        threshold=MarketThreshold("25.50", unit="points", original_value="25.50"),
+        selections=(lower, higher),
+    )
+    plain = _repeatable_market(selections=(higher, lower))
+
+    def collected(markets):
+        collector = _SnapshotMarketCollector()
+        collector.extend(markets)
+        return collector
+
+    forward = collected((plain, padded))
+    backward = collected((padded, plain))
+
+    assert len(forward.markets) == len(backward.markets) == 1
+    assert forward.warning_codes == (CoverageCode.DUPLICATE_SOURCE_IDENTITY,)
+    assert (
+        forward.markets[0].threshold.original_value
+        == backward.markets[0].threshold.original_value
+    )
+    assert forward.markets[0].selections == backward.markets[0].selections
+
+
+def test_the_market_collector_still_rejects_a_changed_repeat():
+    collector = _SnapshotMarketCollector()
+    collector.add(_repeatable_market())
+
+    with pytest.raises(CoverageRecordMalformed) as error:
+        collector.add(
+            _repeatable_market(
+                threshold=MarketThreshold("26.5", unit="points", original_value="26.5")
+            )
+        )
+
+    assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
+    assert collector.markets == ()
+    assert CoverageCode.CONFLICTING_SOURCE_IDENTITY in collector.warning_codes
+
+
+class _CanonicalStatistic:
+    """One reviewed canonical statistic, stated as the catalog contract reads it."""
+
+    def __init__(self, comparable: bool) -> None:
+        self.id = "points"
+        self.components = ("points",)
+        self.comparable = comparable
+
+
+def _resolved(comparable: bool) -> StatisticMatch:
+    """One canonical statistic resolution of a market's own evidence."""
+
+    return StatisticMatch(
+        state=MatchState.CANONICAL,
+        evidence=StatisticEvidence(label="Points"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+        canonical=_CanonicalStatistic(comparable),
+        provider="underdog",
+    )
+
+
+def _unresolved() -> StatisticMatch:
+    return StatisticMatch(
+        state=MatchState.UNMAPPED,
+        evidence=StatisticEvidence(label="Points"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+        provider="underdog",
+        reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
+    )
+
+
+def test_statistic_comparability_is_part_of_what_a_market_says():
+    # Comparability decides whether a resolved market may enter a group at all,
+    # so no two of these readings are the same offering, and a market that
+    # states no resolution at all is distinct from every one of them.
+    keys = {
+        market_content_key(market)
+        for market in (
+            _repeatable_market(),
+            _repeatable_market(statistic_match=_unresolved()),
+            _repeatable_market(statistic_match=_resolved(True)),
+            _repeatable_market(statistic_match=_resolved(False)),
+        )
+    }
+
+    assert len(keys) == 4
+
+
+def test_a_snapshot_repeat_that_flips_comparability_is_a_conflict():
+    comparable = _repeatable_market(statistic_match=_resolved(True))
+    incomparable = _repeatable_market(statistic_match=_resolved(False))
+
+    for markets in ((comparable, incomparable), (incomparable, comparable)):
+        with pytest.raises(MalformedProviderResponseError):
+            _repeat_snapshot(markets)
+
+
+def test_a_snapshot_repeat_restating_one_comparability_is_still_one_market():
+    snapshot = _repeat_snapshot(
+        (
+            _repeatable_market(statistic_match=_resolved(True)),
+            _repeatable_market(statistic_match=_resolved(True)),
+        )
+    )
+
+    assert len(snapshot.markets) == 1
+
+
+def test_the_market_collector_fails_closed_on_flipped_comparability():
+    for first, second in ((True, False), (False, True)):
+        collector = _SnapshotMarketCollector()
+        collector.add(_repeatable_market(statistic_match=_resolved(first)))
+
+        with pytest.raises(CoverageRecordMalformed) as error:
+            collector.add(_repeatable_market(statistic_match=_resolved(second)))
+
+        assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
+        # Neither reading survives, whichever of them arrived first.
+        assert collector.markets == ()
 
 
 def test_partial_snapshot_requires_usable_market_and_known_incomplete_work():

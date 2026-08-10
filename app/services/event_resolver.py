@@ -19,6 +19,11 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.freshness import (
+    exact_seconds,
+    exact_timedelta,
+    time_window_timedelta,
+)
 from app.providers.dfs import (
     EventEvidence,
     PlayerProjectionMarket,
@@ -49,21 +54,20 @@ def event_match_window(
     -- rather than being re-derived wherever a comparison happens.
     """
 
+    field = "the event match window (EVENT_MAPPING_MATCH_WINDOW_HOURS)"
     if match_window is None and settings is not None:
-        configured = getattr(
+        match_window = getattr(
             getattr(settings, "catalog", None), "event_match_window_hours", None
         )
-        match_window = None if configured is None else float(configured)
     if match_window is None:
         return DEFAULT_EVENT_MATCH_WINDOW
-    window = (
-        match_window
-        if isinstance(match_window, timedelta)
-        else timedelta(hours=float(match_window))
-    )
-    if window.total_seconds() <= 0:
-        raise ValueError("the event match window must be greater than zero")
-    return window
+    # The window enters the one time-window authority whichever way it was
+    # given, so a direct override, a setting, and a request all mean the same
+    # exact duration, and an absurd one is a typed domain error rather than an
+    # OverflowError or a silently rounded window.
+    if isinstance(match_window, timedelta):
+        return exact_timedelta(exact_seconds(match_window), field=field)
+    return time_window_timedelta(match_window, unit_seconds=3600, field=field)
 
 
 class EventResolutionState(str, Enum):
