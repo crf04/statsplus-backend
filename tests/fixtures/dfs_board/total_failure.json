@@ -1,0 +1,30 @@
+{
+  "error": {
+    "code": "provider_unavailable",
+    "details": {
+      "contract_version": "1",
+      "disabled_providers": [
+        "underdog"
+      ],
+      "provider_outcomes": [
+        {
+          "cache_failure_reason": null,
+          "cache_status": null,
+          "provider": "dabble",
+          "reason": "timeout",
+          "status": "failed",
+          "warning_codes": []
+        },
+        {
+          "cache_failure_reason": null,
+          "cache_status": null,
+          "provider": "prizepicks",
+          "reason": "timeout",
+          "status": "failed",
+          "warning_codes": []
+        }
+      ]
+    },
+    "message": "No DFS provider produced a usable snapshot. Please try again later."
+  }
+}

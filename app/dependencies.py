@@ -37,6 +37,7 @@ class ApplicationDependencies:
     dfs_snapshot_cache: Any | None = None
     statistic_catalog: Any | None = None
     comparison_board_service: Any | None = None
+    dfs_board_response_service: Any | None = None
     athlete_mapping_repository: Any | None = None
     athlete_resolver: Any | None = None
     event_catalog_service: Any | None = None
@@ -63,6 +64,7 @@ def build_dependencies(
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.statistic_catalog import StatisticCatalog
     from app.services.comparison_board import ComparisonBoardService
+    from app.services.dfs_board_response import DFSBoardResponseService
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
@@ -219,6 +221,12 @@ def build_dependencies(
         event_catalog=event_catalog_service,
         settings=settings,
     )
+    # The published board is assembled from the comparison board alone; it owns
+    # no client of its own, so composing it here creates no new connection.
+    dfs_board_response_service = DFSBoardResponseService(
+        comparison_board_service,
+        settings=settings,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -245,6 +253,7 @@ def build_dependencies(
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,
+        dfs_board_response_service=dfs_board_response_service,
     )
 
 

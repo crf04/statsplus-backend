@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "dfs_board_disabled",
+    "message": "The DFS Board is not enabled on this deployment."
+  }
+}
