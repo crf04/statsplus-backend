@@ -20,6 +20,7 @@ from app.config.settings import load_settings  # noqa: E402
 from app.domain.freshness import time_window_timedelta  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
+from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
 from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
@@ -29,6 +30,8 @@ from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
     StatsFreshnessRepository,
 )
+from app.services.team_matchup_refresh import TeamMatchupRefreshService  # noqa: E402
+from app.services.team_matchup_repository import TeamMatchupRepository  # noqa: E402
 from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: E402
 
 
@@ -38,6 +41,7 @@ def run_nightly_refresh(
     refresh_schedule: Callable[[], Any],
     refresh_athlete_catalog: Callable[[], Any],
     refresh_player_game_logs: Callable[[], Any],
+    refresh_team_matchups: Callable[[], Any],
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
 
@@ -48,6 +52,7 @@ def run_nightly_refresh(
             ("schedule", refresh_schedule),
             ("athlete catalog", refresh_athlete_catalog),
             ("player game logs", refresh_player_game_logs),
+            ("team matchups", refresh_team_matchups),
         ):
             failed_step = step
             try:
@@ -83,10 +88,12 @@ def _run(database_url: str) -> int:
     try:
         run_migrations(engine)
         provider = NBAStatsAdapter(settings=settings)
+        pbp_provider = PBPStatsAdapter(settings=settings)
         stats_freshness = StatsFreshnessRepository(engine)
         data_service = DataService(
             engine,
             settings=settings,
+            pbp_provider=pbp_provider,
             nba_stats_provider=provider,
             stats_freshness=stats_freshness,
         )
@@ -115,6 +122,12 @@ def _run(database_url: str) -> int:
                 settings.catalog.player_game_log_min_active_players_per_team_game
             ),
         )
+        team_matchup_service = TeamMatchupRefreshService(
+            TeamMatchupRepository(engine),
+            event_service,
+            provider,
+            pbp_provider,
+        )
         return run_nightly_refresh(
             refresh_stats=data_service.update_all_data,
             refresh_schedule=lambda: event_service.refresh(
@@ -125,6 +138,9 @@ def _run(database_url: str) -> int:
             ).status
             == "succeeded",
             refresh_player_game_logs=lambda: player_game_log_service.refresh(
+                settings.nba.current_season
+            ),
+            refresh_team_matchups=lambda: team_matchup_service.refresh(
                 settings.nba.current_season
             ),
         )

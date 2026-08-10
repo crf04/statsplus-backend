@@ -101,7 +101,15 @@ class PBPTotalsAdapter:
             response.raise_for_status()
             yield response
 
-    def fetch_totals_frame(self, data_type: PBPDataKind = "player") -> pd.DataFrame:
+    def fetch_totals_frame(
+        self,
+        data_type: PBPDataKind = "player",
+        *,
+        season: str | None = None,
+        team_id: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame:
         """Fetch one PBP totals frame (``player`` or ``opponent``).
 
         Retries happen inside the shared session's urllib3 adapter; each
@@ -115,10 +123,16 @@ class PBPTotalsAdapter:
                 f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
         params = {
-            "Season": self.settings.nba.current_season,
+            "Season": season or self.settings.nba.current_season,
             "SeasonType": "Regular+Season",
             "Type": "Player" if data_type == "player" else "Opponent",
         }
+        if team_id is not None:
+            params["TeamId"] = str(team_id)
+        if from_date is not None:
+            params["FromDate"] = from_date
+        if to_date is not None:
+            params["ToDate"] = to_date
         operation = "get_totals_player" if data_type == "player" else "get_totals_opponent"
 
         with self._request(operation, params) as response:

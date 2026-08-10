@@ -1,0 +1,24 @@
+{
+  "season": {
+    "TeamId": 1610612738,
+    "Name": "Boston Celtics",
+    "SecondsPlayed": 236160,
+    "Assists": 1968,
+    "Arc3Assists": 500,
+    "Corner3Assists": 300,
+    "AtRimAssists": 600,
+    "ShortMidRangeAssists": 350,
+    "LongMidRangeAssists": 218
+  },
+  "last_15": {
+    "TeamId": 1610612738,
+    "Name": "Boston Celtics",
+    "SecondsPlayed": 43200,
+    "Assists": 525,
+    "Arc3Assists": 140,
+    "Corner3Assists": 80,
+    "AtRimAssists": 160,
+    "ShortMidRangeAssists": 90,
+    "LongMidRangeAssists": 55
+  }
+}

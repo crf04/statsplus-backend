@@ -649,6 +649,45 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+### Window-aware team matchup facts
+
+`TeamMatchupRefreshService` is the Nightly Refresh's third ordered step, after
+the stats-table and canonical Event Catalog refreshes. It publishes two
+internal team windows for the current product: Season and exact rolling 15
+games. There is deliberately no public matchup route in this layer; the narrow
+consumer seam is `TeamMatchupQueryService.get_window(scope)`.
+
+Rolling boundaries come only from completed, governed `event_catalog` games.
+The resolver excludes postponed, preseason, All-Star, non-final, and
+post-as-of events, then resolves each team's own 15th-most-recent game. NBA
+Stats surfaces are queried per team with `LastNGames=15` and the as-of date.
+PBP Stats opponent totals are queried per team with `TeamId`, that team's
+governed `FromDate`, and the common as-of `ToDate`; one league-wide cutoff is
+never used. Synergy exposes neither Last-N nor date bounds, so its Last-15
+play-type rows and surface observation are stored as `unavailable` with
+`provider_unsupported` provenance. Season Synergy remains available, and no
+Season value is relabeled as Last-15.
+
+Migration 012 creates `team_matchup_facts` and
+`team_matchup_surface_observations`. The intentional version gap reserves
+migration 011 for the independently developed player-log prerequisite (#56).
+A fact is identified by season, as-of date, window kind plus rolling game
+count, team, Base, slice, and stat. Available facts retain the provider's raw
+numerator and its raw minutes, seconds, or games denominator; they do not
+persist a previously normalized ratio or rank. Surface observations retain a
+timezone-aware collection time and an `available`, `unavailable`, or `missing`
+status plus explicit reason per window.
+
+Both windows are fully collected before one repository transaction deletes
+and replaces either snapshot. Repeating a publication is idempotent. A
+provider, transform, constraint, or transaction failure leaves both prior
+snapshots intact; the Nightly Refresh retries the complete stats → schedule →
+team-matchups unit once. The query service derives allowed-per-48 from the raw
+numerator/denominator and requires exactly 30 distinct teams for every
+available league metric. It then computes the 30-team mean, population sigma,
+percent versus average, sigma deviation, and defensive rank. Player scoring
+and Diet Shares are outside this team-window store and remain Season-only.
+
 ### Canonical athlete catalog
 
 `AthleteCatalogService` owns the application tables `athlete_catalog` and
@@ -1637,6 +1676,12 @@ runs, audited approve/override/reject/clear actions, and history, with the same
 writable-URL requirement and no provider contact; the command builds the
 catalog read seam with a provider that refuses every call, so it is offline by
 construction.
+
+Migration 012 creates the raw window-aware team matchup tables described
+above. It is safe to apply directly after migration 010 on this standalone
+branch; when #56 lands as migration 011, normal ordered migration execution
+will apply 011 before 012 on a fresh database. A branch rebased after another
+change claims either number must rename its migration before merge.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

@@ -126,6 +126,43 @@ def test_fetch_totals_opponent_uses_opponent_operation():
     assert event["operation"] == "get_totals_opponent"
 
 
+def test_fetch_totals_opponent_supports_exact_team_date_bounds():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload=VALID_PAYLOAD)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    adapter.fetch_totals_frame(
+        "opponent",
+        season="2024-25",
+        team_id=1610612738,
+        from_date="2025-03-01",
+        to_date="2025-04-15",
+    )
+
+    assert calls == [
+        (
+            (adapter.base_url,),
+            {
+                "params": {
+                    "Season": "2024-25",
+                    "SeasonType": "Regular+Season",
+                    "Type": "Opponent",
+                    "TeamId": "1610612738",
+                    "FromDate": "2025-03-01",
+                    "ToDate": "2025-04-15",
+                },
+                "timeout": (1.0, 2.0),
+            },
+        )
+    ]
+
+
 def test_fetch_totals_rejects_unsupported_data_type():
     from app.errors import InvalidInputError
 
