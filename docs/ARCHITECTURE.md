@@ -651,8 +651,9 @@ previous tables.
 
 ### Window-aware team matchup facts
 
-`TeamMatchupRefreshService` is the Nightly Refresh's third ordered step, after
-the stats-table and canonical Event Catalog refreshes. It publishes two
+`TeamMatchupRefreshService` is the Nightly Refresh's fifth ordered step, after
+the stats-table, canonical Event Catalog, Athlete Catalog, and durable player
+game-log refreshes. It publishes two
 internal team windows for the current product: Season and exact rolling 15
 games. There is deliberately no public matchup route in this layer; the narrow
 consumer seams are `TeamMatchupQueryService.get_window(scope)` and
@@ -712,9 +713,8 @@ refresh also succeeds with fact-free
 an earlier valid fact snapshot.
 
 Migration 012 creates `team_matchup_facts` and
-`team_matchup_surface_observations`. Its integration prerequisite is the
-player-log migration 011 from #56; #57 must be rebased after #56 so fresh
-databases apply 011 and then 012.
+`team_matchup_surface_observations`. It follows the authoritative player-log
+migration 011, so fresh databases apply 011 and then 012.
 A fact is identified by season, as-of date, window kind plus rolling game
 count, team, Base, slice, and stat. The fact table contains available facts
 only; availability and reasons belong solely to the observation table. Facts retain the provider's raw
@@ -731,7 +731,7 @@ seconds; partial, non-finite, or mislabeled data becomes a fact-free unavailable
 observation and leaves prior valid facts intact. A provider transport,
 constraint, or transaction failure likewise leaves both prior snapshots
 intact; the Nightly Refresh retries the complete stats → schedule →
-team-matchups unit once. A provider response that reaches its adapter but is
+athlete catalog → player game logs → team matchups unit once. A provider response that reaches its adapter but is
 malformed instead degrades only that surface as
 `unavailable/provider_malformed_response`, preserves its prior valid facts,
 and allows other surfaces to publish. The query service defensively degrades only an
@@ -1741,10 +1741,8 @@ catalog read seam with a provider that refuses every call, so it is offline by
 construction.
 
 Migration 012 creates the raw window-aware team matchup tables described
-above. The merge sequence is fixed: land #56's migration 011, rebase #57, then
-rerun the migration and full repository gates so a fresh database applies 011
-before 012. The standalone branch's development migration tests do not replace
-that integration gate.
+above after migration 011's canonical player game logs. Migration tests pin
+that order and exercise a fresh apply plus an idempotent rerun.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
