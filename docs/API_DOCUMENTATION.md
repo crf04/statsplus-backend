@@ -202,7 +202,6 @@ time, then `game_id`.
       "retrieved_at": "2026-01-02T10:00:00+00:00"
     },
     "pool": {
-      "status": "fresh",
       "retrieved_at": "2026-01-02T10:04:00+00:00",
       "providers": {
         "prizepicks": {
@@ -270,8 +269,10 @@ other-slate markets do not affect counts.
 `freshness.pool.providers` reports each attempted provider as `fresh` or
 `missing`, with the provider snapshot time when fresh. A successful empty board
 is fresh information and produces zero counts. If every provider is missing,
-the aggregate is `unavailable`; if at least one usable provider succeeds, the
-aggregate is `fresh` and the union uses the available observations. This route
+the aggregate is `unavailable`. If every attempted provider succeeds, the
+aggregate is `fresh`. When usable and missing provider observations disagree,
+aggregate `status` is omitted so the frontend derives its documented partial
+presentation from the provider entries. The union uses every usable observation. This route
 performs a live board collection on every request; stored-snapshot and
 stale-served behavior belongs to the later persistence slice.
 
@@ -453,8 +454,11 @@ GET /api/data/telemetry
 
 `GET /api/data/telemetry` returns bounded, sanitized provider, board, and
 application telemetry counters on the documented seams, with the most recent
-50 provider events, internal board-collection events, and published board
-request events. Board aggregates are kept in separate bounded scalar
+50 provider events, internal board-collection events, published board request
+events, and `recent_player_pool_events`. Player Pool entries contain only the
+per-request `unknown_stat_label_count` and `unjoined_athlete_count`; the
+corresponding `player_pool_events_total` and `player_pool_buffered_events`
+metrics describe their total and bounded buffer. Board aggregates are kept in separate bounded scalar
 collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries

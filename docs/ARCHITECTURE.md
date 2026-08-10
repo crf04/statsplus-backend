@@ -232,7 +232,9 @@ plus the immutable typed `StatisticMatch`, while the catalog service owns
 resolution. Schema v1's field vocabulary is exact and closed: a document has
 `schema_version` (required, exactly `1`), optional `component_order`, and
 `statistics`; each statistic has `id`, `label`, `unit`, `scoring_periods`,
-`components`, and optional `provider_mappings` and `comparable`. There are no
+`components`, and optional `provider_mappings`, `comparable`, and
+`market_category`. `market_category` is the single governed source of Player
+Pool eligibility and its public PTS/REB/etc. spelling. There are no
 aliases — `version`, `canonical_statistics`, `canonical_id`, `display_name`,
 `name`, `period`, `periods`, `ordered_components`, `mappings`,
 `provider_labels`, `comparison_allowed`, and mapping `alias`/`aliases` are all
@@ -283,10 +285,12 @@ union by canonical player ID, with deterministic Market Categories and
 per-provider provenance retained on each internal `PoolPlayer`.
 
 The live slice does not synthesize players and does not persist snapshots. A
-usable empty provider snapshot is `fresh`; a failed provider is `missing`; at
-least one usable observation makes the aggregate `fresh`, while total failure
-is `unavailable`. Unknown provider stat identities and unjoined athlete
-identities are counted once per bounded Player Pool telemetry event, without
+usable empty provider snapshot is `fresh`; a failed provider is `missing`.
+Unanimously usable observations make the aggregate `fresh`, mixed usable and
+missing observations omit aggregate status for the frontend's partial
+derivation, and total failure is `unavailable`. Unknown provider stat market
+occurrences and unjoined athlete
+identities are counted in a bounded Player Pool telemetry event, without
 logging names, labels, or provider IDs.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the

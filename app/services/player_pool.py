@@ -4,48 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.providers.dfs import MarketStatus, MarketVariant, NBAMarketQuery
+from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
+    PlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryEvent,
-)
-
-
-_MARKET_CATEGORIES = MappingProxyType(
-    {
-        "points": "PTS",
-        "rebounds": "REB",
-        "assists": "AST",
-        "three_pointers_made": "3PM",
-        "turnovers": "TOV",
-        "steals": "STL",
-        "blocks": "BLK",
-        "pra": "PRA",
-        "pa": "PA",
-        "pr": "PR",
-        "ra": "RA",
-        "stks": "STKS",
-        "field_goals_attempted": "FGA",
-        "three_pointers_attempted": "FG3A",
-        "two_pointers_attempted": "FG2A",
-    }
-)
-_KNOWN_EXCLUDED_LABELS = frozenset(
-    {
-        "fantasy points",
-        "fantasy score",
-        "nba fantasy points",
-        "double double",
-        "double-double",
-        "dd2",
-        "triple double",
-        "triple-double",
-        "td3",
-    }
 )
 
 
@@ -68,16 +35,38 @@ class PlayerPool:
     team_counts: Mapping[int, int]
     freshness: Mapping[str, Any]
 
+    @staticmethod
+    def unavailable_freshness() -> dict[str, Any]:
+        return {"status": "unavailable", "retrieved_at": None, "providers": {}}
+
+
+@dataclass(slots=True)
+class _PlayerContribution:
+    team_id: int
+    name: str
+    providers: dict[str, set[str]]
+
 
 class PlayerPoolService:
     """Collect a live DFS board and retain only qualifying joined markets."""
 
     def __init__(
-        self, board_service: Any, *, telemetry_recorder: Any | None = None
+        self,
+        board_service: Any,
+        statistic_catalog: StatisticCatalog,
+        *,
+        telemetry_recorder: PlayerPoolTelemetryRecorder | None = None,
     ) -> None:
         if not callable(getattr(board_service, "get_board", None)):
             raise TypeError("player pool board service must expose get_board")
         self.board_service = board_service
+        if not isinstance(statistic_catalog, StatisticCatalog):
+            raise TypeError("player pool requires a StatisticCatalog")
+        self.market_categories = {
+            statistic.id: statistic.market_category
+            for statistic in statistic_catalog.statistics
+            if statistic.comparable and statistic.market_category is not None
+        }
         self.telemetry_recorder = (
             telemetry_recorder or BoundedPlayerPoolTelemetryRecorder()
         )
@@ -92,8 +81,8 @@ class PlayerPoolService:
         slate_games = frozenset(str(game_id) for game_id in game_ids)
         athlete_mappings = self._athlete_mappings(board)
         event_mappings = self._event_mappings(board)
-        contributions: dict[int, dict[str, Any]] = {}
-        unknown_labels: set[tuple[str, str | None]] = set()
+        contributions: dict[int, _PlayerContribution] = {}
+        unknown_label_count = 0
         unjoined_athletes: set[tuple[str, str | None]] = set()
 
         for provider_outcome in board.provider_outcomes:
@@ -105,10 +94,7 @@ class PlayerPoolService:
                     continue
                 category = self._market_category(market)
                 if category is None:
-                    if not self._known_exclusion(market):
-                        unknown_labels.add(
-                            (provider, getattr(market.statistic, "provider_id", None))
-                        )
+                    unknown_label_count += 1
                     continue
                 event_key = self._evidence_key(provider, market.event)
                 if event_mappings.get(event_key) not in slate_games:
@@ -121,28 +107,28 @@ class PlayerPoolService:
                 player_id, team_id, name = canonical
                 entry = contributions.setdefault(
                     player_id,
-                    {"team_id": team_id, "name": name, "providers": {}},
+                    _PlayerContribution(team_id=team_id, name=name, providers={}),
                 )
-                categories = entry["providers"].setdefault(provider, set())
+                categories = entry.providers.setdefault(provider, set())
                 categories.add(category)
 
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
-                name=entry["name"],
-                team_id=entry["team_id"],
+                name=entry.name,
+                team_id=entry.team_id,
                 market_categories=tuple(
                     sorted(
                         {
                             category
-                            for categories in entry["providers"].values()
+                            for categories in entry.providers.values()
                             for category in categories
                         }
                     )
                 ),
                 provenance={
                     provider: tuple(sorted(categories))
-                    for provider, categories in sorted(entry["providers"].items())
+                    for provider, categories in sorted(entry.providers.items())
                 },
             )
             for player_id, entry in sorted(contributions.items())
@@ -153,7 +139,7 @@ class PlayerPoolService:
 
         self.telemetry_recorder.record(
             PlayerPoolTelemetryEvent(
-                unknown_stat_label_count=len(unknown_labels),
+                unknown_stat_label_count=unknown_label_count,
                 unjoined_athlete_count=len(unjoined_athletes),
             )
         )
@@ -171,8 +157,7 @@ class PlayerPoolService:
             and market.scoring_period is ScoringPeriod.FULL_GAME
         )
 
-    @staticmethod
-    def _market_category(market: Any) -> str | None:
+    def _market_category(self, market: Any) -> str | None:
         match = market.statistic_match
         if (
             match is None
@@ -180,15 +165,7 @@ class PlayerPoolService:
             or not match.is_comparable
         ):
             return None
-        return _MARKET_CATEGORIES.get(match.canonical_id)
-
-    @staticmethod
-    def _known_exclusion(market: Any) -> bool:
-        label = getattr(getattr(market, "statistic", None), "label", None)
-        return (
-            isinstance(label, str)
-            and label.strip().casefold() in _KNOWN_EXCLUDED_LABELS
-        )
+        return self.market_categories.get(match.canonical_id)
 
     @staticmethod
     def _evidence_key(provider: str, evidence: Any | None) -> tuple[str, str | None]:
@@ -216,7 +193,7 @@ class PlayerPoolService:
                 or canonical.player_id != player_id
             ):
                 continue
-            result[(outcome.provider, provider_id)] = (
+            result[(resolution.provider, provider_id)] = (
                 int(player_id),
                 int(canonical.team_id),
                 str(canonical.display_name),
@@ -233,7 +210,7 @@ class PlayerPoolService:
                 provider_id = getattr(resolution, "provider_event_id", None)
             game_id = getattr(outcome, "canonical_event_id", None)
             if game_id is not None:
-                result[(outcome.provider, provider_id)] = str(game_id)
+                result[(resolution.provider, provider_id)] = str(game_id)
         return result
 
     @staticmethod
@@ -253,11 +230,15 @@ class PlayerPoolService:
                     "status": "missing",
                     "retrieved_at": None,
                 }
-        return {
-            "status": "fresh" if retrieved else "unavailable",
+        freshness = {
             "retrieved_at": min(retrieved).isoformat() if retrieved else None,
             "providers": providers,
         }
+        if not retrieved:
+            freshness["status"] = "unavailable"
+        elif len(retrieved) == len(providers):
+            freshness["status"] = "fresh"
+        return freshness
 
 
 __all__ = ["PlayerPool", "PlayerPoolService", "PoolPlayer"]

@@ -25,6 +25,7 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.player_pool import PlayerPool
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -100,11 +101,7 @@ class SlateService:
         # The public ordering contract does not depend on repository behavior.
         games.sort(key=lambda game: (game["scheduled_at"], game["game_id"]))
 
-        pool_freshness = {
-            "status": "unavailable",
-            "retrieved_at": None,
-            "providers": {},
-        }
+        pool_freshness = PlayerPool.unavailable_freshness()
         if self.player_pool is not None:
             pool = self.player_pool.get_pool(
                 season=season,

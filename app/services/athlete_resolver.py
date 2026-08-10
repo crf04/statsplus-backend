@@ -84,9 +84,7 @@ _NON_DECOMPOSING_LATIN_LETTERS = {
 _NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 _TEAM_ABBREVIATION_DIALECTS = {
     "PHO": "PHX",
-    "PHX": "PHX",
     "NO": "NOP",
-    "NOP": "NOP",
 }
 
 

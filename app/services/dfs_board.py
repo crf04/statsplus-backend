@@ -182,7 +182,7 @@ def _evidence_facts(resolution: Any) -> dict[str, Any]:
         "team_abbreviation": (
             None
             if team is None
-            else normalize_team_abbreviation(team.abbreviation).casefold() or None
+            else normalize_team_abbreviation(team.abbreviation) or None
         ),
         "team_name": (None if team is None else normalize_athlete_name(team.name) or None),
     }

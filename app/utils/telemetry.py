@@ -117,6 +117,7 @@ _buffer_lock = threading.Lock()
 _provider_events_total = 0
 _board_events_total = 0
 _board_request_events_total = 0
+_player_pool_events_total = 0
 _provider_failures: dict[tuple[str, str], int] = {}
 _application_failures: dict[str, int] = {}
 _cache_counts: dict[str, dict[str, int]] = {}
@@ -435,7 +436,14 @@ class BoundedBoardTelemetryRecorder(BoardTelemetryRecorder):
         record_board_telemetry(event)
 
 
-class BoundedPlayerPoolTelemetryRecorder:
+class PlayerPoolTelemetryRecorder:
+    """Typed recorder seam for Player Pool aggregates."""
+
+    def record(self, event: PlayerPoolTelemetryEvent) -> None:
+        raise NotImplementedError
+
+
+class BoundedPlayerPoolTelemetryRecorder(PlayerPoolTelemetryRecorder):
     """Record Player Pool drop counts in a bounded scalar-only buffer."""
 
     def record(self, event: PlayerPoolTelemetryEvent) -> None:
@@ -446,7 +454,9 @@ class BoundedPlayerPoolTelemetryRecorder:
             event.unjoined_athlete_count,
         )
         with _buffer_lock:
+            global _player_pool_events_total
             _player_pool_event_buffer.append(payload)
+            _player_pool_events_total += 1
 
 
 def snapshot_recent_player_pool_events(limit: int = 50) -> list[dict[str, Any]]:
@@ -697,6 +707,8 @@ def snapshot_metrics() -> dict[str, Any]:
             "provider_events_total": _provider_events_total,
             "board_events_total": _board_events_total,
             "board_request_events_total": _board_request_events_total,
+            "player_pool_events_total": _player_pool_events_total,
+            "player_pool_buffered_events": len(_player_pool_event_buffer),
             "board_request_buffered_events": len(_board_request_event_buffer),
             "board_buffered_events": len(_board_event_buffer),
             "board_buffered_capacity": EVENT_BUFFER_CAPACITY,
@@ -721,6 +733,7 @@ def clear_recorded_provider_events() -> None:
     deterministic between isolated test cases.
     """
     global _provider_events_total, _board_events_total, _board_request_events_total
+    global _player_pool_events_total
     global _provider_failures, _application_failures, _cache_counts
     with _buffer_lock:
         _event_buffer.clear()
@@ -730,6 +743,7 @@ def clear_recorded_provider_events() -> None:
         _provider_events_total = 0
         _board_events_total = 0
         _board_request_events_total = 0
+        _player_pool_events_total = 0
         _provider_failures = {}
         _application_failures = {}
         _cache_counts = {}
@@ -890,6 +904,7 @@ __all__ = [
     "record_board_telemetry",
     "snapshot_recent_board_events",
     "PlayerPoolTelemetryEvent",
+    "PlayerPoolTelemetryRecorder",
     "BoundedPlayerPoolTelemetryRecorder",
     "snapshot_recent_player_pool_events",
     "ProviderResponseError",

@@ -56,6 +56,7 @@ _STATISTIC_FIELDS = frozenset(
         "components",
         "provider_mappings",
         "comparable",
+        "market_category",
     }
 )
 
@@ -257,6 +258,7 @@ class CanonicalStatistic:
     components: tuple[str, ...]
     provider_mappings: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     comparable: bool = True
+    market_category: str | None = None
 
     def __post_init__(self) -> None:
         statistic_id = _identifier(self.id, field_name="statistic id")
@@ -290,6 +292,16 @@ class CanonicalStatistic:
             raise StatisticCatalogSchemaError(
                 f"statistic {statistic_id} comparable must be boolean"
             )
+        market_category = self.market_category
+        if market_category is not None and (
+            not isinstance(market_category, str)
+            or not market_category
+            or market_category != market_category.strip().upper()
+            or not market_category.replace("3", "").isalnum()
+        ):
+            raise StatisticCatalogSchemaError(
+                f"statistic {statistic_id} market_category must be an uppercase token"
+            )
         mappings: dict[str, tuple[str, ...]] = {}
         for raw_provider, raw_labels in self.provider_mappings.items():
             provider = _provider(
@@ -316,6 +328,7 @@ class CanonicalStatistic:
         object.__setattr__(self, "scoring_periods", periods)
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "provider_mappings", MappingProxyType(mappings))
+        object.__setattr__(self, "market_category", market_category)
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,6 +755,7 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
                     mappings, field_name=f"statistics[{index}].provider_mappings"
                 ),
                 comparable=raw_statistic.get("comparable", True),
+                market_category=raw_statistic.get("market_category"),
             )
         )
 

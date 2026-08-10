@@ -61,6 +61,10 @@ def test_default_catalog_is_immutable_and_contains_initial_full_game_statistics(
     assert catalog.by_id["pr"].components == ("points", "rebounds")
     assert catalog.by_id["ra"].components == ("rebounds", "assists")
     assert catalog.by_id["stks"].components == ("steals", "blocks")
+    assert {statistic.market_category for statistic in catalog.statistics} == {
+        "PTS", "REB", "AST", "3PM", "STL", "BLK", "TOV", "PRA", "PA",
+        "PR", "RA", "STKS", "FGA", "FG3A", "FG2A",
+    }
 
     with pytest.raises(TypeError):
         catalog.by_id["points"] = catalog.by_id["rebounds"]

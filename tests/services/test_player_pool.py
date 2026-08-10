@@ -1,12 +1,12 @@
 """Behavioral tests for the live Player Pool assembled from DFS boards."""
 
 from datetime import datetime, timezone
+from dataclasses import fields
 import json
 from pathlib import Path
 import pytest
-from types import SimpleNamespace
 
-from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+from app.domain.statistics import MatchReason, MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
     AthleteEvidence,
     EventEvidence,
@@ -15,13 +15,39 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     StatisticEvidence,
     TeamEvidence,
+    CoverageEvidence,
+    NBAMarketQuery,
+    ProviderSnapshot,
+    SnapshotStatus,
 )
 from app.services.player_pool import PlayerPoolService
-from app.services.athlete_resolver import AthleteResolver
+from app.services.athlete_resolver import (
+    AthleteResolution,
+    AthleteResolver,
+    CanonicalAthlete,
+    MappingResolutionState,
+)
+from app.services.athlete_mapping_repository import (
+    BoardMappingOutcome,
+    ProviderAthleteMappingRecord,
+)
+from app.services.dfs_board import DFSBoard, ProviderOutcome, ProviderOutcomeStatus
+from app.services.event_resolver import (
+    CanonicalEvent,
+    EventResolution,
+    EventResolutionState,
+)
+from app.services.event_mapping_repository import (
+    BoardEventMappingOutcome,
+    ProviderEventMappingRecord,
+)
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+from app.services.slate_service import SlateService
+from app.config.settings import NBASeasonSettings, RuntimeSettings
 
 
 NOW = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+CATALOG = StatisticCatalog.load_default()
 
 
 class RecordedAthleteCatalog:
@@ -72,29 +98,30 @@ def _market(
     status=MarketStatus.AVAILABLE,
     variant=MarketVariant.STANDARD,
     period=ScoringPeriod.FULL_GAME,
+    unknown_label="Mystery Stat",
 ):
     match = None
     if category is not None:
-        canonical = SimpleNamespace(
-            id=category,
-            label=category,
-            unit=SimpleNamespace(value="count"),
-            scoring_periods=(ScoringPeriod.FULL_GAME,),
-            components=(category,),
-            comparable=True,
-        )
         match = StatisticMatch(
             state=MatchState.CANONICAL,
             evidence=StatisticEvidence(label=category),
             provider=provider,
-            scoring_period=ScoringPeriod.FULL_GAME,
-            canonical=canonical,
+            scoring_period=period,
+            canonical=CATALOG.by_id[category],
+        )
+    else:
+        match = StatisticMatch(
+            state=MatchState.UNMAPPED,
+            evidence=StatisticEvidence(label=unknown_label),
+            provider=provider,
+            scoring_period=period,
+            reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
         )
     return PlayerProjectionMarket(
         provider=provider,
         athlete=AthleteEvidence(provider_id=athlete_id, name="Board Name"),
         event=EventEvidence(provider_id=event_id),
-        statistic=StatisticEvidence(label=category or "Mystery Stat"),
+        statistic=StatisticEvidence(label=category or unknown_label),
         statistic_match=match,
         status=status,
         variant=variant,
@@ -103,31 +130,69 @@ def _market(
 
 
 def _athlete_outcome(provider, provider_id, player_id, team_id, name):
-    canonical = SimpleNamespace(player_id=player_id, team_id=team_id, display_name=name)
-    return SimpleNamespace(
-        provider=provider,
-        provider_athlete_id=provider_id,
-        canonical_player_id=player_id,
-        resolution=SimpleNamespace(canonical_athlete=canonical),
+    evidence = AthleteEvidence(provider_id=provider_id, name=name)
+    canonical = CanonicalAthlete(
+        season="2025-26", player_id=player_id, display_name=name,
+        roster_status="Active", is_active=True, is_active_for_season=True,
+        team_id=team_id,
+    )
+    resolution = AthleteResolution(
+        provider=provider, provider_evidence=evidence, season="2025-26",
+        state=MappingResolutionState.AUTO, canonical_athlete=canonical,
+    )
+    mapping = _record(
+        ProviderAthleteMappingRecord, provider=provider,
+        provider_athlete_id=provider_id, mapping_state="auto", is_active=True,
+        season="2025-26", canonical_player_id=player_id,
+        canonical_name=name, canonical_team_id=team_id,
+        first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+    )
+    return BoardMappingOutcome(
+        resolution=resolution, state=MappingResolutionState.AUTO,
+        persisted=True, mapping=mapping,
     )
 
 
 def _event_outcome(provider, provider_id, game_id):
-    return SimpleNamespace(
-        provider=provider,
-        provider_event_id=provider_id,
-        canonical_event_id=game_id,
-        resolution=SimpleNamespace(provider_event_id=provider_id),
+    evidence = EventEvidence(provider_id=provider_id)
+    resolution = EventResolution(
+        provider=provider, provider_evidence=evidence, season="2025-26",
+        state=EventResolutionState.AUTO,
+        canonical_event=CanonicalEvent(game_id, "2025-26", None),
+    )
+    mapping = _record(
+        ProviderEventMappingRecord, provider=provider,
+        provider_event_id=provider_id, mapping_state="auto", is_active=True,
+        season="2025-26", canonical_event_id=game_id,
+        first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+    )
+    return BoardEventMappingOutcome(
+        resolution=resolution, state=EventResolutionState.AUTO,
+        persisted=True, mapping=mapping,
     )
 
 
 def _provider_outcome(provider, markets=None, *, failed=False):
-    snapshot = None
-    if not failed:
-        snapshot = SimpleNamespace(
-            markets=tuple(markets or ()), retrieved_at=NOW, provider=provider
-        )
-    return SimpleNamespace(provider=provider, usable=not failed, snapshot=snapshot)
+    if failed:
+        return ProviderOutcome(provider, ProviderOutcomeStatus.FAILED, reason="timeout")
+    snapshot = ProviderSnapshot(
+        provider=provider, status=SnapshotStatus.COMPLETE,
+        markets=tuple(markets or ()), coverage=CoverageEvidence(), retrieved_at=NOW,
+    )
+    return ProviderOutcome(provider, ProviderOutcomeStatus.COMPLETE, snapshot=snapshot)
+
+
+def _record(record_type, **values):
+    return record_type(**{field.name: values.get(field.name) for field in fields(record_type)})
+
+
+def _board(provider_outcomes, athlete_outcomes=(), event_outcomes=()):
+    return DFSBoard(
+        query=NBAMarketQuery(season="2025-26"),
+        provider_outcomes=tuple(sorted(provider_outcomes, key=lambda item: item.provider)), disabled_providers=(),
+        generated_at=NOW, mapping_outcomes=tuple(athlete_outcomes),
+        event_mapping_outcomes=tuple(event_outcomes),
+    )
 
 
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])
@@ -177,26 +242,26 @@ def test_recorded_provider_labels_map_to_supported_market_categories():
 
 
 def test_pool_unions_categories_and_provenance_by_canonical_player():
-    board = SimpleNamespace(
-        provider_outcomes=(
+    board = _board(
+        (
             _provider_outcome("prizepicks", [_market("prizepicks", "pp-1", "points")]),
             _provider_outcome("underdog", [_market("underdog", "ud-1", "assists")]),
             _provider_outcome(
                 "dabble", [_market("dabble", "db-2", "field_goals_attempted")]
             ),
         ),
-        mapping_outcomes=(
+        athlete_outcomes=(
             _athlete_outcome("prizepicks", "pp-1", 101, 1, "Luka Dončić"),
             _athlete_outcome("underdog", "ud-1", 101, 1, "Luka Dončić"),
             _athlete_outcome("dabble", "db-2", 202, 2, "Gary Trent Jr."),
         ),
-        event_mapping_outcomes=(
+        event_outcomes=(
             _event_outcome("prizepicks", "game-1", "0022500001"),
             _event_outcome("underdog", "game-1", "0022500001"),
             _event_outcome("dabble", "game-1", "0022500001"),
         ),
     )
-    service = PlayerPoolService(RecordedBoardService(board))
+    service = PlayerPoolService(RecordedBoardService(board), CATALOG)
 
     pool = service.get_pool(season="2025-26", game_ids={"0022500001"})
 
@@ -213,19 +278,20 @@ def test_pool_unions_categories_and_provenance_by_canonical_player():
 def test_pool_excludes_nonqualifying_unknown_unjoined_and_other_slate_markets():
     markets = [
         _market("prizepicks", "joined", "points"),
-        _market("prizepicks", "joined", None),
+        _market("prizepicks", "joined", None, unknown_label="Mystery Stat"),
+        _market("prizepicks", "joined", None, unknown_label="New Stat"),
         _market("prizepicks", "joined", "points", status=MarketStatus.SUSPENDED),
         _market("prizepicks", "joined", "points", variant=MarketVariant.ALTERNATE),
         _market("prizepicks", "joined", "points", period=ScoringPeriod.FIRST_HALF),
         _market("prizepicks", "missing", "rebounds"),
         _market("prizepicks", "joined", "assists", event_id="other-game"),
     ]
-    board = SimpleNamespace(
-        provider_outcomes=(_provider_outcome("prizepicks", markets),),
-        mapping_outcomes=(
+    board = _board(
+        (_provider_outcome("prizepicks", markets),),
+        athlete_outcomes=(
             _athlete_outcome("prizepicks", "joined", 101, 1, "Luka Dončić"),
         ),
-        event_mapping_outcomes=(
+        event_outcomes=(
             _event_outcome("prizepicks", "game-1", "0022500001"),
             _event_outcome("prizepicks", "other-game", "0022500002"),
         ),
@@ -233,30 +299,35 @@ def test_pool_excludes_nonqualifying_unknown_unjoined_and_other_slate_markets():
     telemetry = RecordedTelemetry()
 
     pool = PlayerPoolService(
-        RecordedBoardService(board), telemetry_recorder=telemetry
+        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
     ).get_pool(season="2025-26", game_ids={"0022500001"})
 
     assert pool.team_counts == {1: 1}
     assert pool.players[0].market_categories == ("PTS",)
-    assert telemetry.events[-1].unknown_stat_label_count == 1
+    assert telemetry.events[-1].unknown_stat_label_count == 2
     assert telemetry.events[-1].unjoined_athlete_count == 1
 
 
 def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_failure():
-    empty = SimpleNamespace(
-        provider_outcomes=(
+    all_fresh = _board(
+        (_provider_outcome("prizepicks"), _provider_outcome("underdog"))
+    )
+    fresh = PlayerPoolService(RecordedBoardService(all_fresh), CATALOG).get_pool(
+        season="2025-26", game_ids=set()
+    )
+    assert fresh.freshness["status"] == "fresh"
+
+    empty = _board(
+        (
             _provider_outcome("prizepicks"),
             _provider_outcome("underdog", failed=True),
         ),
-        mapping_outcomes=(),
-        event_mapping_outcomes=(),
     )
-    pool = PlayerPoolService(RecordedBoardService(empty)).get_pool(
+    pool = PlayerPoolService(RecordedBoardService(empty), CATALOG).get_pool(
         season="2025-26", game_ids=set()
     )
 
     assert pool.freshness == {
-        "status": "fresh",
         "retrieved_at": NOW.isoformat(),
         "providers": {
             "prizepicks": {"status": "fresh", "retrieved_at": NOW.isoformat()},
@@ -264,13 +335,68 @@ def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_
         },
     }
 
-    failed = SimpleNamespace(
-        provider_outcomes=(_provider_outcome("prizepicks", failed=True),),
-        mapping_outcomes=(),
-        event_mapping_outcomes=(),
-    )
-    unavailable = PlayerPoolService(RecordedBoardService(failed)).get_pool(
+    failed = _board((_provider_outcome("prizepicks", failed=True),))
+    unavailable = PlayerPoolService(RecordedBoardService(failed), CATALOG).get_pool(
         season="2025-26", game_ids=set()
     )
     assert unavailable.freshness["status"] == "unavailable"
     assert unavailable.freshness["retrieved_at"] is None
+
+
+def test_player_pool_market_categories_are_derived_from_the_injected_catalog():
+    service = PlayerPoolService(RecordedBoardService(_board(())), CATALOG)
+
+    assert service.market_categories == {
+        statistic.id: statistic.market_category
+        for statistic in CATALOG.statistics
+        if statistic.market_category is not None
+    }
+
+
+def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
+    client, dependencies
+):
+    market = _market("prizepicks", "pp-1", "points")
+    board = _board(
+        (_provider_outcome("prizepicks", (market,)),),
+        athlete_outcomes=(
+            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Luka Dončić"),
+        ),
+        event_outcomes=(
+            _event_outcome("prizepicks", "game-1", "0022500001"),
+        ),
+    )
+
+    class Catalog:
+        def count_events(self, season):
+            return 1
+
+        def get_freshness(self, season, *, now):
+            return {"last_success_at": NOW.isoformat()}
+
+        def get_events_between(self, season, starts_at, ends_at):
+            return [{
+                "nba_game_id": "0022500001",
+                "scheduled_at": "2026-01-03T00:00:00+00:00",
+                "status_text": "7:00 pm ET",
+                "status_code": 1,
+                "is_postponed": False,
+                "classification": "Regular Season",
+                "away_team": {"id": 1, "name": "Phoenix Suns", "tricode": "PHX"},
+                "home_team": {"id": 2, "name": "Home", "tricode": "HME"},
+            }]
+
+    dependencies.slate_service = SlateService(
+        Catalog(),
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        clock=lambda: NOW,
+        player_pool=PlayerPoolService(RecordedBoardService(board), CATALOG),
+    )
+
+    response = client.get("/api/games/slate?date=2026-01-02")
+
+    assert response.status_code == 200
+    assert response.get_json()["games"][0]["away_team"]["targetable_player_count"] == 1

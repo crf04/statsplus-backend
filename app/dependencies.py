@@ -230,7 +230,7 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
-    player_pool_service = PlayerPoolService(dfs_board_service)
+    player_pool_service = PlayerPoolService(dfs_board_service, statistic_catalog)
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
