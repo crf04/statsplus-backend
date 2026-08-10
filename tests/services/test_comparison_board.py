@@ -1140,6 +1140,155 @@ def test_the_default_ceiling_is_ten_thousand():
     assert service.max_markets == 10000
 
 
+# -- readability before the ceiling ----------------------------------------
+
+
+def _oversized_markets(count=2):
+    return tuple(
+        _market(market_id=f"m-{index}", threshold=str(20 + index))
+        for index in range(count)
+    )
+
+
+def test_an_unreadable_stale_read_over_the_ceiling_is_not_refused_as_too_large():
+    """Readability is settled before size: an outage is not an over-large board.
+
+    Nothing on this read may be compared, so there is no board to be too large
+    of; the read comes back carrying only the bounded evidence the response
+    seam needs to state the outage.
+    """
+
+    service, _ = _service(
+        [
+            _snapshot(
+                "dabble",
+                _oversized_markets(),
+                retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+            )
+        ],
+        max_markets=1,
+    )
+
+    board = _read(service)
+
+    assert board.market_count == 2
+    assert board.unresolved_count == 2
+    assert board.groups == ()
+    assert board.markets == ()
+    assert board.unresolved == ()
+    assert [report.freshness for report in board.provider_reports] == [None]
+    assert [report.status for report in board.provider_reports] == ["complete"]
+
+
+def test_an_unreadable_future_read_over_the_ceiling_is_not_refused_as_too_large():
+    service, _ = _service(
+        [
+            _snapshot(
+                "dabble",
+                _oversized_markets(),
+                retrieved_at=GENERATED_AT + timedelta(seconds=60),
+            )
+        ],
+        max_markets=1,
+    )
+
+    board = _read(service)
+
+    assert board.market_count == 2
+    assert board.unresolved_count == 2
+    assert board.groups == ()
+    assert board.markets == ()
+    assert [report.future_observation for report in board.provider_reports] == [True]
+
+
+def test_a_read_at_the_exact_stale_ceiling_is_readable_and_still_too_large():
+    """The inclusive boundary is readable, so the ceiling decides this read."""
+
+    service, _ = _service(
+        [
+            _snapshot(
+                "dabble",
+                _oversized_markets(),
+                retrieved_at=GENERATED_AT - timedelta(seconds=1800),
+            )
+        ],
+        max_markets=1,
+    )
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        _read(service)
+
+    evidence = error.value.board_evidence
+    assert error.value.observed_market_count == 2
+    assert [report.freshness for report in evidence.provider_reports] == [
+        MarketFreshness.STALE
+    ]
+
+
+def test_one_readable_provider_keeps_the_ceiling_over_an_unreadable_one():
+    """A board with something to state can still be too large to state it."""
+
+    beyond = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    fresh = _snapshot(
+        "prizepicks",
+        (_market(provider="prizepicks", market_id="m-2", threshold="26.0"),),
+    )
+    service, _ = _service([beyond, fresh], max_markets=1)
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        _read(service)
+
+    evidence = error.value.board_evidence
+    assert error.value.observed_market_count == 2
+    assert evidence.market_count == 2
+    assert evidence.unresolved_count == 1
+    assert evidence.group_count == 1
+
+
+def test_an_empty_complete_read_is_readable_under_any_ceiling():
+    """Emptiness is an offering, not an outage, and it is never too large."""
+
+    service, _ = _service([_snapshot("dabble", ())], max_markets=1)
+
+    board = _read(service)
+
+    assert board.market_count == 0
+    assert board.unresolved_count == 0
+    assert [report.freshness for report in board.provider_reports] == [
+        MarketFreshness.FRESH
+    ]
+
+
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_precedence_does_not_depend_on_the_order_providers_were_read(reversed_order):
+    """Which provider answered first cannot decide 400 against 503."""
+
+    unreadable = _snapshot(
+        "dabble",
+        _oversized_markets(),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    also_unreadable = _snapshot(
+        "prizepicks",
+        (_market(provider="prizepicks", market_id="m-9", threshold="26.0"),),
+        retrieved_at=GENERATED_AT + timedelta(seconds=60),
+    )
+    snapshots = [unreadable, also_unreadable]
+    service, _ = _service(
+        list(reversed(snapshots)) if reversed_order else snapshots, max_markets=1
+    )
+
+    board = _read(service)
+
+    assert board.market_count == 3
+    assert board.unresolved_count == 3
+    assert board.groups == ()
+
+
 # -- empty and complete ----------------------------------------------------
 
 

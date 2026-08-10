@@ -1024,6 +1024,19 @@ unresolved counts — which is observed rather than published, so telemetry
 describes the read that actually happened while the caller's details stay as
 bounded as before.
 
+Readability outranks the ceiling. A read no provider could be read from states
+nothing at any size, so refusing it as too large would tell a caller to narrow
+filters that cannot make an outage readable. Such a read is not refused here:
+it is returned carrying only bounded evidence — comparison availability,
+provider reports, disabled providers, and its observed market and unresolved
+counts, with no group, unresolved entry, or retained market — and the response
+seam reports it as the 503 it is. Nothing publishable is dropped, because every
+observation on such a read is beyond its provider's permitted maximum age or
+ahead of the board's own clock and so entered no group. Both seams judge
+readability through one domain authority, `ProviderReport.is_readable` and
+`has_readable_provider`, so the seam that declines to refuse and the seam that
+reports the outage cannot disagree.
+
 ### Published DFS Board
 
 ```text
@@ -1073,7 +1086,9 @@ succeeded but is past its stale-if-error ceiling, or timestamped ahead of the
 board's clock, carries no freshness, enters no comparison, and leaves every one
 of its markets unresolved. A board of only those states nothing, so it is the
 503 it is rather than an empty 200. The ceiling is inclusive, so a snapshot
-exactly at it is still readable. The 503 carries the same bounded Provider
+exactly at it is still readable — and being readable, such a read is subject to
+the market ceiling again, so an over-large board built from it is the 400 it
+was before. The 503 carries the same bounded Provider
 Outcome vocabulary the board reports on success — provider name, status, stable
 failure reason, freshness, future-observation flag, coverage warning codes, and
 cache state. No upstream text, URL, payload, or credential can reach a caller

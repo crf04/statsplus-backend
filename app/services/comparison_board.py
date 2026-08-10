@@ -13,6 +13,13 @@ recommendation, average, preferred market, entry payout, or cross-provider
 fantasy assumption is derived here, and nothing is ever truncated: a read that
 would exceed the configured ceiling is refused with the count it observed and
 the filters that would narrow it.
+
+Readability comes first.  A read no provider could be read from is an outage
+rather than an over-large board, however many markets it observed, so the
+ceiling is applied only to a read something on it could still be published
+from.  The unreadable one is returned as bounded evidence for the response seam
+to report, and both seams judge readability through the one domain authority in
+:func:`app.domain.comparisons.has_readable_provider`.
 """
 
 from __future__ import annotations
@@ -62,6 +69,7 @@ from app.domain.comparisons import (
     exact_seconds,
     market_content_key,
     market_evidence_key,
+    has_readable_provider,
     market_reference,
     observation_evidence_key,
     selection_reference,
@@ -431,18 +439,38 @@ class ComparisonBoardService:
         # The whole read is classified before the ceiling is applied, so the
         # count reported back is what the caller's filters actually observed
         # rather than the point a truncating reader would have stopped at.
+        #
+        # Readability outranks size.  A read no provider could be read from
+        # states nothing at any ceiling, so there is no board for a ceiling to
+        # be exceeded by, and refusing it as too large would tell a caller to
+        # narrow filters that cannot make an outage readable.  Such a read is
+        # returned instead, carrying only the bounded evidence the response seam
+        # needs to report the outage: every observation on it is beyond the
+        # permitted maximum age or ahead of this board's clock, so it holds no
+        # group and nothing publishable was dropped.
         if observed > self.max_markets:
-            raise ComparisonBoardTooLargeError(
-                observed_market_count=observed,
-                market_limit=self.max_markets,
-                board_evidence=BoardReadEvidence(
-                    availability=availability,
-                    provider_reports=reports,
-                    disabled_providers=board.disabled_providers,
-                    group_count=len(members),
-                    market_count=observed,
-                    unresolved_count=len(unresolved),
-                ),
+            if has_readable_provider(reports):
+                raise ComparisonBoardTooLargeError(
+                    observed_market_count=observed,
+                    market_limit=self.max_markets,
+                    board_evidence=BoardReadEvidence(
+                        availability=availability,
+                        provider_reports=reports,
+                        disabled_providers=board.disabled_providers,
+                        group_count=len(members),
+                        market_count=observed,
+                        unresolved_count=len(unresolved),
+                    ),
+                )
+            return ComparisonBoard(
+                season=query.season,
+                generated_at=observed_at,
+                availability=availability,
+                provider_reports=reports,
+                disabled_providers=board.disabled_providers,
+                filters=filters,
+                market_count=observed,
+                unresolved_count=len(unresolved),
             )
 
         groups = tuple(

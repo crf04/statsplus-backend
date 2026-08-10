@@ -1011,6 +1011,45 @@ class ProviderReport:
             raise ValueError("provider report cache must be BoardCacheState or None")
         object.__setattr__(self, "warning_codes", tuple(sorted(self.warning_codes)))
 
+    @property
+    def is_readable(self) -> bool:
+        """Whether this provider contributed a snapshot the board could read.
+
+        A complete, partial, permitted-stale, or empty-complete answer is
+        readable; emptiness is a fact about the provider's current offerings,
+        not an outage.  A retrieval that succeeded is not by itself readable:
+        an observation past its provider's stale-if-error ceiling, or
+        timestamped ahead of the board's own clock, resolves no market at all.
+
+        Both are read from this report's own typed evidence -- the freshness the
+        board derived and the future-observation flag -- never from exclusion
+        text.  A complete or partial outcome always carries a snapshot and so
+        always carries an observation, so an absent freshness means exactly that
+        the observation was beyond the permitted maximum age.
+        """
+
+        return (
+            self.status in READABLE_PROVIDER_STATUSES
+            and not self.future_observation
+            and self.freshness is not None
+        )
+
+
+#: Provider outcome statuses that carry a snapshot at all.  Anything else
+#: contributed no observation for the board to judge.
+READABLE_PROVIDER_STATUSES = frozenset({"complete", "partial"})
+
+
+def has_readable_provider(reports: Iterable[ProviderReport]) -> bool:
+    """Whether any provider contributed a snapshot the board could read.
+
+    This is the single authority both the comparison assembly and the published
+    response consult, so the seam that decides a board is unusable and the seam
+    that reports the outage can never disagree about what readable means.
+    """
+
+    return any(report.is_readable for report in reports)
+
 
 @dataclass(frozen=True, slots=True)
 class ComparisonFilters:
@@ -1122,6 +1161,7 @@ class ComparisonBoard:
     disabled_providers: tuple[str, ...] = ()
     filters: ComparisonFilters = ComparisonFilters()
     market_count: int = 0
+    unresolved_count: int | None = None
     contract_version: str = "1"
 
     def __post_init__(self) -> None:
@@ -1145,6 +1185,12 @@ class ComparisonBoard:
             raise ValueError("retained markets must be deterministically ordered")
         if markets and len(markets) != self.market_count:
             raise ValueError("a board must retain every market it counted")
+        # A read the response seam will report as an outage retains nothing it
+        # would have published, so what it observed is stated as counts alone.
+        if self.unresolved_count is None:
+            object.__setattr__(self, "unresolved_count", len(unresolved))
+        elif unresolved and self.unresolved_count != len(unresolved):
+            raise ValueError("a board must retain every unresolved market it counted")
         reports = tuple(self.provider_reports)
         if tuple(sorted(reports, key=lambda report: report.provider)) != reports:
             raise ValueError("provider reports must be deterministically ordered")
@@ -1239,13 +1285,14 @@ class BoardReadEvidence:
             disabled_providers=board.disabled_providers,
             group_count=len(board.groups),
             market_count=board.market_count,
-            unresolved_count=len(board.unresolved),
+            unresolved_count=board.unresolved_count,
         )
 
 
 __all__ = [
     "MAX_EXACT_DIFFERENCE_SPAN",
     "NORMALIZED_DECIMAL_PLACE_LIMIT",
+    "READABLE_PROVIDER_STATUSES",
     "REFERENCE_VERSION",
     "SUPPORTED_NARROWING_FILTERS",
     "BoardAppearance",
@@ -1284,6 +1331,7 @@ __all__ = [
     "exact_difference",
     "exact_scaled_seconds",
     "exact_seconds",
+    "has_readable_provider",
     "market_content_key",
     "market_evidence_key",
     "market_reference",

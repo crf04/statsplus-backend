@@ -580,6 +580,121 @@ def test_an_oversized_board_is_refused_with_its_observed_count():
     }
 
 
+def test_an_oversized_read_no_provider_could_be_read_from_is_a_sanitized_503():
+    """Readability outranks size: an outage is never reported as a too-large board."""
+
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    comparison_service, _ = _service([beyond], max_markets=1)
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError) as error:
+        service.respond(board_request())
+
+    outcome = error.value.public_details["provider_outcomes"][0]
+    assert error.value.status_code == 503
+    assert outcome["status"] == "complete"
+    assert outcome["freshness"] is None
+    assert outcome["future_observation"] is False
+
+
+def test_an_oversized_future_dated_read_is_a_sanitized_503():
+    future = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT + timedelta(seconds=60),
+    )
+    comparison_service, _ = _service([future], max_markets=1)
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError) as error:
+        service.respond(board_request())
+
+    assert error.value.public_details["provider_outcomes"][0][
+        "future_observation"
+    ] is True
+
+
+def test_an_oversized_read_with_one_readable_provider_is_still_too_large():
+    beyond = _snapshot(
+        "dabble",
+        (_market(market_id="m-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    fresh = _snapshot(
+        "prizepicks",
+        (_market(provider="prizepicks", market_id="m-2", threshold="26.0"),),
+    )
+    comparison_service, _ = _service([beyond, fresh], max_markets=1)
+    service = build_service(comparison_service)
+
+    with pytest.raises(ComparisonBoardTooLargeError) as error:
+        service.respond(board_request())
+
+    assert error.value.status_code == 400
+    assert error.value.public_details["observed_market_count"] == 2
+
+
+def test_an_oversized_outage_is_observed_as_one_unavailable_request():
+    """Telemetry counts the outage the caller received, with what was observed."""
+
+    recorder = RecordingRecorder()
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    comparison_service, _ = _service([beyond], max_markets=1)
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError):
+        observed(
+            service,
+            lambda observation: service.respond(
+                board_request(), observation=observation
+            ),
+            status_code=503,
+            recorder=recorder,
+        )
+
+    event = recorder.events[0]
+    assert (event.outcome, event.status_code) == ("unavailable", 503)
+    assert event.market_count == 2
+    assert event.unresolved_count == 2
+    assert event.group_count == 0
+    assert event.provider_status_counts == (("complete", 1),)
+    assert event.freshness_counts == (("unknown", 1),)
+
+
+def test_an_empty_complete_read_under_a_tight_ceiling_is_still_published():
+    empty = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(),
+        coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
+        retrieved_at=RETRIEVED_AT,
+    )
+    comparison_service, _ = _service([empty], max_markets=1)
+    service = build_service(comparison_service)
+
+    representation = service.respond(board_request())
+
+    assert representation.status_code == 200
+    assert representation.payload["market_count"] == 0
+
+
 # -- telemetry -------------------------------------------------------------
 
 

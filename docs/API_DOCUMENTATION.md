@@ -569,10 +569,10 @@ recommendation, average, preferred market, or entry payout.
 | `200` | At least one provider produced a *readable* snapshot — complete, partial, permitted-stale, or empty-complete. An empty complete snapshot is a valid empty board, not an outage. |
 | `304` | The caller's `If-None-Match` already holds an equivalent board. |
 | `400 invalid_input` | A filter cannot be parsed or is outside a supported vocabulary. |
-| `400 board_too_large` | The post-filter board exceeds `DFS_COMPARISON_MAX_MARKETS`. Nothing is truncated; `details` states `observed_market_count`, `market_limit`, and `supported_filters`. |
+| `400 board_too_large` | The post-filter board exceeds `DFS_COMPARISON_MAX_MARKETS` *and* at least one provider was readable. Nothing is truncated; `details` states `observed_market_count`, `market_limit`, and `supported_filters`. |
 | `401` | Missing or invalid Firebase credentials. |
 | `404 dfs_board_disabled` | The deployment does not publish the board. |
-| `503 provider_unavailable` | No provider produced a readable snapshot. `details` states the sanitized Provider Outcomes and the disabled providers. |
+| `503 provider_unavailable` | No provider produced a readable snapshot, whatever the read's size. `details` states the sanitized Provider Outcomes and the disabled providers. |
 
 A snapshot is *readable* only while the board can still compare it. A retrieval
 that succeeded but is older than that provider's `DFS_<PROVIDER>_CACHE_STALE_IF_ERROR_SECONDS`
@@ -580,6 +580,11 @@ ceiling, or timestamped ahead of the board's own clock, resolves no market at
 all — every market it carried is `stale_snapshot` or `future_snapshot` — so a
 board carrying only those answers `503` rather than a `200` stating nothing. The
 maximum age is inclusive: a snapshot exactly at the ceiling is still readable.
+
+Readability is decided before size. A read no provider could be read from is
+`503` however many markets it observed, because narrowing filters cannot make an
+outage readable; `board_too_large` is only ever returned for a read at least one
+provider *was* readable on.
 Each sanitized Provider Outcome in the `503` body therefore also states its
 `freshness` (`fresh`, `stale`, or `null`) and `future_observation`, so a caller
 can tell a failed retrieval from an unreadable one.
@@ -605,7 +610,8 @@ is added rather than replaced, so a `Vary: Origin` from CORS survives beside it.
 ### Executable response fixtures
 
 The complete-success, mixed partial/stale, empty, oversized, unauthenticated,
-disabled, total-failure, and unreadable-snapshot responses are recorded verbatim in
+disabled, total-failure, unreadable-snapshot, and unreadable-oversized responses
+are recorded verbatim in
 `tests/fixtures/dfs_board/` and asserted byte-for-byte by
 `tests/test_dfs_routes.py`, so these examples cannot drift from behavior:
 
@@ -619,6 +625,7 @@ disabled, total-failure, and unreadable-snapshot responses are recorded verbatim
 | Disabled | `tests/fixtures/dfs_board/disabled.json` |
 | Total failure | `tests/fixtures/dfs_board/total_failure.json` |
 | Unreadable snapshot | `tests/fixtures/dfs_board/unusable_snapshot.json` |
+| Unreadable and over the ceiling | `tests/fixtures/dfs_board/unreadable_oversized.json` |
 
 Rerecord them with `RECORD_BOARD_FIXTURES=1 pytest tests/test_dfs_routes.py`
 after an intended contract change, and review the diff.

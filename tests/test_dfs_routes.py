@@ -353,6 +353,25 @@ def test_a_board_no_provider_could_be_read_from_is_a_sanitized_503(make_board_cl
     assert_fixture("unusable_snapshot", response.get_json())
 
 
+def test_an_oversized_unreadable_board_is_the_same_sanitized_503(make_board_client):
+    """A read no provider could be read from is an outage at any ceiling."""
+
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    client, _ = make_board_client([beyond], max_markets=1)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 503
+    assert_fixture("unreadable_oversized", response.get_json())
+
+
 def test_a_total_provider_failure_is_a_sanitized_503(make_board_client):
     client, _ = make_board_client(
         failures={
@@ -506,6 +525,30 @@ def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(
     assert event["disabled_provider_count"] == 1
     assert event["group_count"] == 1
     assert event["unresolved_count"] == 0
+
+
+def test_an_oversized_unreadable_read_is_observed_as_one_unavailable_event(
+    make_board_client, board_events
+):
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    client, _ = make_board_client([beyond], max_markets=1)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 503
+    assert board_events() == [("unavailable", 503)]
+    event = telemetry.get_recorded_board_request_events()[0]
+    assert event["market_count"] == 2
+    assert event["unresolved_count"] == 2
+    assert event["group_count"] == 0
+    assert event["freshness_counts"] == {"unknown": 1}
 
 
 def test_a_board_event_carries_no_identity_or_upstream_text(

@@ -47,6 +47,7 @@ from app.domain.comparisons import (
     BoardReadEvidence,
     ComparisonBoard,
     ComparisonGroup,
+    has_readable_provider,
 )
 from app.errors import AppError, InvalidInputError, ProviderUnavailableError
 from app.services.comparison_board import ComparisonBoardTooLargeError
@@ -69,8 +70,6 @@ BOARD_CONTRACT_VERSION = "1"
 #: Fields derived from the instant the board was read.  They belong in the
 #: response and not in the identity of the representation.
 _OBSERVATION_FIELDS = frozenset({"generated_at", "observed_at", "age_seconds"})
-
-_USABLE_PROVIDER_STATUSES = frozenset({"complete", "partial"})
 
 
 class DFSBoardDisabledError(AppError):
@@ -357,7 +356,10 @@ class DFSBoardResponseService:
         if observation is not None:
             observation.observe(BoardReadEvidence.of(board))
 
-        if not _has_usable_provider(board):
+        # Readability is settled before anything is published, and the board
+        # service has already declined to refuse an unreadable read as too
+        # large, so an outage is always reported as the outage it is.
+        if not has_readable_provider(board.provider_reports):
             raise DFSBoardUnavailableError(
                 provider_outcomes=[
                     _provider_outcome(report) for report in board.provider_reports
@@ -469,39 +471,6 @@ def _without_observation(value: Any) -> Any:
 
 
 # -- outcomes --------------------------------------------------------------
-
-
-def _has_usable_provider(board: ComparisonBoard) -> bool:
-    """Whether any provider contributed a snapshot this board could read.
-
-    A complete, partial, permitted-stale, or empty-complete snapshot all count.
-    Emptiness is a fact about the providers' current offerings, not an outage.
-
-    A retrieval that succeeded is not by itself a usable board.  An observation
-    past its provider's stale-if-error ceiling, or timestamped ahead of the
-    board's own clock, enters no comparison and leaves every one of its markets
-    unresolved, so a board carrying only those states nothing and is reported as
-    the outage it is.  Both are read from the report's own typed evidence --
-    :class:`~app.domain.comparisons.MarketFreshness` and the future-observation
-    flag the board already derived -- never from exclusion text.
-    """
-
-    return any(_is_usable(report) for report in board.provider_reports)
-
-
-def _is_usable(report: Any) -> bool:
-    """Whether one provider report is a snapshot the board could read.
-
-    A complete or partial outcome always carries a snapshot, so it always
-    carries an observation: freshness is absent exactly when the observation is
-    beyond the permitted maximum age or ahead of the board's clock.
-    """
-
-    return (
-        report.status in _USABLE_PROVIDER_STATUSES
-        and not report.future_observation
-        and report.freshness is not None
-    )
 
 
 def _failure_outcome(error: BaseException) -> str:
