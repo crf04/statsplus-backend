@@ -381,6 +381,9 @@ class PlayerGameLogService:
     def _growth_hidden_by_unjoined_identity(
         result: _CanonicalizationResult, prior: PlayerGameLogFreshness
     ) -> bool:
+        identity_source_row_count = (
+            result.source_row_count - result.unsupported_phase_count
+        )
         has_unjoined_identity = bool(
             result.unjoined_athlete_count
             or result.unjoined_event_count
@@ -390,7 +393,7 @@ class PlayerGameLogService:
             has_unjoined_identity
             and prior.retrieved_at is not None
             and prior.row_count > 0
-            and result.source_row_count > prior.source_row_count
+            and identity_source_row_count > prior.source_row_count
             and len(result.records) <= prior.row_count
         )
 

@@ -519,7 +519,8 @@ row whose governed catalog event is outside the explicit `Regular Season` and
 `unsupported_phase_count`; it never becomes a stored fact. Stable snapshots
 and new source growth containing only governed unsupported-phase exclusions
 may republish and advance freshness; those rows are outside canonical identity
-coverage rather than failed joins. A
+coverage rather than failed joins, even when a previously observed unjoined
+identity remains stable. A
 nonempty snapshot that yields no canonical rows fails the refresh before
 publication. For every non-postponed governed `Regular Season` or `Playoffs`
 event that is final and scheduled no later than the source observation time,

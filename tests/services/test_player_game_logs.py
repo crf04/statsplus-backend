@@ -1300,6 +1300,46 @@ def test_new_governed_play_in_rows_do_not_block_valid_snapshot_freshness(
     assert telemetry.events[0].rejected_publication_count == 0
 
 
+def test_play_in_growth_does_not_destabilize_a_prior_unjoined_identity(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    initial_provider = _RecordedSeasonProvider()
+    initial_provider.frame.loc[2, "PLAYER_ID"] = 999
+    first = _service(repository, initial_provider).refresh(SEASON)
+    prior_rows = repository.list_player_rows(SEASON, 101)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Play-In Tournament")
+    )
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat(
+            [initial_provider.frame, _unsupported_phase_row("0052500001")],
+            ignore_index=True,
+        )
+    )
+    telemetry = _RecordingTelemetry()
+    refreshed_at = RETRIEVED_AT + timedelta(hours=1)
+
+    second = _service(
+        repository, provider, telemetry_recorder=telemetry
+    ).refresh(SEASON, now=refreshed_at)
+
+    assert first.row_count == second.row_count == 21
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=refreshed_at,
+        row_count=21,
+        source_row_count=23,
+    )
+    assert telemetry.events[0].unjoined_athlete_count == 1
+    assert telemetry.events[0].unsupported_phase_count == 1
+    assert telemetry.events[0].published_row_count == 21
+    assert telemetry.events[0].rejected_publication_count == 0
+
+
 @pytest.mark.parametrize("failure_phase", ["Regular Season", "Playoffs"])
 def test_either_phase_provider_failure_preserves_the_prior_atomic_publication(
     tmp_path, failure_phase

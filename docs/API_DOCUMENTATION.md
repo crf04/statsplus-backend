@@ -470,7 +470,8 @@ identities. Rows governed as Play-In or another phase outside the explicit
 `Regular Season`/`Playoffs` set are excluded under
 `unsupported_phase_count`. Stable exclusions and source growth containing only
 those governed unsupported phases may republish and advance freshness; they do
-not represent an athlete, game, or team identity-join failure.
+not represent an athlete, game, or team identity-join failure, including when
+a previously observed unjoined identity remains stable.
 Every completed, non-postponed governed `Regular Season` or `Playoffs` game
 through the source observation time must have logs from its exact phase for
 both exact teams and at least the configured
