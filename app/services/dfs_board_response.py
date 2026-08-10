@@ -1,0 +1,409 @@
+"""Assemble one published DFS Board representation.
+
+The route above this seam does no deciding.  Everything that determines what a
+caller receives -- whether the board is published at all, whether it is usable,
+the exact JSON of version 1, the representation ETag, the conditional outcome,
+and the bounded telemetry describing all of it -- is decided here, once, from
+the deterministic :class:`~app.domain.comparisons.ComparisonBoard` the
+comparison service returns.
+
+Two rules shape the serialization.  Every exact decimal is written as a string
+in the scale the provider published it in, because a JSON number would silently
+re-round a threshold the board went to some trouble to keep exact.  Every
+timestamp is timezone-aware UTC.  Nothing is added: the payload is the board's
+own retained evidence and provenance, and the only facts it invents are the
+contract version and the references the board already derived.
+
+The ETag identifies the board's *content*, not the instant it was read.  The
+observation time and the ages derived from it are excluded from it deliberately,
+so a caller revalidating an unchanged board gets 304 instead of an identical
+board that differs only in how old it says it is.  That is why the tag is weak.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from collections import Counter
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from typing import Any, Callable
+
+from app.config.settings import RuntimeSettings
+from app.domain.comparisons import ComparisonBoard, ComparisonGroup
+from app.errors import AppError, ProviderUnavailableError
+from app.services.comparison_board import ComparisonBoardTooLargeError
+from app.services.dfs_board_query import BoardRequest
+from app.utils.telemetry import (
+    BoardRequestEvent,
+    current_request_id,
+    record_board_request_event,
+)
+
+#: The public response contract version.  It is independent of the internal
+#: reference and cache algorithm versions, so those may change without
+#: reinterpreting a published board.
+BOARD_CONTRACT_VERSION = "1"
+
+#: Fields derived from the instant the board was read.  They belong in the
+#: response and not in the identity of the representation.
+_OBSERVATION_FIELDS = frozenset({"generated_at", "observed_at", "age_seconds"})
+
+_USABLE_PROVIDER_STATUSES = frozenset({"complete", "partial"})
+
+
+class DFSBoardDisabledError(AppError):
+    """The DFS Board is not published by this deployment's configuration."""
+
+    status_code = 404
+    code = "dfs_board_disabled"
+    default_message = "The DFS Board is not enabled on this deployment."
+
+
+class DFSBoardUnavailableError(ProviderUnavailableError):
+    """No enabled provider produced a usable snapshot for this read.
+
+    The public payload is the same bounded Provider Outcome vocabulary the
+    board reports on success -- statuses, stable failure reasons, coverage
+    warning codes, and cache states -- so a caller learns which provider failed
+    and how, without any upstream text, URL, or credential reaching them.
+    """
+
+    default_message = (
+        "No DFS provider produced a usable snapshot. Please try again later."
+    )
+
+    def __init__(
+        self,
+        *,
+        provider_outcomes: list[dict[str, Any]],
+        disabled_providers: list[str],
+        message: str | None = None,
+    ) -> None:
+        self.provider_outcomes = provider_outcomes
+        self.disabled_providers = disabled_providers
+        super().__init__(message)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        return {
+            "contract_version": BOARD_CONTRACT_VERSION,
+            "provider_outcomes": self.provider_outcomes,
+            "disabled_providers": self.disabled_providers,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BoardRepresentation:
+    """One board response: its status, its body, and its entity tag."""
+
+    status_code: int
+    etag: str
+    payload: dict[str, Any] | None = None
+
+    @property
+    def is_not_modified(self) -> bool:
+        return self.status_code == 304
+
+
+class DFSBoardResponseService:
+    """Decide and assemble exactly what one board request receives."""
+
+    def __init__(
+        self,
+        comparison_board_service: Any,
+        *,
+        settings: RuntimeSettings,
+        monotonic: Callable[[], float] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        recorder: Callable[[BoardRequestEvent], None] | None = None,
+    ) -> None:
+        if not callable(getattr(comparison_board_service, "get_comparisons", None)):
+            raise TypeError("the board response service requires a comparison board")
+        self.comparison_board_service = comparison_board_service
+        self.settings = settings
+        self.monotonic = monotonic or time.monotonic
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.recorder = recorder or record_board_request_event
+
+    # -- publication -------------------------------------------------------
+
+    @property
+    def is_published(self) -> bool:
+        """Whether this deployment publishes the board at all.
+
+        Both halves are required everywhere: the feature flag says the board is
+        meant to be exposed, and the registry says which providers may be
+        called.  Either one alone publishes nothing.
+        """
+
+        return bool(
+            self.settings.features.dfs_board_enabled
+            and self.settings.providers.dfs_enabled_providers
+        )
+
+    # -- public seam -------------------------------------------------------
+
+    def respond(
+        self,
+        request: BoardRequest,
+        *,
+        if_none_match: str | None = None,
+    ) -> BoardRepresentation:
+        """Assemble one board response, or raise its public failure."""
+
+        if not self.is_published:
+            raise DFSBoardDisabledError()
+
+        started_at = self.clock().astimezone(timezone.utc).isoformat()
+        started = self.monotonic()
+        try:
+            board = self.comparison_board_service.get_comparisons(
+                request.query, filters=request.filters
+            )
+        except ComparisonBoardTooLargeError as error:
+            # The refusal already knows what it observed and what would narrow
+            # it; the only thing added here is that it happened and how long it
+            # took, because a board refused for size is an operational signal.
+            self._record(
+                board=None,
+                outcome="too_large",
+                status_code=error.status_code,
+                started=started,
+                started_at=started_at,
+            )
+            raise
+
+        if not _has_usable_provider(board):
+            outcomes = [_provider_outcome(report) for report in board.provider_reports]
+            self._record(
+                board=board,
+                outcome="unavailable",
+                status_code=503,
+                started=started,
+                started_at=started_at,
+            )
+            raise DFSBoardUnavailableError(
+                provider_outcomes=outcomes,
+                disabled_providers=list(board.disabled_providers),
+            )
+
+        payload = serialize_board(board)
+        etag = board_etag(payload)
+        if _matches(if_none_match, etag):
+            self._record(
+                board=board,
+                outcome="not_modified",
+                status_code=304,
+                started=started,
+                started_at=started_at,
+            )
+            return BoardRepresentation(status_code=304, etag=etag)
+
+        self._record(
+            board=board,
+            outcome="served",
+            status_code=200,
+            started=started,
+            started_at=started_at,
+        )
+        return BoardRepresentation(status_code=200, etag=etag, payload=payload)
+
+    # -- telemetry ---------------------------------------------------------
+
+    def _record(
+        self,
+        *,
+        board: ComparisonBoard | None,
+        outcome: str,
+        status_code: int,
+        started: float,
+        started_at: str,
+    ) -> None:
+        """Emit one bounded aggregate for this read, whatever it produced."""
+
+        reports = () if board is None else board.provider_reports
+        availability = "unknown" if board is None else "available"
+        if board is not None and not board.availability.available:
+            unavailable = board.availability.unavailable_catalogs
+            availability = unavailable[0].reason.value if unavailable else "available"
+        request_id = current_request_id()
+        self.recorder(
+            BoardRequestEvent(
+                duration_ms=max(0.0, (self.monotonic() - started) * 1000.0),
+                outcome=outcome,
+                status_code=status_code,
+                comparison_availability=availability,
+                provider_status_counts=_counts(report.status for report in reports),
+                failure_reason_counts=_counts(
+                    report.reason for report in reports if report.reason
+                ),
+                freshness_counts=_counts(
+                    "unknown" if report.freshness is None else report.freshness.value
+                    for report in reports
+                ),
+                cache_counts=_counts(
+                    "unset"
+                    if report.cache is None or report.cache.status is None
+                    else report.cache.status
+                    for report in reports
+                ),
+                group_count=0 if board is None else len(board.groups),
+                market_count=0 if board is None else board.market_count,
+                unresolved_count=0 if board is None else len(board.unresolved),
+                disabled_provider_count=(
+                    0 if board is None else len(board.disabled_providers)
+                ),
+                started_at=started_at,
+                request_id=None if request_id == "-" else request_id,
+            )
+        )
+
+
+# -- serialization ---------------------------------------------------------
+
+
+def serialize_board(board: ComparisonBoard) -> dict[str, Any]:
+    """The complete version 1 JSON body for one comparison board."""
+
+    return {
+        "contract_version": BOARD_CONTRACT_VERSION,
+        "generated_at": _encode(board.generated_at),
+        "season": board.season,
+        "filters": _encode(board.filters),
+        "market_count": board.market_count,
+        "comparison_availability": _encode(board.availability),
+        "comparison_groups": [_group(group) for group in board.groups],
+        "unresolved_markets": [_encode(entry) for entry in board.unresolved],
+        "markets": [_encode(market) for market in board.markets],
+        "provider_reports": [_encode(report) for report in board.provider_reports],
+        "disabled_providers": list(board.disabled_providers),
+    }
+
+
+def board_etag(payload: dict[str, Any]) -> str:
+    """A weak entity tag over everything but the instant of observation."""
+
+    identity = json.dumps(
+        _without_observation(payload), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _group(group: ComparisonGroup) -> dict[str, Any]:
+    """One comparison group, led by the reference its members cite."""
+
+    return {
+        "comparison_reference": group.reference,
+        "key": _encode(group.key),
+        "summary": _encode(group.summary),
+        "members": [_encode(member) for member in group.members],
+    }
+
+
+def _encode(value: Any) -> Any:
+    """One immutable board value as its JSON-ready, exact equivalent."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Decimal):
+        # Written in the scale the provider published, never through a float
+        # and never in exponent notation.
+        return format(value, "f")
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if is_dataclass(value):
+        return {
+            field.name: _encode(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, (tuple, list)):
+        return [_encode(item) for item in value]
+    raise TypeError(f"a board response cannot serialize {type(value).__name__}")
+
+
+def _without_observation(value: Any) -> Any:
+    """The same payload with every observation-time field removed."""
+
+    if isinstance(value, dict):
+        return {
+            key: _without_observation(item)
+            for key, item in value.items()
+            if key not in _OBSERVATION_FIELDS
+        }
+    if isinstance(value, list):
+        return [_without_observation(item) for item in value]
+    return value
+
+
+# -- outcomes --------------------------------------------------------------
+
+
+def _has_usable_provider(board: ComparisonBoard) -> bool:
+    """Whether any provider contributed a snapshot this board could read.
+
+    A complete, partial, permitted-stale, or empty-complete snapshot all count.
+    Emptiness is a fact about the providers' current offerings, not an outage.
+    """
+
+    return any(
+        report.status in _USABLE_PROVIDER_STATUSES
+        for report in board.provider_reports
+    )
+
+
+def _provider_outcome(report: Any) -> dict[str, Any]:
+    """One provider's bounded, sanitized outcome for a 503 body."""
+
+    return {
+        "provider": report.provider,
+        "status": report.status,
+        "reason": report.reason,
+        "warning_codes": list(report.warning_codes),
+        "cache_status": None if report.cache is None else report.cache.status,
+        "cache_failure_reason": (
+            None if report.cache is None else report.cache.failure_reason
+        ),
+    }
+
+
+def _counts(values: Any) -> tuple[tuple[str, int], ...]:
+    """Bounded label counts in a deterministic order."""
+
+    return tuple(sorted(Counter(values).items()))
+
+
+def _matches(if_none_match: str | None, etag: str) -> bool:
+    """Whether a conditional request already holds this representation.
+
+    The tag is weak, so the comparison is weak too: a ``W/`` prefix and the
+    quoting around a tag are syntax, not identity.
+    """
+
+    if not if_none_match:
+        return False
+    candidates = [candidate.strip() for candidate in if_none_match.split(",")]
+    for candidate in candidates:
+        if candidate == "*":
+            return True
+        if candidate.startswith(("W/", "w/")):
+            candidate = candidate[2:]
+        if candidate.strip().strip('"') == etag:
+            return True
+    return False
+
+
+__all__ = [
+    "BOARD_CONTRACT_VERSION",
+    "BoardRepresentation",
+    "DFSBoardDisabledError",
+    "DFSBoardResponseService",
+    "DFSBoardUnavailableError",
+    "board_etag",
+    "serialize_board",
+]

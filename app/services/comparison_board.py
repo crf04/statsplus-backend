@@ -112,6 +112,21 @@ class ComparisonBoardTooLargeError(AppError):
         self.supported_filters = tuple(supported_filters)
         super().__init__(message)
 
+    @property
+    def public_details(self) -> dict[str, Any]:
+        """What the read observed and what would make it smaller.
+
+        A refusal is only actionable if the caller learns both, so the count is
+        the whole post-filter board rather than the point a truncating reader
+        would have stopped at.
+        """
+
+        return {
+            "observed_market_count": self.observed_market_count,
+            "market_limit": self.market_limit,
+            "supported_filters": list(self.supported_filters),
+        }
+
 
 def _catalog_availability(
     catalog: Any,

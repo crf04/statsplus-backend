@@ -109,10 +109,12 @@ _retry_local = threading.local()
 _request_id_local = threading.local()
 _event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
+_board_request_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _buffer_lock = threading.Lock()
 
 _provider_events_total = 0
 _board_events_total = 0
+_board_request_events_total = 0
 _provider_failures: dict[tuple[str, str], int] = {}
 _application_failures: dict[str, int] = {}
 _cache_counts: dict[str, dict[str, int]] = {}
@@ -222,6 +224,146 @@ class BoardTelemetryEvent:
             raise ValueError("board telemetry started_at must be timezone-aware")
         if self.request_id is not None and not is_valid_request_id(self.request_id):
             raise ValueError("board telemetry request_id is invalid")
+
+
+#: Closed label vocabularies for one published board read.  Everything an
+#: operator can group a board request by is one of these strings: no athlete,
+#: event, market, selection, or provider-source ID, and no upstream text, can
+#: become a metric dimension.
+BOARD_REQUEST_OUTCOMES = frozenset(
+    {"served", "not_modified", "unavailable", "too_large"}
+)
+BOARD_PROVIDER_STATUSES = frozenset({"complete", "partial", "failed"})
+BOARD_FAILURE_REASONS = frozenset(
+    {
+        "timeout",
+        "deadline_exceeded",
+        "rate_limited",
+        "access_denied",
+        "upstream_error",
+        "malformed_response",
+    }
+)
+BOARD_FRESHNESS_STATES = frozenset({"fresh", "stale", "unknown"})
+BOARD_CACHE_STATES = frozenset(
+    {CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR, "unset"}
+)
+BOARD_AVAILABILITY_STATES = frozenset(
+    {
+        "available",
+        "catalog_missing",
+        "catalog_stale",
+        "catalog_not_configured",
+        # A read refused before a board existed reports no catalog state.
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True)
+class BoardRequestEvent:
+    """Bounded aggregate telemetry for one published DFS Board request.
+
+    It carries latency, the HTTP outcome, the provider outcomes and reasons
+    behind it, the cache and freshness states the board was served from, and
+    the coverage counts -- all as counts over closed label vocabularies.
+    """
+
+    duration_ms: float
+    outcome: str
+    status_code: int
+    comparison_availability: str
+    provider_status_counts: tuple[tuple[str, int], ...] = ()
+    failure_reason_counts: tuple[tuple[str, int], ...] = ()
+    freshness_counts: tuple[tuple[str, int], ...] = ()
+    cache_counts: tuple[tuple[str, int], ...] = ()
+    group_count: int = 0
+    market_count: int = 0
+    unresolved_count: int = 0
+    disabled_provider_count: int = 0
+    started_at: str = ""
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.duration_ms, (int, float)) or self.duration_ms < 0:
+            raise ValueError("board request duration must be non-negative")
+        if self.outcome not in BOARD_REQUEST_OUTCOMES:
+            raise ValueError("board request outcome must be a bounded label")
+        if self.comparison_availability not in BOARD_AVAILABILITY_STATES:
+            raise ValueError("board request availability must be a bounded label")
+        if not isinstance(self.status_code, int) or isinstance(self.status_code, bool):
+            raise ValueError("board request status code must be an integer")
+        for labels, allowed in (
+            (self.provider_status_counts, BOARD_PROVIDER_STATUSES),
+            (self.failure_reason_counts, BOARD_FAILURE_REASONS),
+            (self.freshness_counts, BOARD_FRESHNESS_STATES),
+            (self.cache_counts, BOARD_CACHE_STATES),
+        ):
+            if any(
+                label not in allowed or not isinstance(count, int) or count < 1
+                for label, count in labels
+            ):
+                raise ValueError("board request labels must be stable and bounded")
+        if any(
+            not isinstance(count, int) or count < 0
+            for count in (
+                self.group_count,
+                self.market_count,
+                self.unresolved_count,
+                self.disabled_provider_count,
+            )
+        ):
+            raise ValueError("board request counts must be non-negative")
+        try:
+            parsed = datetime.fromisoformat(self.started_at.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("board request started_at must be ISO-8601") from error
+        if parsed.tzinfo is None:
+            raise ValueError("board request started_at must be timezone-aware")
+        if self.request_id is not None and not is_valid_request_id(self.request_id):
+            raise ValueError("board request request_id is invalid")
+
+
+def record_board_request_event(event: BoardRequestEvent) -> None:
+    """Record one scalar-only board request aggregate in its bounded buffer."""
+
+    payload = {
+        "started_at": event.started_at,
+        "duration_ms": float(event.duration_ms),
+        "request_id": event.request_id,
+        "outcome": event.outcome,
+        "status_code": event.status_code,
+        "comparison_availability": event.comparison_availability,
+        "provider_status_counts": dict(event.provider_status_counts),
+        "failure_reason_counts": dict(event.failure_reason_counts),
+        "freshness_counts": dict(event.freshness_counts),
+        "cache_counts": dict(event.cache_counts),
+        "group_count": event.group_count,
+        "market_count": event.market_count,
+        "unresolved_count": event.unresolved_count,
+        "disabled_provider_count": event.disabled_provider_count,
+    }
+    logger.info(
+        "board_request outcome=%s status=%d duration_ms=%.1f availability=%s "
+        "groups=%d markets=%d",
+        event.outcome,
+        event.status_code,
+        event.duration_ms,
+        event.comparison_availability,
+        event.group_count,
+        event.market_count,
+    )
+    with _buffer_lock:
+        global _board_request_events_total
+        _board_request_event_buffer.append(payload)
+        _board_request_events_total += 1
+
+
+def get_recorded_board_request_events() -> list[dict[str, Any]]:
+    """Return a snapshot of the bounded board request aggregates."""
+
+    with _buffer_lock:
+        return list(_board_request_event_buffer)
 
 
 class BoardTelemetryRecorder:
@@ -478,6 +620,8 @@ def snapshot_metrics() -> dict[str, Any]:
         return {
             "provider_events_total": _provider_events_total,
             "board_events_total": _board_events_total,
+            "board_request_events_total": _board_request_events_total,
+            "board_request_buffered_events": len(_board_request_event_buffer),
             "board_buffered_events": len(_board_event_buffer),
             "board_buffered_capacity": EVENT_BUFFER_CAPACITY,
             "provider_failures": provider_failures,
@@ -500,12 +644,15 @@ def clear_recorded_provider_events() -> None:
     Resetting the counters and the buffer together keeps telemetry snapshots
     deterministic between isolated test cases.
     """
-    global _provider_events_total, _board_events_total, _provider_failures, _application_failures, _cache_counts
+    global _provider_events_total, _board_events_total, _board_request_events_total
+    global _provider_failures, _application_failures, _cache_counts
     with _buffer_lock:
         _event_buffer.clear()
         _board_event_buffer.clear()
+        _board_request_event_buffer.clear()
         _provider_events_total = 0
         _board_events_total = 0
+        _board_request_events_total = 0
         _provider_failures = {}
         _application_failures = {}
         _cache_counts = {}
@@ -648,6 +795,15 @@ __all__ = [
     "UNDERDOG_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
+    "BOARD_AVAILABILITY_STATES",
+    "BOARD_CACHE_STATES",
+    "BOARD_FAILURE_REASONS",
+    "BOARD_FRESHNESS_STATES",
+    "BOARD_PROVIDER_STATUSES",
+    "BOARD_REQUEST_OUTCOMES",
+    "BoardRequestEvent",
+    "record_board_request_event",
+    "get_recorded_board_request_events",
     "BoardTelemetryEvent",
     "BoardTelemetryRecorder",
     "BoundedBoardTelemetryRecorder",
