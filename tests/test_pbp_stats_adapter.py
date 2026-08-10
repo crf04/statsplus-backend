@@ -147,6 +147,21 @@ def test_fetch_totals_opponent_uses_opponent_operation():
     assert event["operation"] == "get_totals_opponent"
 
 
+def test_fetch_season_opponent_totals_accepts_the_preexisting_minimal_schema():
+    row = dict(VALID_OPPONENT_PAYLOAD["multi_row_table_data"][0])
+    for evidence_column in ("TeamId", "SecondsPlayed", "GamesPlayed"):
+        del row[evidence_column]
+    fake_session = requests.Session()
+    fake_session.get = lambda *a, **k: FakeResponse(
+        payload={"multi_row_table_data": [row]}
+    )
+
+    frame = _adapter(fake_session).fetch_totals_frame("opponent")
+
+    assert frame.loc[0, "Name"] == "BOS"
+    assert frame.loc[0, "Assists"] == 525
+
+
 def test_fetch_totals_opponent_supports_exact_team_date_bounds():
     fake_session = requests.Session()
     calls = []
@@ -326,15 +341,3 @@ def test_parse_totals_valid_and_malformed():
 
     with pytest.raises(telemetry.ProviderResponseError):
         PBPTotalsAdapter.parse_totals(None)
-
-
-@pytest.mark.parametrize("missing", ["TeamId", "SecondsPlayed", "GamesPlayed"])
-def test_parse_opponent_totals_requires_exact_window_evidence(missing):
-    row = dict(VALID_OPPONENT_PAYLOAD["multi_row_table_data"][0])
-    del row[missing]
-
-    with pytest.raises(telemetry.ProviderResponseError):
-        PBPTotalsAdapter.parse_totals(
-            {"multi_row_table_data": [row]},
-            data_type="opponent",
-        )

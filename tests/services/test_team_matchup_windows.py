@@ -246,7 +246,25 @@ def _one_game_for_every_team(played_on: date) -> list[dict]:
     ]
 
 
-def test_refresh_service_constructor_requires_named_typed_collaborators(tmp_path):
+def test_matchup_repository_refuses_the_read_only_demo_database():
+    with pytest.raises(ValueError, match="demo database"):
+        TeamMatchupRepository(create_engine("sqlite:///nba_play_types.db"))
+
+
+@pytest.mark.parametrize(
+    ("collaborator", "message"),
+    [
+        ("repository", "repository"),
+        ("event_catalog", "event_catalog"),
+        ("nba_stats_provider", "nba_stats_provider"),
+        ("pbp_stats_provider", "pbp_stats_provider"),
+    ],
+)
+def test_refresh_service_constructor_validates_each_collaborator_independently(
+    tmp_path,
+    collaborator,
+    message,
+):
     team_ids = _fixture_team_ids()
     repository = TeamMatchupRepository(
         create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}")
@@ -254,14 +272,26 @@ def test_refresh_service_constructor_requires_named_typed_collaborators(tmp_path
     catalog = FakeEventCatalog(_one_game_for_every_team(date(2025, 4, 15)))
     nba = _FakeMatchupNBA(team_ids)
     pbp = _FakeMatchupPBP(team_ids)
+    arguments = {
+        "repository": repository,
+        "event_catalog": catalog,
+        "nba_stats_provider": nba,
+        "pbp_stats_provider": pbp,
+    }
+    arguments[collaborator] = object()
 
-    with pytest.raises(TypeError, match="nba_stats_provider"):
-        TeamMatchupRefreshService(
-            repository=repository,
-            event_catalog=catalog,
-            nba_stats_provider=pbp,
-            pbp_stats_provider=nba,
-        )
+    with pytest.raises(TypeError, match=message):
+        TeamMatchupRefreshService(**arguments)
+
+
+def test_refresh_service_constructor_requires_named_collaborators(tmp_path):
+    team_ids = _fixture_team_ids()
+    repository = TeamMatchupRepository(
+        create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}")
+    )
+    catalog = FakeEventCatalog(_one_game_for_every_team(date(2025, 4, 15)))
+    nba = _FakeMatchupNBA(team_ids)
+    pbp = _FakeMatchupPBP(team_ids)
 
     with pytest.raises(TypeError):
         TeamMatchupRefreshService(repository, catalog, nba, pbp)
@@ -1177,6 +1207,116 @@ def test_refresh_records_malformed_nba_surface_and_preserves_prior_facts(tmp_pat
     }
 
 
+def test_empty_season_traditional_surface_is_incomplete_and_preserves_prior_facts(
+    tmp_path,
+):
+    class EmptyTraditionalNBA(_FakeMatchupNBA):
+        def fetch_opponent_team_stats(self, date_from, **kwargs):
+            return pd.DataFrame(
+                columns=(
+                    "TEAM_ID",
+                    "TEAM_NAME",
+                    "GP",
+                    "MIN",
+                    "OPP_TOV",
+                    "OPP_STL",
+                    "OPP_BLK",
+                )
+            )
+
+    team_ids = _fixture_team_ids()
+    observed_at = datetime(2025, 4, 15, 15, tzinfo=timezone.utc)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty-traditional.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    prior_facts = _complete_traditional_facts(value=77)
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=prior_facts,
+        observations=[TeamMatchupObservation("traditional", "available")],
+        retrieved_at=observed_at - timedelta(hours=1),
+    )
+    TeamMatchupRefreshService(
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        nba_stats_provider=EmptyTraditionalNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
+        clock=lambda: observed_at,
+    ).refresh("2024-25", as_of=scope.as_of)
+
+    snapshot = repository.get_snapshot(scope)
+    observation = next(
+        item for item in snapshot.observations if item.surface == "traditional"
+    )
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "surface_incomplete"
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "traditional"} == {
+        77
+    }
+
+
+def test_season_surface_rejects_a_substituted_off_roster_team_locally(tmp_path):
+    team_ids = _fixture_team_ids()
+
+    class OffRosterSeasonPBP(_FakeMatchupPBP):
+        def fetch_totals_frame(self, data_type, **kwargs):
+            frame = super().fetch_totals_frame(data_type, **kwargs)
+            if kwargs["team_id"] is None:
+                frame.loc[frame.index[-1], "TeamId"] = 999_999_999
+            return frame
+
+    observed_at = datetime(2025, 4, 15, 15, tzinfo=timezone.utc)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    engine = create_engine(f"sqlite:///{tmp_path / 'off-roster.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    prior_facts = [
+        TeamMatchupFact(
+            team_id=team_id,
+            base="assist_locations",
+            slice_key="Assists",
+            stat_key="Assists",
+            raw_value=77,
+            denominator_value=48 * 60,
+            denominator_unit="seconds",
+            provider="pbp_stats",
+        )
+        for team_id in team_ids
+    ]
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=prior_facts,
+        observations=[TeamMatchupObservation("assist_locations", "available")],
+        retrieved_at=observed_at - timedelta(hours=1),
+    )
+    TeamMatchupRefreshService(
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        nba_stats_provider=_FakeMatchupNBA(team_ids),
+        pbp_stats_provider=OffRosterSeasonPBP(team_ids),
+        clock=lambda: observed_at,
+    ).refresh("2024-25", as_of=scope.as_of)
+
+    snapshot = repository.get_snapshot(scope)
+    observations = {item.surface: item for item in snapshot.observations}
+    assert observations["assist_locations"].status == "unavailable"
+    assert (
+        observations["assist_locations"].unavailable_reason
+        == "provider_roster_mismatch"
+    )
+    assert {
+        fact.team_id for fact in snapshot.facts if fact.base == "assist_locations"
+    } == set(team_ids)
+    assert {
+        fact.raw_value for fact in snapshot.facts if fact.base == "assist_locations"
+    } == {77}
+    for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
+        assert observations[surface].status == "available"
+
+
 def test_backdated_unbounded_play_types_keep_their_truthful_failure_reason(tmp_path):
     class MalformedTraditionalNBA(_FakeMatchupNBA):
         def fetch_opponent_team_stats(self, date_from, **kwargs):
@@ -1244,6 +1384,64 @@ def test_refresh_records_malformed_pbp_surface_and_continues_nba_surfaces(tmp_pa
     )
     assert observations["traditional"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
+
+
+def test_rolling_fanout_preserves_the_first_shot_surface_failure(tmp_path):
+    team_ids = _fixture_team_ids()
+    events = [
+        _event(
+            game_day * 15 + pair_index // 2 + 1,
+            date(2025, 3, 1) + timedelta(days=game_day),
+            home_team_id=team_ids[pair_index],
+            away_team_id=team_ids[pair_index + 1],
+        )
+        for game_day in range(15)
+        for pair_index in range(0, 30, 2)
+    ]
+
+    class OrderedFailuresNBA(_FakeMatchupNBA):
+        def fetch_opponent_team_stats(self, date_from, **kwargs):
+            if kwargs["team_id"] == team_ids[1]:
+                return pd.DataFrame()
+            return super().fetch_opponent_team_stats(date_from, **kwargs)
+
+        def fetch_opponent_shot_chart(self, general_range, date_from, **kwargs):
+            if kwargs["team_id"] == team_ids[0]:
+                raise ProviderResponseError("first shot-type response is malformed")
+            return super().fetch_opponent_shot_chart(
+                general_range, date_from, **kwargs
+            )
+
+        def fetch_opponent_shooting_zone(self, date_from, **kwargs):
+            if kwargs["team_id"] == team_ids[0]:
+                raise ProviderResponseError("first shot-zone response is malformed")
+            return super().fetch_opponent_shooting_zone(date_from, **kwargs)
+
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    engine = create_engine(f"sqlite:///{tmp_path / 'ordered-failures.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    TeamMatchupRefreshService(
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=OrderedFailuresNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
+        clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
+    ).refresh("2024-25", as_of=scope.as_of)
+
+    observations = {
+        item.surface: item for item in repository.get_snapshot(scope).observations
+    }
+    for surface in ("shot_types", "shot_zones"):
+        assert observations[surface].status == "unavailable"
+        assert (
+            observations[surface].unavailable_reason
+            == "provider_malformed_response"
+        )
+    assert observations["traditional"].unavailable_reason == (
+        "provider_window_unverified"
+    )
+    assert observations["assist_locations"].status == "available"
 
 
 def test_refresh_marks_cross_phase_last_15_unavailable_without_mixing_games(
@@ -1425,9 +1623,21 @@ def test_empty_rolling_surface_is_unverified_and_preserves_prior_facts(tmp_path)
         assert any(fact.base == surface for fact in snapshot.facts)
 
 
-@pytest.mark.parametrize("reported_games", [None, 14, 22])
-def test_refresh_refuses_to_label_an_unverified_pbp_window_as_last_15(
-    tmp_path, reported_games
+@pytest.mark.parametrize(
+    ("evidence_column", "reported_value"),
+    [
+        ("TeamId", None),
+        ("TeamId", NYK),
+        ("SecondsPlayed", None),
+        ("GamesPlayed", None),
+        ("GamesPlayed", 14),
+        ("GamesPlayed", 22),
+    ],
+)
+def test_refresh_refuses_to_label_unverified_pbp_evidence_as_last_15(
+    tmp_path,
+    evidence_column,
+    reported_value,
 ):
     team_ids = _fixture_team_ids()
     events = [
@@ -1445,9 +1655,9 @@ def test_refresh_refuses_to_label_an_unverified_pbp_window_as_last_15(
         def fetch_totals_frame(self, data_type, **kwargs):
             frame = super().fetch_totals_frame(data_type, **kwargs)
             if kwargs["team_id"] is not None:
-                if reported_games is None:
-                    return frame.drop(columns="GamesPlayed")
-                frame["GamesPlayed"] = reported_games
+                if reported_value is None:
+                    return frame.drop(columns=evidence_column)
+                frame[evidence_column] = reported_value
             return frame
 
     engine = create_engine(f"sqlite:///{tmp_path / 'unverified-pbp.sqlite3'}")

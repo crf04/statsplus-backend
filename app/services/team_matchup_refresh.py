@@ -134,11 +134,8 @@ class TeamWindowBoundaryResolver:
             return False
         return cls._scheduled_at(event).astimezone(EASTERN).date() <= as_of
 
-_TRADITIONAL_STATS = {
-    "OPP_TOV": "OPP_TOV",
-    "OPP_STL": "OPP_STL",
-    "OPP_BLK": "OPP_BLK",
-}
+
+_TRADITIONAL_STATS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
 _SHOT_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
 _ASSIST_STATS = (
     "Assists",
@@ -159,6 +156,10 @@ MATCHUP_SURFACES = (
 
 class _ProviderWindowUnverified(ValueError):
     """An aggregate response cannot prove it represents the governed window."""
+
+
+class _ProviderRosterMismatch(ValueError):
+    """A Season aggregate does not contain the governed NBA team roster."""
 
 
 @runtime_checkable
@@ -293,6 +294,7 @@ class TeamMatchupRefreshService:
             canonical_season,
             snapshot_date=snapshot_date,
             include_play_types=season_play_types_are_bounded,
+            team_ids=team_ids,
         )
         season_observations = self._surface_observations(
             overrides={
@@ -369,6 +371,8 @@ class TeamMatchupRefreshService:
     ) -> tuple[str, str]:
         if isinstance(error, _ProviderWindowUnverified):
             return "unavailable", "provider_window_unverified"
+        if isinstance(error, _ProviderRosterMismatch):
+            return "unavailable", "provider_roster_mismatch"
         if isinstance(error, ProviderResponseError):
             return "unavailable", "provider_malformed_response"
         return "unavailable", "provider_invalid_response"
@@ -386,12 +390,24 @@ class TeamMatchupRefreshService:
             )
         )
 
+    @staticmethod
+    def _require_governed_roster(
+        facts: list[TeamMatchupFact],
+        team_ids: tuple[int, ...],
+    ) -> list[TeamMatchupFact]:
+        if facts and {fact.team_id for fact in facts} != set(team_ids):
+            raise _ProviderRosterMismatch(
+                "provider response does not match the governed NBA team roster"
+            )
+        return facts
+
     def _collect_season(
         self,
         season: str,
         *,
         snapshot_date: date,
         include_play_types: bool,
+        team_ids: tuple[int, ...],
     ) -> tuple[
         list[TeamMatchupFact], dict[str, tuple[str, str | None]]
     ]:
@@ -421,8 +437,8 @@ class TeamMatchupRefreshService:
                 failures[surface] = self._provider_failure(error)
         if minutes_by_team is not None:
             try:
-                facts_by_surface["traditional"] = self._traditional_facts(
-                    traditional_frame
+                facts_by_surface["traditional"] = self._require_governed_roster(
+                    self._traditional_facts(traditional_frame), team_ids
                 )
             except (ProviderResponseError, ValueError) as error:
                 failures["traditional"] = self._provider_failure(error)
@@ -440,14 +456,20 @@ class TeamMatchupRefreshService:
                             minutes_by_team=minutes_by_team,
                         )
                     )
+                self._require_governed_roster(
+                    facts_by_surface["shot_types"], team_ids
+                )
             except (ProviderResponseError, ValueError) as error:
                 failures["shot_types"] = self._provider_failure(error)
             try:
-                facts_by_surface["shot_zones"] = self._shot_zone_facts(
-                    self.nba_stats.fetch_opponent_shooting_zone(
-                        None, per_mode_detailed="Totals", **common
+                facts_by_surface["shot_zones"] = self._require_governed_roster(
+                    self._shot_zone_facts(
+                        self.nba_stats.fetch_opponent_shooting_zone(
+                            None, per_mode_detailed="Totals", **common
+                        ),
+                        minutes_by_team=minutes_by_team,
                     ),
-                    minutes_by_team=minutes_by_team,
+                    team_ids,
                 )
             except (ProviderResponseError, ValueError) as error:
                 failures["shot_zones"] = self._provider_failure(error)
@@ -467,18 +489,24 @@ class TeamMatchupRefreshService:
                                 minutes_by_team=minutes_by_team,
                             )
                         )
+                    self._require_governed_roster(
+                        facts_by_surface["play_types"], team_ids
+                    )
                 except (ProviderResponseError, ValueError) as error:
                     failures["play_types"] = self._provider_failure(error)
         try:
-            facts_by_surface["assist_locations"] = self._assist_facts(
-                self.pbp_stats.fetch_totals_frame(
-                    "opponent",
-                    season=season,
-                    season_type="Regular Season",
-                    team_id=None,
-                    from_date=None,
-                    to_date=snapshot_date.isoformat(),
-                )
+            facts_by_surface["assist_locations"] = self._require_governed_roster(
+                self._assist_facts(
+                    self.pbp_stats.fetch_totals_frame(
+                        "opponent",
+                        season=season,
+                        season_type="Regular Season",
+                        team_id=None,
+                        from_date=None,
+                        to_date=snapshot_date.isoformat(),
+                    )
+                ),
+                team_ids,
             )
         except (ProviderResponseError, ValueError) as error:
             failures["assist_locations"] = self._provider_failure(error)
@@ -541,10 +569,11 @@ class TeamMatchupRefreshService:
                             )
                         )
                 except (ProviderResponseError, ValueError) as error:
-                    failures["traditional"] = self._provider_failure(error)
+                    failure = self._provider_failure(error)
+                    failures.setdefault("traditional", failure)
                     if minutes_by_team is None:
-                        failures["shot_types"] = failures["traditional"]
-                        failures["shot_zones"] = failures["traditional"]
+                        failures.setdefault("shot_types", failure)
+                        failures.setdefault("shot_zones", failure)
 
             if minutes_by_team is not None and "shot_types" not in failures:
                 try:
@@ -573,7 +602,7 @@ class TeamMatchupRefreshService:
                         self._with_start(team_shot_type_facts, boundary.from_date)
                     )
                 except (ProviderResponseError, ValueError) as error:
-                    failures["shot_types"] = self._provider_failure(error)
+                    failures.setdefault("shot_types", self._provider_failure(error))
 
             if minutes_by_team is not None and "shot_zones" not in failures:
                 try:
@@ -598,7 +627,7 @@ class TeamMatchupRefreshService:
                         )
                     )
                 except (ProviderResponseError, ValueError) as error:
-                    failures["shot_zones"] = self._provider_failure(error)
+                    failures.setdefault("shot_zones", self._provider_failure(error))
 
             if "assist_locations" not in failures:
                 try:
@@ -615,6 +644,11 @@ class TeamMatchupRefreshService:
                         team_id=team_id,
                         expected_games=len(boundary.game_ids),
                         require_game_count=True,
+                        required_columns=(
+                            "TeamId",
+                            "SecondsPlayed",
+                            "GamesPlayed",
+                        ),
                     )
                     facts_by_surface["assist_locations"].extend(
                         self._with_start(
@@ -623,7 +657,9 @@ class TeamMatchupRefreshService:
                         )
                     )
                 except (ProviderResponseError, ValueError) as error:
-                    failures["assist_locations"] = self._provider_failure(error)
+                    failures.setdefault(
+                        "assist_locations", self._provider_failure(error)
+                    )
         facts = [
             fact
             for surface in MATCHUP_SURFACES
@@ -644,6 +680,7 @@ class TeamMatchupRefreshService:
         team_id: int,
         expected_games: int,
         require_game_count: bool,
+        required_columns: tuple[str, ...] = (),
     ) -> None:
         records = cls._flat_frame(frame).to_dict(orient="records")
         if len(records) != 1:
@@ -651,6 +688,15 @@ class TeamMatchupRefreshService:
                 f"provider response does not identify only team {team_id}"
             )
         row = records[0]
+        missing = [
+            column
+            for column in required_columns
+            if column not in row or pd.isna(row[column])
+        ]
+        if missing:
+            raise _ProviderWindowUnverified(
+                "provider response is missing rolling-window evidence"
+            )
         try:
             identified_team = cls._team_id(row)
         except ValueError as error:
@@ -741,8 +787,8 @@ class TeamMatchupRefreshService:
         facts = []
         for row in cls._flat_frame(frame).to_dict(orient="records"):
             denominator, unit = cls._denominator(row)
-            for stat_key, source in _TRADITIONAL_STATS.items():
-                if source not in row:
+            for stat_key in _TRADITIONAL_STATS:
+                if stat_key not in row:
                     raise ValueError(f"traditional provider row is missing {stat_key}")
                 facts.append(
                     TeamMatchupFact(
@@ -750,7 +796,7 @@ class TeamMatchupRefreshService:
                         "traditional",
                         stat_key,
                         stat_key,
-                        float(row[source]),
+                        float(row[stat_key]),
                         denominator,
                         unit,
                         "nba_stats",

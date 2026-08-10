@@ -689,7 +689,10 @@ count). A surface that cannot prove its requested aggregate is discarded and
 observed as `unavailable/provider_window_unverified`, never mislabeled
 Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
 ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
-team and expose an aggregate count of exactly 15 games. A date-bounded PBP
+team, expose positive `SecondsPlayed`, and report an aggregate count of exactly
+15 games. Those rolling-window evidence fields are enforced by the matchup
+refresh rather than the shared PBP Season parser, whose pre-existing contract
+requires only the opponent assist fields it consumes. A date-bounded PBP
 response without that proof is `unavailable/provider_window_unverified`; one
 league-wide cutoff is never used. The recorded BOS `2025-03-01` through
 `2025-04-15` response demonstrates why: it reports 525 assists but also
@@ -726,9 +729,12 @@ status plus explicit reason per window.
 Both windows are fully collected before one repository transaction replaces
 observations and each newly valid surface. Repeating a publication is
 idempotent. Available surfaces are written only when every metric has the same
-30 distinct teams and finite raw numerators plus positive finite minutes or
-seconds; partial, non-finite, or mislabeled data becomes a fact-free unavailable
-observation and leaves prior valid facts intact. A provider transport,
+30 distinct teams, those team IDs exactly match the governed catalog roster,
+and every row has finite raw numerators plus positive finite minutes or
+seconds. A substituted off-roster team becomes
+`unavailable/provider_roster_mismatch`; partial, non-finite, or mislabeled data
+becomes a fact-free unavailable observation and leaves prior valid facts
+intact. A provider transport,
 constraint, or transaction failure likewise leaves both prior snapshots
 intact; the Nightly Refresh retries the complete stats → schedule →
 athlete catalog → player game logs → team matchups unit once. A provider response that reaches its adapter but is
@@ -1763,7 +1769,15 @@ used to repair the fixture.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.
-- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. Opponent totals require `TeamId`, `SecondsPlayed`, and `GamesPlayed` in addition to assist numerators, so exact rolling-window publication can fail closed on absent or mismatched game-count evidence. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
+- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns
+  consumed by the existing PBP Season publication/assist transforms. The #57
+  rolling matchup path separately requires `TeamId`, `SecondsPlayed`, and
+  `GamesPlayed`, so exact Last-15 publication fails closed on absent identity,
+  denominator, or game-count evidence without widening the shared Season
+  parser contract. A nonempty row set missing a Season-required column is a
+  malformed provider response; an empty result is materialized with that
+  declared schema so refresh publication cannot replace a valid table with a
+  schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.

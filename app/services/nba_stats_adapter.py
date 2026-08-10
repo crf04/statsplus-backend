@@ -862,7 +862,7 @@ class NBAStatsAdapter:
                 "general_range_nullable": general_range,
                 "date_from_nullable": date_from,
                 "per_mode_simple": per_mode_simple,
-                "league_id_nullable": league_id,
+                "league_id": league_id,
                 "timeout": timeout,
             }
             self._add_optional_matchup_scope(
@@ -950,7 +950,7 @@ class NBAStatsAdapter:
                 "play_type_nullable": play_type,
                 "player_or_team_abbreviation": player_or_team_abbreviation,
                 "type_grouping_nullable": type_grouping,
-                "league_id_nullable": league_id,
+                "league_id": league_id,
                 "timeout": timeout,
             }
             if season is not None:

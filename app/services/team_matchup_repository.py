@@ -64,7 +64,6 @@ class TeamMatchupObservation:
     surface: str
     status: str
     unavailable_reason: str | None = None
-    retrieved_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,9 +181,7 @@ class TeamMatchupRepository:
                             "surface": observation.surface,
                             "status": observation.status,
                             "unavailable_reason": observation.unavailable_reason,
-                            "retrieved_at": assume_utc(
-                                observation.retrieved_at or observed_at
-                            ),
+                            "retrieved_at": observed_at,
                         }
                         for observation in observation_rows
                     ],

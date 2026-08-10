@@ -46,10 +46,7 @@ PBP_PLAYER_REQUIRED_COLUMNS: tuple[str, ...] = (
     "LongMidRangeAssists",
 )
 PBP_OPPONENT_REQUIRED_COLUMNS: tuple[str, ...] = (
-    "TeamId",
     "Name",
-    "SecondsPlayed",
-    "GamesPlayed",
     "Assists",
     "AssistPoints",
     "TwoPtAssists",
