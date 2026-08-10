@@ -393,6 +393,18 @@ def get_recorded_board_request_events() -> list[dict[str, Any]]:
         return list(_board_request_event_buffer)
 
 
+def snapshot_recent_board_request_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Return the most recent bounded board request aggregates.
+
+    Each entry is the same scalar-only payload the buffer holds: closed label
+    counts and coverage counts, never an athlete, event, market, or selection
+    identity, and never upstream text.
+    """
+
+    with _buffer_lock:
+        return list(_board_request_event_buffer)[-limit:]
+
+
 class BoardTelemetryRecorder:
     """Typed recorder seam for board aggregates."""
 
@@ -832,6 +844,7 @@ __all__ = [
     "BoardRequestEvent",
     "record_board_request_event",
     "get_recorded_board_request_events",
+    "snapshot_recent_board_request_events",
     "BoardTelemetryEvent",
     "BoardTelemetryRecorder",
     "BoundedBoardTelemetryRecorder",

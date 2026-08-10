@@ -335,16 +335,29 @@ GET /api/data/telemetry
 
 `GET /api/data/telemetry` returns bounded, sanitized provider, board, and
 application telemetry counters on the documented seams, with the most recent
-50 provider and board events. Board aggregates are kept in a separate bounded
-scalar collection and do not increment provider event or provider-failure
+50 provider events, internal board-collection events, and published board
+request events. Board aggregates are kept in separate bounded scalar
+collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries
-credentials, URLs, bodies, or exception text. Example shape:
+credentials, URLs, bodies, or exception text.
+
+`recent_board_request_events` describes the published `GET /api/dfs/board`
+route: exactly one entry per authenticated request, whatever it ended in.
+`outcome` and `status_code` are one closed pair — `served`/`200`,
+`not_modified`/`304`, `invalid`/`400`, `too_large`/`400`, `disabled`/`404`,
+`error`/`500`, `unavailable`/`503`. An unauthenticated request records nothing,
+because telemetry begins where the caller's identity does. Every label is a
+closed vocabulary and every other field is a count: provider names may appear
+as configured registry names, but no provider-source, athlete, event, market,
+or selection ID and no upstream text can become a label. Example shape:
 
 ```json
 {
   "provider_events_total": 1,
   "board_events_total": 0,
+  "board_request_events_total": 1,
+  "board_request_buffered_events": 1,
   "board_buffered_events": 0,
   "board_buffered_capacity": 5000,
   "provider_failures": { "nba_stats": { "timeout": 1 } },
@@ -383,6 +396,24 @@ credentials, URLs, bodies, or exception text. Example shape:
       "eligible_count": 12,
       "normalized_count": 12,
       "skipped_count": 8
+    }
+  ],
+  "recent_board_request_events": [
+    {
+      "started_at": "2026-08-09T20:00:30+00:00",
+      "duration_ms": 12.5,
+      "request_id": "a1b2…",
+      "outcome": "served",
+      "status_code": 200,
+      "comparison_availability": "available",
+      "provider_status_counts": { "complete": 2 },
+      "failure_reason_counts": {},
+      "freshness_counts": { "fresh": 2 },
+      "cache_counts": { "hit": 1, "miss": 1 },
+      "group_count": 1,
+      "market_count": 2,
+      "unresolved_count": 0,
+      "disabled_provider_count": 1
     }
   ]
 }

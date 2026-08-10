@@ -2,7 +2,12 @@ from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
 from ..utils.auth import require_admin
-from ..utils.telemetry import snapshot_metrics, snapshot_recent_board_events, snapshot_recent_events
+from ..utils.telemetry import (
+    snapshot_metrics,
+    snapshot_recent_board_events,
+    snapshot_recent_board_request_events,
+    snapshot_recent_events,
+)
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -61,8 +66,15 @@ def provider_telemetry():
     Provider failures are counted at the provider seams and application
     failures by the central error handler; neither list ever carries
     credentials, URLs, bodies, or exception text.
+
+    Board request aggregates are exposed beside the totals because a total
+    cannot say which outcome a published board is answering with: one event per
+    authenticated request, each already reduced to closed label counts, so no
+    athlete, event, market, or selection identity can reach an operator surface
+    through them.
     """
     body = snapshot_metrics()
     body["recent_provider_events"] = snapshot_recent_events(limit=50)
     body["recent_board_events"] = snapshot_recent_board_events(limit=50)
+    body["recent_board_request_events"] = snapshot_recent_board_request_events(limit=50)
     return jsonify(body)

@@ -326,7 +326,87 @@ def test_telemetry_route_returns_bounded_sanitized_metrics(client, monkeypatch):
         assert body["recent_provider_events"][0]["provider"] == "nba_stats"
         assert body["recent_provider_events"][0]["outcome"] == "success"
         assert body["recent_board_events"] == []
+        assert body["recent_board_request_events"] == []
         assert "Authorization" not in str(body)
         assert "Bearer" not in str(body)
+    finally:
+        telemetry_module.clear_recorded_provider_events()
+
+
+def test_telemetry_route_reports_recent_board_requests(client, monkeypatch):
+    """An operator can read what the published board actually answered."""
+
+    from app.utils import telemetry as telemetry_module
+
+    telemetry_module.clear_recorded_provider_events()
+    try:
+        headers = _admin_auth(monkeypatch)
+        telemetry_module.record_board_request_event(
+            telemetry_module.BoardRequestEvent(
+                duration_ms=12.5,
+                outcome="unavailable",
+                status_code=503,
+                comparison_availability="catalog_stale",
+                provider_status_counts=(("failed", 2),),
+                failure_reason_counts=(("timeout", 2),),
+                freshness_counts=(("unknown", 2),),
+                cache_counts=(("miss", 2),),
+                group_count=0,
+                market_count=0,
+                unresolved_count=3,
+                disabled_provider_count=1,
+                started_at="2026-08-09T20:00:30+00:00",
+                request_id="board-1",
+            )
+        )
+
+        body = client.get("/api/data/telemetry", headers=headers).get_json()
+
+        assert body["board_request_events_total"] == 1
+        assert body["board_request_buffered_events"] == 1
+        assert body["recent_board_request_events"] == [
+            {
+                "started_at": "2026-08-09T20:00:30+00:00",
+                "duration_ms": 12.5,
+                "request_id": "board-1",
+                "outcome": "unavailable",
+                "status_code": 503,
+                "comparison_availability": "catalog_stale",
+                "provider_status_counts": {"failed": 2},
+                "failure_reason_counts": {"timeout": 2},
+                "freshness_counts": {"unknown": 2},
+                "cache_counts": {"miss": 2},
+                "group_count": 0,
+                "market_count": 0,
+                "unresolved_count": 3,
+                "disabled_provider_count": 1,
+            }
+        ]
+    finally:
+        telemetry_module.clear_recorded_provider_events()
+
+
+def test_telemetry_route_bounds_the_recent_board_requests(client, monkeypatch):
+    from app.utils import telemetry as telemetry_module
+
+    telemetry_module.clear_recorded_provider_events()
+    try:
+        headers = _admin_auth(monkeypatch)
+        for index in range(60):
+            telemetry_module.record_board_request_event(
+                telemetry_module.BoardRequestEvent(
+                    duration_ms=float(index),
+                    outcome="served",
+                    status_code=200,
+                    comparison_availability="available",
+                    started_at="2026-08-09T20:00:30+00:00",
+                )
+            )
+
+        body = client.get("/api/data/telemetry", headers=headers).get_json()
+
+        assert body["board_request_events_total"] == 60
+        assert len(body["recent_board_request_events"]) == 50
+        assert body["recent_board_request_events"][-1]["duration_ms"] == 59.0
     finally:
         telemetry_module.clear_recorded_provider_events()
