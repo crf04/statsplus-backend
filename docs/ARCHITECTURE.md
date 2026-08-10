@@ -751,6 +751,14 @@ order the observations by every field of the evidence they carry, not only by
 the facts that identify the fixture, so markets that agree about the game while
 spelling its label, status, end time, or update instant differently still yield
 one combined observation that does not depend on the provider's listing order.
+Catalog freshness gates the board read as it gates a single resolution: when the
+season's catalog is missing or over-age, the whole group stays
+`event_catalog_unavailable` with no canonical identity — neither merged nor
+promoted to a conflict — so a disagreement between markets queues nothing
+against an operator's standing decision, the mapping row and its history are
+untouched, and every normalized market stays on the board. The disagreement is
+withheld rather than resolved away, and fails closed as a conflict again on the
+next read with a usable catalog.
 
 PBP Stats:
 

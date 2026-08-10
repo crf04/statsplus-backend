@@ -578,6 +578,32 @@ def _fail_closed_event_conflict(resolutions: Iterable[Any]) -> Any:
     )
 
 
+def _event_catalog_unusable(resolutions: Iterable[Any]) -> bool:
+    """Whether the season's catalog left this group nothing to be placed against."""
+
+    return any(
+        resolution.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+        for resolution in resolutions
+    )
+
+
+def _withheld_event_observation(resolutions: Iterable[Any]) -> Any:
+    """One withheld outcome for a fixture no schedule can place.
+
+    A missing or over-age Event Catalog withdraws the comparison identity
+    itself, so nothing the markets say about the fixture -- including a
+    disagreement between them -- is an observation of a canonical game.
+    Promoting the group to a conflict or merging it into one claim would record
+    a decision about an identity that could not be checked, and would queue that
+    decision against an operator's standing one.  The group therefore stays
+    unavailable as a whole, and the representative is chosen by sorting the
+    observations rather than by taking the first, so the markets in any order
+    leave the board reporting the same single outcome.
+    """
+
+    return sorted(resolutions, key=_event_evidence_order)[0]
+
+
 def _merged_event_evidence(resolutions: Iterable[Any]) -> EventEvidence:
     """Everything one fixture's compatible markets reported about it.
 
@@ -1269,7 +1295,9 @@ class DFSBoardService:
         )
         groups: list[tuple[Any, ...]] = []
         for key, group in _identity_groups(resolved):
-            if key in contradictory:
+            if _event_catalog_unusable(group):
+                group = (_withheld_event_observation(group),)
+            elif key in contradictory:
                 # The contradiction is one observation of the fixture, so the
                 # markets it disagreed across are written once, together.
                 group = (_fail_closed_event_conflict(group),)

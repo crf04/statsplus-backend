@@ -1413,6 +1413,128 @@ def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
     )
 
 
+def _disagreeing_markets() -> tuple[PlayerProjectionMarket, ...]:
+    """One fixture's markets disagreeing over claim, teams, and start time."""
+
+    return (
+        _market("m-1"),
+        _market("m-2", event=_evidence(home=TeamEvidence(abbreviation="BOS"))),
+        _market(
+            "m-3",
+            event=_evidence(
+                canonical_id="0022500002",
+                starts_at=TIP_OFF + timedelta(hours=48),
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
+@pytest.mark.parametrize("decision", [None, "approve", "override"])
+def test_a_board_read_never_promotes_a_contradiction_without_catalog_data(
+    event_db, decision, kind
+):
+    """Freshness gates a contradiction as it gates a match.
+
+    A fixture whose markets disagree still has nothing to be placed against
+    when the season's catalog is missing or over-age, so the disagreement is
+    not an observation of anything: the whole group stays unavailable, in
+    whatever order the provider listed the markets, and nothing is recorded --
+    no mapping, no history, no conflict queued.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    if decision is not None:
+        getattr(repository, decision)(
+            "underdog",
+            "ud-1",
+            "0022500001",
+            season=SEASON,
+            operator_id="ops",
+            reason="reviewed",
+            provider_evidence=_evidence(),
+        )
+    decided = [record.decision_state for record in repository.history()]
+    markets = _disagreeing_markets()
+    resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
+    query = NBAMarketQuery(season=SEASON)
+
+    for listing in (markets, tuple(reversed(markets))):
+        board = _board_service(
+            _snapshot(*listing), resolver=resolver, repository=repository
+        ).get_board(query)
+
+        (outcome,) = board.event_mapping_outcomes
+        assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+        assert outcome.canonical_event_id is None
+        assert outcome.persisted is False
+        assert outcome.resolution.reason == _UNAVAILABLE_CATALOGS[kind]
+        assert outcome.resolution.contradictory_evidence == ()
+        # Every normalized market stays on the board.
+        assert len(board.resolved_markets) == len(markets)
+        assert repository.list_conflicts() == []
+        assert [record.decision_state for record in repository.history()] == decided
+
+    if decision is None:
+        assert repository.list_mappings() == []
+    else:
+        mapping = repository.get_active_mapping("underdog", "ud-1")
+        assert mapping.canonical_event_id == "0022500001"
+        assert mapping.mapping_state == {
+            "approve": "manual_approved",
+            "override": "manual_override",
+        }[decision]
+
+
+@pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
+def test_a_contradiction_withheld_for_freshness_returns_with_the_catalog(
+    event_db, kind
+):
+    """The contradiction is withheld, not resolved away.
+
+    Once the season's catalog is usable again the same markets fail closed on
+    their own disagreement exactly as they always have.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    markets = _disagreeing_markets()
+    query = NBAMarketQuery(season=SEASON)
+    unusable = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
+
+    withheld = _board_service(
+        _snapshot(*markets), resolver=unusable, repository=repository
+    ).get_board(query)
+
+    (outcome,) = withheld.event_mapping_outcomes
+    assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+    assert repository.list_conflicts() == []
+
+    if kind == "missing":
+        with engine.begin() as connection:
+            connection.execute(
+                insert(EventCatalogRefresh.__table__).values(
+                    season=SEASON,
+                    last_attempt_at=_NOW,
+                    last_success_at=_NOW,
+                    event_count=2,
+                )
+            )
+    recovered = _board_service(
+        _snapshot(*markets),
+        resolver=_catalog_resolver(engine, repository),
+        repository=repository,
+    ).get_board(query)
+
+    (governed,) = recovered.event_mapping_outcomes
+    assert governed.state is EventResolutionState.MAPPING_CONFLICT
+    assert governed.canonical_event_id is None
+    assert governed.resolution.reason == "contradictory_provider_evidence"
+    assert len(governed.resolution.contradictory_evidence) == 3
+    assert len(repository.list_conflicts()) == 1
+
+
 def test_an_id_less_market_matches_the_current_board_without_a_durable_row(event_db):
     engine, now = event_db
     repository = _repository(engine, now)
