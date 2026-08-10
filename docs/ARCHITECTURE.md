@@ -1019,6 +1019,73 @@ partial name filter. The post-filter market ceiling is
 `ComparisonBoardTooLargeError` (`board_too_large`) carrying the observed count
 and the supported narrowing filters, and nothing is ever truncated.
 
+### Published DFS Board
+
+```text
+GET /api/dfs/board
+  → require_auth (Firebase bearer token)
+  → parse_board_request(request.args) → NBAMarketQuery + ComparisonFilters
+  → DFSBoardResponseService.respond(...)
+      → ComparisonBoardService.get_comparisons(...)
+      → HTTP outcome, version 1 payload, weak ETag, bounded telemetry
+  → private, revalidatable JSON (200), or 304 / 400 / 404 / 503
+```
+
+The route in `app.routes.dfs_routes` decides nothing. It authenticates, parses,
+and formats; `app.services.dfs_board_response` decides whether the board is
+published, whether it is usable, what the payload is, what the entity tag is,
+and whether the caller already holds it. Both the route module and the
+response service create no provider, Redis, or database client: the application
+factory composes `dfs_board_response_service` from the comparison board alone,
+which itself wraps the already-composed collector.
+
+**Publication.** The board is published only when `DFS_BOARD_ENABLED=true`
+*and* `DFS_ENABLED_PROVIDERS` names at least one provider. Both are off by
+default in every environment, so development and tests opt in explicitly.
+Enabling the flag without a registry fails startup with `ConfigurationError`
+rather than exposing a route that can never call a provider; production
+additionally requires a non-empty registry regardless of the flag. An
+unpublished board answers an authenticated request with 404
+`dfs_board_disabled` and calls no provider.
+
+**Outcomes.** A read is 200 when at least one provider produced a usable
+snapshot — complete, partial, permitted-stale, or empty-complete. An empty
+complete snapshot is a valid empty board, not an outage. Only when no provider
+produced a usable snapshot is the response 503, carrying the same bounded
+Provider Outcome vocabulary the board reports on success: provider name,
+status, stable failure reason, coverage warning codes, and cache state. No
+upstream text, URL, payload, or credential can reach a caller through it.
+
+**Conditional requests.** The response carries a weak `ETag` computed over the
+board's stated facts with the instant of observation and every age derived from
+it excluded, so an unchanged board revalidates as 304 instead of resending a
+board that differs only in how old it says it is. `Cache-Control: private,
+no-cache, max-age=0, must-revalidate` and `Vary: Authorization` prohibit shared
+caching of an authenticated board. `X-Request-ID` and the security headers are
+present on 304 responses too.
+
+**Observability.** One `BoardRequestEvent` per read records latency, the HTTP
+outcome and status, comparison availability, provider status and failure-reason
+counts, freshness and cache-state counts, and group/market/unresolved/disabled
+counts. Every label comes from a closed vocabulary in `app.utils.telemetry`; no
+athlete, event, market, selection, or provider-source ID and no upstream text
+can become a metric dimension. The collector's own `BoardTelemetryEvent`
+remains the record of one retrieval.
+
+**Operations.** Catalog freshness gates comparisons but never retrieval, so a
+stale catalog yields a 200 board with `comparison_availability.available:
+false` and the catalog identity and age that explain it. Athlete and event
+catalogs are refreshed by deployment-owned scheduling with
+`scripts/refresh_athlete_catalog.py` and `scripts/refresh_event_catalog.py`
+(daily is the reviewed cadence; API workers run no scheduler). Redis fails open:
+with `ENABLE_CACHE=false` or an unreachable Redis, snapshots are retrieved
+directly and each provider report states its `cache` state. Ambiguous
+identities are governed offline with `scripts/athlete_mappings.py` and
+`scripts/event_mappings.py`; version 1 exposes no mapping mutation route.
+Version 1 reports facts only — minimum, maximum, Threshold Spread, counts,
+freshness, and references — and never a probability, expected value,
+recommendation, or entry payout.
+
 PBP Stats:
 
 ```text
