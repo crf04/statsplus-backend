@@ -179,6 +179,80 @@ Common query types:
 
 ## Game Endpoints
 
+### Get Slate
+
+```http
+GET /api/games/slate?date=YYYY-MM-DD
+```
+
+Requires Firebase bearer authentication. `date` is optional and defaults to
+today's Slate Date in US Eastern time. The route reads the configured current
+season's persisted Event Catalog; slate membership is determined by converting
+each UTC `scheduled_at` value to US Eastern time. Games are ordered by tip time,
+then `game_id`.
+
+```json
+{
+  "slate_date": "2026-01-02",
+  "pool_status": "unavailable",
+  "freshness": {
+    "schedule": {
+      "status": "fresh",
+      "retrieved_at": "2026-01-02T10:00:00+00:00"
+    },
+    "pool": {
+      "status": "unavailable",
+      "retrieved_at": null,
+      "providers": {}
+    }
+  },
+  "games": [
+    {
+      "game_id": "0022500001",
+      "away_team": {
+        "team_id": 1610612747,
+        "tricode": "LAL",
+        "name": "Los Angeles Lakers",
+        "targetable_player_count": 0
+      },
+      "home_team": {
+        "team_id": 1610612759,
+        "tricode": "SAS",
+        "name": "San Antonio Spurs",
+        "targetable_player_count": 0
+      },
+      "scheduled_at": "2026-01-03T00:00:00+00:00",
+      "status": {
+        "state": "scheduled",
+        "label": "7:00 pm ET"
+      },
+      "classification": null,
+      "preseason": false
+    }
+  ]
+}
+```
+
+`status.state` is `scheduled`, `postponed`, or `final`; `status.label` retains
+the Event Catalog label. `classification` is `null` for an ordinary Regular
+Season game and contains the catalog classification for unusual games.
+Preseason games are included with `preseason: true`; All-Star exhibitions are
+excluded. Postponed games remain on their ET slate.
+
+Until the Player Pool surface is implemented, both team counts are truthfully
+zero, top-level `pool_status` is `unavailable`, and `freshness.pool` reports an
+unavailable surface with no retrieval time or providers. A stale but stored
+schedule remains a `200` with `freshness.schedule.status: "stale"`.
+
+Empty and error behavior:
+
+| Case | Response |
+| --- | --- |
+| Date has no current-season games | `200` with `games: []` and freshness blocks |
+| `date` is not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| No successful schedule is stored | `503 provider_unavailable` |
+| Authentication is missing or invalid | existing `401` authentication error contract |
+
 ### Get Game Logs
 
 ```http

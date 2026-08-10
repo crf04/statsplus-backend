@@ -26,6 +26,7 @@ class ApplicationDependencies:
     dfs_providers: dict[str, Any]
     dfs_board_service: Any
     game_service: Any
+    slate_service: Any
     player_service: Any
     team_service: Any
     data_service: Any
@@ -55,6 +56,7 @@ def build_dependencies(
 
     from app.services.data_service import DataService
     from app.services.game_service import GameService
+    from app.services.slate_service import SlateService
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
     from app.services.team_service import TeamService
@@ -227,6 +229,7 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
+    slate_service = SlateService(event_catalog_service, settings=settings)
 
     return ApplicationDependencies(
         settings=settings,
@@ -237,6 +240,7 @@ def build_dependencies(
         dfs_providers=dfs_providers,
         dfs_board_service=dfs_board_service,
         game_service=game_service,
+        slate_service=slate_service,
         player_service=player_service,
         team_service=team_service,
         data_service=data_service,

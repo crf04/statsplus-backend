@@ -26,6 +26,14 @@ game_bp = Blueprint('games', __name__)
 
 
 game_service = CurrentAppService("game")
+slate_service = CurrentAppService("slate")
+
+
+@game_bp.route('/slate', methods=['GET'])
+@require_auth
+def get_slate():
+    """Return the persisted current-season slate for one ET calendar date."""
+    return jsonify(slate_service.get_slate(request.args.get("date")))
 
 
 def _default_season() -> str:
