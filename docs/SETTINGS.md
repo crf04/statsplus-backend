@@ -57,11 +57,24 @@ provenance on the provider outcome. Redis errors fail open to direct upstream
 work and never create an in-process stale store; single-flight suppression is
 per worker only.
 
-Those same two windows decide comparison freshness. A snapshot inside its
-provider's fresh window is contemporaneous; one past it may still enter a
-Comparison Group as explicitly stale while it is inside the stale-if-error
-window; beyond that window its markets stay visible on the board but enter no
-group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter comparison-board
+Both windows are exact decimal seconds inside one **time-window domain**, owned
+by `app.domain.freshness` and enforced at startup: a window is at least `1E-6`
+seconds (the microsecond every age is measured at) and at most `1E+9` seconds
+(about thirty-one years), and a provider's fresh window may never exceed its
+stale-if-error age. A boolean, a nonfinite value, a value outside that domain,
+or a fresh window past its own ceiling raises `ConfigurationError` naming the
+variable and the domain, never quoting the value. The same domain admits the
+event-catalog TTL (`EVENT_CATALOG_MAX_AGE_HOURS`). Because the cache and the
+comparison board read the identical authority, every configuration the process
+starts with can be used by both.
+
+Those same two windows decide comparison freshness, through one shared boundary:
+a fresh window is exclusive at its endpoint and a maximum age is inclusive at
+its own. A snapshot inside its provider's fresh window is contemporaneous — an
+observation exactly one window old is not, at the cache and on the board alike;
+one past it may still enter a Comparison Group as explicitly stale while its age
+is at most the stale-if-error age; beyond that its markets stay visible on the
+board but enter no group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter comparison-board
 ceiling and defaults to 10000. A read that observes more markets than the
 ceiling is refused with `board_too_large`, the observed count, and the
 supported narrowing filters; it is never truncated.

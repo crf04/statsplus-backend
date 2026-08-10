@@ -12,6 +12,7 @@ from requests import exceptions as request_errors
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.freshness import exact_seconds, time_window_seconds
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsProvider
 from app.services.event_catalog_repository import EventCatalogRepository
@@ -64,8 +65,10 @@ class EventCatalogService:
                         max_age if isinstance(max_age, timedelta) else
                         timedelta(hours=float(max_age)) if max_age is not None else
                         timedelta(hours=float(configured)))
-        if self.max_age.total_seconds() <= 0:
-            raise ValueError("event catalog max age must be greater than zero")
+        # The TTL enters the one shared time-window domain, so the duration
+        # this catalog gates on and reports is a duration every other seam can
+        # read as a window too.
+        time_window_seconds(exact_seconds(self.max_age), field="event catalog max age")
 
     def refresh(self, seasons: str | Iterable[str], *, now: datetime | None = None) -> EventCatalogRefreshResult | EventCatalogBatchResult:
         requested = self._canonical_seasons(seasons)

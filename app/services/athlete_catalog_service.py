@@ -20,6 +20,7 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.freshness import exact_seconds
 from app.errors import InvalidConfigurationError
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.providers.nba_stats import ROSTER_COLUMNS, validate_canonical_season
@@ -198,14 +199,16 @@ class AthleteCatalogService:
                 )
             ).mappings().first()
         last_success = _as_utc(row["last_success_at"]) if row else None
-        is_fresh = bool(
-            last_success is not None
-            and observed_at <= last_success + timedelta(days=self.freshness_days)
-        )
+        # One duration decides freshness and is reported: the TTL is stated as
+        # the exact seconds of the very timedelta it was compared against, so a
+        # reader can never see an age past a ceiling this catalog called fresh.
+        max_age = timedelta(days=self.freshness_days)
+        is_fresh = bool(last_success is not None and observed_at <= last_success + max_age)
         return {
             "season": season,
             "is_fresh": is_fresh,
             "freshness_days": self.freshness_days,
+            "max_age_seconds": exact_seconds(max_age),
             "last_success_at": _iso(last_success),
             "last_failure_at": _iso(_as_utc(row["last_failure_at"]) if row else None),
             "last_failure_summary": row["last_failure_summary"] if row else None,

@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from app.domain.freshness import (
+    time_window_seconds,
+    within_fresh_window,
+    within_max_age,
+)
 from app.domain.comparisons import (
     SUPPORTED_NARROWING_FILTERS,
     BoardAppearance,
@@ -78,8 +83,8 @@ DEFAULT_MAX_COMPARISON_MARKETS = 10000
 #: Windows used when no runtime settings are injected.  They mirror the
 #: reviewed provider cache defaults, so a market is fresh for five minutes and
 #: may still enter a comparison as explicitly stale for thirty.
-DEFAULT_FRESH_SECONDS = 300.0
-DEFAULT_STALE_SECONDS = 1800.0
+DEFAULT_FRESH_SECONDS = Decimal(300)
+DEFAULT_STALE_SECONDS = Decimal(1800)
 
 ATHLETE_CATALOG = "athlete_catalog"
 EVENT_CATALOG = "event_catalog"
@@ -177,8 +182,20 @@ def _catalog_availability(
 
 
 def _catalog_max_age_seconds(freshness: Mapping[str, Any]) -> Decimal | None:
-    """The configured maximum age one catalog reports, in exact seconds."""
+    """The configured maximum age one catalog reports, in exact seconds.
 
+    A canonical catalog states the exact duration it gated on, counted from
+    that duration's own whole microseconds, and that is read first: a TTL
+    rewritten into floating-point hours and multiplied back is not the number
+    the catalog compared an age against.  The unit spellings remain readable
+    for a freshness document that states no exact seconds of its own.
+    """
+
+    seconds = freshness.get("max_age_seconds")
+    if seconds is not None:
+        return exact_scaled_seconds(
+            seconds, unit_seconds=1, field="catalog max_age_seconds"
+        )
     hours = freshness.get("max_age_hours")
     if hours is not None:
         return exact_scaled_seconds(
@@ -705,25 +722,34 @@ class ComparisonBoardService:
         past it may still be compared while it is inside the permitted stale
         window, and says so explicitly.  Beyond that window it stays visible on
         the board but enters no group.
+
+        The boundary itself is the cache's, read through the one shared
+        predicate in :mod:`app.domain.freshness`: an observation exactly one
+        fresh window old is served as a miss rather than a hit, so it can never
+        be a fresh member of a comparison either.
         """
 
-        if age <= self._window(
-            "dfs_cache_fresh_seconds_for", provider, DEFAULT_FRESH_SECONDS
+        if within_fresh_window(
+            age,
+            self._window("dfs_cache_fresh_seconds_for", provider, DEFAULT_FRESH_SECONDS),
         ):
             return MarketFreshness.FRESH
-        if age <= self._window(
-            "dfs_cache_stale_if_error_seconds_for", provider, DEFAULT_STALE_SECONDS
+        if within_max_age(
+            age,
+            self._window(
+                "dfs_cache_stale_if_error_seconds_for", provider, DEFAULT_STALE_SECONDS
+            ),
         ):
             return MarketFreshness.STALE
         return None
 
-    def _window(self, accessor: str, provider: str, default: float) -> Decimal:
+    def _window(self, accessor: str, provider: str, default: Decimal) -> Decimal:
         """One configured window as an exact decimal number of seconds."""
 
         providers = getattr(self.settings, "providers", None)
         reader = getattr(providers, accessor, None)
         configured = default if not callable(reader) else reader(provider)
-        return exact_scaled_seconds(configured, unit_seconds=1, field=accessor)
+        return time_window_seconds(configured, field=accessor)
 
     def _provider_reports(
         self, board: Any, observed_at: datetime, filters: ComparisonFilters

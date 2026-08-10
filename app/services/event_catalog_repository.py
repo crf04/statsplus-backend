@@ -11,6 +11,7 @@ import pandas as pd
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
+from app.domain.freshness import exact_seconds
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 
 DEFAULT_FAILURE_SUMMARY = "The event catalog refresh could not complete."
@@ -104,8 +105,13 @@ class EventCatalogRepository:
             row = connection.execute(select(table).where(
                 table.c.season == season)).mappings().one_or_none()
         success = row["last_success_at"] if row else None
+        # The TTL is reported as the exact duration it was gated on, counted
+        # from the timedelta's own whole microseconds.  Rewriting it as float
+        # hours made a third of an hour gate at 1200 seconds and report
+        # 1199.99999999999988, so an age and its own ceiling disagreed at the
+        # boundary they were compared at.
         return {"season": season, "fresh": bool(success and _utc(observed_at) - _utc(success) <= max_age),
-                "max_age_hours": max_age.total_seconds() / 3600,
+                "max_age_seconds": exact_seconds(max_age),
                 "last_attempt_at": _iso(row["last_attempt_at"]) if row else None,
                 "last_success_at": _iso(success), "last_failure_at": _iso(row["last_failure_at"]) if row else None,
                 "failure_summary": row["failure_summary"] if row else None,

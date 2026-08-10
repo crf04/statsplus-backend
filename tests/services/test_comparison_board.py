@@ -1434,6 +1434,8 @@ def test_exact_seconds_is_one_number_whatever_context_a_caller_is_inside(
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
+        ({"max_age_seconds": Decimal("1200.000000")}, "1200"),
+        ({"max_age_seconds": Decimal("1200"), "max_age_hours": 999.0}, "1200"),
         ({"max_age_hours": 72.0}, "259200"),
         ({"max_age_hours": 72.5}, "261000"),
         ({"max_age_hours": "0.5"}, "1800"),
@@ -2437,10 +2439,11 @@ def test_a_catalog_age_and_its_availability_agree_at_the_ttl_boundary(elapsed_se
 @pytest.mark.parametrize(
     ("elapsed_seconds", "freshness"),
     [
-        (300, MarketFreshness.FRESH),
-        ("300.5", MarketFreshness.STALE),
+        ("299.999999", MarketFreshness.FRESH),
+        (300, MarketFreshness.STALE),
+        ("300.000001", MarketFreshness.STALE),
         (1800, MarketFreshness.STALE),
-        ("1800.5", None),
+        ("1800.000001", None),
     ],
 )
 def test_freshness_windows_are_exact_at_their_boundaries(elapsed_seconds, freshness):
@@ -2680,3 +2683,86 @@ def test_provider_reports_serialize_deterministically():
         "coverage",
         "cache",
     }
+
+
+def test_one_boundary_decides_the_cache_and_the_comparison_alike():
+    """A window's endpoint is outside it at every seam that reads the window.
+
+    The provider cache serves an observation exactly one fresh window old as a
+    miss rather than a hit, so the board must not state the same observation as
+    a fresh comparison member.
+    """
+
+    endpoint = _snapshot(
+        "dabble",
+        (_market("dabble", market_id="d-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=300),
+    )
+    inside = _snapshot(
+        "prizepicks",
+        (_market("prizepicks", market_id="p-1"),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=299, microseconds=999999),
+    )
+    service, _ = _service([endpoint, inside])
+
+    board = _read(service)
+    group = board.groups[0]
+    freshness = {member.provider: member.freshness for member in group.members}
+
+    assert freshness == {
+        "dabble": MarketFreshness.STALE,
+        "prizepicks": MarketFreshness.FRESH,
+    }
+    assert group.is_mixed_freshness
+    assert group.summary.freshness is ComparisonFreshness.MIXED
+    reports = {report.provider: report.freshness for report in board.provider_reports}
+    assert reports == {
+        "dabble": MarketFreshness.STALE,
+        "prizepicks": MarketFreshness.FRESH,
+    }
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        {"dfs_cache_fresh_seconds": Decimal("1E+129")},
+        {"dfs_cache_fresh_seconds": Decimal("1E-200")},
+        {"dfs_cache_stale_if_error_seconds": Decimal("1E+129")},
+    ],
+)
+def test_a_window_the_board_would_refuse_cannot_be_configured(windows):
+    """Nothing a request refuses may sit in an accepted configuration."""
+
+    from app.config.settings import ProviderSettings
+
+    with pytest.raises(ValueError):
+        ProviderSettings(**windows)
+
+
+def test_a_catalog_states_its_ttl_as_the_exact_duration_it_gated_on():
+    """A catalog's own exact seconds are read ahead of any rewritten unit."""
+
+    ttl = Decimal("1200.000000")
+    last_success = GENERATED_AT - timedelta(seconds=1200)
+    catalog = FakeCatalog(
+        {
+            "season": SEASON,
+            "fresh": True,
+            "max_age_seconds": ttl,
+            "last_success_at": last_success.isoformat(),
+        },
+        ttl_seconds=1200,
+        fresh_key="fresh",
+    )
+    service, _ = _service(
+        [_snapshot("dabble", (_market(),))], event_catalog=catalog
+    )
+
+    board = _read(service)
+    entry = next(
+        entry for entry in board.availability.catalogs if entry.catalog == "event_catalog"
+    )
+
+    assert entry.max_age_seconds == ttl
+    assert entry.age_seconds == ttl
+    assert entry.available is True

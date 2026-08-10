@@ -287,3 +287,18 @@ def test_demo_database_is_rejected_before_catalog_write():
         AthleteCatalogService(engine, settings=_settings(), nba_stats_provider=FakeRosterProvider({}))
 
     assert hashlib.sha256(demo_path.read_bytes()).digest() == before
+
+
+def test_athlete_catalog_freshness_states_its_ttl_in_exact_seconds(catalog_db):
+    from decimal import Decimal
+
+    service = AthleteCatalogService(
+        catalog_db,
+        settings=_settings(freshness_days=7),
+        nba_stats_provider=FakeRosterProvider({}),
+    )
+    document = service.get_freshness("2024-25")
+
+    assert document["max_age_seconds"] == Decimal(604800)
+    assert isinstance(document["max_age_seconds"], Decimal)
+    assert document["freshness_days"] == 7

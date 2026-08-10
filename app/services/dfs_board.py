@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable
@@ -695,7 +696,7 @@ class ProviderOutcome:
     reason: ProviderFailureReason | str | None = None
     cache_status: str | None = None
     cache_retrieved_at: datetime | str | None = None
-    cache_age_seconds: float | None = None
+    cache_age_seconds: Decimal | float | None = None
     cache_failure_reason: str | None = None
     cache_failure_at: datetime | str | None = None
 
@@ -756,7 +757,7 @@ class ProviderOutcome:
         cache_age = self.cache_age_seconds
         if cache_age is not None and (
             isinstance(cache_age, bool)
-            or not isinstance(cache_age, (int, float))
+            or not isinstance(cache_age, (int, float, Decimal))
             or cache_age < 0
         ):
             raise ValueError("provider outcome cache_age_seconds must be non-negative")

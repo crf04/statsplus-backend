@@ -127,7 +127,19 @@ includes the adapter-contract version; it never serializes a `DFSBoard`. The
 cache sits below Statistic Catalog resolution, so a cached market carries
 provider evidence only: a resolved market is refused on the way in, and a wire
 value with a `statistic_match` is rejected as corrupt rather than decoded.
-Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata.
+Fresh hits retain the snapshot's `retrieved_at` and expose bounded age metadata
+as exact decimal seconds counted from whole microseconds, so the cache and the
+comparison board state one number for one observation.
+
+`app.domain.freshness` owns that boundary for every seam, and it states it once:
+**a fresh window is exclusive at its endpoint and a maximum age is inclusive at
+its own.** An observation exactly one fresh window old is therefore a miss
+rather than a hit, and exactly `stale_if_error_seconds` old is still a permitted
+stale fallback. Both canonical catalog TTLs are maximum ages and are inclusive
+in the same way. The module also owns the exact time-window domain every
+configured window is admitted through — no finer than one microsecond, no
+longer than `1E+9` seconds — enforced at startup, so nothing a configuration
+accepted can be refused by a request.
 Partial refreshes are returned to the current caller but never written over a
 complete value. A complete value past its fresh window is used only as a
 stale-if-error fallback after a later expected total refresh failure. Redis
@@ -871,6 +883,12 @@ Comparison Availability is decided before any group is built. A missing or
 over-age Athlete or Event Catalog makes the whole board unavailable, and each
 `CatalogAvailability` carries the catalog's identity (name and season), its
 last successful refresh, its exact decimal age, and the configured maximum age.
+Both catalogs report that maximum as `max_age_seconds`: the exact seconds of the
+very `timedelta` they gated on, counted from its whole microseconds. A TTL
+rewritten as floating-point hours is not that duration — a third of an hour
+gates at exactly 1200 seconds and was reported as 1199.99999999999988 — so an
+age and the ceiling it was compared against can no longer disagree at the
+boundary.
 The normalized markets are retained throughout; only their comparability is
 withheld until a refresh.
 
@@ -882,11 +900,12 @@ canonical catalogs, so a reported age and the availability derived from it can
 never disagree at a TTL boundary and a slow collection can never report a
 market as fresher than the board that states it.
 
-Freshness uses the reviewed provider cache windows, compared as exact decimals
-so a boundary is exact. A snapshot inside its provider's fresh window is
-contemporaneous; one past it enters comparisons only while it is inside the
-permitted stale window and says so; beyond that window its markets stay visible
-as `stale_snapshot`. A snapshot the provider timestamped after the board
+Freshness uses the reviewed provider cache windows, read through the one shared
+predicate in `app.domain.freshness` and compared as exact decimals, so the cache
+and the board can never classify one observation two ways. A snapshot inside its
+provider's fresh window is contemporaneous; one past it enters comparisons only
+while it is inside the permitted stale window and says so; beyond that window
+its markets stay visible as `stale_snapshot`. A snapshot the provider timestamped after the board
 observed it cannot be aged, so it fails closed: no negative age is ever
 reported, the observation carries no freshness, and its markets stay visible as
 `future_snapshot`. A group whose members are not contemporaneous — different

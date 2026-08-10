@@ -2073,3 +2073,104 @@ def test_future_dated_refresh_is_never_published_or_served() -> None:
     assert redis.set_calls == []
     assert cache.get_last_result() is None
     assert cache.coordinator.pending_count() == 0
+
+
+# -- one freshness boundary, shared with the comparison board ----------------
+
+
+def _boundary_cache(redis, clock, *, provider, fresh=300, stale=1800):
+    return ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+        fresh_seconds=fresh,
+        stale_if_error_seconds=stale,
+    )
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "expected_status"),
+    [
+        (299.999999, "hit"),
+        (300, "miss"),
+        (300.000001, "miss"),
+    ],
+)
+def test_the_fresh_window_endpoint_is_outside_the_window(
+    elapsed, expected_status
+) -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(elapsed)
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    result = cache.last_result
+
+    assert result.cache_status == expected_status
+    assert isinstance(result.age_seconds, Decimal)
+    assert result.age_seconds == Decimal(str(elapsed))
+    assert len(provider.calls) == (0 if expected_status == "hit" else 1)
+
+
+@pytest.mark.parametrize("elapsed", [1799.999999, 1800])
+def test_the_stale_ceiling_endpoint_is_still_a_permitted_fallback(elapsed) -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(elapsed)
+
+    cache.get_snapshot(NBAMarketQuery(), _context())
+    result = cache.last_result
+
+    assert result.cache_status == "stale"
+    assert result.age_seconds == Decimal(str(elapsed))
+    assert result.refresh_failure_reason == "timeout"
+    assert result.refresh_failed_at == clock.now_value
+
+
+def test_one_microsecond_past_the_stale_ceiling_is_no_longer_served() -> None:
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
+    cache = _boundary_cache(redis, clock, provider=provider)
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
+        _snapshot()
+    )
+    clock.advance(1800.000001)
+
+    with pytest.raises(TimeoutError):
+        cache.get_snapshot(NBAMarketQuery(), _context())
+    assert cache.get_last_result() is None
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        {"fresh_seconds": 1e129},
+        {"fresh_seconds": 1e-200},
+        {"stale_if_error_seconds": 1e129},
+        {"stale_if_error_seconds": 1e-200},
+        {"fresh_seconds": float("inf")},
+        {"fresh_seconds": True},
+        {"fresh_seconds": 0},
+        {"fresh_seconds": -1},
+    ],
+)
+def test_cache_windows_outside_the_time_window_domain_are_refused(windows) -> None:
+    with pytest.raises(ValueError):
+        ProviderSnapshotCache(
+            FakeProvider(_snapshot()),
+            provider_name="dabble",
+            redis_client=FakeRedis(),
+            **windows,
+        )

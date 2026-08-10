@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -265,3 +266,39 @@ def test_refresh_rejects_empty_season_batch(tmp_path):
     service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
     with pytest.raises(ValueError, match="at least one"):
         service.refresh([])
+
+
+def test_the_reported_maximum_age_is_the_exact_ttl_the_catalog_gates_on(tmp_path):
+    """One duration decides freshness and is reported, to the microsecond.
+
+    A TTL rewritten as floating-point hours and multiplied back to seconds is
+    not the duration the catalog compared against: a third of an hour gates at
+    exactly 1200 seconds but was reported as 1199.99999999999988.
+    """
+
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(
+        _engine(tmp_path), provider, clock=lambda: now, max_age=1 / 3
+    )
+    service.refresh("2025-26")
+
+    at_boundary = service.get_freshness("2025-26", now=now + timedelta(seconds=1200))
+    past_boundary = service.get_freshness(
+        "2025-26", now=now + timedelta(seconds=1200, microseconds=1)
+    )
+
+    assert at_boundary["max_age_seconds"] == Decimal(1200)
+    assert isinstance(at_boundary["max_age_seconds"], Decimal)
+    assert at_boundary["fresh"] is True
+    assert past_boundary["fresh"] is False
+
+
+def test_a_catalog_freshness_document_states_no_lossy_window(tmp_path):
+    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    service = EventCatalogService(
+        _engine(tmp_path), FakeScheduleProvider(), clock=lambda: now, max_age=1 / 3
+    )
+    service.refresh("2025-26")
+
+    assert "max_age_hours" not in service.get_freshness("2025-26")
