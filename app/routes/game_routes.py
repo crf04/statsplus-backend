@@ -8,6 +8,8 @@ serves requests with worker threads, so no event loop is created per request
 timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
+import re
+
 import requests
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
@@ -28,6 +30,11 @@ game_bp = Blueprint('games', __name__)
 
 game_service = CurrentAppService("game")
 slate_service = CurrentAppService("slate")
+matchup_selection_service = CurrentAppService("matchup_selection")
+
+_SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
+_CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
+_MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
 
 
 @game_bp.route('/slate', methods=['GET'])
@@ -35,6 +42,32 @@ slate_service = CurrentAppService("slate")
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
     return jsonify(slate_service.get_slate(request.args.get("date")))
+
+
+@game_bp.route("/matchup/selection", methods=["GET"])
+@require_auth
+def get_matchup_selection():
+    """Return the stored-log tables for one canonical matchup selection."""
+    if set(request.args) != _SELECTION_PARAMETERS:
+        raise InvalidInputError("The matchup selection parameters are invalid.")
+    game_ids = request.args.getlist("game_id")
+    player_ids = request.args.getlist("player_id")
+    if (
+        len(game_ids) != 1
+        or not game_ids[0]
+        or game_ids[0] != game_ids[0].strip()
+        or len(player_ids) != 1
+        or _CANONICAL_PLAYER_ID.fullmatch(player_ids[0]) is None
+        or len(player_ids[0]) > 19
+        or int(player_ids[0]) > _MAX_CANONICAL_PLAYER_ID
+    ):
+        raise InvalidInputError("The matchup selection parameters are invalid.")
+    return jsonify(
+        matchup_selection_service.get_selection(
+            game_id=game_ids[0],
+            player_id=int(player_ids[0]),
+        )
+    )
 
 
 def _default_season() -> str:

@@ -614,7 +614,33 @@ default), otherwise reads fail closed. That global observation never gates or
 hides historical backfills, which remain season-sidecar based. Callers consume
 the same governed `StatsFreshnessRepository` fact rather than synthesizing
 freshness from rows. Neither migration 011
-nor these services add a public route.
+nor its refresh service calls a provider from a public request.
+
+Authenticated matchup-selection reads compose only stored seams:
+
+```text
+GET /api/games/matchup/selection?game_id&player_id
+  → strict query parsing + Firebase auth
+  → current-season Event Catalog game identity
+  → persisted Player Pool player and posted Market Categories
+  → player_clusters peer IDs
+  → PlayerGameLogRepository Regular Season rates + combined-phase rows
+  → newest-first game rows + one final AVG row per nonempty table
+```
+
+`MatchupSelectionService` has no NBA Stats provider dependency. It resolves the
+opponent from the canonical event and the selected pool player's team, excludes
+the selected player from the archetype peer query, and asks the durable log
+repository for H2H/archetype rows. Rows without positive minutes or a usable
+stored Regular Season rate are omitted rather than assigned a synthetic
+baseline. Posted Market Categories are derived from the reviewed Statistic
+Catalog components, including combinations and FG2A (`FGA - FG3A`). Each game
+delta is `stat / minutes - own Regular Season rate`. An AVG row reports
+per-game mean stats/minutes and a minutes-weighted rate delta; this preserves
+each archetype sample player's own baseline instead of inventing one aggregate
+player. `MATCHUP_SELECTION_H2H_MIN_GAMES` and
+`MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` own the delivered table thinness.
+Empty tables stay `200`, carry `thin: true`, and have no AVG row.
 
 ### Durable refresh jobs
 

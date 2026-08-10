@@ -431,6 +431,10 @@ class CatalogSettings(BaseModel):
     player_game_log_min_active_players_per_team_game: int = Field(
         default=5, strict=True, ge=1
     )
+    matchup_selection_h2h_min_games: int = Field(default=1, strict=True, ge=1)
+    matchup_selection_archetype_min_games: int = Field(
+        default=5, strict=True, ge=1
+    )
     #: How far a provider's reported start time may sit from a scheduled NBA
     #: game before the two are no longer evidence of the same event.  The
     #: boundary itself is inside the window.
@@ -710,6 +714,12 @@ def _build_settings(
                 ),
                 player_game_log_min_active_players_per_team_game=reader.integer(
                     "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME", 5
+                ),
+                matchup_selection_h2h_min_games=reader.integer(
+                    "MATCHUP_SELECTION_H2H_MIN_GAMES", 1
+                ),
+                matchup_selection_archetype_min_games=reader.integer(
+                    "MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES", 5
                 ),
             ),
             port=reader.integer("PORT", 5000),

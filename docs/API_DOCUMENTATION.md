@@ -309,6 +309,79 @@ Empty and error behavior:
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
+### Get Matchup Selection
+
+```http
+GET /api/games/matchup/selection?game_id=<nba_game_id>&player_id=<canonical_player_id>
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns the selected Player Pool player's stored H2H games against the game's
+opponent and the stored games for the player's archetype peers against that
+opponent. `game_id` is one nonempty string and `player_id` is one positive
+canonical integer. Unknown, repeated, empty, noncanonical, or extra parameters
+are refused rather than ignored.
+
+```json
+{
+  "player_id": 2544,
+  "h2h": {
+    "thin": false,
+    "rows": [
+      {
+        "row_type": "game",
+        "game_date": "2026-01-05",
+        "matchup": "LAL @ BOS",
+        "minutes": 36.0,
+        "stats": {"PTS": 31.0, "PRA": 48.0, "FGA": 19.0, "FG3A": 7.0},
+        "deltas": {"PTS": 0.083, "PRA": 0.102, "FGA": 0.018, "FG3A": 0.013}
+      },
+      {
+        "row_type": "average",
+        "game_date": null,
+        "matchup": null,
+        "minutes": 36.0,
+        "stats": {"PTS": 31.0, "PRA": 48.0, "FGA": 19.0, "FG3A": 7.0},
+        "deltas": {"PTS": 0.083, "PRA": 0.102, "FGA": 0.018, "FG3A": 0.013}
+      }
+    ]
+  },
+  "archetype": {"thin": true, "rows": []}
+}
+```
+
+Both tables carry backend-owned `thin` booleans. A nonempty table contains
+newest-first `game` rows followed by exactly one `average` row; an empty table
+contains no rows. Game rows always carry ISO game date and stored team/opponent
+matchup identity. The average row always carries null date and matchup.
+
+Each row's `stats` and `deltas` maps contain every Market Category posted for
+the selected player, including PRA/PA/PR/RA/STKS and FGA/FG3A/FG2A. A delta is
+`game stat / game minutes - sample player's Regular Season stat / Regular
+Season minutes`; it is a ±STAT/MIN difference, not a percentage. H2H and
+archetype game chronology may include stored Regular Season and Playoffs rows,
+but each baseline is derived only from that row's player's stored Regular
+Season logs. Average stats and minutes are per-game means. Average deltas are
+minutes-weighted against the contributing players' own rates. Numeric outputs
+are rounded to six decimal places.
+
+Thinness uses named positive-integer settings:
+`MATCHUP_SELECTION_H2H_MIN_GAMES` (default `1`) and
+`MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` (default `5`). A table is thin below
+its threshold; an empty table is always thin. Missing logs or a missing usable
+Regular Season baseline exclude rows and remain an honest `200` empty/thin
+response. The request consumes persisted Player Pool facts, `player_clusters`,
+and durable `player_game_logs`; it never calls NBA Stats per player and never
+uses recorded test fixtures in production.
+
+| Case | Response |
+| --- | --- |
+| Known selection with no usable H2H or archetype rows | `200` with the affected `rows: []`, `thin: true` |
+| Unknown game or player outside that game's Player Pool | `404 resource_not_found` |
+| Missing, empty, repeated, noncanonical, or extra query parameter | `400 invalid_input` |
+| Authentication is missing or invalid | existing `401` authentication error contract |
+| Schedule dependency is unavailable | `503 provider_unavailable` |
+
 ### Get Game Logs
 
 ```http
