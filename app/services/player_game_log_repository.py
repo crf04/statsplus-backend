@@ -6,13 +6,18 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from typing import Iterable
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.domain.utc import assume_utc
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
+from app.models.stats_freshness import StatsRefresh
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import (
+    PLAYER_GAME_LOG_SURFACE,
+    StatsFreshnessRepository,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,17 +68,25 @@ class PlayerGameLogRepository:
 
     def __init__(self, engine: Engine, *, statistic_catalog: StatisticCatalog) -> None:
         self.engine = engine
+        self._surface_freshness = StatsFreshnessRepository(
+            engine, surface=PLAYER_GAME_LOG_SURFACE
+        )
         self._market_statistics = tuple(
             statistic
             for statistic in statistic_catalog.statistics
             if statistic.market_category is not None
         )
-        supported_components = self._base_stat_values(None)
-        unsupported = {
+        required_components = {
             component
             for statistic in self._market_statistics
             for component in statistic.components
-            if component not in supported_components
+        }
+        stored_components = set(PlayerGameLogRecord.__dataclass_fields__)
+        unsupported = {
+            component
+            for component in required_components
+            if component not in stored_components
+            and component != "two_pointers_attempted"
         }
         if unsupported:
             raise ValueError(
@@ -120,6 +133,14 @@ class PlayerGameLogRepository:
                 raise ValueError(
                     "empty player game log snapshot cannot replace a valid publication"
                 )
+            if (
+                unique
+                and existing_row_count is not None
+                and len(unique) < existing_row_count
+            ):
+                raise ValueError(
+                    "a smaller player game log snapshot cannot replace cumulative facts"
+                )
             connection.execute(
                 delete(log_table).where(log_table.c.season == canonical_season)
             )
@@ -141,6 +162,9 @@ class PlayerGameLogRepository:
                 connection.execute(
                     insert(refresh_table).values(season=canonical_season, **values)
                 )
+            self._surface_freshness.record_success(
+                retrieved, connection=connection
+            )
         return len(unique)
 
     def list_player_rows(
@@ -148,18 +172,12 @@ class PlayerGameLogRepository:
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
         log_table = PlayerGameLog.__table__
-        refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(log_table)
-                .join(
-                    refresh_table,
-                    refresh_table.c.season == log_table.c.season,
-                )
+                self._published_rows_statement()
                 .where(
                     log_table.c.season == canonical_season,
                     log_table.c.player_id == player_id,
-                    refresh_table.c.row_count > 0,
                 )
                 .order_by(log_table.c.game_date.desc(), log_table.c.game_id.desc())
             ).mappings()
@@ -167,10 +185,20 @@ class PlayerGameLogRepository:
 
     def get_freshness(self, season: str) -> PlayerGameLogFreshness:
         canonical_season = validate_canonical_season(season)
-        table = PlayerGameLogRefresh.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
+        surface_table = StatsRefresh.__table__
         with self.engine.connect() as connection:
             row = connection.execute(
-                select(table).where(table.c.season == canonical_season)
+                select(refresh_table)
+                .join(
+                    surface_table,
+                    and_(
+                        surface_table.c.surface == PLAYER_GAME_LOG_SURFACE,
+                        surface_table.c.last_success_at
+                        == refresh_table.c.retrieved_at,
+                    ),
+                )
+                .where(refresh_table.c.season == canonical_season)
             ).mappings().one_or_none()
         if row is None:
             return PlayerGameLogFreshness(canonical_season, None, None, 0)
@@ -243,19 +271,13 @@ class PlayerGameLogRepository:
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
         log_table = PlayerGameLog.__table__
-        refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(log_table)
-                .join(
-                    refresh_table,
-                    refresh_table.c.season == log_table.c.season,
-                )
+                self._published_rows_statement()
                 .where(
                     log_table.c.season == canonical_season,
                     log_table.c.player_id.in_(player_ids),
                     log_table.c.opponent_team_id == opponent_team_id,
-                    refresh_table.c.row_count > 0,
                 )
                 .order_by(
                     log_table.c.game_date.desc(),
@@ -265,50 +287,42 @@ class PlayerGameLogRepository:
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
+    @staticmethod
+    def _published_rows_statement():
+        log_table = PlayerGameLog.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
+        surface_table = StatsRefresh.__table__
+        return (
+            select(log_table)
+            .join(
+                refresh_table,
+                refresh_table.c.season == log_table.c.season,
+            )
+            .join(
+                surface_table,
+                and_(
+                    surface_table.c.surface == PLAYER_GAME_LOG_SURFACE,
+                    surface_table.c.last_success_at == refresh_table.c.retrieved_at,
+                ),
+            )
+            .where(refresh_table.c.row_count > 0)
+        )
+
     def _market_values(self, record: PlayerGameLogRecord) -> dict[str, float]:
-        base_values = self._base_stat_values(record)
         return {
             statistic.market_category: sum(
-                base_values[component] for component in statistic.components
+                self._component_value(record, component)
+                for component in statistic.components
             )
             for statistic in self._market_statistics
             if statistic.market_category is not None
         }
 
     @staticmethod
-    def _base_stat_values(
-        record: PlayerGameLogRecord | None,
-    ) -> dict[str, float]:
-        if record is None:
-            return {
-                key: 0.0
-                for key in (
-                    "points",
-                    "rebounds",
-                    "assists",
-                    "three_pointers_made",
-                    "turnovers",
-                    "steals",
-                    "blocks",
-                    "field_goals_attempted",
-                    "three_pointers_attempted",
-                    "two_pointers_attempted",
-                )
-            }
-        return {
-            "points": record.points,
-            "rebounds": record.rebounds,
-            "assists": record.assists,
-            "three_pointers_made": record.three_pointers_made,
-            "turnovers": record.turnovers,
-            "steals": record.steals,
-            "blocks": record.blocks,
-            "field_goals_attempted": record.field_goals_attempted,
-            "three_pointers_attempted": record.three_pointers_attempted,
-            "two_pointers_attempted": (
-                record.field_goals_attempted - record.three_pointers_attempted
-            ),
-        }
+    def _component_value(record: PlayerGameLogRecord, component: str) -> float:
+        if component == "two_pointers_attempted":
+            return record.field_goals_attempted - record.three_pointers_attempted
+        return float(getattr(record, component))
 
 
 __all__ = [

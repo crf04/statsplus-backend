@@ -447,16 +447,19 @@ provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
-endpoint. It refreshes the stats tables, current-season Event Catalog, and then
-durable current-season player game logs, retrying that ordered unit once. The
-player-log step uses one season-wide provider read and publishes normalized
-player/game facts plus source and retrieval freshness transactionally. Failed
-or wholly unjoinable data preserves the last valid publication; individual
-unjoined athlete, game, or team rows are excluded and counted without exposing
-their identities. Empty results require a present schedule with no completed
-games and cannot replace nonempty facts. These stored facts back
-future matchup rail and selection reads; this slice adds no public matchup
-route and does not change `GET /api/games/game_logs`.
+endpoint. It refreshes the stats tables, current-season Athlete Catalog,
+current-season Event Catalog, and then durable current-season player game logs,
+retrying that ordered unit once. The player-log step uses one season-wide
+provider read and publishes normalized player/game facts plus its season
+sidecar and named `player_game_logs` stats freshness transactionally. A
+nonempty result also requires a present, fresh, nonempty Athlete Catalog.
+Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
+preserves the last valid publication; individual well-formed unjoined athlete,
+game, or team rows are excluded and counted without exposing their identities.
+Empty results require a present schedule with no events classified final and
+cannot replace nonempty facts. These stored facts back future matchup rail and
+selection reads; this slice adds no public matchup route and does not change
+`GET /api/games/game_logs`.
 
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
@@ -490,9 +493,9 @@ credentials, URLs, bodies, or exception text.
 
 The same endpoint includes `recent_player_game_log_events` plus
 `player_game_log_events_total` and `player_game_log_buffered_events`. Each
-entry contains only source/published row counts and the three unjoined-row
-counts; player, game, team, and provider identities are never telemetry
-dimensions.
+entry contains only source/published row counts, the three unjoined-row counts,
+and a malformed-row count; player, game, team, and provider identities are
+never telemetry dimensions.
 
 `recent_board_request_events` describes the published `GET /api/dfs/board`
 route: exactly one entry per authenticated request, whatever it ended in.
@@ -593,7 +596,9 @@ writable database, and has no wall-clock season default or background timer.
 `AthleteCatalogService.get_catalog(season, active_only=...)` and
 `get_freshness(season)` read the persisted catalog and independent success /
 failure timestamps. `ATHLETE_CATALOG_FRESHNESS_DAYS` controls the default
-seven-day freshness window.
+seven-day freshness window. Nightly Refresh invokes the same service with its
+explicit current season before Event Catalog and player-game-log publication;
+player logs also gate canonicalization on the resulting freshness fact.
 
 Provider athlete mappings are an internal, persisted read-side seam rather
 than new HTTP mutation routes. `AthleteResolver` accepts typed provider

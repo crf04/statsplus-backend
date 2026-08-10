@@ -9,16 +9,15 @@ import math
 from typing import Any, Protocol
 
 import pandas as pd
-from sqlalchemy.engine import Engine
 
 from app.domain.utc import assume_utc
-from app.providers.nba_stats import NBAStatsProvider
+from app.domain.nba_events import is_final_event
+from app.providers.nba_stats import DEFAULT_SEASON_TYPE, NBAStatsProvider
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
 )
-from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerGameLogTelemetryRecorder,
     PlayerGameLogTelemetryEvent,
@@ -56,6 +55,10 @@ class AthleteCatalogReader(Protocol):
         self, season: str, *, active_only: bool = False
     ) -> list[dict[str, Any]]: ...
 
+    def get_freshness(
+        self, season: str, *, now: datetime | None = None
+    ) -> dict[str, Any]: ...
+
 
 class EventCatalogReader(Protocol):
     """Owner read seam for canonical games."""
@@ -68,23 +71,18 @@ class PlayerGameLogService:
 
     def __init__(
         self,
-        engine: Engine,
         *,
         nba_stats_provider: NBAStatsProvider,
         athlete_catalog: AthleteCatalogReader,
         event_catalog: EventCatalogReader,
-        repository: PlayerGameLogRepository | None = None,
-        statistic_catalog: StatisticCatalog | None = None,
+        repository: PlayerGameLogRepository,
         clock: Callable[[], datetime] | None = None,
         telemetry_recorder: PlayerGameLogTelemetryRecorder | None = None,
     ) -> None:
         self.provider = nba_stats_provider
         self.athlete_catalog = athlete_catalog
         self.event_catalog = event_catalog
-        self.repository = repository or PlayerGameLogRepository(
-            engine,
-            statistic_catalog=statistic_catalog or StatisticCatalog.load_default(),
-        )
+        self.repository = repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.telemetry_recorder = (
             telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
@@ -96,7 +94,7 @@ class PlayerGameLogService:
         canonical_season = validate_canonical_season(season)
         frame = self.provider.get_season_player_game_logs(
             season=canonical_season,
-            season_type="Regular Season",
+            season_type=DEFAULT_SEASON_TYPE,
         )
         retrieved_at = assume_utc(now or self._clock())
         if not isinstance(frame, pd.DataFrame):
@@ -110,7 +108,7 @@ class PlayerGameLogService:
                 raise PlayerGameLogIdentityError(
                     "an empty snapshot has no event catalog evidence"
                 )
-            if self._has_completed_game(events):
+            if any(is_final_event(event) for event in events):
                 raise PlayerGameLogIdentityError(
                     "an empty snapshot cannot represent a season with completed games"
                 )
@@ -128,15 +126,28 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at.isoformat(),
             )
 
+        athlete_freshness = self.athlete_catalog.get_freshness(
+            canonical_season, now=retrieved_at
+        )
+        if not athlete_freshness.get("is_fresh") or not athlete_freshness.get(
+            "row_count"
+        ):
+            raise PlayerGameLogIdentityError(
+                "the Athlete Catalog must be present and fresh before publication"
+            )
         athletes = self.athlete_catalog.get_catalog(
             canonical_season, active_only=False
         )
-        canonicalized = self._canonicalize(
-            canonical_season,
-            frame,
-            athletes=athletes,
-            events=events,
-        )
+        try:
+            canonicalized = self._canonicalize(
+                canonical_season,
+                frame,
+                athletes=athletes,
+                events=events,
+            )
+        except PlayerGameLogIdentityError:
+            self._record_telemetry(len(frame.index), 0, 0, 0, 0, malformed=1)
+            raise
         if not canonicalized.records:
             self._record_canonicalization_telemetry(canonicalized, published=0)
             raise PlayerGameLogIdentityError(
@@ -337,14 +348,6 @@ class PlayerGameLogService:
             )
         return numeric
 
-    @staticmethod
-    def _has_completed_game(events: list[dict[str, Any]]) -> bool:
-        return any(
-            event.get("status_code") == 3
-            or str(event.get("status_text", "")).casefold().startswith("final")
-            for event in events
-        )
-
     def _record_canonicalization_telemetry(
         self, result: _CanonicalizationResult, *, published: int
     ) -> None:
@@ -363,6 +366,8 @@ class PlayerGameLogService:
         unjoined_athletes: int,
         unjoined_events: int,
         team_mismatches: int,
+        *,
+        malformed: int = 0,
     ) -> None:
         self.telemetry_recorder.record(
             PlayerGameLogTelemetryEvent(
@@ -371,6 +376,7 @@ class PlayerGameLogService:
                 unjoined_athlete_count=unjoined_athletes,
                 unjoined_event_count=unjoined_events,
                 team_mismatch_count=team_mismatches,
+                malformed_row_count=malformed,
             )
         )
 

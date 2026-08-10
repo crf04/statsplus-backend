@@ -62,6 +62,15 @@ def is_postponed_event(event: Mapping[str, object]) -> bool:
     )
 
 
+def is_final_event(event: Mapping[str, object]) -> bool:
+    """Whether governed code or normalized terminal text says a game is final."""
+
+    return bool(
+        event.get("status_code") == NBAGameStatus.FINAL
+        or str(event.get("status_text", "")).casefold().startswith("final")
+    )
+
+
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
     """Return canonical event kind, with a real game ID as authority."""
 
@@ -129,6 +138,7 @@ __all__ = [
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
+    "is_final_event",
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",

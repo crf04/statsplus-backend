@@ -44,8 +44,6 @@ class ApplicationDependencies:
     event_catalog_service: Any | None = None
     event_mapping_repository: Any | None = None
     event_resolver: Any | None = None
-    player_game_log_repository: Any | None = None
-    player_game_log_service: Any | None = None
 
 
 def build_dependencies(
@@ -179,8 +177,6 @@ def build_dependencies(
     event_catalog_service = None
     event_mapping_repository = None
     event_resolver = None
-    player_game_log_repository = None
-    player_game_log_service = None
     from app.utils.db import is_demo_database_url
 
     if not is_demo_database_url(settings.database.url):
@@ -194,8 +190,6 @@ def build_dependencies(
         from app.services.event_catalog_service import EventCatalogService
         from app.services.event_mapping_repository import EventMappingRepository
         from app.services.event_resolver import EventResolver
-        from app.services.player_game_log_repository import PlayerGameLogRepository
-        from app.services.player_game_log_service import PlayerGameLogService
 
         athlete_mapping_repository = AthleteMappingRepository(engine)
         athlete_resolver = AthleteResolver(
@@ -215,16 +209,6 @@ def build_dependencies(
             event_catalog_service,
             mapping_repository=event_mapping_repository,
             settings=settings,
-        )
-        player_game_log_repository = PlayerGameLogRepository(
-            engine, statistic_catalog=statistic_catalog
-        )
-        player_game_log_service = PlayerGameLogService(
-            engine,
-            nba_stats_provider=nba_stats_provider,
-            repository=player_game_log_repository,
-            athlete_catalog=athlete_catalog_service,
-            event_catalog=event_catalog_service,
         )
 
     dfs_board_service = DFSBoardService(
@@ -285,8 +269,6 @@ def build_dependencies(
         event_catalog_service=event_catalog_service,
         event_mapping_repository=event_mapping_repository,
         event_resolver=event_resolver,
-        player_game_log_repository=player_game_log_repository,
-        player_game_log_service=player_game_log_service,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),

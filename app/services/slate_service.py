@@ -16,8 +16,8 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.nba_events import (
-    NBAGameStatus,
     is_all_star_kind,
+    is_final_event,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
@@ -176,10 +176,7 @@ class SlateService:
         )
         if is_postponed_event(event):
             state = "postponed"
-        elif (
-            event.get("status_code") == NBAGameStatus.FINAL
-            or str(event.get("status_text", "")).casefold().startswith("final")
-        ):
+        elif is_final_event(event):
             state = "final"
         else:
             state = "scheduled"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run stats and schedule refreshes as one deployment-owned process unit."""
+"""Run durable current-season refreshes as one deployment-owned process unit."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: 
 
 def run_nightly_refresh(
     refresh_stats: Callable[[], Any],
+    refresh_athlete_catalog: Callable[[], Any],
     refresh_schedule: Callable[[], Any],
     refresh_player_game_logs: Callable[[], Any],
 ) -> int:
@@ -42,6 +43,7 @@ def run_nightly_refresh(
         succeeded = True
         for step, refresh in (
             ("stats", refresh_stats),
+            ("athlete catalog", refresh_athlete_catalog),
             ("schedule", refresh_schedule),
             ("player game logs", refresh_player_game_logs),
         ):
@@ -96,7 +98,6 @@ def _run(database_url: str) -> int:
             engine, statistic_catalog=StatisticCatalog.load_default()
         )
         player_game_log_service = PlayerGameLogService(
-            engine,
             nba_stats_provider=provider,
             repository=player_game_log_repository,
             athlete_catalog=athlete_service,
@@ -104,6 +105,10 @@ def _run(database_url: str) -> int:
         )
         return run_nightly_refresh(
             data_service.update_all_data,
+            lambda: athlete_service.refresh_season(
+                settings.nba.current_season
+            ).status
+            == "succeeded",
             lambda: event_service.refresh(settings.nba.current_season),
             lambda: player_game_log_service.refresh(settings.nba.current_season),
         )

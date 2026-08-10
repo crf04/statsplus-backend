@@ -265,6 +265,7 @@ class PlayerGameLogTelemetryEvent:
     unjoined_athlete_count: int
     unjoined_event_count: int
     team_mismatch_count: int
+    malformed_row_count: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -275,6 +276,7 @@ class PlayerGameLogTelemetryEvent:
                 self.unjoined_athlete_count,
                 self.unjoined_event_count,
                 self.team_mismatch_count,
+                self.malformed_row_count,
             )
         ):
             raise ValueError(
@@ -522,12 +524,13 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
         logger.info(
             "player_game_log_event source_row_count=%d published_row_count=%d "
             "unjoined_athlete_count=%d unjoined_event_count=%d "
-            "team_mismatch_count=%d",
+            "team_mismatch_count=%d malformed_row_count=%d",
             event.source_row_count,
             event.published_row_count,
             event.unjoined_athlete_count,
             event.unjoined_event_count,
             event.team_mismatch_count,
+            event.malformed_row_count,
         )
         with _buffer_lock:
             global _player_game_log_events_total

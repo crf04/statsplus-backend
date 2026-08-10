@@ -200,7 +200,7 @@ def _create_event_mapping_tables(connection: Connection) -> None:
 
 
 def _create_stats_freshness_table(connection: Connection) -> None:
-    """Create the singleton success record for stats-table publication."""
+    """Create governed completion records for stats-surface publications."""
     from app.models.stats_freshness import StatsRefresh
 
     StatsRefresh.__table__.create(connection, checkfirst=True)

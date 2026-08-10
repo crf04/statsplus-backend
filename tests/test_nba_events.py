@@ -3,12 +3,29 @@
 import pytest
 
 from app.domain.nba_events import (
+    NBAGameStatus,
     is_all_star_kind,
+    is_final_event,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
     resolve_stored_event_classification,
 )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"status_code": NBAGameStatus.FINAL, "status_text": "Scheduled"},
+        {"status_code": 1, "status_text": "Final/OT"},
+    ],
+)
+def test_final_event_accepts_governed_code_and_terminal_text(event):
+    assert is_final_event(event)
+
+
+def test_final_event_rejects_nonterminal_schedule_status():
+    assert not is_final_event({"status_code": 1, "status_text": "7:00 pm ET"})
 
 
 @pytest.mark.parametrize(

@@ -8,18 +8,19 @@ from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
 
 
-def test_nightly_refresh_runs_stats_schedule_then_player_logs_once_on_success():
+def test_nightly_refresh_runs_stats_catalog_schedule_then_player_logs_once_on_success():
     calls = []
 
     assert (
         run_nightly_refresh(
             lambda: calls.append("stats") or True,
+            lambda: calls.append("athlete_catalog") or True,
             lambda: calls.append("schedule") or object(),
             lambda: calls.append("player_game_logs") or object(),
         )
         == 0
     )
-    assert calls == ["stats", "schedule", "player_game_logs"]
+    assert calls == ["stats", "athlete_catalog", "schedule", "player_game_logs"]
 
 
 def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
@@ -29,13 +30,46 @@ def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
     assert (
         run_nightly_refresh(
             lambda: calls.append("stats") or next(stats_results),
+            lambda: calls.append("athlete_catalog") or True,
             lambda: calls.append("schedule") or object(),
             lambda: calls.append("player_game_logs") or object(),
         )
         == 0
     )
-    assert calls == ["stats", "stats", "schedule", "player_game_logs"]
+    assert calls == [
+        "stats",
+        "stats",
+        "athlete_catalog",
+        "schedule",
+        "player_game_logs",
+    ]
     assert "attempt 1 failed during stats refresh; retrying" in capsys.readouterr().err
+
+
+def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(capsys):
+    calls = []
+    athlete_results = iter([False, True])
+
+    assert (
+        run_nightly_refresh(
+            lambda: calls.append("stats") or True,
+            lambda: calls.append("athlete_catalog") or next(athlete_results),
+            lambda: calls.append("schedule") or object(),
+            lambda: calls.append("player_game_logs") or object(),
+        )
+        == 0
+    )
+    assert calls == [
+        "stats",
+        "athlete_catalog",
+        "stats",
+        "athlete_catalog",
+        "schedule",
+        "player_game_logs",
+    ]
+    assert "attempt 1 failed during athlete catalog refresh; retrying" in (
+        capsys.readouterr().err
+    )
 
 
 def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
@@ -44,13 +78,21 @@ def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
     assert (
         run_nightly_refresh(
             lambda: calls.append("stats") or True,
+            lambda: calls.append("athlete_catalog") or True,
             lambda: calls.append("schedule")
             or (_ for _ in ()).throw(RuntimeError("offline failure")),
             lambda: calls.append("player_game_logs") or object(),
         )
         == 1
     )
-    assert calls == ["stats", "schedule", "stats", "schedule"]
+    assert calls == [
+        "stats",
+        "athlete_catalog",
+        "schedule",
+        "stats",
+        "athlete_catalog",
+        "schedule",
+    ]
     diagnostics = capsys.readouterr().err
     assert "attempt 1 failed during schedule refresh; retrying" in diagnostics
     assert "attempt 2 failed during schedule refresh; no retries remain" in diagnostics
@@ -70,6 +112,7 @@ def test_nightly_refresh_retries_whole_unit_when_player_logs_fail(capsys):
     assert (
         run_nightly_refresh(
             lambda: calls.append("stats") or True,
+            lambda: calls.append("athlete_catalog") or True,
             lambda: calls.append("schedule") or object(),
             refresh_logs,
         )
@@ -77,9 +120,11 @@ def test_nightly_refresh_retries_whole_unit_when_player_logs_fail(capsys):
     )
     assert calls == [
         "stats",
+        "athlete_catalog",
         "schedule",
         "player_game_logs",
         "stats",
+        "athlete_catalog",
         "schedule",
         "player_game_logs",
     ]
