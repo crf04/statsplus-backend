@@ -35,6 +35,14 @@ def test_regular_season_event_uses_canonical_game_id_authority():
     )
 
 
+@pytest.mark.parametrize(
+    "label",
+    [" regular season ", "REGULAR SEASON", "Regular   Season", "regular_season"],
+)
+def test_regular_season_event_normalizes_fallback_season_type_labels(label):
+    assert is_regular_season_event({"nba_game_id": "", "classification": label})
+
+
 @pytest.mark.parametrize("game_id", ["0012500001", "0032500001", "0042500001"])
 def test_regular_season_event_excludes_other_governed_phases(game_id):
     assert not is_regular_season_event(

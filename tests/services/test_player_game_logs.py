@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, delete, insert, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import create_engine, delete, insert, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.event_catalog import EventCatalogEntry
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.player_game_log import PlayerGameLog
 from app.models.stats_freshness import StatsRefresh
 from app.providers.nba_stats import normalize_season_player_game_logs
@@ -165,6 +165,16 @@ def _seed_identities(
                     ("0022500003", date(2026, 1, 8), 2, "BBB", 3, "CCC"),
                 )
             ],
+        )
+        connection.execute(
+            insert(EventCatalogRefresh.__table__).values(
+                season=SEASON,
+                last_attempt_at=RETRIEVED_AT,
+                last_success_at=RETRIEVED_AT,
+                last_failure_at=None,
+                failure_summary=None,
+                event_count=3,
+            )
         )
 
 
@@ -718,6 +728,25 @@ def test_completed_all_star_game_does_not_block_empty_regular_season_snapshot(
     assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
 
 
+def test_postponed_regular_season_event_with_final_code_allows_empty_snapshot(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository, completed=True)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            update(EventCatalogEntry.__table__).values(
+                postponed_status="postponed"
+            )
+        )
+    provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
+
+    result = _service(repository, provider).refresh(SEASON)
+
+    assert result.row_count == 0
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+
+
 def test_empty_snapshot_without_event_catalog_evidence_fails_closed(tmp_path):
     repository = _repository(tmp_path)
     provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
@@ -839,6 +868,15 @@ def test_unusable_athlete_catalog_preserves_last_valid_publication(
         observed_at = RETRIEVED_AT + timedelta(days=1)
     else:
         observed_at = RETRIEVED_AT + timedelta(days=8)
+        with repository.engine.begin() as connection:
+            connection.execute(
+                update(EventCatalogRefresh.__table__)
+                .where(EventCatalogRefresh.season == SEASON)
+                .values(
+                    last_attempt_at=observed_at,
+                    last_success_at=observed_at,
+                )
+            )
     telemetry = _RecordingTelemetry()
 
     with pytest.raises(PlayerGameLogIdentityError, match="Athlete Catalog.*fresh"):
@@ -858,6 +896,81 @@ def test_unusable_athlete_catalog_preserves_last_valid_publication(
             rejected_publication_count=1,
         )
     ]
+
+
+@pytest.mark.parametrize("catalog_state", ["missing", "stale", "partial"])
+def test_unusable_event_catalog_preserves_last_valid_publication(
+    tmp_path, catalog_state
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    service = _service(repository, provider)
+    service.refresh(SEASON)
+    before = repository.list_player_rows(SEASON, 101)
+    if catalog_state == "missing":
+        with repository.engine.begin() as connection:
+            connection.execute(
+                delete(EventCatalogRefresh.__table__).where(
+                    EventCatalogRefresh.season == SEASON
+                )
+            )
+        observed_at = RETRIEVED_AT + timedelta(days=1)
+    elif catalog_state == "stale":
+        observed_at = RETRIEVED_AT + timedelta(hours=73)
+    else:
+        with repository.engine.begin() as connection:
+            connection.execute(
+                delete(EventCatalogEntry.__table__).where(
+                    EventCatalogEntry.nba_game_id == "0022500003"
+                )
+            )
+        observed_at = RETRIEVED_AT + timedelta(hours=1)
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="Event Catalog.*fresh"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=observed_at)
+
+    assert repository.list_player_rows(SEASON, 101) == before
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+    assert telemetry.events == [
+        PlayerGameLogTelemetryEvent(
+            source_row_count=4,
+            published_row_count=0,
+            unjoined_athlete_count=0,
+            unjoined_event_count=0,
+            team_mismatch_count=0,
+            rejected_publication_count=1,
+        )
+    ]
+
+
+def test_incomplete_event_catalog_cannot_hide_cumulative_log_growth(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    service = _service(repository, provider)
+    service.refresh(SEASON)
+    before = repository.list_player_rows(SEASON, 101)
+    new_game = provider.frame.iloc[[0]].copy()
+    new_game["GAME_ID"] = "0022500004"
+    new_game["GAME_DATE"] = "2026-01-21"
+    provider.frame = pd.concat([provider.frame, new_game], ignore_index=True)
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="incomplete Event Catalog"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert repository.list_player_rows(SEASON, 101) == before
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+    assert telemetry.events[0].source_row_count == 5
+    assert telemetry.events[0].published_row_count == 0
+    assert telemetry.events[0].unjoined_event_count == 1
+    assert telemetry.events[0].rejected_publication_count == 1
 
 
 @pytest.mark.parametrize(
@@ -996,3 +1109,47 @@ def test_rejected_publication_records_safe_telemetry(
     assert telemetry.events[0].published_row_count == 0
     assert telemetry.events[0].malformed_row_count == 0
     assert telemetry.events[0].rejected_publication_count == 1
+
+
+def test_database_publication_failure_preserves_snapshot_and_records_rejection(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    _service(repository, provider).refresh(SEASON)
+    before = repository.list_player_rows(SEASON, 101)
+    unjoined = provider.frame.iloc[[0]].copy()
+    unjoined["PLAYER_ID"] = 999
+    provider.frame = pd.concat([provider.frame, unjoined], ignore_index=True)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TRIGGER reject_player_game_log_insert
+                BEFORE INSERT ON player_game_logs
+                BEGIN
+                    SELECT RAISE(FAIL, 'forced publication failure');
+                END
+                """
+            )
+        )
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(SQLAlchemyError):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert repository.list_player_rows(SEASON, 101) == before
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+    assert telemetry.events == [
+        PlayerGameLogTelemetryEvent(
+            source_row_count=5,
+            published_row_count=0,
+            unjoined_athlete_count=1,
+            unjoined_event_count=0,
+            team_mismatch_count=0,
+            rejected_publication_count=1,
+        )
+    ]

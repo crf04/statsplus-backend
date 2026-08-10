@@ -89,6 +89,10 @@ def canonical_event_kind(game_id: str, provider_classification: str = "") -> str
         game_type = _GAME_TYPE_BY_ID_PREFIX.get(game_id[:3])
         if game_type is not None:
             return game_type
+    normalized = _normalized_words(provider_classification)
+    for game_type in _GAME_TYPE_BY_ID_PREFIX.values():
+        if normalized == _normalized_words(game_type):
+            return game_type
     return _known_classification(provider_classification)
 
 

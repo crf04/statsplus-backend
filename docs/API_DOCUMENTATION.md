@@ -455,16 +455,28 @@ sidecar transactionally. For the configured current season, that transaction
 also advances the named `player_game_logs` stats freshness; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. A nonempty result also requires a present, fresh,
-nonempty Athlete Catalog.
+nonempty Athlete Catalog and a present, fresh, nonempty Event Catalog whose
+freshness count agrees with its actual season rows. `update_database` does not
+publish the season-owned Athlete Catalog or its freshness, so Nightly's named
+Athlete Catalog step is required; if it fails, later schedule and log steps do
+not run and the prior player-log publication remains valid.
 Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
 preserves the last valid publication; individual well-formed unjoined athlete,
 game, or team rows are excluded and counted without exposing their identities.
+Source growth hidden by an unjoined game fails as incomplete Event Catalog
+evidence instead of republishing an unchanged cumulative snapshot as fresh.
+SQLAlchemy publication failures are re-raised after rollback and emit the same
+bounded rejection aggregate with already-observed coverage counts.
 An athlete missing from a refreshed catalog can reuse only its exact durable
 NBA ID and canonical name from the prior complete same-season NBA Stats
 publication; new identities and mismatched events or teams remain excluded.
 Empty Regular Season results require a present schedule with no completed
 Regular Season events; completed preseason, exhibition, All-Star, playoff, or
-other-phase games do not count. Empty results cannot replace nonempty facts.
+other-phase games do not count, and a postponed event with a terminal-looking
+status is not completed evidence. Fallback season-type labels are normalized
+for case and whitespace when no canonical game-ID phase is available; a known
+NBA game-ID prefix remains authoritative. Empty results cannot replace
+nonempty facts.
 These stored facts back future matchup rail and selection reads; this slice
 adds no public matchup route and does not change `GET /api/games/game_logs`.
 

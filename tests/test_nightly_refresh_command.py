@@ -76,6 +76,28 @@ def test_nightly_refresh_retries_before_schedule_when_athlete_catalog_fails(caps
     )
 
 
+def test_nightly_refresh_reports_athlete_failure_without_running_dependents(capsys):
+    calls = []
+
+    assert (
+        run_nightly_refresh(
+            refresh_stats=lambda: calls.append("stats") or True,
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or False,
+            refresh_schedule=lambda: calls.append("schedule") or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
+        )
+        == 1
+    )
+    assert calls == ["stats", "athlete_catalog", "stats", "athlete_catalog"]
+    diagnostics = capsys.readouterr().err
+    assert "attempt 1 failed during athlete catalog refresh; retrying" in diagnostics
+    assert (
+        "attempt 2 failed during athlete catalog refresh; no retries remain"
+        in diagnostics
+    )
+
+
 def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
     calls = []
 

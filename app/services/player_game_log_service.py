@@ -9,9 +9,14 @@ import math
 from typing import Any, Protocol
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.nba_events import (
+    is_final_event,
+    is_postponed_event,
+    is_regular_season_event,
+)
 from app.domain.utc import assume_utc
-from app.domain.nba_events import is_final_event, is_regular_season_event
 from app.providers.nba_stats import DEFAULT_SEASON_TYPE, NBAStatsProvider
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.player_game_log_repository import (
@@ -79,6 +84,10 @@ class EventCatalogReader(Protocol):
 
     def get_events(self, season: str) -> list[dict[str, Any]]: ...
 
+    def get_freshness(
+        self, season: str, *, now: datetime | None = None
+    ) -> dict[str, Any]: ...
+
 
 class PlayerGameLogService:
     """Fetch a complete season once and atomically replace its stored facts."""
@@ -124,7 +133,9 @@ class PlayerGameLogService:
                     "an empty snapshot has no event catalog evidence"
                 )
             if any(
-                is_regular_season_event(event) and is_final_event(event)
+                is_regular_season_event(event)
+                and is_final_event(event)
+                and not is_postponed_event(event)
                 for event in events
             ):
                 self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
@@ -139,7 +150,7 @@ class PlayerGameLogService:
                     source_provider=SOURCE_PROVIDER,
                     allow_empty=True,
                 )
-            except ValueError:
+            except (ValueError, SQLAlchemyError):
                 self._record_telemetry(0, 0, 0, 0, 0, rejected=1)
                 raise
             self._record_telemetry(0, row_count, 0, 0, 0)
@@ -147,6 +158,20 @@ class PlayerGameLogService:
                 season=canonical_season,
                 row_count=row_count,
                 retrieved_at=retrieved_at.isoformat(),
+            )
+
+        event_freshness = self.event_catalog.get_freshness(
+            canonical_season, now=retrieved_at
+        )
+        event_count = event_freshness.get("event_count")
+        if (
+            not event_freshness.get("fresh")
+            or not event_count
+            or event_count != len(events)
+        ):
+            self._record_telemetry(len(frame.index), 0, 0, 0, 0, rejected=1)
+            raise PlayerGameLogIdentityError(
+                "the Event Catalog must be present, fresh, and complete before publication"
             )
 
         athlete_freshness = self.athlete_catalog.get_freshness(
@@ -190,6 +215,20 @@ class PlayerGameLogService:
             raise PlayerGameLogIdentityError(
                 "a non-empty player game log snapshot produced no canonical rows"
             )
+        prior = self.repository.get_freshness(canonical_season)
+        if (
+            canonicalized.unjoined_event_count
+            and prior.retrieved_at is not None
+            and prior.row_count > 0
+            and canonicalized.source_row_count > prior.row_count
+            and len(canonicalized.records) <= prior.row_count
+        ):
+            self._record_canonicalization_telemetry(
+                canonicalized, published=0, rejected=1
+            )
+            raise PlayerGameLogIdentityError(
+                "cumulative player logs reveal an incomplete Event Catalog"
+            )
         try:
             row_count = self.repository.publish(
                 canonical_season,
@@ -197,7 +236,7 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at,
                 source_provider=SOURCE_PROVIDER,
             )
-        except ValueError:
+        except (ValueError, SQLAlchemyError):
             self._record_canonicalization_telemetry(
                 canonicalized, published=0, rejected=1
             )
