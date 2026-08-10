@@ -136,11 +136,13 @@ def _recorded_season_frame():
 
 
 def _recorded_playoff_frame():
-    frame = _recorded_season_frame()
-    frame = frame[frame["GAME_ID"] == "0022500001"].copy()
-    frame["GAME_ID"] = "0042500001"
-    frame["GAME_DATE"] = "2026-01-15"
-    return frame.reset_index(drop=True)
+    path = (
+        Path(__file__).parents[1]
+        / "fixtures/nba_stats/player_game_logs.playoffs.json"
+    )
+    return normalize_season_player_game_logs(
+        parse_recorded_game_logs(json.loads(path.read_text()))
+    )
 
 
 def _seed_identities(
@@ -1193,6 +1195,39 @@ def test_all_unsupported_phase_rows_fail_closed_with_typed_telemetry(tmp_path):
     assert telemetry.events[0].malformed_row_count == 0
     assert telemetry.events[0].rejected_publication_count == 1
     assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_play_in_game_id_is_unsupported_even_when_catalog_claims_regular_season(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Regular Season")
+    )
+    with repository.engine.begin() as connection:
+        connection.execute(
+            update(EventCatalogEntry.__table__)
+            .where(EventCatalogEntry.nba_game_id == "0052500001")
+            .values(status_text="Final", status_code=3)
+        )
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat(
+            [_recorded_season_frame(), _unsupported_phase_row("0052500001")],
+            ignore_index=True,
+        )
+    )
+    telemetry = _RecordingTelemetry()
+
+    result = _service(
+        repository, provider, telemetry_recorder=telemetry
+    ).refresh(SEASON)
+
+    assert result.row_count == 22
+    assert telemetry.events[0].unsupported_phase_count == 1
+    assert "0052500001" not in {
+        row.game_id for row in repository.list_player_rows(SEASON, 101)
+    }
 
 
 def test_new_unsupported_phase_growth_preserves_the_prior_publication(tmp_path):

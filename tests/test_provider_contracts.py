@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from app.providers.nba_stats import REQUIRED_GAME_LOG_COLUMNS
 from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 from app.utils import telemetry
@@ -79,10 +80,37 @@ def test_recorded_playoff_player_logs_parse_through_the_live_path():
         "Season": "2025-26",
         "SeasonType": "Playoffs",
     }
-    assert len(frame) == 2
-    assert set(frame["PLAYER_ID"]) == {101, 202}
-    assert frame["GAME_ID"].str.startswith("004").all()
-    assert set(frame["TEAM_ID"]) == {1, 2}
+    assert len(frame) == 10
+    assert set(frame["PLAYER_ID"]) == {
+        101,
+        103,
+        104,
+        105,
+        106,
+        202,
+        107,
+        108,
+        109,
+        110,
+    }
+    assert set(frame["PLAYER_NAME"]) == {
+        "Canonical One",
+        "Canonical 103",
+        "Canonical 104",
+        "Canonical 105",
+        "Canonical 106",
+        "Canonical Two",
+        "Canonical 107",
+        "Canonical 108",
+        "Canonical 109",
+        "Canonical 110",
+    }
+    assert set(REQUIRED_GAME_LOG_COLUMNS).union({"PLAYER_ID"}).issubset(
+        frame.columns
+    )
+    assert set(frame["GAME_ID"]) == {"0042500001"}
+    assert frame["TEAM_ID"].value_counts().to_dict() == {1: 5, 2: 5}
+    assert (frame["MIN"] > 0).all()
 
 
 def test_malformed_nba_game_logs_raise_provider_response_error():

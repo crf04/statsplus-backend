@@ -16,6 +16,7 @@ class NBAGameStatus(IntEnum):
 
 REGULAR_SEASON_TYPE = "Regular Season"
 PLAYOFFS_SEASON_TYPE = "Playoffs"
+PLAY_IN_EVENT_KIND = "Play-In"
 PLAYER_GAME_LOG_SEASON_TYPES = (REGULAR_SEASON_TYPE, PLAYOFFS_SEASON_TYPE)
 
 
@@ -24,6 +25,7 @@ _GAME_TYPE_BY_ID_PREFIX = {
     "002": REGULAR_SEASON_TYPE,
     "003": "All-Star",
     "004": PLAYOFFS_SEASON_TYPE,
+    "005": PLAY_IN_EVENT_KIND,
 }
 
 
@@ -138,9 +140,17 @@ def resolve_stored_event_classification(
 
     stored_display = _known_classification(stored_classification)
     kind = canonical_event_kind(game_id, stored_display)
+    canonical_display_required = (
+        is_ordinary_classification(stored_display)
+        and not is_ordinary_classification(kind)
+    )
     return EventClassification(
         kind=kind,
-        display=kind if stored_display == "unknown" else stored_display,
+        display=(
+            kind
+            if stored_display == "unknown" or canonical_display_required
+            else stored_display
+        ),
     )
 
 
@@ -168,6 +178,7 @@ __all__ = [
     "EventClassification",
     "NBAGameStatus",
     "PLAYER_GAME_LOG_SEASON_TYPES",
+    "PLAY_IN_EVENT_KIND",
     "PLAYOFFS_SEASON_TYPE",
     "REGULAR_SEASON_TYPE",
     "canonical_event_kind",

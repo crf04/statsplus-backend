@@ -574,7 +574,10 @@ after a completed event in its phase. A postponed event does not become
 completed evidence merely because its feed status code or text says final.
 Preseason, exhibition, All-Star, Play-In, and other unsupported phases are
 never stored; their provider rows are counted separately from malformed or
-unjoined identity rows.
+unjoined identity rows. The canonical NBA game-ID prefix `005` is
+authoritative Play-In evidence even when a provider classification incorrectly
+claims `Regular Season`; Slate retains the unusual `Play-In` label while the
+player-log surface excludes it.
 An empty union snapshot can never replace a prior nonempty publication. A
 missing Event Catalog or an invalid empty phase within the source observation
 boundary fails closed and preserves the last valid facts and freshness. Because

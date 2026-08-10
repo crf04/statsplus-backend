@@ -500,8 +500,12 @@ a completed playoff game. Completed preseason, exhibition, All-Star, or other
 unsupported-phase games do not count, and a postponed event with a terminal-
 looking status is not completed evidence. Phase matching normalizes fallback
 season-type case and separators when no canonical game-ID phase is available;
-public stored/display classification spelling remains unchanged, and a known
-NBA game-ID prefix remains authoritative. Empty union results cannot replace
+fallback stored/display classification spelling remains unchanged when no
+closed game-ID prefix applies, while a known NBA game-ID prefix remains
+authoritative. In particular, prefix `005` is
+governed as Play-In and remains visibly unusual on Slate even if stored with a
+misleading `Regular Season` provider label; it is never stored as a durable
+player log. Empty union results cannot replace
 nonempty facts. Configured-current-season reads also require the
 named `stats_refreshes.player_game_logs` observation to exist and be no older
 than `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 by default). Historical reads remain

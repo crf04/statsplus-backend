@@ -197,6 +197,21 @@ def test_slate_treats_unknown_as_ordinary_and_detects_preseason_game_id():
     assert games[1]["preseason"] is True
 
 
+def test_slate_exposes_authoritative_play_in_kind_over_an_ordinary_label():
+    game = _service(
+        [
+            _event(
+                "0052500001",
+                "2026-04-15T00:00:00+00:00",
+                classification="Regular Season",
+            )
+        ]
+    ).get_slate("2026-04-14")["games"][0]
+
+    assert game["classification"] == "Play-In"
+    assert game["preseason"] is False
+
+
 def test_slate_preserves_existing_fallback_classification_behavior():
     game = _service(
         [
