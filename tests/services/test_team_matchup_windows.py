@@ -1166,6 +1166,78 @@ def test_refresh_refuses_to_label_an_unverified_nba_window_as_last_15(tmp_path):
     assert any(fact.provider == "pbp_stats" for fact in last_15.facts)
 
 
+def test_empty_rolling_surface_is_unverified_and_preserves_prior_facts(tmp_path):
+    team_ids = _fixture_team_ids()
+    events = [
+        _event(
+            game_day * 15 + pair_index // 2 + 1,
+            date(2025, 3, 1) + timedelta(days=game_day),
+            home_team_id=team_ids[pair_index],
+            away_team_id=team_ids[pair_index + 1],
+        )
+        for game_day in range(15)
+        for pair_index in range(0, 30, 2)
+    ]
+
+    class EmptyRollingShotTypesNBA(_FakeMatchupNBA):
+        def fetch_opponent_shot_chart(self, general_range, date_from, **kwargs):
+            if kwargs["team_id"] == BOS:
+                self.calls.append(("shot_types", general_range, date_from, kwargs))
+                return pd.DataFrame()
+            return super().fetch_opponent_shot_chart(
+                general_range, date_from, **kwargs
+            )
+
+    observed_at = datetime(2025, 4, 16, 10, tzinfo=timezone.utc)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    prior_facts = [
+        TeamMatchupFact(
+            team_id=team_id,
+            base="shot_types",
+            slice_key="At Rim",
+            stat_key="FG2M",
+            raw_value=77,
+            denominator_value=48,
+            denominator_unit="minutes",
+            provider="nba_stats",
+        )
+        for team_id in team_ids
+    ]
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty-rolling.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=prior_facts,
+        observations=[TeamMatchupObservation("shot_types", "available")],
+        retrieved_at=observed_at - timedelta(hours=1),
+    )
+    service = TeamMatchupRefreshService(
+        repository,
+        FakeEventCatalog(events),
+        EmptyRollingShotTypesNBA(team_ids),
+        _FakeMatchupPBP(team_ids),
+        clock=lambda: observed_at,
+    )
+
+    service.refresh("2024-25", as_of=scope.as_of)
+
+    snapshot = repository.get_snapshot(scope)
+    observations = {item.surface: item for item in snapshot.observations}
+    assert observations["shot_types"].status == "unavailable"
+    assert (
+        observations["shot_types"].unavailable_reason
+        == "provider_window_unverified"
+    )
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_types"} == {
+        77
+    }
+    for surface in ("traditional", "shot_zones", "assist_locations"):
+        assert observations[surface].status == "available"
+        assert any(fact.base == surface for fact in snapshot.facts)
+
+
 @pytest.mark.parametrize("reported_games", [None, 14, 22])
 def test_refresh_refuses_to_label_an_unverified_pbp_window_as_last_15(
     tmp_path, reported_games

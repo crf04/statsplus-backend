@@ -566,15 +566,19 @@ class TeamMatchupRefreshService:
         require_game_count: bool,
     ) -> None:
         records = cls._flat_frame(frame).to_dict(orient="records")
+        if len(records) != 1:
+            raise _ProviderWindowUnverified(
+                f"provider response does not identify only team {team_id}"
+            )
+        row = records[0]
         try:
-            identified_team = cls._team_id(records[0]) if len(records) == 1 else None
+            identified_team = cls._team_id(row)
         except ValueError as error:
             raise _ProviderWindowUnverified(str(error)) from error
         if identified_team != team_id:
             raise _ProviderWindowUnverified(
                 f"provider response does not identify only team {team_id}"
             )
-        row = records[0]
         game_counts = [
             row[column]
             for column in ("GP", "G", "GamesPlayed", "Games")
