@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -24,6 +24,7 @@ from app.domain.freshness import (
     exact_timedelta,
     time_window_timedelta,
 )
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.providers.dfs import (
     EventEvidence,
     PlayerProjectionMarket,
@@ -136,12 +137,6 @@ def _provider_name(value: str | None) -> str:
     return name
 
 
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def stored_timestamp(value: datetime | str | None) -> datetime | None:
     """Read one persisted instant as UTC.
 
@@ -154,10 +149,10 @@ def stored_timestamp(value: datetime | str | None) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, str):
-        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parse_utc_iso(value)
     if not isinstance(value, datetime):
         raise ValueError("a stored timestamp must be a datetime or ISO 8601 string")
-    return _utc(value)
+    return assume_utc(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,7 +507,7 @@ class EventResolver:
                 reason="single_team_matchup",
             )
 
-        starts_at = _utc(evidence.starts_at)
+        starts_at = assume_utc(evidence.starts_at)
         nearby = self._nearby(events, starts_at, home_id, away_id)
         if claimed_id is not None and not self._is_scheduled(events, claimed_id):
             # The canonical game this identity was mapped to is gone from the
@@ -635,7 +630,7 @@ class EventResolver:
                 continue
             if event.scheduled_at is None:
                 continue
-            offset = _utc(event.scheduled_at) - starts_at
+            offset = assume_utc(event.scheduled_at) - starts_at
             if abs(offset) > self.match_window:
                 continue
             matches.append(
@@ -840,7 +835,7 @@ class EventResolver:
                     return True
         previous_start = stored_timestamp(existing.get("provider_starts_at"))
         if previous_start is not None and evidence.starts_at is not None:
-            if abs(_utc(evidence.starts_at) - _utc(previous_start)) > window:
+            if abs(assume_utc(evidence.starts_at) - assume_utc(previous_start)) > window:
                 return True
         return False
 

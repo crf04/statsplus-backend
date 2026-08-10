@@ -349,10 +349,11 @@ classification. A recognized 10-digit game-ID prefix is authoritative for the
 kind (preseason, regular season, All-Star, or playoffs), which drives slate
 exclusion and the preseason flag even when provider branding conflicts. The
 catalog's display classification prefers provider classification, subtype, or
-label, then a meaningful sublabel such as `Emirates NBA Cup`; generic series,
-game-number, and postponement sublabels remain status/evidence rather than
-badges. When no display evidence remains, the canonical kind supplies the
-classification.
+label, then a meaningful sublabel such as `Emirates NBA Cup` or
+`NBA Mexico City Series`; generic series-state/record text such as
+`LAL leads 2-1` or `LAL wins series 4-2`, game-number text, and postponement
+sublabels remain status/evidence rather than badges. When no display evidence
+remains, the canonical kind supplies the classification.
 
 Authenticated slate read:
 
@@ -360,13 +361,16 @@ Authenticated slate read:
 GET /api/games/slate?date=YYYY-MM-DD
   → require_auth
   → SlateService parses/defaults one US-Eastern Slate Date
-  → EventCatalogService reads the configured season and last successful refresh
-  → SlateService filters ET membership and All-Star exhibitions
+  → EventCatalogService reads the last successful refresh and only the ET day's
+    half-open UTC event window from the configured season
+  → SlateService filters All-Star exhibitions
   → response orders UTC tips and reports schedule/pool freshness independently
 ```
 
 `SlateService` is assembled once in `ApplicationDependencies` beside the game
-service and reads no provider at request time. Its schedule status uses the
+service and reads no provider at request time. The window query uses ET
+midnights converted to UTC, so spring and fall DST days remain correct without
+reading or decoding the whole season. Its schedule status uses the
 surface-specific `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default),
 while Event Catalog matching continues to use `EVENT_CATALOG_MAX_AGE_HOURS`.
 Missing successful schedule metadata or a catalog with zero stored events is

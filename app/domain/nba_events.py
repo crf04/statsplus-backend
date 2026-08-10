@@ -75,7 +75,8 @@ def _display_sublabel(value: str) -> str:
     normalized = _normalized_words(sublabel)
     if sublabel and not (
         "postpon" in normalized
-        or re.match(r"^(?:series (?:tied|leads?)|(?:tied|leads?) series)\b", normalized)
+        or re.match(r"^series (?:tied|leads?)\b", normalized)
+        or re.match(r"^.+ (?:leads?|wins)(?: series)? \d+ \d+$", normalized)
         or re.match(r"^game [0-9]+\b", normalized)
     ):
         return sublabel

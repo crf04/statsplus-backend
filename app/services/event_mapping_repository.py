@@ -25,6 +25,7 @@ from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app.domain.utc import assume_utc
 from app.errors import InvalidConfigurationError
 from app.models.event_catalog import EventCatalogEntry
 from app.models.event_mapping import (
@@ -188,10 +189,7 @@ def _translate_storage_failures(method):
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    value = value or datetime.now(timezone.utc)
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return assume_utc(value or datetime.now(timezone.utc))
 
 
 def _iso(value: datetime | None) -> str | None:

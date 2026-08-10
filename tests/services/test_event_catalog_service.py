@@ -72,6 +72,19 @@ def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
     assert postponed["classification"] == "Regular Season"
 
 
+def test_date_window_read_is_half_open_and_ordered(tmp_path):
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
+    service.refresh("2025-26")
+
+    rows = service.get_events_between(
+        "2025-26",
+        datetime(2025, 10, 23, tzinfo=timezone.utc),
+        datetime(2025, 10, 24, tzinfo=timezone.utc),
+    )
+
+    assert [row["nba_game_id"] for row in rows] == ["0022500001"]
+
+
 def test_service_uses_catalog_event_max_age_setting(tmp_path):
     now = datetime(2025, 10, 20, tzinfo=timezone.utc)
     settings = RuntimeSettings(

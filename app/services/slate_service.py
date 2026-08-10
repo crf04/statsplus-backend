@@ -73,8 +73,15 @@ class SlateService:
                 "The NBA schedule is not available. Please try again later."
             )
 
+        local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
+        local_end = local_start + timedelta(days=1)
+        events = self.event_catalog.get_events_between(
+            season,
+            local_start.astimezone(timezone.utc),
+            local_end.astimezone(timezone.utc),
+        )
         games = []
-        for event in self.event_catalog.get_events(season):
+        for event in events:
             if not self._belongs_to_slate(event, slate_date):
                 continue
             game_id = str(event.get("nba_game_id", ""))

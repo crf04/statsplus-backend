@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.domain.utc import assume_utc, parse_utc_iso
+from app.services.event_resolver import stored_timestamp
 
 
 def test_assume_utc_treats_naive_values_as_utc_and_converts_aware_values():
@@ -19,5 +20,14 @@ def test_parse_utc_iso_accepts_z_and_normalizes_offsets():
         2026, 1, 2, 10, tzinfo=timezone.utc
     )
     assert parse_utc_iso("2026-01-02T04:00:00-06:00") == datetime(
+        2026, 1, 2, 10, tzinfo=timezone.utc
+    )
+
+
+def test_persisted_event_timestamp_uses_shared_iso_and_naive_utc_rules():
+    assert stored_timestamp("2026-01-02T04:00:00-06:00") == datetime(
+        2026, 1, 2, 10, tzinfo=timezone.utc
+    )
+    assert stored_timestamp(datetime(2026, 1, 2, 10)) == datetime(
         2026, 1, 2, 10, tzinfo=timezone.utc
     )

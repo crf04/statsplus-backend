@@ -131,6 +131,15 @@ class EventCatalogService:
     def get_events(self, season: str) -> list[dict[str, Any]]:
         return self.repository.list_events(validate_canonical_season(season))
 
+    def get_events_between(
+        self, season: str, starts_at: datetime, ends_at: datetime
+    ) -> list[dict[str, Any]]:
+        return self.repository.list_events_between(
+            validate_canonical_season(season),
+            assume_utc(starts_at),
+            assume_utc(ends_at),
+        )
+
     def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]:
         return self.repository.freshness(validate_canonical_season(season), assume_utc(now or self._clock()), self.max_age)
 

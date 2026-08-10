@@ -113,6 +113,25 @@ def test_schedule_sublabel_filters_generic_series_and_postponement_evidence():
     ]
 
 
+@pytest.mark.parametrize(
+    "sublabel",
+    [
+        "LAL leads 2-1",
+        "LAL wins series 4-2",
+        "Los Angeles leads series 3-2",
+    ],
+)
+def test_schedule_sublabel_filters_team_series_records(sublabel):
+    payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
+    result_set = payload["resultSets"][0]
+    sublabel_index = result_set["headers"].index("gameSubLabel")
+    result_set["rowSet"][1][sublabel_index] = sublabel
+
+    parsed = parse_recorded_schedule(payload, season="2025-26")
+
+    assert parsed.loc[1, "classification"] == "Regular Season"
+
+
 def test_schedule_sublabel_preserves_a_branded_series_name():
     payload = json.loads(CLASSIFICATION_FIXTURE_PATH.read_text())
     result_set = payload["resultSets"][0]

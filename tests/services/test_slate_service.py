@@ -14,9 +14,16 @@ class RecordedCatalog:
         self.events = events
         self.freshness = freshness
 
-    def get_events(self, season):
+        self.windows = []
+
+    def get_events_between(self, season, starts_at, ends_at):
         assert season == "2025-26"
-        return list(self.events)
+        self.windows.append((starts_at, ends_at))
+        return [
+            event
+            for event in self.events
+            if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
+        ]
 
     def get_freshness(self, season, *, now=None):
         assert season == "2025-26"
@@ -74,6 +81,25 @@ def test_slate_membership_uses_eastern_date_and_orders_tip_then_game_id():
 
     assert payload["slate_date"] == "2026-01-02"
     assert [game["game_id"] for game in payload["games"]] == ["001", "002", "003"]
+
+
+@pytest.mark.parametrize(
+    ("slate_date", "expected_start", "expected_end"),
+    [
+        ("2026-03-08", "2026-03-08T05:00:00+00:00", "2026-03-09T04:00:00+00:00"),
+        ("2026-11-01", "2026-11-01T04:00:00+00:00", "2026-11-02T05:00:00+00:00"),
+    ],
+)
+def test_slate_queries_exact_eastern_day_across_dst(
+    slate_date, expected_start, expected_end
+):
+    service = _service([_event("game", expected_start)])
+
+    service.get_slate(slate_date)
+
+    assert service.event_catalog.windows == [
+        (datetime.fromisoformat(expected_start), datetime.fromisoformat(expected_end))
+    ]
 
 
 def test_slate_excludes_all_star_and_retains_unusual_and_postponed_games():

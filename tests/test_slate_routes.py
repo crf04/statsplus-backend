@@ -1,8 +1,12 @@
 """HTTP contract for the authenticated slate read."""
 
+from datetime import datetime, timezone
+
 import pytest
 
+from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.slate_service import SlateService
 
 
 def test_get_slate_returns_the_service_payload(client, dependencies):
@@ -24,6 +28,34 @@ def test_get_slate_returns_the_service_payload(client, dependencies):
     assert response.status_code == 200
     assert response.get_json() == expected
     dependencies.slate_service.get_slate.assert_called_once_with("2026-01-02")
+
+
+def test_authenticated_omitted_date_defaults_through_real_service(client, dependencies):
+    class Catalog:
+        def get_freshness(self, season, *, now):
+            return {
+                "last_success_at": "2026-03-08T06:00:00+00:00",
+                "event_count": 1,
+            }
+
+        def get_events_between(self, season, starts_at, ends_at):
+            assert starts_at == datetime(2026, 3, 8, 5, tzinfo=timezone.utc)
+            assert ends_at == datetime(2026, 3, 9, 4, tzinfo=timezone.utc)
+            return []
+
+    dependencies.slate_service = SlateService(
+        Catalog(),
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        clock=lambda: datetime(2026, 3, 8, 16, tzinfo=timezone.utc),
+    )
+
+    response = client.get("/api/games/slate")
+
+    assert response.status_code == 200
+    assert response.get_json()["slate_date"] == "2026-03-08"
 
 
 def test_get_slate_requires_authentication(client, monkeypatch):

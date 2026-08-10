@@ -96,6 +96,24 @@ class EventCatalogRepository:
                 table.c.season == season).order_by(table.c.scheduled_at, table.c.nba_game_id)).mappings()
             return [self._serialize(row) for row in rows]
 
+    def list_events_between(
+        self, season: str, starts_at: datetime, ends_at: datetime
+    ) -> list[dict[str, Any]]:
+        """Read events in one half-open UTC window without decoding a season."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    table.c.scheduled_at >= assume_utc(starts_at),
+                    table.c.scheduled_at < assume_utc(ends_at),
+                )
+                .order_by(table.c.scheduled_at, table.c.nba_game_id)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
     def freshness(self, season: str, observed_at: datetime, max_age: timedelta) -> dict[str, Any]:
         table = EventCatalogRefresh.__table__
         with self.engine.connect() as connection:

@@ -188,9 +188,10 @@ GET /api/games/slate?date=YYYY-MM-DD
 Requires Firebase bearer authentication. `date` is optional only by omission
 and defaults to today's Slate Date in US Eastern time; an explicitly empty
 `?date=` is malformed input. The route reads the configured current season's
-persisted Event Catalog; slate membership is determined by converting each UTC
-`scheduled_at` value to US Eastern time. Games are ordered by tip time, then
-`game_id`.
+persisted Event Catalog. It converts the requested day's two US Eastern
+midnights to a half-open UTC query window, including across DST transitions,
+so it does not read the whole season per request. Games are ordered by tip
+time, then `game_id`.
 
 ```json
 {
@@ -236,8 +237,10 @@ persisted Event Catalog; slate membership is determined by converting each UTC
 `status.state` is `scheduled`, `postponed`, or `final`; `status.label` retains
 the Event Catalog label. `classification` is `null` for an ordinary Regular
 Season game and contains meaningful provider display classification for
-unusual games, including a reviewed event sublabel such as `Emirates NBA Cup`.
-Generic series, game-number, and postponement sublabels are not badges. The
+unusual games, including reviewed event sublabels such as `Emirates NBA Cup`
+and `NBA Mexico City Series`. Generic series-state/record text such as
+`LAL leads 2-1` or `LAL wins series 4-2`, game-number text, and postponement
+sublabels are not badges. The
 canonical game-ID kind remains authoritative: `001` games are included with
 `preseason: true`, and `003` All-Star exhibitions are excluded even when the
 display classification is branded differently. Postponed games remain on
