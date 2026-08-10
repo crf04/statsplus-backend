@@ -876,6 +876,121 @@ def test_a_rescheduled_start_time_inside_the_window_is_not_a_conflict(event_db):
     assert result.state is EventResolutionState.MANUAL_APPROVED
 
 
+#: The two ways a season's Event Catalog stops being usable, and the reason
+#: each one resolves with.
+_UNAVAILABLE_CATALOGS = {
+    "missing": "event_catalog_missing",
+    "stale": "event_catalog_stale",
+}
+
+
+def _unusable_catalog(engine, kind: str) -> dict[str, object]:
+    """Make the season's catalog missing or older than allowed.
+
+    Returns the resolver keyword arguments the chosen kind needs, so a caller
+    reads the real catalog seam either way rather than a stubbed freshness.
+    """
+
+    if kind == "missing":
+        with engine.begin() as connection:
+            connection.execute(EventCatalogRefresh.__table__.delete())
+        return {}
+    return {"clock": lambda: _NOW + timedelta(hours=4), "max_age_hours": 1}
+
+
+@pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
+@pytest.mark.parametrize(
+    ("decision", "state"),
+    [
+        ("approve", EventResolutionState.MANUAL_APPROVED),
+        ("override", EventResolutionState.MANUAL_OVERRIDE),
+    ],
+)
+def test_a_governed_identity_is_not_reused_without_usable_catalog_data(
+    event_db, decision, state, kind
+):
+    """Catalog freshness gates an operator's identity as it gates a match."""
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    getattr(repository, decision)(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(),
+    )
+    decided = [
+        record.decision_state
+        for record in repository.history(provider="underdog", provider_event_id="ud-1")
+    ]
+    # The control: with the catalog usable the governed identity is handed back.
+    fresh = _catalog_resolver(engine, repository).resolve(
+        "underdog", _evidence(), SEASON
+    )
+
+    resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
+    result = resolver.resolve("underdog", _evidence(), SEASON)
+    recorded = repository.record_resolution(result)
+
+    assert fresh.state is state
+    assert fresh.canonical_event_id == "0022500001"
+    assert result.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+    assert result.reason == _UNAVAILABLE_CATALOGS[kind]
+    assert result.canonical_event is None
+    assert result.candidates == ()
+    # Nothing is recorded against an identity nothing can be placed against.
+    assert recorded.persisted is False
+    assert [
+        record.decision_state
+        for record in repository.history(provider="underdog", provider_event_id="ud-1")
+    ] == decided
+    mapping = repository.get_active_mapping("underdog", "ud-1")
+    assert mapping.mapping_state == state.value
+    assert mapping.canonical_event_id == "0022500001"
+
+
+@pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
+def test_an_unusable_catalog_queues_no_conflict_against_a_governed_identity(
+    event_db, kind
+):
+    """Evidence an operator never reviewed still records nothing without one."""
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(),
+    )
+    reused = _evidence(
+        home=TeamEvidence(abbreviation="BOS"), away=TeamEvidence(abbreviation="SAS")
+    )
+    # The control: with the catalog usable the changed matchup fails closed.
+    conflicting = _catalog_resolver(engine, repository).resolve(
+        "underdog", reused, SEASON
+    )
+
+    resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
+    result = resolver.resolve("underdog", reused, SEASON)
+    recorded = repository.record_resolution(result)
+
+    assert conflicting.state is EventResolutionState.MAPPING_CONFLICT
+    assert result.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+    assert result.canonical_event is None
+    assert recorded.persisted is False
+    assert repository.list_conflicts() == []
+    assert repository.get_active_mapping("underdog", "ud-1").mapping_state == (
+        "manual_approved"
+    )
+
+
 def test_a_rejection_suppresses_the_identity_until_cleared(event_db):
     engine, now = event_db
     repository = _repository(engine, now)
@@ -1259,6 +1374,43 @@ def test_a_board_read_keeps_markets_when_the_catalog_is_unavailable(event_db):
     assert board.resolved_markets[0].statistic_match is not None
     assert repository.list_mappings() == []
     assert repository.history() == []
+
+
+@pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
+@pytest.mark.parametrize("decision", ["approve", "override"])
+def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
+    event_db, decision, kind
+):
+    engine, now = event_db
+    repository = _repository(engine, now)
+    getattr(repository, decision)(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(),
+    )
+    decided = [record.decision_state for record in repository.history()]
+    resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
+    service = _board_service(
+        _snapshot(_market("m-1")), resolver=resolver, repository=repository
+    )
+
+    board = service.get_board(NBAMarketQuery(season=SEASON))
+
+    (outcome,) = board.event_mapping_outcomes
+    assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+    assert outcome.canonical_event_id is None
+    assert outcome.persisted is False
+    # The normalized markets stay on the board regardless.
+    assert len(board.resolved_markets) == 1
+    assert board.resolved_markets[0].statistic_match is not None
+    assert [record.decision_state for record in repository.history()] == decided
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
+        "0022500001"
+    )
 
 
 def test_an_id_less_market_matches_the_current_board_without_a_durable_row(event_db):

@@ -722,14 +722,21 @@ Evidence that resolves to a *different* scheduled game under an established
 claim is a `mapping_conflict` that deactivates the mapping and stops its use
 pending review, as is provider evidence that contradicts a governed manual
 decision — a changed home or away team at the strongest tier both sides carry,
-or a start time no longer within the reviewed window of the approved one. A
-reschedule inside the window is the same game and not a conflict. Operator
-precedence protects a governed mapping from automatic *overwrite*, not from
-fail-closed conflict detection, and approving or overriding again restores the
-manual state and clears the conflict column. Missing or older-than-allowed Event
-Catalog data yields `event_catalog_unavailable`: the normalized markets stay
-visible on the board with no event comparison identity, and nothing is recorded,
-because there is nothing to compare against yet.
+a changed provider canonical event claim, or a start time no longer within the
+reviewed window of the approved one. Each of those is compared only when both
+the mapping and the new evidence assert it, so a claim, team identity, or start
+time one side simply omits is sparse evidence rather than a contradiction and
+stays compatible. A reschedule inside the window is the same game and not a
+conflict. Operator precedence protects a governed mapping from automatic
+*overwrite*, not from fail-closed conflict detection, and approving or
+overriding again restores the manual state and clears the conflict column.
+Missing or older-than-allowed Event Catalog data yields
+`event_catalog_unavailable`: the normalized markets stay visible on the board
+with no event comparison identity, and nothing is recorded, because there is
+nothing to compare against yet. Freshness gates a governed identity too — an
+active `manual_approved` or `manual_override` is withheld and left untouched
+while the catalog is unusable, rather than lending an operator's decision to
+evidence no schedule can place.
 
 `DFSBoardService` receives the resolver and repository by injection and reports
 `board.event_mapping_outcomes`. One board read resolves every market before it

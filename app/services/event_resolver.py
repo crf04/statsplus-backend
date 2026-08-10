@@ -384,7 +384,18 @@ class EventResolver:
                 normalized_provider, evidence, canonical_season, existing
             )
             if governed is not None:
-                return governed
+                # Freshness gates a governed identity exactly as it gates a
+                # match.  Without usable catalog data there is no schedule to
+                # place the operator's decision against, so the identity is
+                # neither handed to the board nor recorded against; the
+                # decision itself is untouched and returns with the next
+                # refresh.
+                unavailable = self._catalog_unavailable_reason(canonical_season)
+                if unavailable is None:
+                    return governed
+                return self._unavailable_result(
+                    normalized_provider, evidence, canonical_season, unavailable
+                )
         if provider_event_id:
             rejection = self._get_rejection(normalized_provider, provider_event_id)
             if rejection is not None and bool(rejection.get("is_active", True)):
@@ -398,12 +409,8 @@ class EventResolver:
 
         unavailable = self._catalog_unavailable_reason(canonical_season)
         if unavailable is not None:
-            return self._result(
-                normalized_provider,
-                evidence,
-                canonical_season,
-                EventResolutionState.EVENT_CATALOG_UNAVAILABLE,
-                reason=unavailable,
+            return self._unavailable_result(
+                normalized_provider, evidence, canonical_season, unavailable
             )
         events = self._catalog_events(canonical_season)
         return self._match(
@@ -875,6 +882,24 @@ class EventResolver:
             return None
         record = self.mapping_repository.get_rejection(provider, provider_id)
         return None if record is None else record.to_dict()
+
+    @classmethod
+    def _unavailable_result(
+        cls,
+        provider: str,
+        evidence: EventEvidence,
+        season: str,
+        reason: str,
+    ) -> EventResolution:
+        """One outcome for a season with no usable comparison identity."""
+
+        return cls._result(
+            provider,
+            evidence,
+            season,
+            EventResolutionState.EVENT_CATALOG_UNAVAILABLE,
+            reason=reason,
+        )
 
     @staticmethod
     def _result(
