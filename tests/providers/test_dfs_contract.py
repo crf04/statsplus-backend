@@ -39,7 +39,8 @@ from app.providers.dfs import (
     normalize_selection_direction,
     normalize_scoring_period,
 )
-from app.domain.market_content import market_evidence_key
+from app.domain.market_content import market_content_key, market_evidence_key
+from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.providers.dfs import _SnapshotMarketCollector
 
 
@@ -572,6 +573,87 @@ def test_the_market_collector_still_rejects_a_changed_repeat():
     assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
     assert collector.markets == ()
     assert CoverageCode.CONFLICTING_SOURCE_IDENTITY in collector.warning_codes
+
+
+class _CanonicalStatistic:
+    """One reviewed canonical statistic, stated as the catalog contract reads it."""
+
+    def __init__(self, comparable: bool) -> None:
+        self.id = "points"
+        self.components = ("points",)
+        self.comparable = comparable
+
+
+def _resolved(comparable: bool) -> StatisticMatch:
+    """One canonical statistic resolution of a market's own evidence."""
+
+    return StatisticMatch(
+        state=MatchState.CANONICAL,
+        evidence=StatisticEvidence(label="Points"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+        canonical=_CanonicalStatistic(comparable),
+        provider="underdog",
+    )
+
+
+def _unresolved() -> StatisticMatch:
+    return StatisticMatch(
+        state=MatchState.UNMAPPED,
+        evidence=StatisticEvidence(label="Points"),
+        scoring_period=ScoringPeriod.FULL_GAME,
+        provider="underdog",
+        reason=MatchReason.UNKNOWN_PROVIDER_LABEL,
+    )
+
+
+def test_statistic_comparability_is_part_of_what_a_market_says():
+    # Comparability decides whether a resolved market may enter a group at all,
+    # so no two of these readings are the same offering, and a market that
+    # states no resolution at all is distinct from every one of them.
+    keys = {
+        market_content_key(market)
+        for market in (
+            _repeatable_market(),
+            _repeatable_market(statistic_match=_unresolved()),
+            _repeatable_market(statistic_match=_resolved(True)),
+            _repeatable_market(statistic_match=_resolved(False)),
+        )
+    }
+
+    assert len(keys) == 4
+
+
+def test_a_snapshot_repeat_that_flips_comparability_is_a_conflict():
+    comparable = _repeatable_market(statistic_match=_resolved(True))
+    incomparable = _repeatable_market(statistic_match=_resolved(False))
+
+    for markets in ((comparable, incomparable), (incomparable, comparable)):
+        with pytest.raises(MalformedProviderResponseError):
+            _repeat_snapshot(markets)
+
+
+def test_a_snapshot_repeat_restating_one_comparability_is_still_one_market():
+    snapshot = _repeat_snapshot(
+        (
+            _repeatable_market(statistic_match=_resolved(True)),
+            _repeatable_market(statistic_match=_resolved(True)),
+        )
+    )
+
+    assert len(snapshot.markets) == 1
+
+
+def test_the_market_collector_fails_closed_on_flipped_comparability():
+    for first, second in ((True, False), (False, True)):
+        collector = _SnapshotMarketCollector()
+        collector.add(_repeatable_market(statistic_match=_resolved(first)))
+
+        with pytest.raises(CoverageRecordMalformed) as error:
+            collector.add(_repeatable_market(statistic_match=_resolved(second)))
+
+        assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
+        # Neither reading survives, whichever of them arrived first.
+        assert collector.markets == ()
 
 
 def test_partial_snapshot_requires_usable_market_and_known_incomplete_work():

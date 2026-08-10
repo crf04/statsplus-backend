@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Decimal, Inexact, localcontext
 from enum import Enum
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -155,6 +155,54 @@ class CatalogAvailabilityReason(str, Enum):
     MISSING = "catalog_missing"
     STALE = "catalog_stale"
     NOT_CONFIGURED = "catalog_not_configured"
+
+
+#: The most base-ten places an exact difference may span.  A difference costs
+#: one digit per place from the larger value's leading digit down to the
+#: smaller value's last written one, so two values whose exponents are far
+#: apart cost memory proportional to that separation rather than to the digits
+#: either provider actually wrote.
+EXACT_DIFFERENCE_DIGIT_LIMIT = 1000
+
+
+def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
+    """The exact difference of two finite decimals, whatever context is ambient.
+
+    Decimal subtraction rounds to the ambient context's precision, so the same
+    two provider thresholds subtracted inside ``localcontext(prec=5)`` and
+    outside it are two different numbers, and a threshold carrying more digits
+    than the ambient precision is rounded into a value that is not the
+    difference of the numbers the board states.  This asks instead for exactly
+    the precision the result needs, read off the operands' own digit counts and
+    exponents: the leading place either value could carry into, down to the
+    last place either wrote.
+
+    Nothing is materialized from an exponent.  A precision is only a ceiling,
+    so it costs nothing until the digits exist -- but the digits of a genuinely
+    separated difference do exist, and ``1E+1000000`` less ``1`` really is a
+    million of them.  Such a difference is refused rather than allocated, and
+    the ``Inexact`` trap makes a returned value exact by construction.
+    """
+
+    for name, value in (("minuend", minuend), ("subtrahend", subtrahend)):
+        if not isinstance(value, Decimal) or not value.is_finite():
+            raise ValueError(f"an exact difference requires a finite Decimal {name}")
+    _sign, left_digits, left_exponent = minuend.as_tuple()
+    _sign, right_digits, right_exponent = subtrahend.as_tuple()
+    leading = max(left_exponent + len(left_digits), right_exponent + len(right_digits))
+    trailing = min(left_exponent, right_exponent)
+    required = leading - trailing + 1
+    if required > EXACT_DIFFERENCE_DIGIT_LIMIT:
+        raise ValueError(
+            "an exact difference cannot span more than "
+            f"{EXACT_DIFFERENCE_DIGIT_LIMIT} decimal places"
+        )
+    with localcontext() as context:
+        context.prec = required
+        context.Emax = MAX_EMAX
+        context.Emin = MIN_EMIN
+        context.traps[Inexact] = True
+        return minuend - subtrahend
 
 
 def exact_seconds(value: object) -> Decimal:
@@ -324,6 +372,10 @@ class ComparisonSummary:
     Minimum, maximum, and Threshold Spread are exact decimal arithmetic over
     the thresholds the providers published.  Nothing is averaged, ranked,
     priced, or recommended.
+
+    The spread is exact independently of the decimal context a caller happens
+    to be inside, and validation compares it against that same exact
+    difference, so a summary can neither store nor accept a rounded spread.
     """
 
     minimum_threshold: Decimal
@@ -340,7 +392,9 @@ class ComparisonSummary:
                 raise ValueError(f"comparison summary {name} must be an exact Decimal")
         if self.maximum_threshold < self.minimum_threshold:
             raise ValueError("comparison summary maximum cannot precede its minimum")
-        if self.threshold_spread != self.maximum_threshold - self.minimum_threshold:
+        if self.threshold_spread != exact_difference(
+            self.maximum_threshold, self.minimum_threshold
+        ):
             raise ValueError("comparison summary spread must be the exact difference")
         if not isinstance(self.freshness, ComparisonFreshness):
             raise ValueError("comparison summary requires a ComparisonFreshness")
@@ -370,7 +424,7 @@ class ComparisonSummary:
         return cls(
             minimum_threshold=minimum,
             maximum_threshold=maximum,
-            threshold_spread=maximum - minimum,
+            threshold_spread=exact_difference(maximum, minimum),
             provider_count=len({member.provider for member in members}),
             market_count=len(members),
             freshness=freshness,
@@ -1155,6 +1209,7 @@ class ComparisonBoard:
 
 
 __all__ = [
+    "EXACT_DIFFERENCE_DIGIT_LIMIT",
     "REFERENCE_VERSION",
     "SUPPORTED_NARROWING_FILTERS",
     "BoardAppearance",
@@ -1188,6 +1243,7 @@ __all__ = [
     "UnresolvedMarket",
     "canonical_decimal",
     "canonical_selections",
+    "exact_difference",
     "exact_seconds",
     "market_content_key",
     "market_evidence_key",

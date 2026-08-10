@@ -794,7 +794,11 @@ has therefore restated one offering at every seam, and the repeat that survives
 is the least by complete retained evidence rather than the first to arrive. A
 repeat that changes a stated fact — another threshold, status, variant, or
 selection — remains `conflicting_source_identity` at the provider boundary and
-`conflicting_market_identity` on the board.
+`conflicting_market_identity` on the board. The comparability the catalog
+resolved the statistic to is one of those stated facts, because it decides
+whether a resolved market may enter a group at all: two readings of one
+identity that agree on everything else but disagree there are a content
+conflict at every seam, never one offering restated.
 
 A repeat that disagrees is evidence, not a duplicate to discard. Every distinct
 contradicting observation of one reference is retained as its own
@@ -860,7 +864,14 @@ Mixed-Freshness Comparison.
 A summary states only exact decimal minimum, maximum, and Threshold Spread,
 the provider and market counts, the freshness, and the sorted market
 references. Thresholds are `Decimal` throughout, so a serialized value is the
-provider's own exact number. No probability, expected value, recommendation,
+provider's own exact number. The Threshold Spread is the exact difference of
+the stated minimum and maximum whatever decimal context the caller happens to
+be inside, and a summary validates its spread against that same exact
+difference, so neither a stored nor an accepted spread can be a rounded one.
+The precision that needs is read off the operands' own digit counts and
+exponents rather than materialized from an exponent; a difference spanning
+more than `EXACT_DIFFERENCE_DIGIT_LIMIT` decimal places is refused rather than
+allocated. No probability, expected value, recommendation,
 average, preferred market, entry payout, or cross-provider fantasy assumption
 is produced anywhere in this seam.
 

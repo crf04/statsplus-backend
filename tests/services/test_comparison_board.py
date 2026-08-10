@@ -30,7 +30,7 @@ from app.domain.comparisons import (
     market_reference,
     selection_reference,
 )
-from app.domain.statistics import MatchState, ScoringPeriod
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
     AppearanceEvidence,
     AthleteEvidence,
@@ -1169,6 +1169,96 @@ def test_a_summary_must_state_the_exact_difference_and_sorted_references():
         )
 
 
+def _summary(minimum, maximum):
+    return ComparisonSummary.of(
+        (
+            _member(reference="mkt_1_a", threshold=minimum),
+            _member(reference="mkt_1_b", threshold=maximum),
+        )
+    )
+
+
+def test_a_threshold_spread_is_exact_whatever_context_a_caller_is_inside():
+    # Both thresholds carry more digits than the default context permits, so a
+    # spread computed under the ambient context would be a rounded number that
+    # is not the difference of the values the board states.
+    minimum = "25." + "0" * 30 + "1"
+    maximum = "26." + "0" * 30 + "3"
+    expected = Decimal("1." + "0" * 30 + "2")
+
+    with localcontext() as context:
+        context.prec = 5
+        narrow = _summary(minimum, maximum)
+    with localcontext() as context:
+        context.prec = 90
+        wide = _summary(minimum, maximum)
+
+    assert narrow.threshold_spread == expected
+    assert wide.threshold_spread == expected
+    assert narrow.minimum_threshold == Decimal(minimum)
+    assert narrow.maximum_threshold == Decimal(maximum)
+
+
+@pytest.mark.parametrize(
+    ("minimum", "maximum", "spread"),
+    [
+        ("-2.5", "1.5", "4.0"),
+        ("-7.25", "-3.25", "4"),
+        ("-0", "0.000", "0"),
+        ("-1E-30", "1E-30", "2E-30"),
+        ("1E-10", "1E+40", "9" * 40 + "." + "9" * 10),
+    ],
+)
+def test_a_threshold_spread_is_exact_across_signs_zero_and_exponents(
+    minimum, maximum, spread
+):
+    summary = _summary(minimum, maximum)
+
+    assert summary.minimum_threshold == Decimal(minimum)
+    assert summary.maximum_threshold == Decimal(maximum)
+    assert summary.threshold_spread == Decimal(spread)
+
+
+def test_a_summary_spread_rounded_by_the_ambient_context_is_refused():
+    minimum = Decimal("25." + "0" * 30 + "1")
+    maximum = Decimal("26." + "0" * 30 + "3")
+    exact = Decimal("1." + "0" * 30 + "2")
+
+    with localcontext() as context:
+        context.prec = 5
+        # What subtraction under this context would have produced.
+        with pytest.raises(ValueError, match="exact difference"):
+            comparisons.ComparisonSummary(
+                minimum_threshold=minimum,
+                maximum_threshold=maximum,
+                threshold_spread=Decimal("1.0000"),
+                provider_count=1,
+                market_count=1,
+                freshness=ComparisonFreshness.FRESH,
+                market_references=("mkt_1_a",),
+            )
+        accepted = comparisons.ComparisonSummary(
+            minimum_threshold=minimum,
+            maximum_threshold=maximum,
+            threshold_spread=exact,
+            provider_count=1,
+            market_count=1,
+            freshness=ComparisonFreshness.FRESH,
+            market_references=("mkt_1_a",),
+        )
+
+    assert accepted.threshold_spread == exact
+
+
+def test_a_spread_separated_by_a_huge_exponent_is_refused_not_allocated():
+    # The exact difference really is a million digits long; refusing it costs
+    # the exponents themselves rather than the digits between them.
+    with pytest.raises(ValueError, match="decimal places"):
+        comparisons.exact_difference(Decimal("1E+1000000"), Decimal("1"))
+    with pytest.raises(ValueError, match="decimal places"):
+        _summary("1", "1E+1000000")
+
+
 def test_a_group_requires_deterministically_ordered_members():
     members = (_member(reference="mkt_1_b"), _member(reference="mkt_1_a"))
     with pytest.raises(ValueError, match="deterministically ordered"):
@@ -1905,6 +1995,78 @@ def test_a_contradicted_reference_does_not_depend_on_input_order(monkeypatch):
     assert forward.markets == reversed_read.markets
     assert forward.unresolved == reversed_read.unresolved
     assert forward.market_count == reversed_read.market_count == 2
+
+
+class _CanonicalStatistic:
+    """One reviewed canonical statistic, stated as the catalog contract reads it."""
+
+    def __init__(self, comparable):
+        self.id = "points"
+        self.components = ("points",)
+        self.comparable = comparable
+
+
+class _AlternatingStatisticResolver:
+    """Resolve successive markets to the comparabilities given, in order.
+
+    A reviewed catalog cannot resolve one market's own evidence two ways, so
+    the disagreement the board must survive is provoked at the seam that states
+    it -- exactly as a forced reference provokes a contradicted identity.
+    """
+
+    def __init__(self, comparabilities):
+        self.comparabilities = tuple(comparabilities)
+        self.calls = 0
+
+    def resolve_market(self, market):
+        comparable = self.comparabilities[self.calls % len(self.comparabilities)]
+        self.calls += 1
+        return StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=market.statistic,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=_CanonicalStatistic(comparable),
+            provider=market.provider,
+        )
+
+
+def _comparability_board(comparabilities):
+    """One board reading the same offering twice, resolved in the order given."""
+
+    repeated = _market(market_id=None)
+    service, _ = _service([_snapshot("dabble", (repeated, repeated))])
+    service.board_service.statistic_resolver = _AlternatingStatisticResolver(
+        comparabilities
+    )
+    return _read(service)
+
+
+def test_two_readings_of_one_offering_that_agree_on_comparability_are_one():
+    board = _comparability_board((True, True))
+
+    assert board.market_count == 1
+    assert board.markets[0].conflict_ordinal is None
+    assert board.groups[0].summary.market_count == 1
+
+
+def test_readings_that_disagree_on_comparability_conflict_in_either_order():
+    forward = _comparability_board((True, False))
+    backward = _comparability_board((False, True))
+
+    assert forward.groups == () and backward.groups == ()
+    assert [entry.reason for entry in forward.unresolved] == [
+        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    ]
+    assert {market.exclusion for market in forward.markets} == {
+        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    }
+    assert {
+        market.statistic_resolution.comparable for market in forward.markets
+    } == {True, False}
+    # Neither reading wins by arriving first, and both stay auditable.
+    assert forward.markets == backward.markets
+    assert forward.unresolved == backward.unresolved
+    assert forward.market_count == backward.market_count == 2
 
 
 def test_exact_repeats_of_one_reference_collapse_to_one_observation(monkeypatch):

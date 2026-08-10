@@ -225,16 +225,31 @@ def selection_facts(selection: Any) -> object:
 
 
 def statistic_resolution_facts(match: object) -> object:
-    """What a catalog resolved about a market's statistic, if anything."""
+    """What a catalog resolved about a market's statistic, if anything.
+
+    Comparability takes part.  It is retained on the board and it decides
+    whether a resolved market is eligible for a Comparison Group at all, so two
+    observations of one identity that agree on every other fact but resolve to
+    opposite comparability are saying two different things about the same
+    offering.  Left out, they would read as one offering restated and collapse
+    silently; stated, they read as the content conflict they are, at every seam
+    that shares these semantics.
+
+    It is encoded as a bool, and a match stating no comparability at all is
+    encoded as ``None`` -- a distinct token from either bool, and from the
+    ``None`` of no match at all, which no resolution tuple can collide with.
+    """
 
     if match is None:
         return None
+    comparable = getattr(match, "is_comparable", None)
     return (
         getattr(match, "state", None),
         getattr(match, "scoring_period", None),
         getattr(match, "canonical_id", None),
         getattr(getattr(match, "unit", None), "value", None),
         getattr(getattr(match, "reason", None), "value", None),
+        None if comparable is None else bool(comparable),
     )
 
 
