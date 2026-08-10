@@ -40,9 +40,6 @@ class PBPStatsProvider(Protocol):
         *,
         season: str | None = None,
         season_type: str = "Regular Season",
-        team_id: int | None = None,
-        from_date: str | None = None,
-        to_date: str | None = None,
     ) -> pd.DataFrame:
         """Fetch and normalize player or opponent totals."""
 
@@ -87,9 +84,6 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
         *,
         season: str | None = None,
         season_type: str = "Regular Season",
-        team_id: int | None = None,
-        from_date: str | None = None,
-        to_date: str | None = None,
     ) -> pd.DataFrame:
         """Fetch PBP totals and return a normalized dataframe.
 
@@ -104,9 +98,6 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
             canonical_type,
             season=season,
             season_type=season_type,
-            team_id=team_id,
-            from_date=from_date,
-            to_date=to_date,
         )
         return self._normalize_payload(payload)
 
@@ -140,9 +131,6 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
         *,
         season: str | None = None,
         season_type: str = "Regular Season",
-        team_id: int | None = None,
-        from_date: str | None = None,
-        to_date: str | None = None,
     ) -> tuple[Any, Any]:
         """Request one totals payload and translate all provider failures."""
 
@@ -152,12 +140,6 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
             "SeasonType": season_type,
             "Type": "Player" if data_type == "player" else "Opponent",
         }
-        if team_id is not None:
-            params["TeamId"] = str(team_id)
-        if from_date is not None:
-            params["FromDate"] = from_date
-        if to_date is not None:
-            params["ToDate"] = to_date
         started = time.monotonic()
 
         try:

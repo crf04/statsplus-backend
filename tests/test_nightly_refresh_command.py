@@ -90,13 +90,13 @@ def test_run_wires_owner_services_into_the_five_step_refresh(monkeypatch):
         }
         return player_log_service
 
-    def build_team_matchup_service(*args):
-        assert args == (
-            team_matchup_repository,
-            event_service,
-            provider,
-            pbp_provider,
-        )
+    def build_team_matchup_service(**kwargs):
+        assert kwargs == {
+            "repository": team_matchup_repository,
+            "event_catalog": event_service,
+            "nba_stats_provider": provider,
+            "pbp_stats_provider": pbp_provider,
+        }
         return team_matchup_service
 
     monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)

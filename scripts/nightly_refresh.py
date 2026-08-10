@@ -123,10 +123,10 @@ def _run(database_url: str) -> int:
             ),
         )
         team_matchup_service = TeamMatchupRefreshService(
-            TeamMatchupRepository(engine),
-            event_service,
-            provider,
-            pbp_provider,
+            repository=TeamMatchupRepository(engine),
+            event_catalog=event_service,
+            nba_stats_provider=provider,
+            pbp_stats_provider=pbp_provider,
         )
         return run_nightly_refresh(
             refresh_stats=data_service.update_all_data,

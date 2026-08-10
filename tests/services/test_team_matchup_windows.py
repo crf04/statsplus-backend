@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import pandas as pd
-from sqlalchemy import create_engine, delete, inspect
+from sqlalchemy import create_engine, delete, inspect, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import run_migrations
@@ -246,6 +246,27 @@ def _one_game_for_every_team(played_on: date) -> list[dict]:
     ]
 
 
+def test_refresh_service_constructor_requires_named_typed_collaborators(tmp_path):
+    team_ids = _fixture_team_ids()
+    repository = TeamMatchupRepository(
+        create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}")
+    )
+    catalog = FakeEventCatalog(_one_game_for_every_team(date(2025, 4, 15)))
+    nba = _FakeMatchupNBA(team_ids)
+    pbp = _FakeMatchupPBP(team_ids)
+
+    with pytest.raises(TypeError, match="nba_stats_provider"):
+        TeamMatchupRefreshService(
+            repository=repository,
+            event_catalog=catalog,
+            nba_stats_provider=pbp,
+            pbp_stats_provider=nba,
+        )
+
+    with pytest.raises(TypeError):
+        TeamMatchupRefreshService(repository, catalog, nba, pbp)
+
+
 def test_team_last_15_boundary_uses_only_completed_governed_games():
     as_of = date(2025, 4, 15)
     governed = [
@@ -308,10 +329,10 @@ def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path
     pbp = _FakeMatchupPBP(team_ids)
     catalog = FakeEventCatalog(events)
     service = TeamMatchupRefreshService(
-        repository,
-        catalog,
-        nba,
-        pbp,
+        repository=repository,
+        event_catalog=catalog,
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
     )
 
@@ -366,10 +387,10 @@ def test_refresh_records_an_incomplete_governed_roster_without_failing_nightly(
     pbp = _FakeMatchupPBP((BOS, NYK))
     catalog = FakeEventCatalog(events)
     service = TeamMatchupRefreshService(
-        repository,
-        catalog,
-        nba,
-        pbp,
+        repository=repository,
+        event_catalog=catalog,
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
     )
 
@@ -670,6 +691,58 @@ def test_query_degrades_only_a_legacy_incomplete_surface(tmp_path):
     )
 
 
+def test_query_keeps_invalid_numeric_as_the_causal_surface_reason(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-invalid-numeric.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    assist_facts = [
+        TeamMatchupFact(
+            team_id=team_id,
+            base="assist_locations",
+            slice_key="Assists",
+            stat_key="Assists",
+            raw_value=20,
+            denominator_value=48,
+            denominator_unit="minutes",
+            provider="pbp_stats",
+        )
+        for team_id in _fixture_team_ids()
+    ]
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=[*_complete_traditional_facts(), *assist_facts],
+        observations=[
+            TeamMatchupObservation("traditional", "available"),
+            TeamMatchupObservation("assist_locations", "available"),
+        ],
+        retrieved_at=datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            update(TeamMatchupFactRow.__table__)
+            .where(
+                TeamMatchupFactRow.__table__.c.base == "traditional",
+                TeamMatchupFactRow.__table__.c.team_id == _fixture_team_ids()[0],
+            )
+            .values(denominator_value=0)
+        )
+
+    window = TeamMatchupQueryService(repository).get_window(scope)
+
+    assert {metric.base for metric in window.league_metrics} == {
+        "assist_locations"
+    }
+    observations = {item.surface: item for item in window.observations}
+    assert observations["assist_locations"].status == "available"
+    assert observations["traditional"].status == "unavailable"
+    assert (
+        observations["traditional"].unavailable_reason
+        == "provider_invalid_numeric"
+    )
+
+
 def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     tmp_path,
 ):
@@ -844,10 +917,10 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     catalog = FakeEventCatalog(events)
     retrieved_at = datetime(2025, 4, 15, 10, tzinfo=timezone.utc)
     service = TeamMatchupRefreshService(
-        repository,
-        catalog,
-        nba,
-        pbp,
+        repository=repository,
+        event_catalog=catalog,
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
         clock=lambda: retrieved_at,
     )
 
@@ -961,10 +1034,10 @@ def test_refresh_persists_production_shape_opponent_shot_locations(tmp_path):
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(_one_game_for_every_team(as_of)),
-        MultiIndexShotZonesNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(as_of)),
+        nba_stats_provider=MultiIndexShotZonesNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: datetime(2025, 4, 15, 10, tzinfo=timezone.utc),
     )
 
@@ -1020,10 +1093,10 @@ def test_refresh_publishes_season_and_honest_missing_last_15_early_in_season(
     nba = _FakeMatchupNBA(team_ids)
     pbp = _FakeMatchupPBP(team_ids)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        nba,
-        pbp,
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
         clock=lambda: datetime(2024, 10, 23, 10, tzinfo=timezone.utc),
     )
 
@@ -1083,10 +1156,10 @@ def test_refresh_records_malformed_nba_surface_and_preserves_prior_facts(tmp_pat
         retrieved_at=observed_at - timedelta(hours=1),
     )
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
-        MalformedZonesNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        nba_stats_provider=MalformedZonesNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: observed_at,
     )
 
@@ -1116,10 +1189,10 @@ def test_backdated_unbounded_play_types_keep_their_truthful_failure_reason(tmp_p
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
-        MalformedTraditionalNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        nba_stats_provider=MalformedTraditionalNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: observed_at,
     )
 
@@ -1153,10 +1226,10 @@ def test_refresh_records_malformed_pbp_surface_and_continues_nba_surfaces(tmp_pa
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
-        _FakeMatchupNBA(team_ids),
-        MalformedPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(_one_game_for_every_team(scope.as_of)),
+        nba_stats_provider=_FakeMatchupNBA(team_ids),
+        pbp_stats_provider=MalformedPBP(team_ids),
         clock=lambda: observed_at,
     )
 
@@ -1206,10 +1279,10 @@ def test_refresh_marks_cross_phase_last_15_unavailable_without_mixing_games(
     nba = _FakeMatchupNBA(team_ids)
     pbp = _FakeMatchupPBP(team_ids)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        nba,
-        pbp,
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
         clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
     )
 
@@ -1259,10 +1332,10 @@ def test_refresh_refuses_to_label_an_unverified_nba_window_as_last_15(tmp_path):
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        _FakeMatchupNBA(team_ids, rolling_games=14),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=_FakeMatchupNBA(team_ids, rolling_games=14),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
     )
 
@@ -1328,10 +1401,10 @@ def test_empty_rolling_surface_is_unverified_and_preserves_prior_facts(tmp_path)
         retrieved_at=observed_at - timedelta(hours=1),
     )
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        EmptyRollingShotTypesNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=EmptyRollingShotTypesNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: observed_at,
     )
 
@@ -1381,10 +1454,10 @@ def test_refresh_refuses_to_label_an_unverified_pbp_window_as_last_15(
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     service = TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        _FakeMatchupNBA(team_ids),
-        UnverifiedPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=_FakeMatchupNBA(team_ids),
+        pbp_stats_provider=UnverifiedPBP(team_ids),
         clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
     )
 
@@ -1431,10 +1504,10 @@ def test_refresh_never_substitutes_own_team_stats_for_opponent_stats(tmp_path):
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        OwnStatsOnlyNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=OwnStatsOnlyNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
     ).refresh("2024-25", as_of=date(2025, 4, 15))
 
@@ -1474,10 +1547,10 @@ def test_refresh_degrades_zero_minute_dependent_surfaces_only(tmp_path):
     run_migrations(engine)
     repository = TeamMatchupRepository(engine)
     TeamMatchupRefreshService(
-        repository,
-        FakeEventCatalog(events),
-        ZeroMinutesNBA(team_ids),
-        _FakeMatchupPBP(team_ids),
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=ZeroMinutesNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
     ).refresh("2024-25", as_of=date(2025, 4, 15))
 

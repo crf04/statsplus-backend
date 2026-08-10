@@ -146,8 +146,11 @@ class TeamMatchupQueryService:
 
         for key, team_values in grouped.items():
             if (
-                len(team_values) != 30
-                or len({team_id for team_id, _ in team_values}) != 30
+                key[0] not in invalid_surfaces
+                and (
+                    len(team_values) != 30
+                    or len({team_id for team_id, _ in team_values}) != 30
+                )
             ):
                 invalid_surfaces[key[0]] = "legacy_surface_incomplete"
 

@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Any, cast
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -161,18 +161,95 @@ class _ProviderWindowUnverified(ValueError):
     """An aggregate response cannot prove it represents the governed window."""
 
 
+@runtime_checkable
+class TeamMatchupEventCatalog(Protocol):
+    def get_events(self, season: str) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class TeamMatchupNBAStatsProvider(Protocol):
+    def fetch_opponent_team_stats(
+        self,
+        date_from: str | None,
+        *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
+        per_mode_detailed: str = "Per48",
+    ) -> pd.DataFrame | None: ...
+
+    def fetch_opponent_shot_chart(
+        self,
+        general_range: str,
+        date_from: str | None,
+        *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
+        per_mode_simple: str = "PerGame",
+    ) -> pd.DataFrame: ...
+
+    def fetch_opponent_shooting_zone(
+        self,
+        date_from: str | None,
+        *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
+        per_mode_detailed: str = "PerGame",
+    ) -> pd.DataFrame: ...
+
+    def fetch_synergy_play_types(
+        self,
+        play_type: str,
+        *,
+        player_or_team_abbreviation: str,
+        type_grouping: str,
+        season: str | None = None,
+        per_mode_simple: str | None = None,
+    ) -> pd.DataFrame: ...
+
+
+@runtime_checkable
+class TeamMatchupPBPStatsProvider(Protocol):
+    def fetch_totals_frame(
+        self,
+        data_type: Literal["player", "opponent"] = "player",
+        *,
+        season: str | None = None,
+        season_type: str = "Regular+Season",
+        team_id: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame: ...
+
+
 class TeamMatchupRefreshService:
     """Collect Season and exact team Last-15 facts, then publish together."""
 
     def __init__(
         self,
-        repository: TeamMatchupRepository,
-        event_catalog: Any,
-        nba_stats_provider: Any,
-        pbp_stats_provider: Any,
         *,
+        repository: TeamMatchupRepository,
+        event_catalog: TeamMatchupEventCatalog,
+        nba_stats_provider: TeamMatchupNBAStatsProvider,
+        pbp_stats_provider: TeamMatchupPBPStatsProvider,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if not isinstance(repository, TeamMatchupRepository):
+            raise TypeError("repository must be a TeamMatchupRepository")
+        if not isinstance(event_catalog, TeamMatchupEventCatalog):
+            raise TypeError("event_catalog must provide get_events")
+        if not isinstance(nba_stats_provider, TeamMatchupNBAStatsProvider):
+            raise TypeError("nba_stats_provider does not satisfy the matchup contract")
+        if not isinstance(pbp_stats_provider, TeamMatchupPBPStatsProvider):
+            raise TypeError("pbp_stats_provider does not satisfy the matchup contract")
         self.repository = repository
         self.event_catalog = event_catalog
         self.nba_stats = nba_stats_provider
@@ -802,6 +879,9 @@ class TeamMatchupRefreshService:
 
 
 __all__ = [
+    "TeamMatchupEventCatalog",
+    "TeamMatchupNBAStatsProvider",
+    "TeamMatchupPBPStatsProvider",
     "TeamMatchupRefreshService",
     "TeamWindowBoundary",
     "TeamWindowBoundaryResolver",
