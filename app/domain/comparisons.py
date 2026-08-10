@@ -22,7 +22,7 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -925,6 +925,16 @@ class BoardMarket:
                 raise ValueError(
                     "a contradicted observation is excluded as a conflicting identity"
                 )
+        elif self.exclusion is ComparisonExclusion.CONFLICTING_MARKET_IDENTITY:
+            # The other direction of the same fact.  A market excluded for a
+            # conflicting identity with nothing to conflict with would publish
+            # an unresolved reason that says several observations disagreed
+            # while the board retains one, so the label is refused without the
+            # contradiction it names.
+            raise ValueError(
+                "a conflicting identity exclusion states the contradiction it "
+                "belongs to"
+            )
         object.__setattr__(self, "selections", tuple(self.selections))
 
     @property
@@ -1239,6 +1249,59 @@ def _by_reference(
     return clusters
 
 
+#: The two fields that state where an observation sits in a contradiction
+#: rather than what it observed.  They are the only fields a contradiction is
+#: allowed to differ in by itself, so they take no part in the evidence key.
+CONFLICT_BOOKKEEPING_FIELDS = frozenset({"conflict_ordinal", "conflict_count"})
+
+
+def _stated_fact(value: Any) -> Any:
+    """One hashable rendering of a retained fact, at the scale it is published.
+
+    Type-tagged, so ``1`` and ``"1"`` are two facts; scale-aware, because a
+    board writes a threshold in the scale its provider published and
+    ``Decimal("25.50")`` reaches a caller as another number than
+    ``Decimal("25.5")``; and recursive through nested retained evidence, so a
+    disagreement about an athlete's canonical id counts exactly as much as a
+    disagreement about a threshold.
+    """
+
+    if isinstance(value, Decimal):
+        return ("decimal", value.as_tuple())
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, Enum):
+        return ("enum", type(value).__name__, value.value)
+    if isinstance(value, (tuple, list)):
+        return ("sequence", tuple(_stated_fact(item) for item in value))
+    if is_dataclass(value):
+        return (
+            type(value).__name__,
+            tuple(
+                (field.name, _stated_fact(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    return (type(value).__name__, value)
+
+
+def board_market_evidence_key(market: BoardMarket) -> tuple:
+    """Everything one retained observation states, apart from its bookkeeping.
+
+    Every field takes part, read from the dataclass itself, so a fact retained
+    on a board later distinguishes two observations from the day it exists
+    rather than the day someone remembers to list it here.  Only where an
+    observation sits in a contradiction is left out: an ordinal is a statement
+    about the cluster, never evidence the cluster is one.
+    """
+
+    return tuple(
+        (field.name, _stated_fact(getattr(market, field.name)))
+        for field in fields(market)
+        if field.name not in CONFLICT_BOOKKEEPING_FIELDS
+    )
+
+
 def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
     """Require each contradicted reference to retain the whole contradiction.
 
@@ -1280,6 +1343,16 @@ def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
         if ordinals != list(range(count)):
             raise ValueError(
                 "contradicting observations must name each observation once"
+            )
+        # Structure is not disagreement.  A cluster whose observations state the
+        # same evidence is a repeat that failed to collapse, not a source
+        # contradicting itself, and publishing it would tell a caller that
+        # several providers' answers could not be reconciled when only one
+        # answer was ever given.  An exact repeat collapses before a board is
+        # built, so every observation the cluster counted states its own facts.
+        if len({board_market_evidence_key(market) for market in cluster}) != count:
+            raise ValueError(
+                "contradicting observations must state evidence that disagrees"
             )
 
 

@@ -1114,6 +1114,26 @@ cluster's own detail. Conversely, two retained observations of one reference
 that state no contradiction are refused: a reference is either one observation
 or a complete contradiction.
 
+The exclusion and the evidence for it are required of each other in both
+directions. A `BoardMarket` that states `conflict_ordinal` and `conflict_count`
+is excluded as `conflicting_market_identity`, and a market excluded as
+`conflicting_market_identity` states them, so the reason can never be published
+for a lone observation with nothing to disagree with.
+
+Structure is not disagreement. A structurally complete cluster whose retained
+observations state the same evidence is a repeat that failed to collapse, so
+the board requires the cluster's `count` observations to state `count` distinct
+facts. Distinctness is read from a canonical evidence key over every field a
+`BoardMarket` retains, taken from the dataclass itself so a fact retained later
+takes part from the day it exists, with only `conflict_ordinal` and
+`conflict_count` left out — an ordinal is a statement about the cluster, never
+evidence the cluster is one. The key is scale-aware, because a board writes a
+threshold in the scale its provider published: `Decimal("25.50")` and
+`Decimal("25.5")` reach a caller as different numbers and are therefore a
+contradiction, exactly as a differing name, team, status, or selection price is.
+An exact semantic repeat has already collapsed at the retention seam, so a
+cluster the board assembles always satisfies this.
+
 `BoardReadEvidence` carries counts without the collections behind them, so it
 enforces that same relation directly: a read cannot have established more
 comparisons and unresolved markets together than the observations it made. The

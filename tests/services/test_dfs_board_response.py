@@ -1395,6 +1395,36 @@ def test_a_published_contradiction_states_its_whole_cluster(monkeypatch):
         assert market["exclusion_detail"] == entry["detail"]
 
 
+def test_a_lone_conflict_label_cannot_reach_the_serializer():
+    """A reason claiming a contradiction states the contradiction it belongs to."""
+
+    board = _unresolved_board()
+    (market,) = board.markets
+
+    with pytest.raises(ValueError, match="states the contradiction it belongs to"):
+        dataclasses.replace(
+            market, exclusion=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+        )
+
+
+def test_a_contradiction_of_identical_observations_cannot_reach_the_serializer(
+    monkeypatch,
+):
+    """A cluster that repeats one observation publishes a disagreement it lacks."""
+
+    _forced_reference(monkeypatch)
+    board = _read_markets((_spelled("25.5", "25.5"), _spelled("27.5", "27.5")))
+    first = board.markets[0]
+
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        serialize_board(
+            dataclasses.replace(
+                board,
+                markets=(first, dataclasses.replace(first, conflict_ordinal=1)),
+            )
+        )
+
+
 #: Each falsification publishes a member that is internally valid -- its own
 #: group summary is re-derived from it -- and yet states a fact the market
 #: retained beside it does not.

@@ -3321,6 +3321,20 @@ def test_a_contradiction_ordinal_still_names_one_observation():
         _conflicted_market(conflict_ordinal=2, conflict_count=2)
 
 
+def test_contradiction_evidence_is_excluded_as_a_conflicting_identity():
+    """Metadata without the label would publish a reason its cluster denies."""
+
+    with pytest.raises(ValueError, match="excluded as a conflicting identity"):
+        _conflicted_market(exclusion=ComparisonExclusion.STALE_SNAPSHOT)
+
+
+def test_a_conflicting_identity_exclusion_requires_its_contradiction():
+    """The label without the metadata is a contradiction of one observation."""
+
+    with pytest.raises(ValueError, match="states the contradiction it belongs to"):
+        _conflicted_market(conflict_ordinal=None, conflict_count=None)
+
+
 COVERAGE_COUNTS = [
     "fetched_count",
     "eligible_count",
@@ -3673,7 +3687,9 @@ def test_a_contradicted_reference_is_backed_by_every_observation_it_kept():
         ),
         markets=(
             _conflicted_market(conflict_ordinal=0, conflict_count=2),
-            _conflicted_market(conflict_ordinal=1, conflict_count=2),
+            _conflicted_market(
+                conflict_ordinal=1, conflict_count=2, status=MarketStatus.SUSPENDED
+            ),
         ),
     )
 
@@ -3935,8 +3951,9 @@ def test_an_unresolved_conflict_must_describe_the_cluster_it_stands_on():
                     conflict_ordinal=ordinal,
                     conflict_count=2,
                     exclusion_detail="conflicting_normalized_content",
+                    status_label=label,
                 )
-                for ordinal in (0, 1)
+                for ordinal, label in ((0, "open"), (1, "closed"))
             ),
         )
 
@@ -3994,11 +4011,11 @@ def test_contradicting_observations_must_agree_on_how_many_there_were():
 def test_no_observation_of_a_contradicted_reference_may_stay_unmarked():
     with pytest.raises(ValueError, match="every observation of a contradicted"):
         _conflict_board(
-            _conflict_observation(0, 2),
-            _conflict_observation(1, 2),
+            _conflict_observation(0, 2, **_disagreement(0)),
+            _conflict_observation(1, 2, **_disagreement(1)),
             _excluded_market(
                 "mkt_1_a",
-                exclusion=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY,
+                exclusion=ComparisonExclusion.STALE_SNAPSHOT,
                 exclusion_detail="conflicting_normalized_content",
             ),
         )
@@ -4020,7 +4037,10 @@ def test_repeated_observations_of_one_reference_state_their_contradiction():
 @pytest.mark.parametrize("ordinals", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
 def test_a_complete_contradiction_cluster_is_kept_whole(ordinals):
     board = _conflict_board(
-        *(_conflict_observation(ordinal, 3) for ordinal in ordinals)
+        *(
+            _conflict_observation(ordinal, 3, **_disagreement(ordinal))
+            for ordinal in ordinals
+        )
     )
 
     assert board.market_count == 3
@@ -4030,6 +4050,128 @@ def test_a_complete_contradiction_cluster_is_kept_whole(ordinals):
         1,
         2,
     ]
+
+
+# -- a contradiction contradicts something, or it is a repeat ---------------
+
+
+def _threshold(value, unit="count"):
+    return comparisons.BoardThreshold(value=Decimal(value), unit=unit)
+
+
+def _disagreement(ordinal):
+    """One observation's own threshold, so a cluster of them disagrees."""
+
+    return {"threshold": _threshold(f"2{ordinal}.5")}
+
+
+def test_observations_that_state_the_same_evidence_are_not_a_contradiction():
+    """Two markets alike apart from their bookkeeping contradict nothing."""
+
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        _conflict_board(
+            _conflict_observation(0, 2),
+            _conflict_observation(1, 2),
+        )
+
+
+def test_three_identical_observations_are_not_a_contradiction():
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        _conflict_board(*(_conflict_observation(ordinal, 3) for ordinal in range(3)))
+
+
+def test_one_repeat_inside_a_contradiction_is_still_a_repeat():
+    """Exact repeats collapse upstream, so three must be three distinct facts."""
+
+    with pytest.raises(ValueError, match="must state evidence that disagrees"):
+        _conflict_board(
+            _conflict_observation(0, 3, **_disagreement(0)),
+            _conflict_observation(1, 3, **_disagreement(1)),
+            _conflict_observation(2, 3, **_disagreement(1)),
+        )
+
+
+#: Each pair states one substantive disagreement -- a fact the board publishes
+#: for one observation and not the other -- so the two are a contradiction.
+#: Provider is deliberately absent: a cluster states one exclusion, and an
+#: unresolved market names the provider its whole cluster shares.
+CONTRADICTING_FACTS = {
+    "market_id": ({"market_id": "m-1"}, {"market_id": "m-2"}),
+    "threshold": ({"threshold": _threshold("25.5")}, {"threshold": _threshold("27.5")}),
+    "threshold_scale": (
+        {"threshold": _threshold("25.5")},
+        {"threshold": _threshold("25.50")},
+    ),
+    "threshold_unit": (
+        {"threshold": _threshold("25.5")},
+        {"threshold": _threshold("25.5", unit="points")},
+    ),
+    "athlete_name": (
+        {"athlete": comparisons.BoardAthlete(provider_id="a-1", name="Nikola Jokic")},
+        {"athlete": comparisons.BoardAthlete(provider_id="a-1", name="N. Jokic")},
+    ),
+    "athlete_identity": (
+        {"athlete": comparisons.BoardAthlete(provider_id="a-1", canonical_id=None)},
+        {"athlete": comparisons.BoardAthlete(provider_id="a-1", canonical_id=203999)},
+    ),
+    "team": (
+        {"team": comparisons.BoardTeam(abbreviation="DEN")},
+        {"team": comparisons.BoardTeam(abbreviation="LAL")},
+    ),
+    "event": (
+        {"event": comparisons.BoardEvent(provider_id="e-1")},
+        {"event": comparisons.BoardEvent(provider_id="e-2")},
+    ),
+    "status": ({"status": MarketStatus.AVAILABLE}, {"status": MarketStatus.SUSPENDED}),
+    "status_label": ({"status_label": "open"}, {"status_label": "closed"}),
+    "variant": (
+        {"variant": MarketVariant.STANDARD},
+        {"variant": MarketVariant.ALTERNATE},
+    ),
+    "scoring_period": (
+        {"scoring_period": ScoringPeriod.FULL_GAME},
+        {"scoring_period": ScoringPeriod.FIRST_HALF},
+    ),
+    "observation": (
+        {"observation": _board_observation()},
+        {"observation": _board_observation(age_seconds=Decimal("31"))},
+    ),
+    "selections": (
+        {"selections": ()},
+        {"selections": (comparisons.BoardSelection(selection_reference="sel_1_a"),)},
+    ),
+    "selection_price": (
+        {
+            "selections": (
+                comparisons.BoardSelection(
+                    selection_reference="sel_1_a", decimal_price=Decimal("1.9")
+                ),
+            )
+        },
+        {
+            "selections": (
+                comparisons.BoardSelection(
+                    selection_reference="sel_1_a", decimal_price=Decimal("1.90")
+                ),
+            )
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "disagreement", sorted(CONTRADICTING_FACTS), ids=sorted(CONTRADICTING_FACTS)
+)
+def test_observations_that_disagree_in_any_published_fact_contradict(disagreement):
+    left, right = CONTRADICTING_FACTS[disagreement]
+
+    board = _conflict_board(
+        _conflict_observation(0, 2, **left),
+        _conflict_observation(1, 2, **right),
+    )
+
+    assert board.market_count == 2
+    assert len(board.conflicting_markets) == 2
 
 
 # -- board read evidence states relationships it could have observed --------
