@@ -773,18 +773,39 @@ Canonical Statistic, and scoring period; those four facts are its key. The
 canonical athlete and event come only from the governed mapping outcomes the
 collector reports, so a suppressed, disputed, or withdrawn identity never
 reaches a group. Legitimate multiple thresholds, variants, statuses, and
-same-provider markets stay distinct members of one group; only members whose
-every fact agrees collapse into one. Exact repeated source identities are
-already deduplicated inside `ProviderSnapshot`, where a repeat with conflicting
-normalized content is malformed rather than a second market.
+same-provider markets stay distinct members of one group. Identity is decided
+once, over whole normalized markets, before any market is reduced to a member,
+so two distinct offerings can never merge because the few facts a member
+happens to state agree. Exact repeated source identities are already
+deduplicated inside `ProviderSnapshot`, where a repeat with conflicting
+normalized content is malformed rather than a second market; the board applies
+the same rule to the references it derives, so a repeated reference is one
+market only when every normalized fact and its observation agree, and a repeat
+that disagrees is retained as `conflicting_market_identity` instead of
+silently collapsing or splitting.
+
+The board keeps every normalized market it read, not only the facts a
+comparison needs. `ComparisonBoard.markets` holds one `BoardMarket` per
+retained market: typed athlete, event, team, league, competition, sport,
+appearance, and statistic evidence, the catalog's statistic resolution, the
+exact threshold, the status, variant, and scoring period with the provider's
+own original labels, every selection with its stable reference, modifiers, and
+prices, and the snapshot observation it came from — provider, snapshot status,
+retrieval instant, exact decimal age, and freshness. Exactly one of
+`comparison_reference` and `exclusion` is set on each, so `markets_for(...)`
+reads a group's evidence and `markets_by_reference` reads the whole market
+behind any member or unresolved entry. Unresolved, stale, unmapped, and
+catalog-blocked markets are therefore auditable in full rather than named by an
+opaque reference.
 
 Every market the read retains but cannot compare stays visible as an
 `UnresolvedMarket` with one closed `ComparisonExclusion` reason and the
 governed state as its detail: ambiguous, unmatched, mapping-conflict,
 stale-catalog, and unmapped-statistic markets are all reported rather than
 dropped, and none of them enters a group. The checks run in a fixed order —
-availability, freshness, statistic, athlete, event, threshold — so a market
-that fails several always reports the same reason.
+conflicting identity, future observation, availability, freshness, statistic,
+athlete, event, threshold — so a market that fails several always reports the
+same reason.
 
 Comparison Availability is decided before any group is built. A missing or
 over-age Athlete or Event Catalog makes the whole board unavailable, and each
@@ -793,12 +814,24 @@ last successful refresh, its exact decimal age, and the configured maximum age.
 The normalized markets are retained throughout; only their comparability is
 withheld until a refresh.
 
-Freshness uses the reviewed provider cache windows. A snapshot inside its
-provider's fresh window is contemporaneous; one past it enters comparisons only
-while it is inside the permitted stale window and says so; beyond that window
-its markets stay visible as `stale_snapshot`. A group whose members are not
-contemporaneous — different retrieval instants, or a mix of fresh and stale
-observations — is an explicit Mixed-Freshness Comparison.
+One timezone-aware observation timestamp, read from
+`ComparisonBoardService.clock` after the collector returns, is the instant the
+whole board is measured against: it is the board's `generated_at`, it ages
+every provider snapshot and retained market, and it is passed as `now=` to both
+canonical catalogs, so a reported age and the availability derived from it can
+never disagree at a TTL boundary and a slow collection can never report a
+market as fresher than the board that states it.
+
+Freshness uses the reviewed provider cache windows, compared as exact decimals
+so a boundary is exact. A snapshot inside its provider's fresh window is
+contemporaneous; one past it enters comparisons only while it is inside the
+permitted stale window and says so; beyond that window its markets stay visible
+as `stale_snapshot`. A snapshot the provider timestamped after the board
+observed it cannot be aged, so it fails closed: no negative age is ever
+reported, the observation carries no freshness, and its markets stay visible as
+`future_snapshot`. A group whose members are not contemporaneous — different
+retrieval instants, or a mix of fresh and stale observations — is an explicit
+Mixed-Freshness Comparison.
 
 A summary states only exact decimal minimum, maximum, and Threshold Spread,
 the provider and market counts, the freshness, and the sorted market
@@ -808,18 +841,33 @@ average, preferred market, entry payout, or cross-provider fantasy assumption
 is produced anywhere in this seam.
 
 Market, selection, and comparison references are versioned and deterministic
-(`mkt_1_…`, `sel_1_…`, `cmp_1_…`). A market reference is defined by the
-provider's own market ID, or — when the provider publishes none — by the facts
-it did report; market availability is deliberately excluded, so a market that
-is suspended and available again keeps its reference. A comparison reference is
-defined by its canonical identity alone. Each is stable exactly while its
-defining identity is unchanged.
+(`mkt_2_…`, `sel_2_…`, `cmp_2_…`). Each is a digest over a canonical injective
+encoding: every value is tagged by type and framed by its byte length, and
+every sequence carries its element count, so a field containing a separator can
+never be read as two fields and two distinct structures can never encode alike.
+Decimals take part in one canonical form independent of the scale they were
+written in, so `25.5` and `25.50` are the same number and the same reference.
+
+A market reference is defined by the provider's own market ID, or — when the
+provider publishes none — by every fact it did report: the athlete evidence,
+the complete event evidence including provider and canonical IDs, team IDs,
+names and abbreviations, start, end, and update times, label and status, the
+statistic evidence, threshold, variant, scoring period, source labels, times,
+appearance, and the offered selections with their modifiers and prices. Market
+availability is deliberately excluded from both, so a market that is suspended
+and available again keeps its reference. A selection reference is defined by
+its market reference and every fact that defines the offering — identity,
+labels, direction, status, modifiers, and prices — so two distinctly priced or
+distinctly modified selections are never one reference. A comparison reference
+is defined by its canonical identity alone. Each is stable exactly while its
+defining identity is unchanged; the version is bumped whenever those facts
+change.
 
 Ordering is a property of the observations, never of completion order:
 provider reports and warnings sort by provider and code, groups by their key,
 members by provider, threshold, variant, status, and reference, unresolved
-markets by reason, provider, and reference, and selection references
-lexicographically.
+markets by reason, provider, and reference, retained markets by provider and
+reference, and selection references lexicographically.
 
 Filters are central and exact: enabled providers, Canonical Athlete IDs,
 Canonical Event IDs, Canonical Statistic IDs, and Market Status. A provider

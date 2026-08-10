@@ -13,6 +13,7 @@ import requests
 
 from app.domain import comparisons
 from app.domain.comparisons import (
+    REFERENCE_VERSION,
     SUPPORTED_NARROWING_FILTERS,
     ComparisonBoard,
     ComparisonGroup,
@@ -23,13 +24,18 @@ from app.domain.comparisons import (
     ComparisonFreshness,
     ComparisonSummary,
     MarketFreshness,
+    canonical_decimal,
     market_reference,
+    selection_reference,
 )
-from app.domain.statistics import ScoringPeriod
+from app.domain.statistics import MatchState, ScoringPeriod
 from app.providers.dfs import (
+    AppearanceEvidence,
     AthleteEvidence,
+    CompetitionEvidence,
     CoverageEvidence,
     EventEvidence,
+    LeagueEvidence,
     MalformedProviderResponseError,
     MarketStatus,
     MarketThreshold,
@@ -39,7 +45,9 @@ from app.providers.dfs import (
     ProviderSnapshot,
     RetrievalContext,
     Selection,
+    SelectionModifier,
     SnapshotStatus,
+    SportEvidence,
     StatisticEvidence,
     TeamEvidence,
 )
@@ -236,15 +244,29 @@ class _FakeEventPersistence:
 
 
 class FakeCatalog:
-    """A canonical catalog reporting one reviewed freshness document."""
+    """A canonical catalog reporting one reviewed freshness document.
 
-    def __init__(self, document):
+    It records the observation instant it was asked about, because a board must
+    age every catalog against exactly the instant it states.
+    """
+
+    def __init__(self, document, *, ttl_seconds=None, fresh_key="is_fresh"):
         self.document = document
+        self.ttl_seconds = ttl_seconds
+        self.fresh_key = fresh_key
         self.seasons: list[str] = []
+        self.observed: list[datetime] = []
 
-    def get_freshness(self, season):
+    def get_freshness(self, season, *, now=None):
         self.seasons.append(season)
-        return self.document
+        self.observed.append(now)
+        if self.ttl_seconds is None:
+            return self.document
+        last_success = datetime.fromisoformat(self.document["last_success_at"])
+        return {
+            **self.document,
+            self.fresh_key: now <= last_success + timedelta(seconds=self.ttl_seconds),
+        }
 
 
 def _athlete_catalog(*, fresh=True, last_success_at="2026-08-09T12:00:00+00:00"):
@@ -358,6 +380,7 @@ def _service(
     event_catalog=None,
     max_markets=None,
     generated_at=GENERATED_AT,
+    observed_at=None,
     statistic_catalog=None,
     delays=None,
 ):
@@ -382,11 +405,13 @@ def _service(
         ),
         event_mapping_repository=FakeEventRepository(),
     )
+    observation = observed_at or generated_at
     service = ComparisonBoardService(
         board_service,
         athlete_catalog=athlete_catalog or _athlete_catalog(),
         event_catalog=event_catalog or _event_catalog(),
         max_markets=max_markets,
+        clock=lambda: observation,
     )
     return service, providers
 
@@ -784,7 +809,7 @@ def test_references_are_versioned_and_stable_while_identity_is_unchanged():
     same_identity = _market(market_id="m-1", status=MarketStatus.SUSPENDED)
     other_identity = _market(market_id="m-2")
 
-    assert market_reference(market).startswith("mkt_1_")
+    assert market_reference(market).startswith(f"mkt_{REFERENCE_VERSION}_")
     assert market_reference(market) == market_reference(same_identity)
     assert market_reference(market) != market_reference(other_identity)
 
@@ -810,12 +835,14 @@ def test_comparison_and_selection_references_are_deterministic():
     board = _read(service)
     group = board.groups[0]
 
-    assert group.reference.startswith("cmp_1_")
+    assert group.reference.startswith(f"cmp_{REFERENCE_VERSION}_")
     assert group.reference == group.key.reference
     references = group.members[0].selection_references
     assert len(references) == 2
     assert tuple(sorted(references)) == references
-    assert all(reference.startswith("sel_1_") for reference in references)
+    assert all(
+        reference.startswith(f"sel_{REFERENCE_VERSION}_") for reference in references
+    )
 
 
 # -- ordering --------------------------------------------------------------
@@ -1200,3 +1227,491 @@ def test_a_board_read_without_a_season_states_it_cannot_compare():
         CatalogAvailabilityReason.NOT_CONFIGURED
     }
     assert board.unresolved[0].reason is ComparisonExclusion.COMPARISON_UNAVAILABLE
+
+
+# -- retained normalized evidence ------------------------------------------
+
+
+def _rich_selection(**overrides):
+    """One fully described selection, varied one fact at a time."""
+
+    values = {
+        "selection_id": "s-1",
+        "label": "Higher",
+        "direction": "higher",
+        "status": "open",
+        "modifiers": (
+            SelectionModifier(value="1.25", kind="boost", scope="selection"),
+        ),
+        "american_price": -120,
+        "decimal_price": "1.83",
+    }
+    return Selection(**{**values, **overrides})
+
+
+def _rich_market():
+    return dataclasses.replace(
+        _market(selections=(_rich_selection(),)),
+        team=TeamEvidence(provider_id="t-1", name="Denver Nuggets", abbreviation="den"),
+        opponent=TeamEvidence(abbreviation="lal"),
+        league=LeagueEvidence(provider_id="l-1", canonical_id="nba", label="NBA"),
+        competition=CompetitionEvidence(
+            provider_id="c-1", label="Regular Season", sport=SportEvidence(label="Basketball")
+        ),
+        sport=SportEvidence(provider_id="sp-1", label="Basketball"),
+        appearance=AppearanceEvidence(provider_id="ap-1", appearance_type="starter"),
+        status_label="OPEN",
+        variant_label="Standard",
+        scoring_period_label="Full Game",
+    )
+
+
+def test_the_board_retains_every_normalized_market_with_its_typed_evidence():
+    service, _ = _service([_snapshot("dabble", (_rich_market(),))])
+
+    board = _read(service)
+    group = board.groups[0]
+    retained = board.markets_by_reference[group.members[0].market_reference]
+
+    assert board.markets_for(group.reference) == (retained,)
+    assert retained.comparison_reference == group.reference
+    assert retained.exclusion is None
+    assert (retained.athlete.provider_id, retained.athlete.name) == ("a-1", "Nikola Jokic")
+    assert retained.event.label == "DEN @ LAL"
+    assert retained.event.home_team.canonical_id == 1610612747
+    assert retained.event.away_team.canonical_id == 1610612743
+    assert retained.team.abbreviation == "DEN"
+    assert retained.opponent.abbreviation == "LAL"
+    assert retained.league.label == "NBA"
+    assert retained.competition.sport.label == "Basketball"
+    assert retained.sport.provider_id == "sp-1"
+    assert retained.appearance.appearance_type == "starter"
+    assert retained.statistic.label == "points"
+    assert retained.statistic_resolution.canonical_id == "points"
+    assert retained.statistic_resolution.state is MatchState.CANONICAL
+    assert retained.statistic_resolution.comparable
+    assert retained.threshold.value == Decimal("25.5")
+    assert retained.threshold.unit == "count"
+    assert (retained.status, retained.status_label) == (MarketStatus.AVAILABLE, "OPEN")
+    assert (retained.variant, retained.variant_label) == (MarketVariant.STANDARD, "Standard")
+    assert retained.scoring_period is ScoringPeriod.FULL_GAME
+    assert retained.scoring_period_label == "Full Game"
+
+
+def test_a_retained_market_keeps_every_offered_selection_and_its_prices():
+    service, _ = _service([_snapshot("dabble", (_rich_market(),))])
+
+    retained = _read(service).markets[0]
+    selection = retained.selections[0]
+
+    assert selection.selection_reference == selection_reference(
+        retained.market_reference, _rich_selection()
+    )
+    assert (selection.selection_id, selection.label) == ("s-1", "Higher")
+    assert (selection.direction, selection.direction_label) == ("higher", "higher")
+    assert selection.status == "open"
+    assert selection.american_price == -120
+    assert selection.decimal_price == Decimal("1.83")
+    assert selection.modifiers[0].value == Decimal("1.25")
+    assert (selection.modifiers[0].kind, selection.modifiers[0].scope) == (
+        "boost",
+        "selection",
+    )
+
+
+def test_a_retained_market_states_its_snapshot_and_provider_freshness():
+    service, _ = _service([_snapshot("dabble", (_market(),))])
+
+    retained = _read(service).markets[0]
+
+    assert retained.observation.provider == "dabble"
+    assert retained.observation.snapshot_status == "complete"
+    assert retained.observation.retrieved_at == RETRIEVED_AT
+    assert retained.observation.observed_at == GENERATED_AT
+    assert retained.observation.age_seconds == Decimal(30)
+    assert retained.observation.freshness is MarketFreshness.FRESH
+    assert not retained.observation.is_future
+
+
+@pytest.mark.parametrize(
+    ("markets", "kwargs", "reason"),
+    [
+        ((_market(statistic="Fantasy Score"),), {}, ComparisonExclusion.UNMAPPED_STATISTIC),
+        ((_market(),), {"athlete_states": {"a-1": "ambiguous"}}, ComparisonExclusion.UNRESOLVED_ATHLETE),
+        ((_market(),), {"event_states": {"e-1": "ambiguous"}}, ComparisonExclusion.UNRESOLVED_EVENT),
+    ],
+)
+def test_an_unresolved_market_stays_auditable_rather_than_an_opaque_reference(
+    markets, kwargs, reason
+):
+    service, _ = _service([_snapshot("dabble", markets)], **kwargs)
+
+    board = _read(service)
+    entry = board.unresolved[0]
+    retained = board.markets_by_reference[entry.market_reference]
+
+    assert entry.reason is reason
+    assert retained.exclusion is reason
+    assert retained.exclusion_detail == entry.detail
+    assert retained.comparison_reference is None
+    assert retained.athlete.name == "Nikola Jokic"
+    assert retained.event.label == "DEN @ LAL"
+    assert retained.statistic.label == markets[0].statistic.label
+    assert retained.threshold.value == Decimal("25.5")
+    assert retained.observation.freshness is MarketFreshness.FRESH
+
+
+def test_a_market_past_the_stale_window_is_retained_with_its_exact_age():
+    beyond = _snapshot(
+        "dabble",
+        (_market(),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=3600),
+    )
+    service, _ = _service([beyond])
+
+    board = _read(service)
+    retained = board.markets[0]
+
+    assert board.groups == ()
+    assert retained.exclusion is ComparisonExclusion.STALE_SNAPSHOT
+    assert retained.observation.freshness is None
+    assert retained.observation.age_seconds == Decimal(3600)
+    assert retained.threshold.value == Decimal("25.5")
+
+
+def test_markets_stay_retained_while_a_catalog_cannot_support_comparison():
+    service, _ = _service(
+        [_snapshot("dabble", (_market(),))],
+        athlete_catalog=_athlete_catalog(fresh=False),
+    )
+
+    board = _read(service)
+    retained = board.markets[0]
+
+    assert not board.availability.available
+    assert retained.exclusion is ComparisonExclusion.COMPARISON_UNAVAILABLE
+    assert retained.exclusion_detail == CatalogAvailabilityReason.STALE.value
+    assert retained.athlete.provider_id == "a-1"
+    assert retained.statistic_resolution.canonical_id == "points"
+
+
+# -- canonical injective references ----------------------------------------
+
+
+def test_a_separator_in_one_field_cannot_forge_another_market_identity():
+    # Under delimiter-joined hashing both of these joined to the same payload.
+    one = _market(market_id=None, athlete_name="A\x1fB", event_id="C")
+    two = _market(market_id=None, athlete_name="A", event_id="B\x1fC")
+    provider_one = _market(provider="dabble\x1fa", market_id="b")
+    provider_two = _market(provider="dabble", market_id="a\x1fb")
+
+    assert market_reference(one) != market_reference(two)
+    assert market_reference(provider_one) != market_reference(provider_two)
+
+
+def test_a_separator_in_a_modifier_cannot_forge_another_selection_identity():
+    one = _rich_selection(
+        modifiers=(SelectionModifier(value="1.25", kind="a\x1fb", scope="c"),)
+    )
+    two = _rich_selection(
+        modifiers=(SelectionModifier(value="1.25", kind="a", scope="b\x1fc"),)
+    )
+
+    assert selection_reference("mkt", one) != selection_reference("mkt", two)
+
+
+def test_an_exact_decimal_is_canonical_whatever_scale_it_was_written_in():
+    assert canonical_decimal(Decimal("25.50")) == "25.5"
+    assert canonical_decimal(Decimal("25.5")) == "25.5"
+    assert canonical_decimal(Decimal("0.00")) == "0"
+    assert canonical_decimal(Decimal("-0")) == "0"
+    assert canonical_decimal(Decimal("1E+2")) == "100"
+    with pytest.raises(ValueError, match="finite Decimal"):
+        canonical_decimal(Decimal("NaN"))
+
+
+def test_a_reference_does_not_depend_on_the_scale_a_number_was_written_in():
+    assert market_reference(_market(market_id=None, threshold="25.5")) == market_reference(
+        _market(market_id=None, threshold="25.50")
+    )
+    assert market_reference(_market(market_id=None, threshold="25.5")) != market_reference(
+        _market(market_id=None, threshold="25.05")
+    )
+    assert selection_reference("mkt", _rich_selection(decimal_price="1.9")) == (
+        selection_reference("mkt", _rich_selection(decimal_price="1.90"))
+    )
+    assert selection_reference("mkt", _rich_selection(decimal_price="1.9")) != (
+        selection_reference("mkt", _rich_selection(decimal_price="1.09"))
+    )
+
+
+def test_id_less_markets_of_different_events_never_share_a_reference():
+    base = EventEvidence(
+        label="DEN @ LAL",
+        starts_at="2026-08-10T00:00:00+00:00",
+        ends_at="2026-08-10T02:30:00+00:00",
+        updated_at="2026-08-09T19:00:00+00:00",
+        home_team=TeamEvidence(provider_id="h-1", canonical_id=1610612747, name="Lakers", abbreviation="lal"),
+        away_team=TeamEvidence(provider_id="a-1", canonical_id=1610612743, name="Nuggets", abbreviation="den"),
+        status_label="scheduled",
+    )
+    events = (
+        base,
+        dataclasses.replace(base, canonical_id="0022500001"),
+        dataclasses.replace(base, label="LAL vs DEN"),
+        dataclasses.replace(base, starts_at="2026-08-10T00:30:00+00:00"),
+        dataclasses.replace(base, ends_at="2026-08-10T03:00:00+00:00"),
+        dataclasses.replace(base, updated_at="2026-08-09T19:30:00+00:00"),
+        dataclasses.replace(base, status_label="delayed"),
+        dataclasses.replace(base, home_team=dataclasses.replace(base.home_team, canonical_id=1610612744)),
+        dataclasses.replace(base, home_team=dataclasses.replace(base.home_team, name="Los Angeles Lakers")),
+        dataclasses.replace(base, home_team=dataclasses.replace(base.home_team, abbreviation="lak")),
+        dataclasses.replace(base, home_team=dataclasses.replace(base.home_team, provider_id="h-2")),
+        dataclasses.replace(base, away_team=dataclasses.replace(base.away_team, canonical_id=1610612745)),
+    )
+    references = {
+        market_reference(dataclasses.replace(_market(market_id=None), event=event))
+        for event in events
+    }
+
+    assert len(references) == len(events)
+
+
+def test_id_less_markets_of_different_source_identity_never_share_a_reference():
+    base = _market(market_id=None)
+    variants = (
+        base,
+        dataclasses.replace(base, athlete=AthleteEvidence(provider_id="a-2", name="Nikola Jokic")),
+        dataclasses.replace(base, athlete=AthleteEvidence(provider_id="a-1", name="Jamal Murray")),
+        dataclasses.replace(
+            base, athlete=AthleteEvidence(provider_id="a-1", name="Nikola Jokic", canonical_id=203999)
+        ),
+        dataclasses.replace(base, statistic=StatisticEvidence(label="points", provider_id="p-9")),
+        dataclasses.replace(base, statistic=StatisticEvidence(label="points", components=("points",))),
+        dataclasses.replace(base, threshold=MarketThreshold("25.5", "points")),
+        dataclasses.replace(base, variant=MarketVariant.ALTERNATE),
+        dataclasses.replace(base, scoring_period=ScoringPeriod.FIRST_HALF),
+        dataclasses.replace(base, starts_at="2026-08-10T00:00:00+00:00"),
+        dataclasses.replace(base, updated_at="2026-08-09T19:00:00+00:00"),
+        dataclasses.replace(base, team=TeamEvidence(abbreviation="den")),
+        dataclasses.replace(base, opponent=TeamEvidence(abbreviation="lal")),
+        dataclasses.replace(base, league=LeagueEvidence(label="NBA")),
+        dataclasses.replace(base, sport=SportEvidence(label="Basketball")),
+        dataclasses.replace(base, competition=CompetitionEvidence(provider_id="c-1")),
+        dataclasses.replace(base, appearance=AppearanceEvidence(provider_id="ap-1")),
+        dataclasses.replace(base, selections=(_rich_selection(),)),
+    )
+
+    assert len({market_reference(variant) for variant in variants}) == len(variants)
+
+
+def test_selection_references_separate_every_distinct_offering():
+    variants = (
+        _rich_selection(),
+        _rich_selection(selection_id="s-2"),
+        _rich_selection(label="Higher than"),
+        _rich_selection(direction="lower"),
+        _rich_selection(direction="higher", direction_label="Over"),
+        _rich_selection(status="suspended"),
+        _rich_selection(american_price=-125),
+        _rich_selection(decimal_price="1.91"),
+        _rich_selection(modifiers=()),
+        _rich_selection(
+            modifiers=(SelectionModifier(value="1.5", kind="boost", scope="selection"),)
+        ),
+        _rich_selection(
+            modifiers=(SelectionModifier(value="1.25", kind="boost", scope="entry"),)
+        ),
+        _rich_selection(
+            modifiers=(
+                SelectionModifier(value="1.25", kind="boost", scope="selection", label="Boosted"),
+            )
+        ),
+    )
+
+    references = {selection_reference("mkt", variant) for variant in variants}
+
+    assert len(references) == len(variants)
+
+
+def test_id_less_offerings_that_differ_only_in_price_stay_distinct_members():
+    markets = (
+        _market(market_id=None, selections=(_rich_selection(decimal_price="1.83"),)),
+        _market(market_id=None, selections=(_rich_selection(decimal_price="1.91"),)),
+    )
+    service, _ = _service([_snapshot("dabble", markets)])
+
+    board = _read(service)
+
+    assert board.market_count == 2
+    assert board.groups[0].summary.market_count == 2
+    assert len({market.market_reference for market in board.markets}) == 2
+
+
+def test_exact_repeated_id_less_markets_are_one_offering():
+    repeated = _market(market_id=None)
+    service, _ = _service([_snapshot("dabble", (repeated, repeated))])
+
+    board = _read(service)
+
+    assert board.market_count == 1
+    assert board.groups[0].summary.market_count == 1
+    assert len(board.markets) == 1
+
+
+def test_a_repeated_identity_whose_content_disagrees_stays_unresolved():
+    markets = (
+        _market(market_id=None),
+        _market(market_id=None, status=MarketStatus.SUSPENDED),
+    )
+    service, _ = _service([_snapshot("dabble", markets)])
+
+    board = _read(service)
+
+    assert board.groups == ()
+    assert [entry.reason for entry in board.unresolved] == [
+        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    ]
+    assert board.markets[0].exclusion is ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+    assert board.markets[0].exclusion_detail == "conflicting_normalized_content"
+
+
+# -- one observation timestamp ---------------------------------------------
+
+
+def test_the_observation_timestamp_is_taken_after_the_collector_returns():
+    # The collector stamped its board at GENERATED_AT; this read only finished
+    # ten minutes later, and every age states that.
+    observed_at = GENERATED_AT + timedelta(seconds=600)
+    service, _ = _service([_snapshot("dabble", (_market(),))], observed_at=observed_at)
+
+    board = _read(service)
+
+    assert board.generated_at == observed_at
+    assert board.markets[0].observation.age_seconds == Decimal(630)
+    assert board.markets[0].observation.freshness is MarketFreshness.STALE
+    assert board.groups[0].members[0].freshness is MarketFreshness.STALE
+    assert board.provider_reports[0].age_seconds == Decimal(630)
+    assert board.provider_reports[0].freshness is MarketFreshness.STALE
+    assert board.provider_reports[0].snapshot_status == "complete"
+
+
+def test_both_catalogs_are_aged_against_the_same_observation():
+    athlete_catalog = _athlete_catalog()
+    event_catalog = _event_catalog()
+    service, _ = _service(
+        [_snapshot("dabble", (_market(),))],
+        athlete_catalog=athlete_catalog,
+        event_catalog=event_catalog,
+        observed_at=GENERATED_AT + timedelta(seconds=600),
+    )
+
+    board = _read(service)
+
+    assert athlete_catalog.observed == [board.generated_at]
+    assert event_catalog.observed == [board.generated_at]
+    ages = {entry.catalog: entry.age_seconds for entry in board.availability.catalogs}
+    assert ages == {
+        "athlete_catalog": Decimal(29430),
+        "event_catalog": Decimal(29430),
+    }
+
+
+@pytest.mark.parametrize("elapsed_seconds", [604800, 604801])
+def test_a_catalog_age_and_its_availability_agree_at_the_ttl_boundary(elapsed_seconds):
+    ttl = 604800
+    last_success = GENERATED_AT - timedelta(seconds=elapsed_seconds)
+    catalog = FakeCatalog(
+        {
+            "season": SEASON,
+            "is_fresh": True,
+            "freshness_days": 7,
+            "last_success_at": last_success.isoformat(),
+        },
+        ttl_seconds=ttl,
+    )
+    service, _ = _service(
+        [_snapshot("dabble", (_market(),))], athlete_catalog=catalog
+    )
+
+    board = _read(service)
+    entry = next(
+        entry for entry in board.availability.catalogs if entry.catalog == "athlete_catalog"
+    )
+
+    assert entry.age_seconds == Decimal(elapsed_seconds)
+    assert entry.available is (elapsed_seconds <= ttl)
+    assert entry.max_age_seconds == Decimal(ttl)
+
+
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "freshness"),
+    [
+        (300, MarketFreshness.FRESH),
+        ("300.5", MarketFreshness.STALE),
+        (1800, MarketFreshness.STALE),
+        ("1800.5", None),
+    ],
+)
+def test_freshness_windows_are_exact_at_their_boundaries(elapsed_seconds, freshness):
+    elapsed = Decimal(str(elapsed_seconds))
+    snapshot = _snapshot(
+        "dabble",
+        (_market(),),
+        retrieved_at=GENERATED_AT - timedelta(seconds=float(elapsed)),
+    )
+    service, _ = _service([snapshot])
+
+    board = _read(service)
+    retained = board.markets[0]
+
+    assert retained.observation.age_seconds == elapsed
+    assert retained.observation.freshness is freshness
+    if freshness is None:
+        assert retained.exclusion is ComparisonExclusion.STALE_SNAPSHOT
+    else:
+        assert retained.comparison_reference == board.groups[0].reference
+
+
+def test_a_slow_collection_never_reports_a_market_as_fresher_than_the_board():
+    def read(observed_at):
+        service, _ = _service(
+            [_snapshot("dabble", (_market(),))], observed_at=observed_at
+        )
+        return _read(service)
+
+    prompt = read(GENERATED_AT)
+    slow = read(GENERATED_AT + timedelta(seconds=600))
+
+    assert prompt.markets[0].observation.age_seconds < slow.markets[0].observation.age_seconds
+    assert prompt.generated_at < slow.generated_at
+
+
+def test_a_future_snapshot_fails_closed_without_a_negative_age():
+    ahead = _snapshot(
+        "dabble", (_market(),), retrieved_at=GENERATED_AT + timedelta(seconds=60)
+    )
+    service, _ = _service([ahead])
+
+    board = _read(service)
+    retained = board.markets[0]
+    report = board.provider_reports[0]
+
+    assert board.groups == ()
+    assert [entry.reason for entry in board.unresolved] == [
+        ComparisonExclusion.FUTURE_SNAPSHOT
+    ]
+    assert retained.observation.is_future
+    assert retained.observation.age_seconds == Decimal(0)
+    assert retained.observation.freshness is None
+    assert report.future_observation
+    assert report.age_seconds == Decimal(0)
+    assert report.freshness is None
+
+
+def test_a_naive_observation_clock_is_refused():
+    service, _ = _service([_snapshot("dabble", (_market(),))])
+    service.clock = lambda: datetime(2026, 8, 9, 20, 0)
+
+    with pytest.raises(ValueError, match="aware datetime"):
+        _read(service)

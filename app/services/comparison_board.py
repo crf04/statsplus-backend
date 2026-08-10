@@ -24,6 +24,18 @@ from typing import Any, Callable
 
 from app.domain.comparisons import (
     SUPPORTED_NARROWING_FILTERS,
+    BoardAppearance,
+    BoardAthlete,
+    BoardCompetition,
+    BoardEvent,
+    BoardMarket,
+    BoardNamedEvidence,
+    BoardObservation,
+    BoardSelection,
+    BoardStatistic,
+    BoardStatisticResolution,
+    BoardTeam,
+    BoardThreshold,
     CatalogAvailability,
     CatalogAvailabilityReason,
     ComparisonAvailability,
@@ -118,7 +130,7 @@ def _catalog_availability(
             available=False,
             reason=CatalogAvailabilityReason.NOT_CONFIGURED,
         )
-    freshness = catalog.get_freshness(season)
+    freshness = catalog.get_freshness(season, now=now)
     if not isinstance(freshness, Mapping):
         return CatalogAvailability(
             catalog=name,
@@ -136,7 +148,7 @@ def _catalog_availability(
             reason=CatalogAvailabilityReason.MISSING,
             max_age_seconds=max_age,
         )
-    age = exact_seconds(now - last_success)
+    age = max(exact_seconds(now - last_success), Decimal(0))
     if not bool(freshness.get(fresh_key)):
         return CatalogAvailability(
             catalog=name,
@@ -280,48 +292,59 @@ class ComparisonBoardService:
         board = self.board_service.get_board(
             query, context, providers=(filters.providers or None)
         )
-        generated_at = board.generated_at
-        availability = self._availability(query.season, generated_at)
+
+        # One timezone-aware observation, taken after the collector returned.
+        # Every age, freshness window, and catalog TTL on this board is measured
+        # against exactly this instant, so a slow collection cannot report a
+        # market as fresher than the board that states it.
+        observed_at = self._observed_at()
+        availability = self._availability(query.season, observed_at)
         athletes = _athlete_identities(board)
         events_by_identity, events_by_evidence = _event_identities(board)
 
+        retained, conflicting = self._retained_markets(board, filters, observed_at)
+
         members: dict[ComparisonKey, list[ComparisonMember]] = {}
         unresolved: list[UnresolvedMarket] = []
+        markets: list[BoardMarket] = []
         observed = 0
-        for snapshot in board.snapshots:
-            if filters.providers and snapshot.provider not in filters.providers:
-                continue
-            freshness = self._snapshot_freshness(snapshot, generated_at)
-            for market in snapshot.markets:
-                if filters.market_statuses and (
-                    MarketStatus(market.status) not in filters.market_statuses
-                ):
-                    continue
+        for reference, (market, observation) in retained.items():
+            if reference in conflicting:
+                key: ComparisonKey | None = None
+                exclusion: ComparisonExclusion | None = (
+                    ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+                )
+                detail: str | None = "conflicting_normalized_content"
+            elif observation.is_future:
+                key, exclusion, detail = None, ComparisonExclusion.FUTURE_SNAPSHOT, None
+            else:
                 key, exclusion, detail = self._classify(
                     market,
                     availability=availability,
-                    freshness=freshness,
+                    freshness=observation.freshness,
                     athletes=athletes,
                     events_by_identity=events_by_identity,
                     events_by_evidence=events_by_evidence,
                 )
-                if not self._passes_canonical_filters(key, filters):
-                    continue
-                observed += 1
-                reference = market_reference(market)
-                if key is None:
-                    unresolved.append(
-                        UnresolvedMarket(
-                            market_reference=reference,
-                            provider=market.provider,
-                            reason=exclusion,
-                            detail=detail,
-                        )
+            if not self._passes_canonical_filters(key, filters):
+                continue
+            observed += 1
+            markets.append(
+                self._board_market(market, reference, observation, key, exclusion, detail)
+            )
+            if key is None:
+                unresolved.append(
+                    UnresolvedMarket(
+                        market_reference=reference,
+                        provider=market.provider,
+                        reason=exclusion,
+                        detail=detail,
                     )
-                    continue
-                members.setdefault(key, []).append(
-                    self._member(market, reference, freshness, snapshot.retrieved_at)
                 )
+                continue
+            members.setdefault(key, []).append(
+                self._member(market, reference, observation)
+            )
 
         # The whole read is classified before the ceiling is applied, so the
         # count reported back is what the caller's filters actually observed
@@ -338,36 +361,109 @@ class ComparisonBoardService:
         )
         return ComparisonBoard(
             season=query.season,
-            generated_at=generated_at,
+            generated_at=observed_at,
             availability=availability,
             groups=groups,
             unresolved=tuple(sorted(unresolved, key=lambda entry: entry.order)),
-            provider_reports=self._provider_reports(board, generated_at, filters),
+            markets=tuple(sorted(markets, key=lambda entry: entry.order)),
+            provider_reports=self._provider_reports(board, observed_at, filters),
             disabled_providers=board.disabled_providers,
             filters=filters,
             market_count=observed,
         )
 
+    # -- observation -------------------------------------------------------
+
+    def _observed_at(self) -> datetime:
+        """The single instant this board is measured against."""
+
+        observed_at = self.clock()
+        if (
+            not isinstance(observed_at, datetime)
+            or observed_at.tzinfo is None
+            or observed_at.utcoffset() is None
+        ):
+            raise ValueError("the comparison board clock must return an aware datetime")
+        return observed_at.astimezone(timezone.utc)
+
+    def _retained_markets(
+        self, board: Any, filters: ComparisonFilters, observed_at: datetime
+    ) -> tuple[dict[str, tuple[PlayerProjectionMarket, BoardObservation]], set[str]]:
+        """Every normalized market this read keeps, by its stable reference.
+
+        A repeated reference is one market only when every normalized fact --
+        including the observation it came from -- agrees; a repeat that
+        disagrees is malformed rather than a second offering, so the reference
+        it contests is retained as conflicting evidence and enters no group.
+        """
+
+        retained: dict[str, tuple[PlayerProjectionMarket, BoardObservation]] = {}
+        conflicting: set[str] = set()
+        for snapshot in board.snapshots:
+            if filters.providers and snapshot.provider not in filters.providers:
+                continue
+            observation = self._observation(snapshot, observed_at)
+            for market in snapshot.markets:
+                if filters.market_statuses and (
+                    MarketStatus(market.status) not in filters.market_statuses
+                ):
+                    continue
+                reference = market_reference(market)
+                previous = retained.get(reference)
+                if previous is None:
+                    retained[reference] = (market, observation)
+                elif previous[0] != market or previous[1] != observation:
+                    conflicting.add(reference)
+        return retained, conflicting
+
+    def _observation(
+        self, snapshot: ProviderSnapshot, observed_at: datetime
+    ) -> BoardObservation:
+        """One snapshot's age and freshness against the board's observation.
+
+        A snapshot the provider timestamped after the board observed it cannot
+        be aged, so it fails closed: it reports no negative age, carries no
+        freshness, and its markets enter no comparison.
+        """
+
+        elapsed = observed_at - snapshot.retrieved_at
+        is_future = elapsed.total_seconds() < 0
+        age = Decimal(0) if is_future else exact_seconds(elapsed)
+        return BoardObservation(
+            provider=snapshot.provider,
+            snapshot_status=getattr(snapshot.status, "value", str(snapshot.status)),
+            retrieved_at=snapshot.retrieved_at,
+            observed_at=observed_at,
+            age_seconds=age,
+            freshness=None if is_future else self._freshness(age, snapshot.provider),
+            is_future=is_future,
+        )
+
     # -- availability ------------------------------------------------------
 
     def _availability(
-        self, season: str | None, generated_at: datetime
+        self, season: str | None, observed_at: datetime
     ) -> ComparisonAvailability:
-        """Whether both canonical catalogs can support comparison identity."""
+        """Whether both canonical catalogs can support comparison identity.
+
+        Both catalogs are asked about the same instant the rest of the board is
+        measured against, so a reported age and the availability derived from it
+        can never disagree at a TTL boundary.
+        """
 
         catalogs = (
             _catalog_availability(
                 self.athlete_catalog,
                 name=ATHLETE_CATALOG,
                 season=season,
-                now=generated_at,
+                now=observed_at,
                 fresh_key="is_fresh",
             ),
             _catalog_availability(
                 self.event_catalog,
                 name=EVENT_CATALOG,
                 season=season,
-                now=generated_at,
+                now=observed_at,
                 fresh_key="fresh",
             ),
         )
@@ -486,8 +582,7 @@ class ComparisonBoardService:
     def _member(
         market: PlayerProjectionMarket,
         reference: str,
-        freshness: MarketFreshness,
-        retrieved_at: datetime,
+        observation: BoardObservation,
     ) -> ComparisonMember:
         return ComparisonMember(
             market_reference=reference,
@@ -496,20 +591,62 @@ class ComparisonBoardService:
             threshold_unit=market.threshold.unit,
             variant=MarketVariant(market.variant),
             status=MarketStatus(market.status),
-            retrieved_at=retrieved_at,
-            freshness=freshness,
+            retrieved_at=observation.retrieved_at,
+            freshness=observation.freshness,
             selection_references=tuple(
                 selection_reference(reference, selection)
                 for selection in market.selections
             ),
         )
 
+    @staticmethod
+    def _board_market(
+        market: PlayerProjectionMarket,
+        reference: str,
+        observation: BoardObservation,
+        key: ComparisonKey | None,
+        exclusion: ComparisonExclusion | None,
+        detail: str | None,
+    ) -> BoardMarket:
+        """Retain one normalized market whole, linked to where it went."""
+
+        return BoardMarket(
+            market_reference=reference,
+            provider=market.provider,
+            observation=observation,
+            market_id=market.market_id,
+            athlete=BoardAthlete.of(market.athlete),
+            event=BoardEvent.of(market.event),
+            team=BoardTeam.of(market.team),
+            opponent=BoardTeam.of(market.opponent),
+            league=BoardNamedEvidence.of(market.league),
+            competition=BoardCompetition.of(market.competition),
+            sport=BoardNamedEvidence.of(market.sport),
+            statistic=BoardStatistic.of(market.statistic),
+            statistic_resolution=BoardStatisticResolution.of(market.statistic_match),
+            threshold=BoardThreshold.of(market.threshold),
+            status=MarketStatus(market.status),
+            status_label=market.status_label,
+            variant=MarketVariant(market.variant),
+            variant_label=market.variant_label,
+            scoring_period=ScoringPeriod(market.scoring_period),
+            scoring_period_label=market.scoring_period_label,
+            starts_at=market.starts_at,
+            updated_at=market.updated_at,
+            appearance=BoardAppearance.of(market.appearance),
+            selections=tuple(
+                BoardSelection.of(selection_reference(reference, selection), selection)
+                for selection in market.selections
+            ),
+            comparison_reference=None if key is None else key.reference,
+            exclusion=exclusion,
+            exclusion_detail=detail,
+        )
+
     # -- freshness and reporting -------------------------------------------
 
-    def _snapshot_freshness(
-        self, snapshot: ProviderSnapshot, generated_at: datetime
-    ) -> MarketFreshness | None:
-        """Whether this observation may enter comparisons, and how fresh it is.
+    def _freshness(self, age: Decimal, provider: str) -> MarketFreshness | None:
+        """Whether an observation of this age may enter comparisons.
 
         A snapshot inside its provider's fresh window is contemporaneous.  One
         past it may still be compared while it is inside the permitted stale
@@ -517,24 +654,27 @@ class ComparisonBoardService:
         the board but enters no group.
         """
 
-        age = (generated_at - snapshot.retrieved_at).total_seconds()
-        if age <= self._window("dfs_cache_fresh_seconds_for", snapshot.provider, DEFAULT_FRESH_SECONDS):
+        if age <= self._window(
+            "dfs_cache_fresh_seconds_for", provider, DEFAULT_FRESH_SECONDS
+        ):
             return MarketFreshness.FRESH
         if age <= self._window(
-            "dfs_cache_stale_if_error_seconds_for", snapshot.provider, DEFAULT_STALE_SECONDS
+            "dfs_cache_stale_if_error_seconds_for", provider, DEFAULT_STALE_SECONDS
         ):
             return MarketFreshness.STALE
         return None
 
-    def _window(self, accessor: str, provider: str, default: float) -> float:
+    def _window(self, accessor: str, provider: str, default: float) -> Decimal:
+        """One configured window as an exact decimal number of seconds."""
+
         providers = getattr(self.settings, "providers", None)
         reader = getattr(providers, accessor, None)
         if not callable(reader):
-            return default
-        return float(reader(provider))
+            return Decimal(str(default))
+        return Decimal(str(reader(provider)))
 
     def _provider_reports(
-        self, board: Any, generated_at: datetime, filters: ComparisonFilters
+        self, board: Any, observed_at: datetime, filters: ComparisonFilters
     ) -> tuple[ProviderReport, ...]:
         reports: list[ProviderReport] = []
         for outcome in board.provider_outcomes:
@@ -542,22 +682,22 @@ class ComparisonBoardService:
                 continue
             snapshot = outcome.snapshot
             coverage = outcome.coverage
-            retrieved_at = None if snapshot is None else snapshot.retrieved_at
+            observation = (
+                None if snapshot is None else self._observation(snapshot, observed_at)
+            )
             reports.append(
                 ProviderReport(
                     provider=outcome.provider,
                     status=outcome.status.value,
                     reason=None if outcome.reason is None else outcome.reason.value,
-                    retrieved_at=retrieved_at,
-                    age_seconds=(
-                        None
-                        if retrieved_at is None
-                        else exact_seconds(generated_at - retrieved_at)
+                    retrieved_at=None if snapshot is None else snapshot.retrieved_at,
+                    age_seconds=None if observation is None else observation.age_seconds,
+                    freshness=None if observation is None else observation.freshness,
+                    snapshot_status=(
+                        None if observation is None else observation.snapshot_status
                     ),
-                    freshness=(
-                        None
-                        if snapshot is None
-                        else self._snapshot_freshness(snapshot, generated_at)
+                    future_observation=(
+                        False if observation is None else observation.is_future
                     ),
                     market_count=0 if snapshot is None else len(snapshot.markets),
                     warning_codes=(
@@ -581,15 +721,16 @@ def _group(key: ComparisonKey, members: Iterable[ComparisonMember]) -> Compariso
 
 
 def _ordered_members(members: Iterable[ComparisonMember]) -> tuple[ComparisonMember, ...]:
-    """Deterministically ordered members with exact repeats collapsed.
+    """Deterministically ordered members.
 
-    Two members are the same offering only when every fact about them agrees,
-    so legitimate multiple thresholds, variants, statuses, and same-provider
-    markets all stay distinct members of one group.
+    Nothing is collapsed here: identity is decided once, over whole normalized
+    markets, before a member is ever reduced, so legitimate multiple
+    thresholds, variants, statuses, prices, and same-provider markets all stay
+    distinct members of one group and two markets can never be merged because
+    the facts a member happens to state agree.
     """
 
-    unique = tuple(dict.fromkeys(members))
-    return tuple(sorted(unique, key=lambda member: member.order))
+    return tuple(sorted(members, key=lambda member: member.order))
 
 
 __all__ = [
