@@ -152,8 +152,9 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The process runs four named current-season steps in this exact order: stats
-tables, Event Catalog schedule, Athlete Catalog, then durable player game logs.
+The process runs five named current-season steps in this exact order: stats
+tables, Event Catalog schedule, Athlete Catalog, durable player game logs, then
+internal Season/exact-team-Last-15 matchup facts.
 If a step fails, later steps in that attempt do not run and the whole unit
 starts over once. A failed Athlete Catalog therefore never suppresses the
 required schedule refresh that precedes it, while player logs remain untouched.
@@ -165,13 +166,23 @@ Recorded Regular Season and Playoffs payloads under
 parser without network access.
 After the single retry the process exits nonzero and names the failed step;
 success exits zero. Each owning service preserves its prior publication on
-failure. The admin `POST /api/data/update_database` path uses the same stats
-publication service and remains the manual backstop.
+failure. The two matchup windows publish together. Matchup reads distinguish
+each surface's last fact-bearing scope and retrieval time from the newest
+availability observation, so a failed same-day rerun cannot make older facts
+look newly retrieved. The admin `POST /api/data/update_database` path uses the
+same stats publication service and remains the manual backstop.
 
 Current-season player-log reads require the named Nightly stats observation to
 remain within `PLAYER_GAME_LOG_MAX_AGE_HOURS` (30 hours by default). Historical
 season backfills retain independent season freshness and are not hidden when
 the current observation expires.
+
+Early in a season, the same successful unit publishes Season facts and an
+explicitly missing Last-15 observation until every team has 15 governed
+completed games; it never substitutes a shorter or mixed-phase window.
+An incomplete governed 30-team catalog is also recorded as a fact-free missing
+observation without failing the Nightly unit. Failed or incomplete surface
+observations do not replace the most recent usable facts.
 
 Validate the bundled fixture without changing it:
 

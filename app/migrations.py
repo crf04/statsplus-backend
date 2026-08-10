@@ -221,6 +221,21 @@ def _create_player_game_log_tables(connection: Connection) -> None:
     PlayerGameLogRefresh.__table__.create(connection, checkfirst=True)
 
 
+def _create_team_matchup_fact_tables(connection: Connection) -> None:
+    """Create raw team-window facts and per-surface observations.
+
+    Migration 012 is reserved for issue #57 and follows the player-log
+    prerequisite's migration 011 (#56) in integrated history.
+    """
+    from app.models.team_matchup import (
+        TeamMatchupFactRow,
+        TeamMatchupSurfaceObservationRow,
+    )
+
+    TeamMatchupFactRow.__table__.create(connection, checkfirst=True)
+    TeamMatchupSurfaceObservationRow.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -237,6 +252,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(9, "009_create_stats_freshness", _create_stats_freshness_table),
     Migration(10, "010_create_player_pool_snapshots", _create_player_pool_snapshot_table),
     Migration(11, "011_create_player_game_logs", _create_player_game_log_tables),
+    Migration(12, "012_create_team_matchup_facts", _create_team_matchup_fact_tables),
 )
 
 

@@ -73,6 +73,10 @@ from .event_mapping import (  # noqa: E402
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
 from .player_game_log import PlayerGameLog, PlayerGameLogRefresh  # noqa: E402
+from .team_matchup import (  # noqa: E402
+    TeamMatchupFactRow,
+    TeamMatchupSurfaceObservationRow,
+)
 
 __all__ = [
     'Base',
@@ -100,4 +104,6 @@ __all__ = [
     'PlayerPoolSnapshot',
     'PlayerGameLog',
     'PlayerGameLogRefresh',
+    'TeamMatchupFactRow',
+    'TeamMatchupSurfaceObservationRow',
 ]

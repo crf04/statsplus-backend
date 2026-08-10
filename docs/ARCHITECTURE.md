@@ -649,6 +649,114 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+### Window-aware team matchup facts
+
+`TeamMatchupRefreshService` is the Nightly Refresh's fifth ordered step, after
+the stats-table, canonical Event Catalog, Athlete Catalog, and durable player
+game-log refreshes. It publishes two
+internal team windows for the current product: Season and exact rolling 15
+games. There is deliberately no public matchup route in this layer; the narrow
+consumer seams are `TeamMatchupQueryService.get_window(scope)` and
+`get_latest_window(season, window_games, as_of)`. The latter deterministically
+selects the greatest observation date no later than an optional Slate Date,
+while resolving each surface's most recent fact-bearing scope independently.
+It therefore returns the last usable facts alongside the newest persisted
+failure or freshness observation instead of letting a fact-free failed run
+hide yesterday's valid values. Each surface reports both the scope and
+`retrieved_at` of those facts separately from the latest observation's
+`retrieved_at`, status, and reason, including when a later failure happened on
+the same Slate Date. Consumers can therefore label stale-served metrics
+without overstating their freshness. Future cutoffs are rejected and the default
+cutoff is the injected clock's current ET date, so future-dated rows cannot
+shadow current data.
+
+Rolling boundaries come only from completed, governed `event_catalog` games.
+The resolver excludes postponed, preseason, All-Star, non-final, and
+post-as-of events, then resolves each team's own 15th-most-recent game. The
+30-team roster is derived from governed regular-season/playoff catalog events,
+so preseason and exhibition participants cannot contaminate it. A homogeneous
+window carries its governed `Regular Season` or `Playoffs` provider phase. A
+window crossing those phases is retained as canonical evidence but published
+unavailable because the approved aggregate providers cannot represent that
+exact mixed game set in one request.
+
+NBA Stats surfaces are queried per team with `LastNGames=15`, `TeamID`, the
+team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
+the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
+responses must identify the requested team and report exactly 15 games; the
+shot-zone aggregate must identify the team (that endpoint exposes no game
+count). A surface that cannot prove its requested aggregate is discarded and
+observed as `unavailable/provider_window_unverified`, never mislabeled
+Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
+ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
+team, expose positive `SecondsPlayed`, and report an aggregate count of exactly
+15 games. Those rolling-window evidence fields are enforced by the matchup
+refresh rather than the shared PBP Season parser, whose pre-existing contract
+requires only the opponent assist fields it consumes. A date-bounded PBP
+response without that proof is `unavailable/provider_window_unverified`; one
+league-wide cutoff is never used. The recorded BOS `2025-03-01` through
+`2025-04-15` response demonstrates why: it reports 525 assists but also
+`GamesPlayed=22`, so it is valid provider data and explicitly not a Last-15
+aggregate. Synergy exposes neither Last-N nor date
+bounds, so its fact-free Last-15 play-type observation is
+`unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
+Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
+each governed slice; `GP` is provider evidence rather than a display metric.
+
+Before every team has 15 governed completions, the same transaction publishes
+the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces
+are `missing/insufficient_governed_games`. Nightly refresh therefore remains
+successful early in the season. Season NBA and PBP aggregates are bounded by
+the snapshot date. Season Synergy is collected only for a current-date
+snapshot; a backdated as-of cannot bound Synergy and records
+`unavailable/provider_unbounded_as_of` instead of combining mismatched scopes.
+If the governed catalog does not yet identify exactly the NBA's 30 teams, the
+refresh also succeeds with fact-free
+`missing/governed_team_roster_incomplete` observations. Neither case deletes
+an earlier valid fact snapshot.
+
+Migration 012 creates `team_matchup_facts` and
+`team_matchup_surface_observations`. It follows the authoritative player-log
+migration 011, so fresh databases apply 011 and then 012.
+A fact is identified by season, as-of date, window kind plus rolling game
+count, team, Base, slice, and stat. The fact table contains available facts
+only; availability and reasons belong solely to the observation table. Facts retain the provider's raw
+numerator and its raw minutes or seconds denominator; they do not
+persist a previously normalized ratio or rank. Surface observations retain a
+timezone-aware collection time and an `available`, `unavailable`, or `missing`
+status plus explicit reason per window.
+
+Both windows are fully collected before one repository transaction replaces
+observations and each newly valid surface. Repeating a publication is
+idempotent. Available surfaces are written only when every metric has the same
+30 distinct teams, those team IDs exactly match the governed catalog roster,
+and every row has finite raw numerators plus positive finite minutes or
+seconds. A substituted off-roster team becomes
+`unavailable/provider_roster_mismatch`; partial, non-finite, or mislabeled data
+becomes a fact-free unavailable observation and leaves prior valid facts
+intact. A provider transport,
+constraint, or transaction failure likewise leaves both prior snapshots
+intact; the Nightly Refresh retries the complete stats → schedule →
+athlete catalog → player game logs → team matchups unit once. A provider response that reaches its adapter but is
+malformed instead degrades only that surface as
+`unavailable/provider_malformed_response`, preserves its prior valid facts,
+and allows other surfaces to publish. The query service defensively degrades only an
+affected incomplete legacy surface and derives allowed-per-48 from valid raw
+facts. It then computes the 30-team mean, population sigma, percent versus
+average, sigma deviation, and defensive rank. Player scoring and Diet Shares
+are outside this team-window store and remain Season-only. If the 30-team mean
+is zero, percent-versus-average is null because that ratio is undefined; a
+zero population sigma yields a conventional zero sigma deviation.
+
+One fully available run makes 17 Season provider calls (16 NBA, one PBP) and
+180 rolling calls (five NBA plus one PBP for each of 30 teams). The calls stay
+sequential: each NBA call already uses the shared configured timeout,
+concurrency bound, and provider telemetry, while each PBP call uses the shared
+pooled session, connect/read timeouts, retry accounting, and telemetry. The
+Nightly Refresh supplies the one whole-unit retry. Adding another concurrency
+layer here would multiply load against rate-sensitive upstreams, so the exact
+request plan is preferred over speculative parallelism.
+
 ### Canonical athlete catalog
 
 `AthleteCatalogService` owns the application tables `athlete_catalog` and
@@ -1638,6 +1746,10 @@ writable-URL requirement and no provider contact; the command builds the
 catalog read seam with a provider that refuses every call, so it is offline by
 construction.
 
+Migration 012 creates the raw window-aware team matchup tables described
+above after migration 011's canonical player game logs. Migration tests pin
+that order and exercise a fresh apply plus an idempotent rerun.
+
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
 opening it for writes. Migration 009 creates the surface-keyed
@@ -1657,7 +1769,15 @@ used to repair the fixture.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.
-- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns consumed by the PBP publication/assist transforms. A nonempty row set missing a required column is a malformed provider response; an empty result is materialized with that declared schema so refresh publication cannot replace a valid table with a schema-less frame.
+- `PBPTotalsAdapter.parse_totals` validates the operation-specific columns
+  consumed by the existing PBP Season publication/assist transforms. The #57
+  rolling matchup path separately requires `TeamId`, `SecondsPlayed`, and
+  `GamesPlayed`, so exact Last-15 publication fails closed on absent identity,
+  denominator, or game-count evidence without widening the shared Season
+  parser contract. A nonempty row set missing a Season-required column is a
+  malformed provider response; an empty result is materialized with that
+  declared schema so refresh publication cannot replace a valid table with a
+  schema-less frame.
 - Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.

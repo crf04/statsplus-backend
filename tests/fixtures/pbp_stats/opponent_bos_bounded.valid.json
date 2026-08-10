@@ -1,0 +1,20 @@
+{
+  "single_row_table_data": [],
+  "multi_row_table_data": [
+    {
+      "TeamId": "1610612738",
+      "Name": "BOS",
+      "SecondsPlayed": 63660.0,
+      "GamesPlayed": 22,
+      "Assists": 525,
+      "AssistPoints": 1297,
+      "TwoPtAssists": 278,
+      "ThreePtAssists": 247,
+      "Arc3Assists": 172,
+      "Corner3Assists": 75,
+      "AtRimAssists": 135,
+      "ShortMidRangeAssists": 104,
+      "LongMidRangeAssists": 39
+    }
+  ]
+}

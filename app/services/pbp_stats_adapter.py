@@ -30,6 +30,7 @@ from app.utils.telemetry import (
 )
 
 PBP_TOTALS_URL = "https://api.pbpstats.com/get-totals/nba"
+PBP_REGULAR_SEASON = "Regular+Season"
 
 # These are the columns consumed by the publication and assist-table
 # transforms in ``DataService``.  Keep the provider contract at this seam so
@@ -101,7 +102,16 @@ class PBPTotalsAdapter:
             response.raise_for_status()
             yield response
 
-    def fetch_totals_frame(self, data_type: PBPDataKind = "player") -> pd.DataFrame:
+    def fetch_totals_frame(
+        self,
+        data_type: PBPDataKind = "player",
+        *,
+        season: str | None = None,
+        season_type: str = PBP_REGULAR_SEASON,
+        team_id: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame:
         """Fetch one PBP totals frame (``player`` or ``opponent``).
 
         Retries happen inside the shared session's urllib3 adapter; each
@@ -114,11 +124,22 @@ class PBPTotalsAdapter:
                 f"Unsupported PBP data type {data_type!r}. "
                 f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
+        provider_season_type = (
+            PBP_REGULAR_SEASON
+            if season_type in {"Regular Season", PBP_REGULAR_SEASON}
+            else season_type
+        )
         params = {
-            "Season": self.settings.nba.current_season,
-            "SeasonType": "Regular+Season",
+            "Season": season or self.settings.nba.current_season,
+            "SeasonType": provider_season_type,
             "Type": "Player" if data_type == "player" else "Opponent",
         }
+        if team_id is not None:
+            params["TeamId"] = str(team_id)
+        if from_date is not None:
+            params["FromDate"] = from_date
+        if to_date is not None:
+            params["ToDate"] = to_date
         operation = "get_totals_player" if data_type == "player" else "get_totals_opponent"
 
         with self._request(operation, params) as response:
@@ -136,7 +157,7 @@ class PBPTotalsAdapter:
             "health_probe",
             {
                 "Season": self.settings.nba.current_season,
-                "SeasonType": "Regular+Season",
+                "SeasonType": PBP_REGULAR_SEASON,
                 "Type": "Player",
             },
         ) as response:
@@ -188,6 +209,7 @@ class PBPTotalsAdapter:
 
 __all__ = [
     "PBP_TOTALS_URL",
+    "PBP_REGULAR_SEASON",
     "PBP_PLAYER_REQUIRED_COLUMNS",
     "PBP_OPPONENT_REQUIRED_COLUMNS",
     "PBP_REQUIRED_COLUMNS",

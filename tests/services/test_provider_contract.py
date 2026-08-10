@@ -8,6 +8,22 @@ columns this codebase drops, reads, or sorts by still exist there.
 They are offline: ``expected_data`` is a static class attribute, not a request.
 """
 
+import inspect
+
+
+def test_matchup_endpoints_use_their_exact_league_id_constructor_keyword():
+    """The two endpoint classes reject LeagueDash-style nullable spelling."""
+    from nba_api.stats import endpoints
+
+    for endpoint_class in (
+        endpoints.LeagueDashOppPtShot,
+        endpoints.SynergyPlayTypes,
+    ):
+        parameters = inspect.signature(endpoint_class).parameters
+        assert "league_id" in parameters
+        assert "league_id_nullable" not in parameters
+
+
 def declared_columns(endpoint_class, data_set):
     """Return the columns nba_api declares for one of an endpoint's data sets."""
     expected = getattr(endpoint_class, "expected_data", None)

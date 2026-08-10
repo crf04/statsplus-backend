@@ -1,0 +1,13 @@
+{
+  "season": {
+    "TeamId": 1610612738,
+    "Name": "Boston Celtics",
+    "SecondsPlayed": 236160,
+    "Assists": 1968,
+    "Arc3Assists": 500,
+    "Corner3Assists": 300,
+    "AtRimAssists": 600,
+    "ShortMidRangeAssists": 350,
+    "LongMidRangeAssists": 218
+  }
+}

@@ -776,10 +776,39 @@ class NBAStatsAdapter:
             required_columns=GAME_LOG_REQUIRED_COLUMNS,
         )
 
+    @staticmethod
+    def _add_optional_matchup_scope(
+        parameters: dict[str, Any],
+        *,
+        date_to: str | None,
+        season: str | None,
+        season_type: str | None,
+        team_id: int | None,
+        last_n_games: int | None,
+        last_n_parameter: str,
+    ) -> None:
+        """Add only explicitly requested scope parameters to an NBA endpoint."""
+
+        optional = {
+            "date_to_nullable": date_to,
+            "season": season,
+            "season_type_all_star": season_type,
+            "team_id_nullable": team_id,
+            last_n_parameter: last_n_games,
+        }
+        parameters.update(
+            {name: value for name, value in optional.items() if value is not None}
+        )
+
     def fetch_opponent_team_stats(
         self,
         date_from: str | None,
         *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
         cache_status: str = CACHE_DISABLED,
         per_mode_detailed: str = "Per48",
         league_id: str = "00",
@@ -787,13 +816,23 @@ class NBAStatsAdapter:
         """Fetch league opponent team stats from the cutoff ``date_from``."""
 
         def build(timeout: float) -> object:
-            return endpoints.LeagueDashTeamStats(
-                measure_type_detailed_defense="Opponent",
-                per_mode_detailed=per_mode_detailed,
-                date_from_nullable=date_from,
-                league_id_nullable=league_id,
-                timeout=timeout,
+            parameters = {
+                "measure_type_detailed_defense": "Opponent",
+                "per_mode_detailed": per_mode_detailed,
+                "date_from_nullable": date_from,
+                "league_id_nullable": league_id,
+                "timeout": timeout,
+            }
+            self._add_optional_matchup_scope(
+                parameters,
+                date_to=date_to,
+                season=season,
+                season_type=season_type,
+                team_id=team_id,
+                last_n_games=last_n_games,
+                last_n_parameter="last_n_games",
             )
+            return endpoints.LeagueDashTeamStats(**parameters)
 
         return self.run_endpoint(
             "league_opponent_team_stats",
@@ -807,6 +846,11 @@ class NBAStatsAdapter:
         general_range: str,
         date_from: str | None,
         *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
         cache_status: str = CACHE_DISABLED,
         per_mode_simple: str = "PerGame",
         league_id: str = "00",
@@ -814,13 +858,23 @@ class NBAStatsAdapter:
         """Fetch league opponent shot data (catch-and-shoot / pull-ups)."""
 
         def build(timeout: float) -> object:
-            return endpoints.LeagueDashOppPtShot(
-                general_range_nullable=general_range,
-                date_from_nullable=date_from,
-                per_mode_simple=per_mode_simple,
-                league_id_nullable=league_id,
-                timeout=timeout,
+            parameters = {
+                "general_range_nullable": general_range,
+                "date_from_nullable": date_from,
+                "per_mode_simple": per_mode_simple,
+                "league_id": league_id,
+                "timeout": timeout,
+            }
+            self._add_optional_matchup_scope(
+                parameters,
+                date_to=date_to,
+                season=season,
+                season_type=season_type,
+                team_id=team_id,
+                last_n_games=last_n_games,
+                last_n_parameter="last_n_games_nullable",
             )
+            return endpoints.LeagueDashOppPtShot(**parameters)
 
         return self.run_endpoint(
             "league_opponent_shot_chart",
@@ -833,6 +887,11 @@ class NBAStatsAdapter:
         self,
         date_from: str | None,
         *,
+        date_to: str | None = None,
+        season: str | None = None,
+        season_type: str | None = None,
+        team_id: int | None = None,
+        last_n_games: int | None = None,
         cache_status: str = CACHE_DISABLED,
         per_mode_detailed: str = "PerGame",
         league_id: str = "00",
@@ -840,14 +899,24 @@ class NBAStatsAdapter:
         """Fetch opponent shot-location data through the shared NBA seam."""
 
         def build(timeout: float) -> object:
-            return endpoints.LeagueDashTeamShotLocations(
-                distance_range="By Zone",
-                measure_type_simple="Opponent",
-                per_mode_detailed=per_mode_detailed,
-                date_from_nullable=date_from,
-                league_id_nullable=league_id,
-                timeout=timeout,
+            parameters = {
+                "distance_range": "By Zone",
+                "measure_type_simple": "Opponent",
+                "per_mode_detailed": per_mode_detailed,
+                "date_from_nullable": date_from,
+                "league_id_nullable": league_id,
+                "timeout": timeout,
+            }
+            self._add_optional_matchup_scope(
+                parameters,
+                date_to=date_to,
+                season=season,
+                season_type=season_type,
+                team_id=team_id,
+                last_n_games=last_n_games,
+                last_n_parameter="last_n_games",
             )
+            return endpoints.LeagueDashTeamShotLocations(**parameters)
 
         return self.run_endpoint(
             "league_opponent_shooting_zone",
@@ -862,6 +931,8 @@ class NBAStatsAdapter:
         *,
         player_or_team_abbreviation: str,
         type_grouping: str,
+        season: str | None = None,
+        per_mode_simple: str | None = None,
         league_id: str = "00",
     ) -> pd.DataFrame:
         """Fetch one typed Synergy play-type frame."""
@@ -875,13 +946,18 @@ class NBAStatsAdapter:
         )
 
         def build(timeout: float) -> object:
-            return endpoints.SynergyPlayTypes(
-                play_type_nullable=play_type,
-                player_or_team_abbreviation=player_or_team_abbreviation,
-                type_grouping_nullable=type_grouping,
-                league_id_nullable=league_id,
-                timeout=timeout,
-            )
+            parameters = {
+                "play_type_nullable": play_type,
+                "player_or_team_abbreviation": player_or_team_abbreviation,
+                "type_grouping_nullable": type_grouping,
+                "league_id": league_id,
+                "timeout": timeout,
+            }
+            if season is not None:
+                parameters["season"] = season
+            if per_mode_simple is not None:
+                parameters["per_mode_simple"] = per_mode_simple
+            return endpoints.SynergyPlayTypes(**parameters)
 
         required_columns = (
             ("TEAM_NAME", "GP", "PTS")

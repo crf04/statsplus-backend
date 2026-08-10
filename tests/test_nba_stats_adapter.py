@@ -630,6 +630,218 @@ def test_adapter_fetches_each_complete_season_phase_in_one_provider_call(
     ]
 
 
+def test_team_matchup_nba_surface_uses_exact_last_n_and_as_of(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{"TEAM_ID": 1610612738, "TEAM_NAME": "Boston Celtics"}]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_opponent_team_stats(
+        "03/01/2025",
+        date_to="04/15/2025",
+        season="2024-25",
+        season_type="Regular Season",
+        team_id=1610612738,
+        last_n_games=15,
+        per_mode_detailed="Totals",
+    )
+
+    assert calls == [
+        {
+            "measure_type_detailed_defense": "Opponent",
+            "per_mode_detailed": "Totals",
+            "date_from_nullable": "03/01/2025",
+            "date_to_nullable": "04/15/2025",
+            "season": "2024-25",
+            "season_type_all_star": "Regular Season",
+            "team_id_nullable": 1610612738,
+            "last_n_games": 15,
+            "league_id_nullable": "00",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_existing_opponent_stats_call_keeps_provider_scope_defaults(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{"TEAM_ID": 1610612738, "TEAM_NAME": "Boston Celtics"}]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_opponent_team_stats("03/01/2025")
+
+    assert calls == [
+        {
+            "measure_type_detailed_defense": "Opponent",
+            "per_mode_detailed": "Per48",
+            "date_from_nullable": "03/01/2025",
+            "league_id_nullable": "00",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_opponent_shot_chart_uses_the_installed_endpoint_league_id_keyword(
+    monkeypatch,
+):
+    calls = []
+
+    class Endpoint:
+        def __init__(
+            self,
+            *,
+            general_range_nullable,
+            date_from_nullable,
+            per_mode_simple,
+            league_id,
+            date_to_nullable,
+            season,
+            season_type_all_star,
+            team_id_nullable,
+            last_n_games_nullable,
+            timeout,
+        ):
+            calls.append(
+                {
+                    "general_range_nullable": general_range_nullable,
+                    "date_from_nullable": date_from_nullable,
+                    "per_mode_simple": per_mode_simple,
+                    "league_id": league_id,
+                    "date_to_nullable": date_to_nullable,
+                    "season": season,
+                    "season_type_all_star": season_type_all_star,
+                    "team_id_nullable": team_id_nullable,
+                    "last_n_games_nullable": last_n_games_nullable,
+                    "timeout": timeout,
+                }
+            )
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [
+                        {
+                            "TEAM_ID": 1610612738,
+                            "TEAM_NAME": "Boston Celtics",
+                            "FG2M": 20,
+                            "FG3M": 10,
+                        }
+                    ]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashOppPtShot", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_opponent_shot_chart(
+        "Catch and Shoot",
+        "03/01/2025",
+        date_to="04/15/2025",
+        season="2024-25",
+        season_type="Regular Season",
+        team_id=1610612738,
+        last_n_games=15,
+        per_mode_simple="Totals",
+    )
+
+    assert calls == [
+        {
+            "general_range_nullable": "Catch and Shoot",
+            "date_from_nullable": "03/01/2025",
+            "per_mode_simple": "Totals",
+            "league_id": "00",
+            "date_to_nullable": "04/15/2025",
+            "season": "2024-25",
+            "season_type_all_star": "Regular Season",
+            "team_id_nullable": 1610612738,
+            "last_n_games_nullable": 15,
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_synergy_play_types_uses_the_installed_endpoint_league_id_keyword(
+    monkeypatch,
+):
+    calls = []
+
+    class Endpoint:
+        def __init__(
+            self,
+            *,
+            play_type_nullable,
+            player_or_team_abbreviation,
+            type_grouping_nullable,
+            league_id,
+            season,
+            per_mode_simple,
+            timeout,
+        ):
+            calls.append(
+                {
+                    "play_type_nullable": play_type_nullable,
+                    "player_or_team_abbreviation": player_or_team_abbreviation,
+                    "type_grouping_nullable": type_grouping_nullable,
+                    "league_id": league_id,
+                    "season": season,
+                    "per_mode_simple": per_mode_simple,
+                    "timeout": timeout,
+                }
+            )
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{"TEAM_NAME": "Boston Celtics", "GP": 82, "PTS": 1000}]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "SynergyPlayTypes", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_synergy_play_types(
+        "Transition",
+        player_or_team_abbreviation="T",
+        type_grouping="defensive",
+        season="2024-25",
+        per_mode_simple="Totals",
+    )
+
+    assert calls == [
+        {
+            "play_type_nullable": "Transition",
+            "player_or_team_abbreviation": "T",
+            "type_grouping_nullable": "defensive",
+            "league_id": "00",
+            "season": "2024-25",
+            "per_mode_simple": "Totals",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
 def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):
     raw_frame = _recorded_provider_frame()
     normalized_frame = normalize_player_game_logs(raw_frame)

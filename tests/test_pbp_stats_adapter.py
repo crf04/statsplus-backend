@@ -44,6 +44,27 @@ VALID_PAYLOAD = {
     ]
 }
 
+VALID_OPPONENT_PAYLOAD = {
+    "single_row_table_data": [],
+    "multi_row_table_data": [
+        {
+            "TeamId": "1610612738",
+            "Name": "BOS",
+            "SecondsPlayed": 63660.0,
+            "GamesPlayed": 22,
+            "Assists": 525,
+            "AssistPoints": 1297,
+            "TwoPtAssists": 278,
+            "ThreePtAssists": 247,
+            "Arc3Assists": 172,
+            "Corner3Assists": 75,
+            "AtRimAssists": 135,
+            "ShortMidRangeAssists": 104,
+            "LongMidRangeAssists": 39,
+        }
+    ],
+}
+
 
 def _settings() -> RuntimeSettings:
     return RuntimeSettings(
@@ -117,13 +138,102 @@ def test_fetch_totals_records_full_event_and_valid_frame(monkeypatch):
 
 def test_fetch_totals_opponent_uses_opponent_operation():
     fake_session = requests.Session()
-    fake_session.get = lambda *a, **k: FakeResponse(payload=VALID_PAYLOAD)
+    fake_session.get = lambda *a, **k: FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
 
     adapter = _adapter(fake_session)
     adapter.fetch_totals_frame("opponent")
 
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["operation"] == "get_totals_opponent"
+
+
+def test_fetch_season_opponent_totals_accepts_the_preexisting_minimal_schema():
+    row = dict(VALID_OPPONENT_PAYLOAD["multi_row_table_data"][0])
+    for evidence_column in ("TeamId", "SecondsPlayed", "GamesPlayed"):
+        del row[evidence_column]
+    fake_session = requests.Session()
+    fake_session.get = lambda *a, **k: FakeResponse(
+        payload={"multi_row_table_data": [row]}
+    )
+
+    frame = _adapter(fake_session).fetch_totals_frame("opponent")
+
+    assert frame.loc[0, "Name"] == "BOS"
+    assert frame.loc[0, "Assists"] == 525
+
+
+def test_fetch_totals_opponent_supports_exact_team_date_bounds():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    adapter.fetch_totals_frame(
+        "opponent",
+        season="2024-25",
+        season_type="Playoffs",
+        team_id=1610612738,
+        from_date="2025-03-01",
+        to_date="2025-04-15",
+    )
+
+    assert calls == [
+        (
+            (adapter.base_url,),
+            {
+                "params": {
+                    "Season": "2024-25",
+                    "SeasonType": "Playoffs",
+                    "Type": "Opponent",
+                    "TeamId": "1610612738",
+                    "FromDate": "2025-03-01",
+                    "ToDate": "2025-04-15",
+                },
+                "timeout": (1.0, 2.0),
+            },
+        )
+    ]
+
+
+def test_health_probe_uses_the_same_canonical_season_type_as_totals():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(status_code=200)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    assert adapter.health_probe() == 200
+    assert calls[0][1]["params"]["SeasonType"] == "Regular+Season"
+
+
+def test_regular_season_totals_preserve_the_existing_provider_parameter_spelling():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload=VALID_OPPONENT_PAYLOAD)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    adapter.fetch_totals_frame(
+        "opponent",
+        season="2024-25",
+        season_type="Regular Season",
+        team_id=1610612738,
+    )
+
+    assert calls[0][1]["params"]["SeasonType"] == "Regular+Season"
 
 
 def test_fetch_totals_rejects_unsupported_data_type():
