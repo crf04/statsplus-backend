@@ -1447,13 +1447,42 @@ def test_a_separator_in_a_modifier_cannot_forge_another_selection_identity():
 
 
 def test_an_exact_decimal_is_canonical_whatever_scale_it_was_written_in():
-    assert canonical_decimal(Decimal("25.50")) == "25.5"
-    assert canonical_decimal(Decimal("25.5")) == "25.5"
+    assert canonical_decimal(Decimal("25.50")) == canonical_decimal(Decimal("25.5"))
+    assert canonical_decimal(Decimal("25.5")) == "255E1"
     assert canonical_decimal(Decimal("0.00")) == "0"
     assert canonical_decimal(Decimal("-0")) == "0"
-    assert canonical_decimal(Decimal("1E+2")) == "100"
+    assert canonical_decimal(Decimal("0E+100")) == "0"
+    assert canonical_decimal(Decimal("1E+2")) == canonical_decimal(Decimal("100.00"))
+    assert canonical_decimal(Decimal("-25.5")) == "-255E1"
     with pytest.raises(ValueError, match="finite Decimal"):
         canonical_decimal(Decimal("NaN"))
+
+
+def test_a_canonical_decimal_separates_every_distinct_finite_value():
+    values = (
+        "0",
+        "1",
+        "-1",
+        "10",
+        "0.1",
+        "1.01",
+        "25.5",
+        "25.05",
+        "255",
+        "1E+2",
+        "1E+1000000",
+        "1E-1000000",
+        "-1E+1000000",
+    )
+    encodings = {canonical_decimal(Decimal(value)) for value in values}
+
+    assert len(encodings) == len(values)
+
+
+def test_a_canonical_decimal_is_bounded_however_large_its_exponent():
+    # A fixed-point rendering of these would be a million characters long.
+    for value in ("1E+1000000", "-1E+1000000", "1.5E-999999999"):
+        assert len(canonical_decimal(Decimal(value))) < 64
 
 
 def test_a_reference_does_not_depend_on_the_scale_a_number_was_written_in():
@@ -1477,7 +1506,7 @@ def test_a_canonical_decimal_is_exact_beyond_the_ambient_context_precision():
     fine = Decimal("1." + "0" * 30 + "1")
     finer = Decimal("1." + "0" * 30 + "2")
 
-    assert canonical_decimal(fine) == "1." + "0" * 30 + "1"
+    assert canonical_decimal(fine) == "1" + "0" * 30 + "1E0"
     assert canonical_decimal(fine) != canonical_decimal(finer)
     assert market_reference(
         _market(market_id=None, threshold=str(fine))
@@ -1490,9 +1519,9 @@ def test_a_canonical_decimal_does_not_depend_on_the_ambient_decimal_context():
 
     with localcontext() as context:
         context.prec = 5
-        assert canonical_decimal(value) == "1." + "0" * 30 + "1"
-        assert canonical_decimal(trailing) == "25.5"
-        assert canonical_decimal(Decimal("123456789")) == "123456789"
+        assert canonical_decimal(value) == "1" + "0" * 30 + "1E0"
+        assert canonical_decimal(trailing) == canonical_decimal(Decimal("25.5"))
+        assert canonical_decimal(Decimal("123456789")) == "123456789E8"
         narrow = market_reference(_market(market_id=None, threshold=str(value)))
 
     assert narrow == market_reference(_market(market_id=None, threshold=str(value)))
@@ -1654,6 +1683,73 @@ def test_exact_repeated_id_less_markets_are_one_offering():
     assert board.market_count == 1
     assert board.groups[0].summary.market_count == 1
     assert len(board.markets) == 1
+
+
+def _spelled(threshold, original, **overrides):
+    """One market whose threshold carries the exact text the provider wrote."""
+
+    return dataclasses.replace(
+        _market(market_id=None, **overrides),
+        threshold=MarketThreshold(threshold, "count", original),
+    )
+
+
+def _read_markets(markets):
+    service, _ = _service([_snapshot("dabble", markets)])
+    return _read(service)
+
+
+def test_selections_listed_in_either_order_are_one_semantic_repeat():
+    # Listing order is not a fact about an offering, so a provider that repeats
+    # one market with its selections the other way round has not contradicted
+    # itself.
+    higher = _rich_selection(selection_id="s-1", label="Higher", direction="higher")
+    lower = _rich_selection(selection_id="s-2", label="Lower", direction="lower")
+
+    board = _read_markets(
+        (
+            _market(market_id=None, selections=(higher, lower)),
+            _market(market_id=None, selections=(lower, higher)),
+        )
+    )
+
+    assert board.market_count == 1
+    assert board.markets[0].conflict_ordinal is None
+    assert board.markets[0].conflict_count is None
+    assert board.groups[0].summary.market_count == 1
+
+
+def test_one_threshold_written_at_two_scales_is_one_semantic_repeat():
+    # 25.50 and 25.5 are the same line, whatever the provider wrote them as.
+    written = _spelled("25.5", "25.5")
+    rewritten = _spelled("25.50", "25.50")
+
+    forward = _read_markets((written, rewritten))
+    backward = _read_markets((rewritten, written))
+
+    assert forward.market_count == 1
+    assert forward.markets[0].conflict_ordinal is None
+    assert forward.groups[0].summary.market_count == 1
+    # The one retained spelling is chosen by content, not by arrival order.
+    assert forward.markets == backward.markets
+
+
+def test_a_contradiction_among_semantic_repeats_does_not_depend_on_input_order(
+    monkeypatch,
+):
+    _forced_reference(monkeypatch)
+    written = _spelled("25.5", "25.5")
+    rewritten = _spelled("25.50", "25.50")
+    contradicting = _spelled("27.5", "27.5")
+
+    forward = _read_markets((written, rewritten, contradicting))
+    backward = _read_markets((contradicting, rewritten, written))
+
+    assert forward.market_count == 2
+    assert [market.conflict_ordinal for market in forward.markets] == [0, 1]
+    assert {market.conflict_count for market in forward.markets} == {2}
+    assert forward.markets == backward.markets
+    assert forward.unresolved == backward.unresolved
 
 
 def _forced_reference(monkeypatch, reference="mkt_2_forced"):

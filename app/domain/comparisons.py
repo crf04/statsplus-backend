@@ -53,10 +53,14 @@ REFERENCE_VERSION = "2"
 
 
 def canonical_decimal(value: Decimal) -> str:
-    """The one canonical text for an exact decimal, independent of scale.
+    """The one canonical token for an exact decimal, independent of scale.
 
-    ``25.5`` and ``25.50`` are the same number, so they must produce the same
-    reference; ``0`` and ``-0`` are the same number too.
+    This is internal reference material, not a rendering: it is a value's sign,
+    its significant digits, and the base-ten exponent those digits sit at,
+    written as ``<sign><coefficient>E<adjusted exponent>``.  ``25.5`` and
+    ``25.50`` are the same number, so they produce one token; ``0`` and ``-0``
+    are the same number too, and every zero is the single token ``0`` whatever
+    scale or sign it was written with.
 
     The form is read straight off the value's own digits.  No arithmetic and no
     normalization takes part, because both are performed under the ambient
@@ -64,28 +68,30 @@ def canonical_decimal(value: Decimal) -> str:
     context permits -- which would make two distinct provider numbers one
     reference, and would make a reference depend on the context a caller
     happened to be inside.
+
+    Nothing here is materialized from the exponent, so a legitimate provider
+    value such as ``1E+1000000`` costs its own digits rather than a million
+    characters of positional zeroes.
     """
 
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("a reference requires a finite Decimal")
     sign, digits, exponent = value.as_tuple()
     significant = list(digits)
-    # Only insignificant fractional zeroes are dropped: a trailing zero left of
-    # the point is part of the number, not its written scale.
-    while exponent < 0 and significant and significant[-1] == 0:
+    # Insignificant zeroes are written scale, not part of the number: dropping a
+    # trailing one raises the exponent, and a leading one names nothing at all.
+    while significant and significant[-1] == 0:
         significant.pop()
         exponent += 1
-    if not any(significant):
+    while significant and significant[0] == 0:
+        significant.pop(0)
+    if not significant:
         return "0"
-    text = "".join(str(digit) for digit in significant)
-    if exponent >= 0:
-        text += "0" * exponent
-    else:
-        point = len(text) + exponent
-        text = (
-            f"0.{'0' * -point}{text}" if point <= 0 else f"{text[:point]}.{text[point:]}"
-        )
-    return f"-{text}" if sign else text
+    coefficient = "".join(str(digit) for digit in significant)
+    # The exponent of the leading significant digit, so one number has one
+    # exponent whatever scale its coefficient was written at.
+    adjusted = exponent + len(coefficient) - 1
+    return f"{'-' if sign else ''}{coefficient}E{adjusted}"
 
 
 def _framed(tag: str, text: str) -> bytes:
@@ -304,12 +310,15 @@ def market_reference(market: PlayerProjectionMarket) -> str:
     return _reference("mkt", ("reported_evidence", _reported_evidence_facts(market)))
 
 
-def market_evidence_key(market: PlayerProjectionMarket) -> bytes:
-    """A total, content-derived order over one market's normalized evidence.
+def market_content_key(market: PlayerProjectionMarket) -> bytes:
+    """What one market says, in the same semantics its reference is derived in.
 
-    Two markets that contest one reference must be retained in an order neither
-    the provider's listing order nor the board's iteration order can change, so
-    they are ordered by their own complete normalized content.
+    Two observations with this key equal are one offering stated twice, not two
+    offerings contradicting each other: selections are read in canonical order
+    because listing order is not a fact about an offering, and a threshold is
+    read as the exact number it states, so ``25.50`` and ``25.5`` are one line.
+    An exact semantic repeat therefore collapses instead of being read as a
+    conflicting market identity.
     """
 
     return _encode(
@@ -319,6 +328,54 @@ def market_evidence_key(market: PlayerProjectionMarket) -> bytes:
             _statistic_resolution_facts(market.statistic_match),
         )
     )
+
+
+def _written_form(value: Decimal | None) -> object:
+    """How one retained exact decimal was written, which its value alone drops.
+
+    A canonical value is deliberately scale-independent, so it cannot order two
+    retained decimals that state one number in two spellings; the sign and
+    exponent the provider wrote can, and cost nothing to carry.
+    """
+
+    if value is None:
+        return None
+    sign, _digits, exponent = value.as_tuple()
+    return (sign, int(exponent))
+
+
+def _retained_audit_facts(market: PlayerProjectionMarket) -> object:
+    """The retained audit spellings a market's canonical semantics drop."""
+
+    threshold = market.threshold
+    return (
+        None
+        if threshold is None
+        else (threshold.original_value, _written_form(threshold.value)),
+        tuple(
+            (
+                _written_form(selection.decimal_price),
+                tuple(_written_form(modifier.value) for modifier in selection.modifiers),
+            )
+            for selection in canonical_selections(market.selections)
+        ),
+    )
+
+
+def market_evidence_key(market: PlayerProjectionMarket) -> bytes:
+    """A total, content-derived order over one market's retained evidence.
+
+    Two markets that contest one reference must be retained in an order neither
+    the provider's listing order nor the board's iteration order can change, so
+    they are ordered by their own complete retained content -- every canonical
+    fact, and then every audit field the board keeps beyond them, down to the
+    provider's original threshold text and the scale each exact decimal was
+    written at.  Two retained observations therefore tie here only when the
+    board retains nothing that tells them apart.
+    """
+
+    # Both halves are self-delimiting, so their concatenation stays injective.
+    return market_content_key(market) + _encode(_retained_audit_facts(market))
 
 
 def _statistic_resolution_facts(match: object) -> object:
@@ -1431,6 +1488,7 @@ __all__ = [
     "canonical_decimal",
     "canonical_selections",
     "exact_seconds",
+    "market_content_key",
     "market_evidence_key",
     "market_reference",
     "observation_evidence_key",

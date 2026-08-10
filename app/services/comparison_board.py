@@ -53,6 +53,7 @@ from app.domain.comparisons import (
     UnresolvedMarket,
     canonical_selections,
     exact_seconds,
+    market_content_key,
     market_evidence_key,
     market_reference,
     observation_evidence_key,
@@ -418,15 +419,23 @@ class ComparisonBoardService:
     ) -> dict[str, list[tuple[PlayerProjectionMarket, BoardObservation]]]:
         """Every normalized observation this read keeps, by stable reference.
 
-        A repeat collapses only when every normalized fact -- including the
-        observation it came from -- agrees, so an exact repeat is one offering.
-        A repeat that disagrees is malformed rather than a second offering, but
-        it is still evidence: every distinct contradicting observation is kept,
-        ordered by its own content so the result cannot depend on the order the
-        providers were read in, and none of them enters a group.
+        A repeat collapses when it says the same thing -- in the same canonical
+        semantics the reference itself is derived in, so a market relisted with
+        its selections the other way round, or its threshold rewritten at
+        another scale, is one offering rather than a market contradicting
+        itself.  Where two such repeats differ only in a retained audit field,
+        the one kept is chosen by content too, never by arrival order.
+
+        A repeat that says something else is malformed rather than a second
+        offering, but it is still evidence: every distinct contradicting
+        observation is kept, ordered by its own complete retained content so the
+        result cannot depend on the order the providers were read in, and none
+        of them enters a group.
         """
 
-        retained: dict[str, list[tuple[PlayerProjectionMarket, BoardObservation]]] = {}
+        repeats: dict[
+            str, dict[tuple[bytes, bytes], tuple[PlayerProjectionMarket, BoardObservation]]
+        ] = {}
         for snapshot in board.snapshots:
             if filters.providers and snapshot.provider not in filters.providers:
                 continue
@@ -436,12 +445,19 @@ class ComparisonBoardService:
                     MarketStatus(market.status) not in filters.market_statuses
                 ):
                     continue
-                observations = retained.setdefault(market_reference(market), [])
-                if (market, observation) not in observations:
-                    observations.append((market, observation))
-        for observations in retained.values():
-            observations.sort(key=_evidence_order)
-        return retained
+                entry = (market, observation)
+                semantic = (
+                    market_content_key(market),
+                    observation_evidence_key(observation),
+                )
+                stated = repeats.setdefault(market_reference(market), {})
+                previous = stated.get(semantic)
+                if previous is None or _evidence_order(entry) < _evidence_order(previous):
+                    stated[semantic] = entry
+        return {
+            reference: sorted(stated.values(), key=_evidence_order)
+            for reference, stated in repeats.items()
+        }
 
     def _observation(
         self, snapshot: ProviderSnapshot, observed_at: datetime
