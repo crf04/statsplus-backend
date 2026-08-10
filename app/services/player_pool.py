@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
+import logging
 import time
 from typing import Any, Callable, Iterable, Mapping, Protocol
 from uuid import uuid4
@@ -47,12 +49,27 @@ POOL_REUSE_MAX_AGE_SECONDS = time_window_seconds(
 POOL_STALE_MAX_AGE_SECONDS = time_window_seconds(
     6, unit_seconds=3600, field="Player Pool stale-serve maximum age"
 )
-REFRESH_LEASE_SECONDS = 30
+REFRESH_LEASE_SECONDS = time_window_seconds(
+    60, field="Player Pool refresh lease"
+)
+FOLLOWER_WAIT_MAX_SECONDS = time_window_seconds(
+    65, field="Player Pool follower wait maximum"
+)
+FOLLOWER_POLL_INITIAL_SECONDS = time_window_seconds(
+    "0.05", field="Player Pool follower initial poll"
+)
+FOLLOWER_POLL_MAX_SECONDS = time_window_seconds(
+    "0.5", field="Player Pool follower maximum poll"
+)
+POOL_CLOCK_SKEW_TOLERANCE_SECONDS = time_window_seconds(
+    60, field="Player Pool clock-skew tolerance"
+)
 EXPECTED_COLLECTION_FAILURES = (
     ProviderUnavailableError,
     AthleteMappingPersistenceError,
     EventMappingPersistenceError,
 )
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +122,7 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
         *,
         owner: str,
         now: datetime,
-        lease_seconds: int,
+        lease_seconds: object,
     ) -> bool: ...
 
     def get_refresh_result(
@@ -149,6 +166,7 @@ class PlayerPoolService:
         snapshot_repository: PlayerPoolSnapshotReaderWriter | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.board_service = board_service
         self.market_categories = {
@@ -162,6 +180,7 @@ class PlayerPoolService:
         self.snapshot_repository = snapshot_repository
         self.clock = clock
         self.sleeper = sleeper
+        self.monotonic = monotonic
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         scope = PlayerPoolSnapshotScope.create(season, game_ids)
@@ -171,20 +190,34 @@ class PlayerPoolService:
 
         baseline = repository.get_refresh_result(scope).version
         waiting = False
+        wait_deadline = self.monotonic() + float(FOLLOWER_WAIT_MAX_SECONDS)
+        poll_seconds = float(FOLLOWER_POLL_INITIAL_SECONDS)
         while True:
             now = assume_utc(self.clock())
             stored = repository.get(scope)
             if self._within_age(stored, now, POOL_REUSE_MAX_AGE_SECONDS):
                 return self._decode_pool(stored.payload)
 
+            completed = repository.get_refresh_result(scope)
             if waiting:
-                completed = repository.get_refresh_result(scope)
                 if completed.version > baseline:
-                    if completed.outcome == "success" and stored is not None:
-                        return self._decode_pool(stored.payload)
+                    completed_stored = repository.get(scope)
+                    if completed.outcome == "success" and completed_stored is not None:
+                        return self._decode_pool(completed_stored.payload)
                     if completed.outcome == "failure":
-                        return self._fallback_pool(stored, now, {})
+                        return self._fallback_pool(completed_stored, now, {})
                     baseline = completed.version
+
+            lease_expires_at = completed.lease_expires_at
+            if lease_expires_at is not None and assume_utc(lease_expires_at) > now:
+                waiting = True
+                if self.monotonic() >= wait_deadline:
+                    return self._fallback_pool(stored, now, {})
+                self.sleeper(poll_seconds)
+                poll_seconds = min(
+                    poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS)
+                )
+                continue
 
             owner = uuid4().hex
             if repository.try_acquire_refresh(
@@ -197,7 +230,10 @@ class PlayerPoolService:
                     scope, owner=owner, prior=stored, baseline_version=baseline
                 )
             waiting = True
-            self.sleeper(0.01)
+            if self.monotonic() >= wait_deadline:
+                return self._fallback_pool(stored, now, {})
+            self.sleeper(poll_seconds)
+            poll_seconds = min(poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS))
 
     def _refresh_owned(
         self,
@@ -212,15 +248,16 @@ class PlayerPoolService:
             raise RuntimeError("snapshot repository is required for an owned refresh")
         try:
             now = assume_utc(self.clock())
+            completed = repository.get_refresh_result(scope)
             stored = repository.get(scope)
             if self._within_age(stored, now, POOL_REUSE_MAX_AGE_SECONDS):
                 return self._decode_pool(stored.payload)
-            completed = repository.get_refresh_result(scope)
             if completed.version > baseline_version:
-                if completed.outcome == "success" and stored is not None:
-                    return self._decode_pool(stored.payload)
+                completed_stored = repository.get(scope)
+                if completed.outcome == "success" and completed_stored is not None:
+                    return self._decode_pool(completed_stored.payload)
                 if completed.outcome == "failure":
-                    return self._fallback_pool(stored or prior, now, {})
+                    return self._fallback_pool(completed_stored or prior, now, {})
             fallback = stored or prior
             try:
                 refreshed = self._collect_pool(
@@ -228,7 +265,11 @@ class PlayerPoolService:
                 )
             except EXPECTED_COLLECTION_FAILURES:
                 finished_at = assume_utc(self.clock())
-                repository.finish_failure_owned(scope, owner=owner, now=finished_at)
+                recorded = repository.finish_failure_owned(
+                    scope, owner=owner, now=finished_at
+                )
+                if not recorded:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
                 return self._fallback_pool(fallback, finished_at, {})
 
             providers = refreshed.freshness["providers"]
@@ -237,18 +278,29 @@ class PlayerPoolService:
                 provider["status"] == "missing" for provider in providers.values()
             )
             if total_failure:
-                repository.finish_failure_owned(scope, owner=owner, now=finished_at)
+                recorded = repository.finish_failure_owned(
+                    scope, owner=owner, now=finished_at
+                )
+                if not recorded:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
                 return self._fallback_pool(fallback, finished_at, providers)
 
             retrieved_at = refreshed.freshness.get("retrieved_at")
             if retrieved_at is not None:
-                repository.replace_owned(
+                published = repository.replace_owned(
                     scope,
                     owner=owner,
                     payload=self._encode_pool(refreshed),
                     retrieved_at=parse_utc_iso(retrieved_at),
                     now=finished_at,
                 )
+                if not published:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
+                    winner = repository.get_refresh_result(scope)
+                    if winner.version > baseline_version and winner.outcome == "success":
+                        winner_snapshot = repository.get(scope)
+                        if winner_snapshot is not None:
+                            return self._decode_pool(winner_snapshot.payload)
             return refreshed
         finally:
             repository.release_refresh(scope, owner=owner)
@@ -261,10 +313,13 @@ class PlayerPoolService:
     ) -> bool:
         if stored is None:
             return False
-        age = exact_age_seconds(
-            exact_seconds(assume_utc(now) - assume_utc(stored.retrieved_at)),
-            field="Player Pool snapshot age",
-        )
+        elapsed = exact_seconds(assume_utc(now) - assume_utc(stored.retrieved_at))
+        if elapsed < 0:
+            future_skew = exact_age_seconds(-elapsed, field="Player Pool future skew")
+            if not within_max_age(future_skew, POOL_CLOCK_SKEW_TOLERANCE_SECONDS):
+                raise ValueError("Player Pool snapshot timestamp is too far in the future")
+            elapsed = Decimal(0)
+        age = exact_age_seconds(elapsed, field="Player Pool snapshot age")
         return within_max_age(age, maximum_age)
 
     def _fallback_pool(

@@ -25,8 +25,13 @@ from app.providers.dfs import (
 )
 from app.migrations import run_migrations
 from app.errors import ProviderUnavailableError
-from app.services.player_pool import PlayerPoolService
-from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
+from app.services.player_pool import PlayerPool, PlayerPoolService
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolRefreshResult,
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+    StoredPlayerPoolSnapshot,
+)
 from app.services.athlete_resolver import (
     AthleteResolution,
     AthleteResolver,
@@ -648,6 +653,203 @@ def test_persisted_trailing_z_timestamps_are_normalized_through_utc_authority():
     assert pool.freshness["providers"]["prizepicks"]["retrieved_at"] == NOW.isoformat()
 
 
+def test_malformed_persisted_timestamp_is_rejected_separately_from_clock_skew():
+    with pytest.raises(ValueError):
+        PlayerPoolService._decode_pool(
+            {
+                "players": [],
+                "team_counts": {},
+                "freshness": {
+                    "status": "fresh",
+                    "retrieved_at": "not-a-timestamp",
+                    "providers": {},
+                },
+            }
+        )
+
+
+def test_small_future_snapshot_timestamp_clamps_to_zero_age(tmp_path):
+    future = NOW + timedelta(seconds=30)
+    board = _joined_board(("prizepicks", "pp-1", 101))
+    board = replace(
+        board,
+        provider_outcomes=(
+            replace(
+                board.provider_outcomes[0],
+                snapshot=replace(board.provider_outcomes[0].snapshot, retrieved_at=future),
+            ),
+        ),
+    )
+    boards = RecordedBoardService(board)
+    service = _persistent_service(tmp_path, boards, lambda: NOW)
+
+    first = service.get_pool(season="2025-26", game_ids={"0022500001"})
+    second = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert first == second
+    assert len(boards.queries) == 1
+
+
+def test_snapshot_timestamp_beyond_clock_skew_tolerance_is_rejected():
+    stored = StoredPlayerPoolSnapshot({}, NOW + timedelta(seconds=61))
+
+    with pytest.raises(ValueError, match="too far in the future"):
+        PlayerPoolService._within_age(stored, NOW, 900)
+
+
+@pytest.mark.parametrize("acquire_after_completion", [False, True])
+def test_follower_rereads_snapshot_after_observing_completed_generation(
+    acquire_after_completion,
+):
+    scope = PlayerPoolSnapshotScope.create("2025-26", {"0022500001"})
+    old_pool = PlayerPool(
+        (), {}, {"status": "fresh", "retrieved_at": NOW.isoformat(), "providers": {}}
+    )
+    new_time = NOW + timedelta(hours=1)
+    new_pool = PlayerPool(
+        (), {}, {"status": "fresh", "retrieved_at": new_time.isoformat(), "providers": {}}
+    )
+    old = StoredPlayerPoolSnapshot(PlayerPoolService._encode_pool(old_pool), NOW)
+    new = StoredPlayerPoolSnapshot(PlayerPoolService._encode_pool(new_pool), new_time)
+
+    class InterleavingRepository:
+        def __init__(self):
+            self.completed = False
+            self.get_calls = 0
+
+        def get_refresh_result(self, requested_scope):
+            assert requested_scope == scope
+            return PlayerPoolRefreshResult(
+                1 if self.completed else 0,
+                "success" if self.completed else None,
+                None,
+            )
+
+        def get(self, requested_scope):
+            self.get_calls += 1
+            if self.completed and self.get_calls >= 3:
+                return new
+            return old
+
+        def try_acquire_refresh(self, requested_scope, **kwargs):
+            self.completed = True
+            return acquire_after_completion
+
+        def replace_owned(self, requested_scope, **kwargs):
+            pytest.fail("the completed generation must be adopted")
+
+        def finish_failure_owned(self, requested_scope, **kwargs):
+            pytest.fail("the completed generation must be adopted")
+
+        def release_refresh(self, requested_scope, **kwargs):
+            return None
+
+    repository = InterleavingRepository()
+    service = PlayerPoolService(
+        RecordedBoardService(_board(())),
+        CATALOG,
+        snapshot_repository=repository,
+        clock=lambda: new_time,
+        sleeper=lambda _: None,
+    )
+
+    result = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert result.freshness["retrieved_at"] == new_time.isoformat()
+
+
+def test_lease_overrun_is_fenced_and_adopts_takeover_winner(tmp_path, caplog):
+    database_url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    entered = Event()
+    release_owner = Event()
+
+    class OverrunningBoard:
+        def get_board(self, query):
+            entered.set()
+            assert release_owner.wait(timeout=5)
+            return _joined_board(("prizepicks", "pp-1", 101))
+
+    owner = PlayerPoolService(
+        OverrunningBoard(),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW if not release_owner.is_set() else NOW + timedelta(seconds=61),
+    )
+    winner = PlayerPoolService(
+        RecordedBoardService(_joined_board(("prizepicks", "pp-2", 202))),
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(create_engine(database_url)),
+        clock=lambda: NOW + timedelta(seconds=61),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale_owner = executor.submit(
+            owner.get_pool, season="2025-26", game_ids={"0022500001"}
+        )
+        assert entered.wait(timeout=5)
+        winning_pool = winner.get_pool(
+            season="2025-26", game_ids={"0022500001"}
+        )
+        release_owner.set()
+        owner_pool = stale_owner.result(timeout=5)
+
+    assert [player.canonical_player_id for player in winning_pool.players] == [202]
+    assert owner_pool == winning_pool
+    assert "outcome=fence_lost" in caplog.text
+
+
+def test_follower_uses_bounded_read_only_backoff_while_lease_is_healthy(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    repository = PlayerPoolSnapshotRepository(engine)
+    scope = PlayerPoolSnapshotScope.create("2025-26", {"0022500001"})
+    assert repository.try_acquire_refresh(
+        scope, owner="other-worker", now=NOW, lease_seconds=60
+    )
+    acquire_attempts = 0
+    original_acquire = repository.try_acquire_refresh
+
+    def counted_acquire(*args, **kwargs):
+        nonlocal acquire_attempts
+        acquire_attempts += 1
+        return original_acquire(*args, **kwargs)
+
+    repository.try_acquire_refresh = counted_acquire
+    elapsed = [0.0]
+    sleeps = []
+
+    def monotonic():
+        return elapsed[0]
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+
+    service = PlayerPoolService(
+        RecordedBoardService(_board(())),
+        CATALOG,
+        snapshot_repository=repository,
+        clock=lambda: NOW,
+        monotonic=monotonic,
+        sleeper=sleeper,
+    )
+
+    pool = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert pool.freshness["status"] == "unavailable"
+    assert acquire_attempts == 0
+    assert sleeps[:5] == [0.05, 0.1, 0.2, 0.4, 0.5]
+    assert len(sleeps) < 140
+
+
+def test_snapshot_repository_refuses_demo_database():
+    with pytest.raises(ValueError, match="demo database"):
+        PlayerPoolSnapshotRepository(create_engine("sqlite:///nba_play_types.db"))
+
+
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])
 def test_canonical_join_normalizes_diacritics_suffix_order_team_dialect_and_season(
     provider_team, canonical_team
@@ -963,6 +1165,26 @@ def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_
     )
     assert unavailable.freshness["status"] == "unavailable"
     assert unavailable.freshness["retrieved_at"] is None
+
+
+def test_fresh_and_stale_served_providers_are_usable_without_fresh_aggregate():
+    stale = replace(_provider_outcome("underdog"), cache_status="stale")
+    board = _board((_provider_outcome("prizepicks"), stale))
+
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG).get_pool(
+        season="2025-26", game_ids=set()
+    )
+
+    assert pool.freshness == {
+        "retrieved_at": NOW.isoformat(),
+        "providers": {
+            "prizepicks": {"status": "fresh", "retrieved_at": NOW.isoformat()},
+            "underdog": {
+                "status": "stale-served",
+                "retrieved_at": NOW.isoformat(),
+            },
+        },
+    }
 
 
 def test_player_pool_market_categories_are_derived_from_the_injected_catalog():

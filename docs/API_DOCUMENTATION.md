@@ -266,13 +266,15 @@ PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
 period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
 
-`freshness.pool.providers` reports each attempted provider as `fresh` or
-`missing`, with the provider snapshot time when fresh. A successful empty board
-is fresh information and produces zero counts. If every provider is missing,
-the aggregate is `unavailable`. If every attempted provider succeeds, the
-aggregate is `fresh`. When usable and missing provider observations disagree,
-aggregate `status` is omitted so the frontend derives its documented partial
-presentation from the provider entries. The union uses every usable observation.
+`freshness.pool.providers` uses the closed vocabulary `fresh | stale-served |
+missing` and retains each usable provider snapshot's actual retrieval time. A
+successful empty board is fresh information and produces zero counts. The
+aggregate is `fresh` only when every provider is fresh, `stale-served` when
+every usable provider is stale-served, and `unavailable` when none is usable.
+For any mixed state—including fresh plus stale-served, or usable plus
+missing—aggregate `status` is omitted so the frontend derives its documented
+partial/degraded presentation from the provider entries. The union uses every
+usable observation.
 Player Pool snapshots are persisted by season and exact Slate game set. A
 snapshot no more than 15 minutes old is reused without another board fetch and
 retains each provider's actual `retrieved_at`. This is an inclusive reuse

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 from typing import Any, Iterable, Mapping
 
@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from app.domain.utc import assume_utc
+from app.domain.freshness import exact_timedelta, time_window_seconds
 from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.utils.db import is_demo_database_url
 
@@ -42,6 +43,7 @@ class StoredPlayerPoolSnapshot:
 class PlayerPoolRefreshResult:
     version: int
     outcome: str | None
+    lease_expires_at: datetime | None
 
 
 class PlayerPoolSnapshotRepository:
@@ -78,13 +80,21 @@ class PlayerPoolSnapshotRepository:
         table = PlayerPoolSnapshot.__table__
         with self.engine.connect() as connection:
             row = connection.execute(
-                select(table.c.refresh_version, table.c.refresh_outcome).where(
+                select(
+                    table.c.refresh_version,
+                    table.c.refresh_outcome,
+                    table.c.lease_expires_at,
+                ).where(
                     self._identity(table, scope)
                 )
             ).one_or_none()
         if row is None:
-            return PlayerPoolRefreshResult(0, None)
-        return PlayerPoolRefreshResult(int(row.refresh_version), row.refresh_outcome)
+            return PlayerPoolRefreshResult(0, None, None)
+        return PlayerPoolRefreshResult(
+            int(row.refresh_version),
+            row.refresh_outcome,
+            assume_utc(row.lease_expires_at) if row.lease_expires_at is not None else None,
+        )
 
     def try_acquire_refresh(
         self,
@@ -92,11 +102,14 @@ class PlayerPoolSnapshotRepository:
         *,
         owner: str,
         now: datetime,
-        lease_seconds: int,
+        lease_seconds: object,
     ) -> bool:
         table = PlayerPoolSnapshot.__table__
         observed_at = assume_utc(now)
-        expires_at = observed_at + timedelta(seconds=lease_seconds)
+        expires_at = observed_at + exact_timedelta(
+            time_window_seconds(lease_seconds, field="Player Pool refresh lease"),
+            field="Player Pool refresh lease",
+        )
         with self.engine.begin() as connection:
             try:
                 with connection.begin_nested():
