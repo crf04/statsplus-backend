@@ -22,6 +22,7 @@ without any error being counted twice.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -230,9 +231,22 @@ class BoardTelemetryEvent:
 #: operator can group a board request by is one of these strings: no athlete,
 #: event, market, selection, or provider-source ID, and no upstream text, can
 #: become a metric dimension.
-BOARD_REQUEST_OUTCOMES = frozenset(
-    {"served", "not_modified", "unavailable", "too_large"}
-)
+#: Every outcome one authenticated board request can end in, and the single
+#: HTTP status each of them means.  The pairing is closed in both directions, so
+#: a dashboard can count statuses by outcome without two names for one thing:
+#: an ``unavailable`` recorded as a 500, or a 404 recorded as ``served``, is a
+#: recording bug rather than an operational signal, and it fails where it is
+#: written.
+BOARD_REQUEST_STATUSES = {
+    "served": 200,
+    "not_modified": 304,
+    "invalid": 400,
+    "too_large": 400,
+    "disabled": 404,
+    "error": 500,
+    "unavailable": 503,
+}
+BOARD_REQUEST_OUTCOMES = frozenset(BOARD_REQUEST_STATUSES)
 BOARD_PROVIDER_STATUSES = frozenset({"complete", "partial", "failed"})
 BOARD_FAILURE_REASONS = frozenset(
     {
@@ -285,14 +299,24 @@ class BoardRequestEvent:
     request_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.duration_ms, (int, float)) or self.duration_ms < 0:
-            raise ValueError("board request duration must be non-negative")
-        if self.outcome not in BOARD_REQUEST_OUTCOMES:
+        # A duration is measured, and a count is counted.  A boolean is neither,
+        # however willingly Python treats it as one, and a NaN or an infinity is
+        # not a latency an operator can average -- so each of them is refused
+        # here rather than reaching a buffer, a log line, or a dashboard.
+        if isinstance(self.duration_ms, bool) or not isinstance(
+            self.duration_ms, (int, float)
+        ):
+            raise ValueError("board request duration must be a real number")
+        if not math.isfinite(self.duration_ms) or self.duration_ms < 0:
+            raise ValueError("board request duration must be finite and non-negative")
+        if self.outcome not in BOARD_REQUEST_STATUSES:
             raise ValueError("board request outcome must be a bounded label")
         if self.comparison_availability not in BOARD_AVAILABILITY_STATES:
             raise ValueError("board request availability must be a bounded label")
         if not isinstance(self.status_code, int) or isinstance(self.status_code, bool):
             raise ValueError("board request status code must be an integer")
+        if self.status_code != BOARD_REQUEST_STATUSES[self.outcome]:
+            raise ValueError("board request outcome and status code must be one pair")
         for labels, allowed in (
             (self.provider_status_counts, BOARD_PROVIDER_STATUSES),
             (self.failure_reason_counts, BOARD_FAILURE_REASONS),
@@ -300,12 +324,15 @@ class BoardRequestEvent:
             (self.cache_counts, BOARD_CACHE_STATES),
         ):
             if any(
-                label not in allowed or not isinstance(count, int) or count < 1
+                label not in allowed
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 1
                 for label, count in labels
             ):
                 raise ValueError("board request labels must be stable and bounded")
         if any(
-            not isinstance(count, int) or count < 0
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
             for count in (
                 self.group_count,
                 self.market_count,
@@ -801,6 +828,7 @@ __all__ = [
     "BOARD_FRESHNESS_STATES",
     "BOARD_PROVIDER_STATUSES",
     "BOARD_REQUEST_OUTCOMES",
+    "BOARD_REQUEST_STATUSES",
     "BoardRequestEvent",
     "record_board_request_event",
     "get_recorded_board_request_events",
