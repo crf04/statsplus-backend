@@ -50,7 +50,10 @@ from app.domain.comparisons import (
     has_readable_provider,
 )
 from app.errors import AppError, InvalidInputError, ProviderUnavailableError
-from app.services.comparison_board import ComparisonBoardTooLargeError
+from app.services.comparison_board import (
+    ComparisonBoardTooLargeError,
+    UnreadableComparisonBoardError,
+)
 from app.services.dfs_board_query import BoardRequest, parse_board_request
 from app.utils.telemetry import (
     BOARD_REQUEST_STATUSES,
@@ -350,9 +353,22 @@ class DFSBoardResponseService:
     ) -> BoardRepresentation:
         """The board itself: retrieved, judged usable, serialized, and tagged."""
 
-        board = self.comparison_board_service.get_comparisons(
-            request.query, filters=request.filters
-        )
+        try:
+            board = self.comparison_board_service.get_comparisons(
+                request.query, filters=request.filters
+            )
+        except UnreadableComparisonBoardError as unreadable:
+            # A read nothing could be published from built no board, so there
+            # is nothing here to observe or serialize -- only the evidence the
+            # read finished with, which states the same outage in the same
+            # sanitized vocabulary a readable one would have.
+            evidence = unreadable.board_evidence
+            if observation is not None:
+                observation.observe(evidence)
+            raise self._unavailable(
+                evidence.provider_reports, evidence.disabled_providers
+            ) from unreadable
+
         if observation is not None:
             observation.observe(BoardReadEvidence.of(board))
 
@@ -360,12 +376,7 @@ class DFSBoardResponseService:
         # service has already declined to refuse an unreadable read as too
         # large, so an outage is always reported as the outage it is.
         if not has_readable_provider(board.provider_reports):
-            raise DFSBoardUnavailableError(
-                provider_outcomes=[
-                    _provider_outcome(report) for report in board.provider_reports
-                ],
-                disabled_providers=list(board.disabled_providers),
-            )
+            raise self._unavailable(board.provider_reports, board.disabled_providers)
 
         payload = serialize_board(board)
         etag = board_etag(payload)
@@ -373,6 +384,17 @@ class DFSBoardResponseService:
             return BoardRepresentation(status_code=304, etag=etag)
 
         return BoardRepresentation(status_code=200, etag=etag, payload=payload)
+
+    @staticmethod
+    def _unavailable(
+        reports: Any, disabled_providers: Any
+    ) -> DFSBoardUnavailableError:
+        """One outage, stated the same way whether or not a board was built."""
+
+        return DFSBoardUnavailableError(
+            provider_outcomes=[_provider_outcome(report) for report in reports],
+            disabled_providers=list(disabled_providers),
+        )
 
 
 @contextmanager
@@ -396,8 +418,17 @@ def _contributing(observation: PendingBoardObservation | None) -> Iterator[None]
 
 
 def serialize_board(board: ComparisonBoard) -> dict[str, Any]:
-    """The complete version 1 JSON body for one comparison board."""
+    """The complete version 1 JSON body for one comparison board.
 
+    Only an actual board can be published.  A read that stated counts without
+    retaining what they counted -- an outage refused after retrieval -- is
+    :class:`~app.domain.comparisons.BoardReadEvidence`, which is observed
+    rather than published, and is refused here rather than serialized into a
+    body whose counts nothing in it supports.
+    """
+
+    if not isinstance(board, ComparisonBoard):
+        raise TypeError("only a comparison board can be published as a board")
     return {
         "contract_version": BOARD_CONTRACT_VERSION,
         "generated_at": _encode(board.generated_at),

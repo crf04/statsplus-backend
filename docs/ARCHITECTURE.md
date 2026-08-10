@@ -1026,16 +1026,31 @@ bounded as before.
 
 Readability outranks the ceiling. A read no provider could be read from states
 nothing at any size, so refusing it as too large would tell a caller to narrow
-filters that cannot make an outage readable. Such a read is not refused here:
-it is returned carrying only bounded evidence — comparison availability,
-provider reports, disabled providers, and its observed market and unresolved
-counts, with no group, unresolved entry, or retained market — and the response
-seam reports it as the 503 it is. Nothing publishable is dropped, because every
-observation on such a read is beyond its provider's permitted maximum age or
-ahead of the board's own clock and so entered no group. Both seams judge
-readability through one domain authority, `ProviderReport.is_readable` and
-`has_readable_provider`, so the seam that declines to refuse and the seam that
-reports the outage cannot disagree.
+filters that cannot make an outage readable. Such a read builds no board at
+all. It raises its own result variant, `UnreadableComparisonBoardError`,
+carrying only that read's `BoardReadEvidence` — comparison availability,
+provider reports, disabled providers, and the observed group, market, and
+unresolved counts — and no serializable board. The response seam catches it,
+contributes the evidence to the request's observation, and reports it as the
+same sanitized 503 a readable outage is; the evidence itself is never
+published, and the serializer refuses anything that is not a `ComparisonBoard`.
+Nothing publishable is dropped, because every observation on such a read is
+beyond its provider's permitted maximum age or ahead of the board's own clock
+and so entered no group.
+
+The variant exists so that no board can state a count its own collections
+contradict. A `ComparisonBoard` retains exactly what it counted — `market_count`
+equals its retained markets, `unresolved_count` its retained unresolved markets,
+and `is_empty` is read from groups, unresolved markets, and retained markets
+together — so an over-ceiling outage cannot be expressed as a board at all.
+`UnreadableComparisonBoardError` is a `ProviderUnavailableError` rather than a
+sibling of `ComparisonBoardTooLargeError`, so should it ever escape the response
+seam the central handler already answers it as the safe 503 an outage is, with
+no evidence in its public details and no 400 telling a caller to narrow filters.
+
+Both seams judge readability through one domain authority,
+`ProviderReport.is_readable` and `has_readable_provider`, so the seam that
+declines to refuse and the seam that reports the outage cannot disagree.
 
 ### Published DFS Board
 

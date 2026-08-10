@@ -1183,13 +1183,16 @@ class ComparisonBoard:
             raise ValueError("retained markets must be BoardMarket values")
         if tuple(sorted(markets, key=lambda market: market.order)) != markets:
             raise ValueError("retained markets must be deterministically ordered")
-        if markets and len(markets) != self.market_count:
+        # A board counts exactly what it kept.  There is no count-only board:
+        # a read that retained nothing it would have published is not a board
+        # at all, and states what it observed as
+        # :class:`BoardReadEvidence` instead, so nothing that reaches the
+        # serializer can report a count its own collections contradict.
+        if len(markets) != self.market_count:
             raise ValueError("a board must retain every market it counted")
-        # A read the response seam will report as an outage retains nothing it
-        # would have published, so what it observed is stated as counts alone.
         if self.unresolved_count is None:
             object.__setattr__(self, "unresolved_count", len(unresolved))
-        elif unresolved and self.unresolved_count != len(unresolved):
+        elif self.unresolved_count != len(unresolved):
             raise ValueError("a board must retain every unresolved market it counted")
         reports = tuple(self.provider_reports)
         if tuple(sorted(reports, key=lambda report: report.provider)) != reports:
@@ -1204,9 +1207,14 @@ class ComparisonBoard:
 
     @property
     def is_empty(self) -> bool:
-        """Whether a complete read found nothing to compare and nothing left over."""
+        """Whether a complete read found nothing to compare and nothing left over.
 
-        return not self.groups and not self.unresolved
+        Read from everything the board retained, so it can never disagree with
+        the counts: a board that kept a market is not empty, whether that
+        market entered a comparison or stayed unresolved.
+        """
+
+        return not self.groups and not self.unresolved and not self.markets
 
     @property
     def mixed_freshness_groups(self) -> tuple[ComparisonGroup, ...]:

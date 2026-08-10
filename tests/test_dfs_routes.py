@@ -372,6 +372,29 @@ def test_an_oversized_unreadable_board_is_the_same_sanitized_503(make_board_clie
     assert_fixture("unreadable_oversized", response.get_json())
 
 
+def test_an_oversized_future_dated_board_is_the_same_sanitized_503(make_board_client):
+    """A read ahead of the board's own clock is an outage at any ceiling too."""
+
+    future = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT + timedelta(seconds=60),
+    )
+    client, _ = make_board_client([future], max_markets=1)
+
+    response = client.get("/api/dfs/board", headers=AUTH)
+
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["error"]["code"] == "provider_unavailable"
+    outcome = body["error"]["details"]["provider_outcomes"][0]
+    assert outcome["future_observation"] is True
+    assert outcome["freshness"] is None
+
+
 def test_a_total_provider_failure_is_a_sanitized_503(make_board_client):
     client, _ = make_board_client(
         failures={

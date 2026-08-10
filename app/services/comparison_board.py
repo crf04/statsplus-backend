@@ -17,9 +17,10 @@ the filters that would narrow it.
 Readability comes first.  A read no provider could be read from is an outage
 rather than an over-large board, however many markets it observed, so the
 ceiling is applied only to a read something on it could still be published
-from.  The unreadable one is returned as bounded evidence for the response seam
-to report, and both seams judge readability through the one domain authority in
-:func:`app.domain.comparisons.has_readable_provider`.
+from.  The unreadable one builds no board at all: it raises
+:class:`UnreadableComparisonBoardError`, carrying bounded evidence for the
+response seam to report, and both seams judge readability through the one
+domain authority in :func:`app.domain.comparisons.has_readable_provider`.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ from app.domain.comparisons import (
     selection_reference,
 )
 from app.domain.statistics import MatchState, ScoringPeriod
-from app.errors import AppError
+from app.errors import AppError, ProviderUnavailableError
 from app.providers.dfs import (
     MarketStatus,
     MarketVariant,
@@ -146,6 +147,35 @@ class ComparisonBoardTooLargeError(AppError):
             "market_limit": self.market_limit,
             "supported_filters": list(self.supported_filters),
         }
+
+
+class UnreadableComparisonBoardError(ProviderUnavailableError):
+    """No provider on this read could be read from, so no board was built.
+
+    This is the internal result of a read that finished retrieval and found
+    nothing publishable in it.  It carries the completed read's
+    :class:`BoardReadEvidence` and deliberately no board: there is no board to
+    carry, and a caller learns about the outage from the response seam, which
+    catches this and states the bounded Provider Outcome vocabulary the public
+    503 contract documents.
+
+    It is a :class:`~app.errors.ProviderUnavailableError` rather than a sibling
+    of :class:`ComparisonBoardTooLargeError` so that the central error handler
+    already answers it as the same safe 503 an outage is, without publishing
+    any evidence, should it ever escape the response seam.  Nothing about it is
+    a too-large refusal: an outage cannot be narrowed by a filter.
+    """
+
+    def __init__(
+        self,
+        *,
+        board_evidence: BoardReadEvidence,
+        message: str | None = None,
+    ) -> None:
+        if not isinstance(board_evidence, BoardReadEvidence):
+            raise TypeError("an unreadable board read states typed board evidence")
+        self.board_evidence = board_evidence
+        super().__init__(message)
 
 
 def _catalog_availability(
@@ -443,35 +473,29 @@ class ComparisonBoardService:
         # Readability outranks size.  A read no provider could be read from
         # states nothing at any ceiling, so there is no board for a ceiling to
         # be exceeded by, and refusing it as too large would tell a caller to
-        # narrow filters that cannot make an outage readable.  Such a read is
-        # returned instead, carrying only the bounded evidence the response seam
-        # needs to report the outage: every observation on it is beyond the
-        # permitted maximum age or ahead of this board's clock, so it holds no
-        # group and nothing publishable was dropped.
+        # narrow filters that cannot make an outage readable.  Such a read
+        # fails with its own type instead, carrying only the bounded evidence
+        # the response seam needs to report the outage: every observation on it
+        # is beyond the permitted maximum age or ahead of this board's clock,
+        # so it holds no group and nothing publishable was dropped.  No board
+        # is built for it, because a board that retained nothing it counted
+        # would contradict itself and could still reach the serializer.
         if observed > self.max_markets:
+            evidence = BoardReadEvidence(
+                availability=availability,
+                provider_reports=reports,
+                disabled_providers=board.disabled_providers,
+                group_count=len(members),
+                market_count=observed,
+                unresolved_count=len(unresolved),
+            )
             if has_readable_provider(reports):
                 raise ComparisonBoardTooLargeError(
                     observed_market_count=observed,
                     market_limit=self.max_markets,
-                    board_evidence=BoardReadEvidence(
-                        availability=availability,
-                        provider_reports=reports,
-                        disabled_providers=board.disabled_providers,
-                        group_count=len(members),
-                        market_count=observed,
-                        unresolved_count=len(unresolved),
-                    ),
+                    board_evidence=evidence,
                 )
-            return ComparisonBoard(
-                season=query.season,
-                generated_at=observed_at,
-                availability=availability,
-                provider_reports=reports,
-                disabled_providers=board.disabled_providers,
-                filters=filters,
-                market_count=observed,
-                unresolved_count=len(unresolved),
-            )
+            raise UnreadableComparisonBoardError(board_evidence=evidence)
 
         groups = tuple(
             _group(key, members[key])
@@ -894,4 +918,5 @@ __all__ = [
     "DEFAULT_MAX_COMPARISON_MARKETS",
     "ComparisonBoardService",
     "ComparisonBoardTooLargeError",
+    "UnreadableComparisonBoardError",
 ]

@@ -31,7 +31,10 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.errors import InvalidInputError
-from app.services.comparison_board import ComparisonBoardTooLargeError
+from app.services.comparison_board import (
+    ComparisonBoardTooLargeError,
+    UnreadableComparisonBoardError,
+)
 from app.services.dfs_board_query import BoardRequest
 from app.services.dfs_board_response import (
     BOARD_CONTRACT_VERSION,
@@ -622,6 +625,62 @@ def test_an_oversized_future_dated_read_is_a_sanitized_503():
     assert error.value.public_details["provider_outcomes"][0][
         "future_observation"
     ] is True
+
+
+def test_an_unreadable_read_never_reaches_the_serializer():
+    """The refusal carries evidence, not a board, so nothing can serialize it."""
+
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    comparison_service, _ = _service([beyond], max_markets=1)
+
+    with pytest.raises(UnreadableComparisonBoardError) as error:
+        comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
+
+    with pytest.raises(TypeError, match="comparison board"):
+        serialize_board(error.value.board_evidence)
+
+
+def test_an_unreadable_oversized_read_is_observed_from_what_it_observed():
+    """The outage is counted with the read that happened, not an empty one."""
+
+    recorder = RecordingRecorder()
+    beyond = _snapshot(
+        "dabble",
+        (
+            _market(market_id="m-1", threshold="25.5"),
+            _market(market_id="m-2", threshold="26.5"),
+        ),
+        retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+    )
+    comparison_service, _ = _service([beyond], max_markets=1)
+    service = build_service(comparison_service)
+
+    with pytest.raises(DFSBoardUnavailableError):
+        observed(
+            service,
+            lambda observation: service.respond(
+                board_request(), observation=observation
+            ),
+            status_code=503,
+            recorder=recorder,
+        )
+
+    event = recorder.events[0]
+    assert (event.outcome, event.status_code) == ("unavailable", 503)
+    assert event.market_count == 2
+    assert event.unresolved_count == 2
+    assert event.group_count == 0
+    assert event.comparison_availability == "available"
+    assert event.provider_status_counts == (("complete", 1),)
+    assert event.freshness_counts == (("unknown", 1),)
+    assert event.disabled_provider_count == 2
 
 
 def test_an_oversized_read_with_one_readable_provider_is_still_too_large():

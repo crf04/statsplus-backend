@@ -34,6 +34,7 @@ from app.domain.comparisons import (
     SUPPORTED_NARROWING_FILTERS,
     NumericDomainError,
     BoardCacheState,
+    BoardReadEvidence,
     ComparisonBoard,
     ComparisonGroup,
     ComparisonMember,
@@ -85,6 +86,7 @@ from app.services import comparison_board
 from app.services.comparison_board import (
     ComparisonBoardService,
     ComparisonBoardTooLargeError,
+    UnreadableComparisonBoardError,
 )
 from app.services.dfs_board import (
     DFSBoard,
@@ -1154,8 +1156,8 @@ def test_an_unreadable_stale_read_over_the_ceiling_is_not_refused_as_too_large()
     """Readability is settled before size: an outage is not an over-large board.
 
     Nothing on this read may be compared, so there is no board to be too large
-    of; the read comes back carrying only the bounded evidence the response
-    seam needs to state the outage.
+    of, and none is built.  The read fails with its own type, carrying only the
+    bounded evidence the response seam needs to state the outage.
     """
 
     service, _ = _service(
@@ -1169,15 +1171,51 @@ def test_an_unreadable_stale_read_over_the_ceiling_is_not_refused_as_too_large()
         max_markets=1,
     )
 
-    board = _read(service)
+    with pytest.raises(UnreadableComparisonBoardError) as error:
+        _read(service)
 
-    assert board.market_count == 2
-    assert board.unresolved_count == 2
-    assert board.groups == ()
-    assert board.markets == ()
-    assert board.unresolved == ()
-    assert [report.freshness for report in board.provider_reports] == [None]
-    assert [report.status for report in board.provider_reports] == ["complete"]
+    evidence = error.value.board_evidence
+    assert isinstance(evidence, BoardReadEvidence)
+    assert evidence.market_count == 2
+    assert evidence.unresolved_count == 2
+    assert evidence.group_count == 0
+    assert [report.freshness for report in evidence.provider_reports] == [None]
+    assert [report.status for report in evidence.provider_reports] == ["complete"]
+
+
+def test_an_unreadable_read_is_a_distinct_type_carrying_no_board():
+    """The refusal is its own type, and it publishes nothing serializable.
+
+    It is not a too-large refusal, so nothing can mistake an outage for a
+    board a caller could narrow, and it carries no ``ComparisonBoard`` at all,
+    so no count-only board can reach the serializer.
+    """
+
+    service, _ = _service(
+        [
+            _snapshot(
+                "dabble",
+                _oversized_markets(),
+                retrieved_at=GENERATED_AT - timedelta(seconds=1801),
+            )
+        ],
+        max_markets=1,
+    )
+
+    with pytest.raises(UnreadableComparisonBoardError) as error:
+        _read(service)
+
+    assert not isinstance(error.value, ComparisonBoardTooLargeError)
+    # Its central public contract is the same safe 503 the response seam
+    # states, so an escape can never publish a 400 telling a caller to narrow
+    # filters that cannot make an outage readable.
+    assert error.value.status_code == 503
+    assert error.value.code == "provider_unavailable"
+    assert error.value.public_details is None
+    assert not any(
+        isinstance(getattr(error.value, name, None), ComparisonBoard)
+        for name in vars(error.value)
+    )
 
 
 def test_an_unreadable_future_read_over_the_ceiling_is_not_refused_as_too_large():
@@ -1192,13 +1230,14 @@ def test_an_unreadable_future_read_over_the_ceiling_is_not_refused_as_too_large(
         max_markets=1,
     )
 
-    board = _read(service)
+    with pytest.raises(UnreadableComparisonBoardError) as error:
+        _read(service)
 
-    assert board.market_count == 2
-    assert board.unresolved_count == 2
-    assert board.groups == ()
-    assert board.markets == ()
-    assert [report.future_observation for report in board.provider_reports] == [True]
+    evidence = error.value.board_evidence
+    assert evidence.market_count == 2
+    assert evidence.unresolved_count == 2
+    assert evidence.group_count == 0
+    assert [report.future_observation for report in evidence.provider_reports] == [True]
 
 
 def test_a_read_at_the_exact_stale_ceiling_is_readable_and_still_too_large():
@@ -1282,11 +1321,14 @@ def test_precedence_does_not_depend_on_the_order_providers_were_read(reversed_or
         list(reversed(snapshots)) if reversed_order else snapshots, max_markets=1
     )
 
-    board = _read(service)
+    with pytest.raises(UnreadableComparisonBoardError) as error:
+        _read(service)
 
-    assert board.market_count == 3
-    assert board.unresolved_count == 3
-    assert board.groups == ()
+    evidence = error.value.board_evidence
+    assert evidence.market_count == 3
+    assert evidence.unresolved_count == 3
+    assert evidence.group_count == 0
+    assert evidence.disabled_providers == ("underdog",)
 
 
 # -- empty and complete ----------------------------------------------------
@@ -1790,6 +1832,87 @@ def test_an_unavailable_board_cannot_carry_groups():
             ),
             groups=(group,),
         )
+
+
+def _available():
+    return comparisons.ComparisonAvailability(
+        available=True,
+        catalogs=(
+            comparisons.CatalogAvailability(
+                catalog="athlete_catalog", season=SEASON, available=True
+            ),
+        ),
+    )
+
+
+def test_a_board_cannot_state_a_market_count_it_did_not_retain():
+    """Every actual board agrees with itself: what it counted, it kept."""
+
+    with pytest.raises(ValueError, match="retain every market it counted"):
+        ComparisonBoard(
+            season=SEASON,
+            generated_at=GENERATED_AT,
+            availability=_available(),
+            market_count=2,
+        )
+
+
+def test_a_board_cannot_state_an_unresolved_count_it_did_not_retain():
+    with pytest.raises(ValueError, match="retain every unresolved market it counted"):
+        ComparisonBoard(
+            season=SEASON,
+            generated_at=GENERATED_AT,
+            availability=_available(),
+            unresolved_count=2,
+        )
+
+
+def test_a_board_counts_exactly_what_it_retained():
+    unresolved = (
+        comparisons.UnresolvedMarket(
+            market_reference="ref-1",
+            provider="dabble",
+            reason=ComparisonExclusion.STALE_SNAPSHOT,
+        ),
+    )
+    board = ComparisonBoard(
+        season=SEASON,
+        generated_at=GENERATED_AT,
+        availability=_available(),
+        unresolved=unresolved,
+    )
+
+    assert board.unresolved_count == 1
+    assert board.market_count == 0
+    assert board.is_empty is False
+
+
+def test_a_board_retaining_a_market_is_never_empty():
+    """Emptiness is read from everything the board kept, counts included."""
+
+    service, _ = _service([_snapshot("dabble", (_market(market_id="m-1"),))])
+    retained = _read(service).markets
+
+    board = ComparisonBoard(
+        season=SEASON,
+        generated_at=GENERATED_AT,
+        availability=_available(),
+        markets=retained,
+        market_count=len(retained),
+    )
+
+    assert retained
+    assert board.is_empty is False
+
+
+def test_an_empty_board_states_nothing_at_all():
+    board = ComparisonBoard(
+        season=SEASON, generated_at=GENERATED_AT, availability=_available()
+    )
+
+    assert board.is_empty is True
+    assert board.market_count == 0
+    assert board.unresolved_count == 0
 
 
 def test_filters_normalize_and_reject_values_that_name_nothing():
