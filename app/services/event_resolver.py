@@ -787,8 +787,18 @@ class EventResolver:
         as a conflict.  The matchup label is presentation and is never compared;
         a start time inside the reviewed window is a reschedule of the same
         game rather than a different one.
+
+        The provider's own canonical event claim is such a fact -- it is what
+        the provider says this fixture *is*, and two markets claiming different
+        ones already contradict each other -- so an observation that renames
+        the claim is evidence the operator never reviewed, whatever else about
+        the matchup still matches.
         """
 
+        previous_claim = existing.get("provider_canonical_event_id")
+        if previous_claim is not None and evidence.canonical_id is not None:
+            if str(previous_claim).strip() != str(evidence.canonical_id).strip():
+                return True
         for side in ("home", "away"):
             team = getattr(evidence, f"{side}_team")
             if team is None:

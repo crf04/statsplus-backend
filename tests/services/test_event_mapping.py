@@ -1449,6 +1449,195 @@ def test_a_manual_decision_records_the_provider_canonical_claim(event_db):
     assert approved.decision.provider_canonical_event_id == "ud-evt-1"
 
 
+def test_a_governed_identity_claiming_another_canonical_event_fails_closed(event_db):
+    """The reviewed claim is provider identity, so a new one is unreviewed.
+
+    An operator approved *this* fixture as the game the provider then named
+    ``ud-evt-1``.  A later read that keeps the matchup and the tip-off but
+    claims to be a different provider event is not the evidence the operator
+    reviewed, so the identity fails closed instead of lending the approval to a
+    fixture nobody looked at.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+
+    reclaimed = resolver.resolve("underdog", _evidence(canonical_id="ud-evt-2"), SEASON)
+    result = repository.record_resolution(reclaimed)
+    repeated = repository.record_resolution(
+        resolver.resolve("underdog", _evidence(canonical_id="ud-evt-2"), SEASON)
+    )
+
+    assert reclaimed.state is EventResolutionState.MAPPING_CONFLICT
+    assert reclaimed.reason == "manual_mapping_conflict"
+    assert result.state == "mapping_conflict"
+    assert repeated.persisted is False
+    mapping = repository.get_mapping("underdog", "ud-1")
+    assert mapping.mapping_state == "mapping_conflict"
+    assert mapping.canonical_event_id == "0022500001"
+    # The claim an operator has to review is the one the provider now reports.
+    assert mapping.provider_canonical_event_id == "ud-evt-2"
+    decisions = repository.history(provider="underdog", provider_event_id="ud-1")
+    assert [decision.decision_state for decision in decisions] == [
+        "manual_approved",
+        "mapping_conflict",
+    ]
+    assert [decision.provider_canonical_event_id for decision in decisions] == [
+        "ud-evt-1",
+        "ud-evt-2",
+    ]
+
+
+def test_a_canonical_claim_only_one_side_reports_is_not_a_conflict(event_db):
+    """Sparse evidence is the same identity described with less, as elsewhere.
+
+    A claim only the approval carries, or only the observation carries, gives
+    nothing to disagree with, so the governed mapping still answers for it.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+    repository.approve(
+        "underdog",
+        "ud-2",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence("ud-2"),
+    )
+
+    observation_omits = resolver.resolve("underdog", _evidence(), SEASON)
+    approval_omits = resolver.resolve(
+        "underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON
+    )
+
+    assert observation_omits.state is EventResolutionState.MANUAL_APPROVED
+    assert approval_omits.state is EventResolutionState.MANUAL_APPROVED
+    assert repository.record_resolution(observation_omits).state == "manual_approved"
+    assert repository.record_resolution(approval_omits).state == "manual_approved"
+    assert repository.list_conflicts() == []
+
+
+def test_the_in_lock_recheck_compares_the_provider_canonical_claim(event_db):
+    """The recheck reads the decision an operator has since recorded.
+
+    A conflict resolved between the resolver's read and this transaction must
+    not requeue, and one the newest decision still contradicts must promote.
+    The claim decides both ways, exactly as it does outside the transaction.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    for provider_event_id in ("ud-1", "ud-2"):
+        repository.approve(
+            "underdog",
+            provider_event_id,
+            "0022500001",
+            season=SEASON,
+            operator_id="ops",
+            reason="reviewed",
+            provider_evidence=_evidence(provider_event_id, canonical_id="ud-evt-1"),
+        )
+    accepted = resolver.resolve("underdog", _evidence(canonical_id="ud-evt-2"), SEASON)
+    contradicted = resolver.resolve(
+        "underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON
+    )
+
+    # The operator accepts the reclaimed fixture for one identity only, after
+    # the resolver already read both conflicts.
+    repository.override(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="the fixture was re-keyed",
+        provider_evidence=_evidence(canonical_id="ud-evt-2"),
+    )
+
+    assert accepted.state is EventResolutionState.MAPPING_CONFLICT
+    assert contradicted.state is EventResolutionState.MAPPING_CONFLICT
+    assert repository.record_resolution(accepted).state == "manual_override"
+    assert repository.record_resolution(contradicted).state == "mapping_conflict"
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
+        "0022500001"
+    )
+    assert repository.get_mapping("underdog", "ud-2").mapping_state == "mapping_conflict"
+    assert [
+        conflict.mapping.provider_event_id for conflict in repository.list_conflicts()
+    ] == ["ud-2"]
+
+
+def test_simultaneous_contradictory_claims_unseat_a_manual_approval(event_db):
+    """One read that cannot say which provider event the fixture is.
+
+    Two markets of one identity claiming different provider events contradict
+    each other, and the approval covers at most one of them, so the manual
+    mapping does not absorb the contradiction.  Every claim stays reviewable,
+    and repeating the same read is the same observation.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+    disagreeing = (
+        _market("m-1", event=_evidence(canonical_id="ud-evt-1")),
+        _market("m-2", event=_evidence(canonical_id="ud-evt-2")),
+    )
+    query = NBAMarketQuery(season=SEASON)
+
+    _board_service(
+        _snapshot(*disagreeing), resolver=resolver, repository=repository
+    ).get_board(query)
+    _board_service(
+        _snapshot(*reversed(disagreeing)), resolver=resolver, repository=repository
+    ).get_board(query)
+
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
+        "mapping_conflict"
+    )
+    decisions = repository.history(provider="underdog", provider_event_id="ud-1")
+    assert [decision.decision_state for decision in decisions] == [
+        "manual_approved",
+        "mapping_conflict",
+    ]
+    assert {
+        item.provider_canonical_event_id
+        for item in decisions[1].contradictory_evidence
+    } == {"ud-evt-1", "ud-evt-2"}
+
+
 # -- durable contradictory evidence ------------------------------------------
 
 

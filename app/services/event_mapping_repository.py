@@ -1706,7 +1706,9 @@ class EventMappingRepository:
         Observation order cannot stand in for that comparison: a read taken
         after the decision may still carry evidence the operator never reviewed.
 
-        The canonical choice is deliberately not compared.  An operator who
+        The operator's canonical *game* choice is deliberately not compared --
+        unlike the provider's own canonical claim, which is evidence.  An
+        operator who
         accepts the provider's observation may still keep or pick a canonical
         game the automatic side would not have chosen -- that disagreement is
         the decision, not a conflict.  A contradiction asserts several evidences
