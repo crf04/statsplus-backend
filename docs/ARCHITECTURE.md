@@ -657,9 +657,13 @@ internal team windows for the current product: Season and exact rolling 15
 games. There is deliberately no public matchup route in this layer; the narrow
 consumer seams are `TeamMatchupQueryService.get_window(scope)` and
 `get_latest_window(season, window_games, as_of)`. The latter deterministically
-selects the greatest stored as-of date no later than an optional Slate Date;
-it returns the selected snapshot's persisted per-surface collection times, so
-route code does not mistake "latest row" for "fresh now."
+selects the greatest observation date no later than an optional Slate Date,
+while resolving each surface's most recent fact-bearing scope independently.
+It therefore returns the last usable facts alongside the newest persisted
+failure or freshness observation instead of letting a fact-free failed run
+hide yesterday's valid values. Future cutoffs are rejected and the default
+cutoff is the injected clock's current ET date, so future-dated rows cannot
+shadow current data.
 
 Rolling boundaries come only from completed, governed `event_catalog` games.
 The resolver excludes postponed, preseason, All-Star, non-final, and
@@ -679,10 +683,12 @@ shot-zone aggregate must identify the team (that endpoint exposes no game
 count). A surface that cannot prove its requested aggregate is discarded and
 observed as `unavailable/provider_window_unverified`, never mislabeled
 Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
-ISO `FromDate`, and the common ISO `ToDate`; one league-wide cutoff is never
-used. Synergy exposes neither Last-N nor date bounds, so its Last-15 play-type
-rows and observation are `unavailable/provider_unsupported`; no Season value
-is relabeled as Last-15.
+ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
+team and expose an aggregate count of exactly 15 games. A date-bounded PBP
+response without that proof is `unavailable/provider_window_unverified`; one
+league-wide cutoff is never used. Synergy exposes neither Last-N nor date
+bounds, so its fact-free Last-15 play-type observation is
+`unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
 
 Before every team has 15 governed completions, the same transaction publishes
 the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces
@@ -691,10 +697,15 @@ successful early in the season. Season NBA and PBP aggregates are bounded by
 the snapshot date. Season Synergy is collected only for a current-date
 snapshot; a backdated as-of cannot bound Synergy and records
 `unavailable/provider_unbounded_as_of` instead of combining mismatched scopes.
+If the governed catalog does not yet identify exactly the NBA's 30 teams, the
+refresh also succeeds with fact-free
+`missing/governed_team_roster_incomplete` observations. Neither case deletes
+an earlier valid fact snapshot.
 
 Migration 012 creates `team_matchup_facts` and
-`team_matchup_surface_observations`. The intentional version gap reserves
-migration 011 for the independently developed player-log prerequisite (#56).
+`team_matchup_surface_observations`. Its integration prerequisite is the
+player-log migration 011 from #56; #57 must be rebased after #56 so fresh
+databases apply 011 and then 012.
 A fact is identified by season, as-of date, window kind plus rolling game
 count, team, Base, slice, and stat. Available facts retain the provider's raw
 numerator and its raw minutes or seconds denominator; they do not
@@ -702,17 +713,21 @@ persist a previously normalized ratio or rank. Surface observations retain a
 timezone-aware collection time and an `available`, `unavailable`, or `missing`
 status plus explicit reason per window.
 
-Both windows are fully collected before one repository transaction deletes
-and replaces either snapshot. Repeating a publication is idempotent. A
-provider, transform, constraint, or transaction failure leaves both prior
-snapshots intact; the Nightly Refresh retries the complete stats → schedule →
-team-matchups unit once. The query service derives allowed-per-48 from the raw
-numerator/denominator and requires exactly 30 distinct teams for every
-available league metric. It then computes the 30-team mean, population sigma,
-percent versus average, sigma deviation, and defensive rank. Player scoring
-and Diet Shares are outside this team-window store and remain Season-only. If
-the 30-team mean is zero, percent-versus-average is null because that ratio is
-undefined; a zero population sigma yields a conventional zero sigma deviation.
+Both windows are fully collected before one repository transaction replaces
+observations and each newly valid surface. Repeating a publication is
+idempotent. Available surfaces are written only when every metric has the same
+30 distinct teams and finite raw numerators plus positive finite minutes or
+seconds; partial, non-finite, or mislabeled data becomes a fact-free unavailable
+observation and leaves prior valid facts intact. A provider transport,
+constraint, or transaction failure likewise leaves both prior snapshots
+intact; the Nightly Refresh retries the complete stats → schedule →
+team-matchups unit once. The query service defensively degrades only an
+affected incomplete legacy surface and derives allowed-per-48 from valid raw
+facts. It then computes the 30-team mean, population sigma, percent versus
+average, sigma deviation, and defensive rank. Player scoring and Diet Shares
+are outside this team-window store and remain Season-only. If the 30-team mean
+is zero, percent-versus-average is null because that ratio is undefined; a
+zero population sigma yields a conventional zero sigma deviation.
 
 One fully available run makes 17 Season provider calls (16 NBA, one PBP) and
 180 rolling calls (five NBA plus one PBP for each of 30 teams). The calls stay
@@ -1713,10 +1728,10 @@ catalog read seam with a provider that refuses every call, so it is offline by
 construction.
 
 Migration 012 creates the raw window-aware team matchup tables described
-above. It is safe to apply directly after migration 010 on this standalone
-branch; when #56 lands as migration 011, normal ordered migration execution
-will apply 011 before 012 on a fresh database. A branch rebased after another
-change claims either number must rename its migration before merge.
+above. The merge sequence is fixed: land #56's migration 011, rebase #57, then
+rerun the migration and full repository gates so a fresh database applies 011
+before 012. The standalone branch's development migration tests do not replace
+that integration gate.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without

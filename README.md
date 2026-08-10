@@ -183,6 +183,9 @@ the current observation expires.
 Early in a season, the same successful unit publishes Season facts and an
 explicitly missing Last-15 observation until every team has 15 governed
 completed games; it never substitutes a shorter or mixed-phase window.
+An incomplete governed 30-team catalog is also recorded as a fact-free missing
+observation without failing the Nightly unit. Failed or incomplete surface
+observations do not replace the most recent usable facts.
 
 Validate the bundled fixture without changing it:
 

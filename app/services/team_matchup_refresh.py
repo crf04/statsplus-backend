@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -32,6 +32,31 @@ from app.services.team_matchup_repository import (
 EASTERN = ZoneInfo("America/New_York")
 
 
+def governed_season_type(event: Mapping[str, Any]) -> str | None:
+    """Return the provider season type for a canonical governed NBA event."""
+
+    game_id = str(event.get("nba_game_id") or "")
+    classification = resolve_stored_event_classification(
+        game_id, str(event.get("classification") or "")
+    )
+    if (
+        is_all_star_kind(classification.kind)
+        or is_all_star_kind(classification.display)
+        or is_preseason_kind(classification.kind)
+        or is_preseason_kind(classification.display)
+    ):
+        return None
+    if classification.kind in {"Regular Season", "Playoffs"}:
+        return classification.kind
+    return None
+
+
+def is_governed_event(event: Mapping[str, Any]) -> bool:
+    """Whether an event belongs to the canonical regular/postseason schedule."""
+
+    return governed_season_type(event) is not None
+
+
 @dataclass(frozen=True, slots=True)
 class TeamWindowBoundary:
     """The exact governed games and provider date bounds for one team."""
@@ -46,11 +71,12 @@ class TeamWindowBoundary:
 class TeamWindowBoundaryResolver:
     """Resolve rolling windows from the canonical governed schedule."""
 
-    def __init__(self, event_catalog: Any) -> None:
-        self.event_catalog = event_catalog
-
     def last_n(
-        self, season: str, *, as_of: date, window_games: int
+        self,
+        events: list[dict[str, Any]],
+        *,
+        as_of: date,
+        window_games: int,
     ) -> dict[int, TeamWindowBoundary]:
         if (
             not isinstance(window_games, int)
@@ -60,14 +86,12 @@ class TeamWindowBoundaryResolver:
             raise ValueError("window_games must be a positive integer")
 
         games_by_team: dict[int, list[tuple[datetime, str, str]]] = defaultdict(list)
-        for event in self.event_catalog.get_events(season):
-            if not self._is_governed_completion(event, as_of=as_of):
+        for event in events:
+            season_type = governed_season_type(event)
+            if season_type is None or not self._is_completed_by(event, as_of=as_of):
                 continue
             scheduled_at = self._scheduled_at(event)
             game_id = str(event["nba_game_id"])
-            season_type = self._governed_season_type(event)
-            if season_type is None:  # covered by _is_governed_completion
-                continue
             for field in ("home_team_id", "away_team_id"):
                 games_by_team[int(event[field])].append(
                     (scheduled_at, game_id, season_type)
@@ -99,9 +123,7 @@ class TeamWindowBoundaryResolver:
         return parse_utc_iso(str(value))
 
     @classmethod
-    def _is_governed_completion(cls, event: dict[str, Any], *, as_of: date) -> bool:
-        if not cls._is_governed_event(event):
-            return False
+    def _is_completed_by(cls, event: dict[str, Any], *, as_of: date) -> bool:
         if is_postponed_event(event):
             return False
         is_final = event.get("status_code") == NBAGameStatus.FINAL or str(
@@ -111,32 +133,10 @@ class TeamWindowBoundaryResolver:
             return False
         return cls._scheduled_at(event).astimezone(EASTERN).date() <= as_of
 
-    @staticmethod
-    def _is_governed_event(event: dict[str, Any]) -> bool:
-        return TeamWindowBoundaryResolver._governed_season_type(event) is not None
-
-    @staticmethod
-    def _governed_season_type(event: dict[str, Any]) -> str | None:
-        game_id = str(event.get("nba_game_id") or "")
-        classification = resolve_stored_event_classification(
-            game_id, str(event.get("classification") or "")
-        )
-        if (
-            is_all_star_kind(classification.kind)
-            or is_all_star_kind(classification.display)
-            or is_preseason_kind(classification.kind)
-            or is_preseason_kind(classification.display)
-        ):
-            return None
-        if classification.kind in {"Regular Season", "Playoffs"}:
-            return classification.kind
-        return None
-
-
 _TRADITIONAL_STATS = {
-    "OPP_TOV": ("OPP_TOV", "TOV"),
-    "OPP_STL": ("OPP_STL", "STL"),
-    "OPP_BLK": ("OPP_BLK", "BLK"),
+    "OPP_TOV": "OPP_TOV",
+    "OPP_STL": "OPP_STL",
+    "OPP_BLK": "OPP_BLK",
 }
 _SHOT_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
 _ASSIST_STATS = (
@@ -177,45 +177,59 @@ class TeamMatchupRefreshService:
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self.boundaries = TeamWindowBoundaryResolver(event_catalog)
 
     def refresh(self, season: str, *, as_of: date | None = None) -> None:
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(self._clock())
-        snapshot_date = as_of or retrieved_at.astimezone(EASTERN).date()
+        current_date = retrieved_at.astimezone(EASTERN).date()
+        snapshot_date = as_of or current_date
+        if snapshot_date > current_date:
+            raise ValueError("future as_of dates cannot be published")
         events = self.event_catalog.get_events(canonical_season)
         team_ids = self._team_ids(events)
-        if len(team_ids) != 30:
-            raise ValueError(
-                "team matchup refresh requires the governed 30-team league"
-            )
-        boundaries = self.boundaries.last_n(
-            canonical_season, as_of=snapshot_date, window_games=15
-        )
-
         season_scope = TeamMatchupSnapshotScope(canonical_season, snapshot_date)
         rolling_scope = TeamMatchupSnapshotScope(
             canonical_season, snapshot_date, window_games=15
         )
+        if len(team_ids) != 30:
+            observations = self._surface_observations(
+                default_status="missing",
+                default_reason="governed_team_roster_incomplete",
+            )
+            self.repository.replace_snapshots(
+                (
+                    (season_scope, (), observations),
+                    (rolling_scope, (), observations),
+                ),
+                retrieved_at=retrieved_at,
+            )
+            return
+        boundaries = TeamWindowBoundaryResolver().last_n(
+            events, as_of=snapshot_date, window_games=15
+        )
+
         season_play_types_are_bounded = (
             snapshot_date == retrieved_at.astimezone(EASTERN).date()
         )
-        season_facts = self._collect_season(
+        season_facts, season_failures = self._collect_season(
             canonical_season,
             snapshot_date=snapshot_date,
             include_play_types=season_play_types_are_bounded,
         )
         season_observations = self._surface_observations(
-            overrides=(
-                {}
-                if season_play_types_are_bounded
-                else {
-                    "play_types": (
-                        "unavailable",
-                        "provider_unbounded_as_of",
-                    )
-                }
-            )
+            overrides={
+                **(
+                    {}
+                    if season_play_types_are_bounded
+                    else {
+                        "play_types": (
+                            "unavailable",
+                            "provider_unbounded_as_of",
+                        )
+                    }
+                ),
+                **season_failures,
+            }
         )
         if set(boundaries) != set(team_ids):
             rolling_facts = []
@@ -277,7 +291,7 @@ class TeamMatchupRefreshService:
                 {
                     int(event[field])
                     for event in events
-                    if TeamWindowBoundaryResolver._is_governed_event(event)
+                    if is_governed_event(event)
                     for field in ("home_team_id", "away_team_id")
                 }
             )
@@ -289,7 +303,7 @@ class TeamMatchupRefreshService:
         *,
         snapshot_date: date,
         include_play_types: bool,
-    ) -> list[TeamMatchupFact]:
+    ) -> tuple[list[TeamMatchupFact], dict[str, tuple[str, str | None]]]:
         date_to = self._nba_date(snapshot_date)
         common = {
             "season": season,
@@ -298,49 +312,83 @@ class TeamMatchupRefreshService:
             "last_n_games": 0,
             "date_to": date_to,
         }
-        traditional_frame = self.nba_stats.fetch_opponent_team_stats(
-            None, per_mode_detailed="Totals", **common
-        )
-        minutes_by_team = self._minutes_by_team(traditional_frame)
-        facts = self._traditional_facts(traditional_frame)
-        for shooting_type in SHOOTING_TYPES:
-            facts.extend(
-                self._shot_type_facts(
-                    self.nba_stats.fetch_opponent_shot_chart(
-                        shooting_type,
-                        None,
-                        per_mode_simple="Totals",
-                        **common,
+        facts_by_surface: dict[str, list[TeamMatchupFact]] = {
+            surface: [] for surface in MATCHUP_SURFACES
+        }
+        failures: dict[str, tuple[str, str | None]] = {}
+        try:
+            traditional_frame = self.nba_stats.fetch_opponent_team_stats(
+                None, per_mode_detailed="Totals", **common
+            )
+            minutes_by_team = self._minutes_by_team(traditional_frame)
+        except ValueError:
+            minutes_by_team = None
+            for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
+                failures[surface] = ("unavailable", "provider_invalid_response")
+        if minutes_by_team is not None:
+            try:
+                facts_by_surface["traditional"] = self._traditional_facts(
+                    traditional_frame
+                )
+            except ValueError:
+                failures["traditional"] = (
+                    "unavailable",
+                    "provider_invalid_response",
+                )
+            try:
+                for shooting_type in SHOOTING_TYPES:
+                    facts_by_surface["shot_types"].extend(
+                        self._shot_type_facts(
+                            self.nba_stats.fetch_opponent_shot_chart(
+                                shooting_type,
+                                None,
+                                per_mode_simple="Totals",
+                                **common,
+                            ),
+                            shooting_type,
+                            minutes_by_team=minutes_by_team,
+                        )
+                    )
+            except ValueError:
+                failures["shot_types"] = (
+                    "unavailable",
+                    "provider_invalid_response",
+                )
+            try:
+                facts_by_surface["shot_zones"] = self._shot_zone_facts(
+                    self.nba_stats.fetch_opponent_shooting_zone(
+                        None, per_mode_detailed="Totals", **common
                     ),
-                    shooting_type,
                     minutes_by_team=minutes_by_team,
                 )
-            )
-        facts.extend(
-            self._shot_zone_facts(
-                self.nba_stats.fetch_opponent_shooting_zone(
-                    None, per_mode_detailed="Totals", **common
-                ),
-                minutes_by_team=minutes_by_team,
-            )
-        )
-        if include_play_types:
-            for play_type in PLAY_TYPES:
-                facts.extend(
-                    self._play_type_facts(
-                        self.nba_stats.fetch_synergy_play_types(
-                            play_type,
-                            player_or_team_abbreviation="T",
-                            type_grouping="Defensive",
-                            season=season,
-                            per_mode_simple="Totals",
-                        ),
-                        play_type,
-                        minutes_by_team=minutes_by_team,
-                    )
+            except ValueError:
+                failures["shot_zones"] = (
+                    "unavailable",
+                    "provider_invalid_response",
                 )
-        facts.extend(
-            self._assist_facts(
+            if include_play_types:
+                try:
+                    for play_type in PLAY_TYPES:
+                        facts_by_surface["play_types"].extend(
+                            self._play_type_facts(
+                                self.nba_stats.fetch_synergy_play_types(
+                                    play_type,
+                                    player_or_team_abbreviation="T",
+                                    type_grouping="Defensive",
+                                    season=season,
+                                    per_mode_simple="Totals",
+                                ),
+                                play_type,
+                                minutes_by_team=minutes_by_team,
+                            )
+                        )
+                except ValueError:
+                    failures["play_types"] = (
+                        "unavailable",
+                        "provider_invalid_response",
+                    )
+        try:
+            facts_by_surface["assist_locations"] = self._assist_facts(
                 self.pbp_stats.fetch_totals_frame(
                     "opponent",
                     season=season,
@@ -350,8 +398,20 @@ class TeamMatchupRefreshService:
                     to_date=snapshot_date.isoformat(),
                 )
             )
+        except ValueError:
+            failures["assist_locations"] = (
+                "unavailable",
+                "provider_invalid_response",
+            )
+        return (
+            [
+                fact
+                for surface, surface_facts in facts_by_surface.items()
+                if surface not in failures
+                for fact in surface_facts
+            ],
+            failures,
         )
-        return facts
 
     def _collect_last_15(
         self,
@@ -366,21 +426,23 @@ class TeamMatchupRefreshService:
         facts_by_surface: dict[str, list[TeamMatchupFact]] = {
             surface: [] for surface in MATCHUP_SURFACES
         }
-        unverified_surfaces: set[str] = set()
+        failures: dict[str, tuple[str, str | None]] = {}
         date_to = self._nba_date(snapshot_date)
         for team_id in team_ids:
             boundary = boundaries[team_id]
-            if boundary.season_type is None:
-                raise ValueError("a mixed-phase rolling window cannot be collected")
+            season_type = cast(str, boundary.season_type)
             common = {
                 "season": season,
-                "season_type": boundary.season_type,
+                "season_type": season_type,
                 "team_id": team_id,
                 "last_n_games": 15,
                 "date_to": date_to,
             }
             minutes_by_team = None
-            if "traditional" not in unverified_surfaces:
+            if any(
+                surface not in failures
+                for surface in ("traditional", "shot_types", "shot_zones")
+            ):
                 try:
                     traditional_frame = self.nba_stats.fetch_opponent_team_stats(
                         self._nba_date(boundary.from_date),
@@ -393,22 +455,31 @@ class TeamMatchupRefreshService:
                         expected_games=len(boundary.game_ids),
                         require_game_count=True,
                     )
-                    try:
-                        minutes_by_team = self._minutes_by_team(traditional_frame)
-                    except ValueError as error:
-                        raise _ProviderWindowUnverified(str(error)) from error
-                    facts_by_surface["traditional"].extend(
-                        self._with_start(
-                            self._traditional_facts(traditional_frame),
-                            boundary.from_date,
+                    minutes_by_team = self._minutes_by_team(traditional_frame)
+                    if "traditional" not in failures:
+                        facts_by_surface["traditional"].extend(
+                            self._with_start(
+                                self._traditional_facts(traditional_frame),
+                                boundary.from_date,
+                            )
                         )
-                    )
                 except _ProviderWindowUnverified:
-                    unverified_surfaces.update(
-                        {"traditional", "shot_types", "shot_zones"}
+                    failures["traditional"] = (
+                        "unavailable",
+                        "provider_window_unverified",
                     )
+                    failures["shot_types"] = failures["traditional"]
+                    failures["shot_zones"] = failures["traditional"]
+                except ValueError:
+                    failures["traditional"] = (
+                        "unavailable",
+                        "provider_invalid_response",
+                    )
+                    if minutes_by_team is None:
+                        failures["shot_types"] = failures["traditional"]
+                        failures["shot_zones"] = failures["traditional"]
 
-            if minutes_by_team is not None and "shot_types" not in unverified_surfaces:
+            if minutes_by_team is not None and "shot_types" not in failures:
                 try:
                     team_shot_type_facts = []
                     for shooting_type in SHOOTING_TYPES:
@@ -435,9 +506,17 @@ class TeamMatchupRefreshService:
                         self._with_start(team_shot_type_facts, boundary.from_date)
                     )
                 except _ProviderWindowUnverified:
-                    unverified_surfaces.add("shot_types")
+                    failures["shot_types"] = (
+                        "unavailable",
+                        "provider_window_unverified",
+                    )
+                except ValueError:
+                    failures["shot_types"] = (
+                        "unavailable",
+                        "provider_invalid_response",
+                    )
 
-            if minutes_by_team is not None and "shot_zones" not in unverified_surfaces:
+            if minutes_by_team is not None and "shot_zones" not in failures:
                 try:
                     frame = self.nba_stats.fetch_opponent_shooting_zone(
                         self._nba_date(boundary.from_date),
@@ -460,14 +539,22 @@ class TeamMatchupRefreshService:
                         )
                     )
                 except _ProviderWindowUnverified:
-                    unverified_surfaces.add("shot_zones")
+                    failures["shot_zones"] = (
+                        "unavailable",
+                        "provider_window_unverified",
+                    )
+                except ValueError:
+                    failures["shot_zones"] = (
+                        "unavailable",
+                        "provider_invalid_response",
+                    )
 
-            if "assist_locations" not in unverified_surfaces:
+            if "assist_locations" not in failures:
                 try:
                     frame = self.pbp_stats.fetch_totals_frame(
                         "opponent",
                         season=season,
-                        season_type=boundary.season_type,
+                        season_type=season_type,
                         team_id=team_id,
                         from_date=boundary.from_date.isoformat(),
                         to_date=boundary.to_date.isoformat(),
@@ -476,7 +563,7 @@ class TeamMatchupRefreshService:
                         frame,
                         team_id=team_id,
                         expected_games=len(boundary.game_ids),
-                        require_game_count=False,
+                        require_game_count=True,
                     )
                     facts_by_surface["assist_locations"].extend(
                         self._with_start(
@@ -485,34 +572,22 @@ class TeamMatchupRefreshService:
                         )
                     )
                 except _ProviderWindowUnverified:
-                    unverified_surfaces.add("assist_locations")
-
-            facts_by_surface["play_types"].extend(
-                TeamMatchupFact(
-                    team_id=team_id,
-                    base="play_types",
-                    slice_key=play_type,
-                    stat_key="PTS",
-                    raw_value=None,
-                    denominator_value=None,
-                    denominator_unit=None,
-                    provider="nba_synergy",
-                    status="unavailable",
-                    unavailable_reason="provider_unsupported",
-                    window_start_date=boundary.from_date,
-                )
-                for play_type in PLAY_TYPES
-            )
+                    failures["assist_locations"] = (
+                        "unavailable",
+                        "provider_window_unverified",
+                    )
+                except ValueError:
+                    failures["assist_locations"] = (
+                        "unavailable",
+                        "provider_invalid_response",
+                    )
         facts = [
             fact
             for surface in MATCHUP_SURFACES
-            if surface not in unverified_surfaces
+            if surface not in failures
             for fact in facts_by_surface[surface]
         ]
-        return facts, {
-            surface: ("unavailable", "provider_window_unverified")
-            for surface in unverified_surfaces
-        }
+        return facts, failures
 
     @staticmethod
     def _nba_date(value: date) -> str:
@@ -621,9 +696,8 @@ class TeamMatchupRefreshService:
         facts = []
         for row in cls._flat_frame(frame).to_dict(orient="records"):
             denominator, unit = cls._denominator(row)
-            for stat_key, candidates in _TRADITIONAL_STATS.items():
-                source = next((name for name in candidates if name in row), None)
-                if source is None:
+            for stat_key, source in _TRADITIONAL_STATS.items():
+                if source not in row:
                     raise ValueError(f"traditional provider row is missing {stat_key}")
                 facts.append(
                     TeamMatchupFact(
@@ -682,6 +756,7 @@ class TeamMatchupRefreshService:
                 column
                 for column in row
                 if str(column).endswith(("_OPP_FGM", "_OPP_FGA"))
+                and "Backcourt" not in str(column)
             ]
             if not stat_columns:
                 raise ValueError(
@@ -759,4 +834,6 @@ __all__ = [
     "TeamMatchupRefreshService",
     "TeamWindowBoundary",
     "TeamWindowBoundaryResolver",
+    "governed_season_type",
+    "is_governed_event",
 ]

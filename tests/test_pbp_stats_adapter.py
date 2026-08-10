@@ -164,6 +164,21 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
     ]
 
 
+def test_health_probe_uses_the_same_canonical_season_type_as_totals():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(status_code=200)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    assert adapter.health_probe() == 200
+    assert calls[0][1]["params"]["SeasonType"] == "Regular Season"
+
+
 def test_fetch_totals_rejects_unsupported_data_type():
     from app.errors import InvalidInputError
 

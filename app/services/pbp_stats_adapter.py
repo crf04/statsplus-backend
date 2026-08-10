@@ -151,7 +151,7 @@ class PBPTotalsAdapter:
             "health_probe",
             {
                 "Season": self.settings.nba.current_season,
-                "SeasonType": "Regular+Season",
+                "SeasonType": "Regular Season",
                 "Type": "Player",
             },
         ) as response:

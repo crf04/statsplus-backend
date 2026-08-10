@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import date
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
+from math import isfinite
 from statistics import fmean, pstdev
+from zoneinfo import ZoneInfo
 
+from app.domain.utc import assume_utc
 from app.services.team_matchup_repository import (
+    StoredTeamMatchupFact,
     StoredTeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+
+
+EASTERN = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +46,7 @@ class TeamMatchupMetric:
 @dataclass(frozen=True, slots=True)
 class TeamMatchupWindow:
     scope: TeamMatchupSnapshotScope
+    fact_scopes: dict[str, TeamMatchupSnapshotScope]
     league_metrics: tuple[LeagueMatchupMetric, ...]
     team_metrics: dict[int, tuple[TeamMatchupMetric, ...]]
     observations: tuple[StoredTeamMatchupObservation, ...]
@@ -46,8 +55,14 @@ class TeamMatchupWindow:
 class TeamMatchupQueryService:
     """Calculate league denominators and team comparisons from raw facts."""
 
-    def __init__(self, repository: TeamMatchupRepository) -> None:
+    def __init__(
+        self,
+        repository: TeamMatchupRepository,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.repository = repository
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def get_latest_window(
         self,
@@ -58,35 +73,82 @@ class TeamMatchupQueryService:
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date."""
 
-        scope = self.repository.get_latest_scope(
-            season, window_games=window_games, as_of=as_of
+        current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
+        if as_of is not None and as_of > current_date:
+            raise ValueError("future as_of dates cannot be queried")
+        cutoff = as_of or current_date
+        observation_scope = self.repository.get_latest_scope(
+            season, window_games=window_games, as_of=cutoff
         )
-        return None if scope is None else self.get_window(scope)
+        if observation_scope is None:
+            return None
+        observations = self.repository.get_snapshot(observation_scope).observations
+        fact_scopes = self.repository.get_latest_fact_scopes(
+            season,
+            window_games=window_games,
+            as_of=cutoff,
+        )
+        facts = []
+        for surface, fact_scope in fact_scopes.items():
+            facts.extend(
+                fact
+                for fact in self.repository.get_snapshot(fact_scope).facts
+                if fact.base == surface
+            )
+        return self._build_window(
+            observation_scope,
+            fact_scopes=fact_scopes,
+            facts=facts,
+            observations=observations,
+        )
 
     def get_window(self, scope: TeamMatchupSnapshotScope) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
+        return self._build_window(
+            scope,
+            fact_scopes={fact.base: scope for fact in snapshot.facts},
+            facts=snapshot.facts,
+            observations=snapshot.observations,
+        )
+
+    def _build_window(
+        self,
+        scope: TeamMatchupSnapshotScope,
+        *,
+        fact_scopes: dict[str, TeamMatchupSnapshotScope],
+        facts: Iterable[StoredTeamMatchupFact],
+        observations: Iterable[StoredTeamMatchupObservation],
+    ) -> TeamMatchupWindow:
         grouped = defaultdict(list)
-        for fact in snapshot.facts:
+        invalid_surfaces: dict[str, str] = {}
+        fact_rows = tuple(facts)
+        for fact in fact_rows:
             if fact.status != "available":
                 continue
-            value = self._allowed_per_48(
-                fact.raw_value, fact.denominator_value, fact.denominator_unit
-            )
+            try:
+                value = self._allowed_per_48(
+                    fact.raw_value, fact.denominator_value, fact.denominator_unit
+                )
+            except ValueError:
+                invalid_surfaces[fact.base] = "provider_invalid_numeric"
+                continue
             grouped[(fact.base, fact.slice_key, fact.stat_key)].append(
                 (fact.team_id, value)
             )
 
-        league_metrics = []
-        team_metrics = defaultdict(list)
-        for key in sorted(grouped):
-            team_values = grouped[key]
+        for key, team_values in grouped.items():
             if (
                 len(team_values) != 30
                 or len({team_id for team_id, _ in team_values}) != 30
             ):
-                raise ValueError(
-                    "team matchup league metrics require exactly 30 distinct teams"
-                )
+                invalid_surfaces[key[0]] = "legacy_surface_incomplete"
+
+        league_metrics = []
+        team_metrics = defaultdict(list)
+        for key in sorted(grouped):
+            if key[0] in invalid_surfaces:
+                continue
+            team_values = grouped[key]
             values = [value for _, value in team_values]
             average = fmean(values)
             sigma = pstdev(values)
@@ -108,26 +170,68 @@ class TeamMatchupQueryService:
                         rank=ranks[value],
                     )
                 )
+        observations_by_surface = {
+            observation.surface: observation for observation in observations
+        }
+        for surface, reason in invalid_surfaces.items():
+            observation = observations_by_surface.get(surface)
+            if observation is None:
+                retrieved_at = max(
+                    fact.retrieved_at
+                    for fact in fact_rows
+                    if fact.base == surface
+                )
+                observations_by_surface[surface] = StoredTeamMatchupObservation(
+                    surface=surface,
+                    status="unavailable",
+                    unavailable_reason=reason,
+                    retrieved_at=retrieved_at,
+                )
+            else:
+                observations_by_surface[surface] = replace(
+                    observation,
+                    status="unavailable",
+                    unavailable_reason=reason,
+                )
         return TeamMatchupWindow(
             scope=scope,
+            fact_scopes={
+                surface: fact_scope
+                for surface, fact_scope in fact_scopes.items()
+                if surface not in invalid_surfaces
+            },
             league_metrics=tuple(league_metrics),
             team_metrics={
                 team_id: tuple(metrics)
                 for team_id, metrics in sorted(team_metrics.items())
             },
-            observations=snapshot.observations,
+            observations=tuple(
+                observations_by_surface[surface]
+                for surface in sorted(observations_by_surface)
+            ),
         )
 
     @staticmethod
     def _allowed_per_48(raw, denominator, denominator_unit) -> float:
-        if raw is None or denominator is None or denominator <= 0:
+        try:
+            raw_value = float(raw)
+            denominator_value = float(denominator)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "an available team matchup fact needs finite numeric values"
+            ) from error
+        if not isfinite(raw_value) or not isfinite(denominator_value):
+            raise ValueError(
+                "an available team matchup fact needs finite numeric values"
+            )
+        if denominator_value <= 0:
             raise ValueError(
                 "an available team matchup fact needs a positive denominator"
             )
         if denominator_unit == "minutes":
-            return float(raw) * 48 / float(denominator)
+            return raw_value * 48 / denominator_value
         if denominator_unit == "seconds":
-            return float(raw) * 48 * 60 / float(denominator)
+            return raw_value * 48 * 60 / denominator_value
         raise ValueError(
             "an available team matchup fact has an unknown denominator unit"
         )

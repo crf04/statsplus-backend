@@ -673,6 +673,36 @@ def test_team_matchup_nba_surface_uses_exact_last_n_and_as_of(monkeypatch):
     ]
 
 
+def test_existing_opponent_stats_call_keeps_provider_scope_defaults(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{"TEAM_ID": 1610612738, "TEAM_NAME": "Boston Celtics"}]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_opponent_team_stats("03/01/2025")
+
+    assert calls == [
+        {
+            "measure_type_detailed_defense": "Opponent",
+            "per_mode_detailed": "Per48",
+            "date_from_nullable": "03/01/2025",
+            "league_id_nullable": "00",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
 def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):
     raw_frame = _recorded_provider_frame()
     normalized_frame = normalize_player_game_logs(raw_frame)

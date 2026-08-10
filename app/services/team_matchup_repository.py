@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from math import isfinite
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
@@ -15,6 +18,9 @@ from app.models.team_matchup import (
     TeamMatchupSurfaceObservationRow,
 )
 from app.utils.db import is_demo_database_url
+
+
+EASTERN = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,28 +130,39 @@ class TeamMatchupRepository:
     ) -> None:
         """Replace related windows in one transaction after collection."""
 
-        prepared = tuple(
+        received = tuple(
             (scope, tuple(facts), tuple(observations))
             for scope, facts, observations in snapshots
         )
-        if not prepared:
+        if not received:
             raise ValueError("at least one team matchup snapshot is required")
-        if any(not observations for _, _, observations in prepared):
+        if any(not observations for _, _, observations in received):
             raise ValueError("a team matchup snapshot needs surface observations")
         observed_at = assume_utc(retrieved_at)
+        current_date = observed_at.astimezone(EASTERN).date()
+        if any(scope.as_of > current_date for scope, _, _ in received):
+            raise ValueError("future as_of dates cannot be published")
+        prepared = tuple(
+            (scope, *self._prepare_surface_publication(facts, observations))
+            for scope, facts, observations in received
+        )
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
-            for scope, fact_rows, observation_rows in prepared:
+            for scope, fact_rows, observation_rows, replace_surfaces in prepared:
                 identity = {
                     "season": scope.season,
                     "as_of_date": scope.as_of,
                     "window_kind": scope.window_kind,
                     "window_games": scope.stored_window_games,
                 }
-                connection.execute(
-                    delete(fact_table).where(*self._scope(fact_table, scope))
-                )
+                if replace_surfaces:
+                    connection.execute(
+                        delete(fact_table).where(
+                            *self._scope(fact_table, scope),
+                            fact_table.c.base.in_(replace_surfaces),
+                        )
+                    )
                 connection.execute(
                     delete(observation_table).where(
                         *self._scope(observation_table, scope)
@@ -189,6 +206,95 @@ class TeamMatchupRepository:
                         for observation in observation_rows
                     ],
                 )
+
+    @staticmethod
+    def _prepare_surface_publication(
+        facts: tuple[TeamMatchupFact, ...],
+        observations: tuple[TeamMatchupObservation, ...],
+    ) -> tuple[
+        tuple[TeamMatchupFact, ...],
+        tuple[TeamMatchupObservation, ...],
+        tuple[str, ...],
+    ]:
+        by_surface: dict[str, list[TeamMatchupFact]] = defaultdict(list)
+        for fact in facts:
+            by_surface[fact.base].append(fact)
+
+        published_facts: list[TeamMatchupFact] = []
+        published_observations = []
+        replace_surfaces: set[str] = set()
+        for observation in observations:
+            surface_facts = tuple(by_surface[observation.surface])
+            invalid_numeric = any(
+                not TeamMatchupRepository._has_valid_numeric_values(fact)
+                for fact in surface_facts
+            )
+            if observation.status == "available" and invalid_numeric:
+                published_observations.append(
+                    replace(
+                        observation,
+                        status="unavailable",
+                        unavailable_reason="provider_invalid_numeric",
+                    )
+                )
+                continue
+            if (
+                observation.status == "available"
+                and not TeamMatchupRepository._has_complete_metrics(surface_facts)
+            ):
+                published_observations.append(
+                    replace(
+                        observation,
+                        status="unavailable",
+                        unavailable_reason="surface_incomplete",
+                    )
+                )
+                continue
+            published_observations.append(observation)
+            if (
+                observation.status == "available"
+                and observation.surface not in replace_surfaces
+            ):
+                replace_surfaces.add(observation.surface)
+                published_facts.extend(surface_facts)
+        return (
+            tuple(published_facts),
+            tuple(published_observations),
+            tuple(sorted(replace_surfaces)),
+        )
+
+    @staticmethod
+    def _has_valid_numeric_values(fact: TeamMatchupFact) -> bool:
+        if fact.status != "available":
+            return False
+        if fact.denominator_unit not in {"minutes", "seconds"}:
+            return False
+        try:
+            return (
+                fact.raw_value is not None
+                and isfinite(float(fact.raw_value))
+                and fact.denominator_value is not None
+                and isfinite(float(fact.denominator_value))
+                and float(fact.denominator_value) > 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _has_complete_metrics(facts: tuple[TeamMatchupFact, ...]) -> bool:
+        if not facts or any(fact.status != "available" for fact in facts):
+            return False
+        teams_by_metric: dict[tuple[str, str], set[int]] = defaultdict(set)
+        counts_by_metric: dict[tuple[str, str], int] = defaultdict(int)
+        for fact in facts:
+            key = (fact.slice_key, fact.stat_key)
+            teams_by_metric[key].add(fact.team_id)
+            counts_by_metric[key] += 1
+        team_sets = tuple(teams_by_metric.values())
+        return len(set().union(*team_sets)) == 30 and all(
+            len(teams_by_metric[key]) == 30 and counts_by_metric[key] == 30
+            for key in teams_by_metric
+        )
 
     def get_snapshot(
         self, scope: TeamMatchupSnapshotScope
@@ -271,6 +377,36 @@ class TeamMatchupRepository:
         if latest_as_of is None:
             return None
         return TeamMatchupSnapshotScope(season, latest_as_of, window_games)
+
+    def get_latest_fact_scopes(
+        self,
+        season: str,
+        *,
+        window_games: int | None = None,
+        as_of: date,
+    ) -> dict[str, TeamMatchupSnapshotScope]:
+        """Return each surface's newest fact-bearing scope through ``as_of``."""
+
+        requested = TeamMatchupSnapshotScope(season, as_of, window_games)
+        table = TeamMatchupFactRow.__table__
+        statement = (
+            select(table.c.base, func.max(table.c.as_of_date).label("as_of_date"))
+            .where(
+                table.c.season == season,
+                table.c.window_kind == requested.window_kind,
+                table.c.window_games == requested.stored_window_games,
+                table.c.as_of_date <= as_of,
+            )
+            .group_by(table.c.base)
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return {
+            row["base"]: TeamMatchupSnapshotScope(
+                season, row["as_of_date"], window_games
+            )
+            for row in rows
+        }
 
 
 __all__ = [
