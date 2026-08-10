@@ -355,6 +355,11 @@ label, then a meaningful sublabel such as `Emirates NBA Cup` or
 sublabels remain status/evidence rather than badges. When no display evidence
 remains, the canonical kind supplies the classification.
 
+On a slate read, `resolve_stored_event_classification` returns that canonical
+kind and display label together exactly once. Recognized `001` through `004`
+prefixes remain authoritative; only an unknown prefix falls back to the stored
+display classification for kind, so a badge cannot reclassify a known game.
+
 Authenticated slate read:
 
 ```text
@@ -374,7 +379,8 @@ reading or decoding the whole season. Its schedule status uses the
 surface-specific `SLATE_SCHEDULE_MAX_AGE_HOURS` window (30 hours by default),
 while Event Catalog matching continues to use `EVENT_CATALOG_MAX_AGE_HOURS`.
 Missing successful schedule metadata or a catalog with zero stored events is
-unavailable. A populated catalog can return an empty date, and populated but
+unavailable, as is a missing runtime Event Catalog dependency. A populated
+catalog can return an empty date, and populated but
 older schedule data remains servable and is marked stale. The player-pool
 surface remains an explicit unavailable aggregate until its owning service is
 implemented.

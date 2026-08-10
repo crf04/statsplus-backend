@@ -240,11 +240,15 @@ Season game and contains meaningful provider display classification for
 unusual games, including reviewed event sublabels such as `Emirates NBA Cup`
 and `NBA Mexico City Series`. Generic series-state/record text such as
 `LAL leads 2-1` or `LAL wins series 4-2`, game-number text, and postponement
-sublabels are not badges. The
-canonical game-ID kind remains authoritative: `001` games are included with
+sublabels are not badges. Recognized `001` through `004` game-ID prefixes
+determine canonical kind before the stored display classification is
+considered, so an arbitrary badge cannot turn a known regular-season or
+playoff game into an All-Star exclusion. Stored display classification is the
+kind fallback only for an unknown prefix. Thus `001` games are included with
 `preseason: true`, and `003` All-Star exhibitions are excluded even when the
 display classification is branded differently. Postponed games remain on
-their ET slate.
+their ET slate. Output is always ordered by UTC tip and then game ID,
+independently of repository row order.
 
 Until the Player Pool surface is implemented, both team counts are truthfully
 zero and `freshness.pool` is the sole pool-status authority: it reports an
@@ -261,6 +265,7 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | No successful schedule metadata or no catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 

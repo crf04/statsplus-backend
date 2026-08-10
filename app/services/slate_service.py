@@ -17,11 +17,10 @@ from app.domain.freshness import (
 )
 from app.domain.nba_events import (
     NBAGameStatus,
-    canonical_event_kind,
-    display_event_classification,
     is_all_star_kind,
     is_ordinary_classification,
     is_preseason_kind,
+    resolve_stored_event_classification,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
@@ -82,22 +81,20 @@ class SlateService:
         )
         games = []
         for event in events:
-            if not self._belongs_to_slate(event, slate_date):
-                continue
             game_id = str(event.get("nba_game_id", ""))
-            classification = display_event_classification(
+            classification = resolve_stored_event_classification(
                 game_id, str(event.get("classification") or "")
             )
-            canonical_kind = canonical_event_kind(game_id, classification)
-            if is_all_star_kind(canonical_kind):
+            if is_all_star_kind(classification.kind):
                 continue
             games.append(
                 self._game(
                     event,
-                    classification=classification,
-                    canonical_kind=canonical_kind,
+                    classification=classification.display,
+                    canonical_kind=classification.kind,
                 )
             )
+        # The public ordering contract does not depend on repository behavior.
         games.sort(key=lambda game: (game["scheduled_at"], game["game_id"]))
 
         return {
@@ -137,10 +134,6 @@ class SlateService:
     def _scheduled_at(event: Mapping[str, Any]) -> datetime:
         value = str(event["scheduled_at"])
         return parse_utc_iso(value)
-
-    @classmethod
-    def _belongs_to_slate(cls, event: Mapping[str, Any], slate_date: date) -> bool:
-        return cls._scheduled_at(event).astimezone(EASTERN).date() == slate_date
 
     def _schedule_freshness(
         self, retrieved_at: str, *, observed_at: datetime

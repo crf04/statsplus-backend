@@ -58,6 +58,21 @@ def test_authenticated_omitted_date_defaults_through_real_service(client, depend
     assert response.get_json()["slate_date"] == "2026-03-08"
 
 
+def test_missing_event_catalog_dependency_is_standard_503(client, dependencies):
+    dependencies.slate_service = SlateService(
+        None,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+    )
+
+    response = client.get("/api/games/slate?date=2026-01-02")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
 def test_get_slate_requires_authentication(client, monkeypatch):
     from app.utils import auth
 

@@ -67,7 +67,7 @@ def _service(events, *, freshness=None, now=None, schedule_max_age=None):
     )
 
 
-def test_slate_membership_uses_eastern_date_and_orders_tip_then_game_id():
+def test_slate_orders_tip_then_game_id_independently_of_repository_order():
     service = _service(
         [
             _event("003", "2026-01-03T04:30:00+00:00"),  # Jan 2, 11:30pm ET
@@ -190,6 +190,21 @@ def test_game_id_kind_overrides_conflicting_provider_classification():
     assert games[0]["preseason"] is True
 
 
+def test_known_regular_season_id_is_not_excluded_by_all_star_display_badge():
+    game = _service(
+        [
+            _event(
+                "0022500001",
+                "2026-02-15T01:00:00+00:00",
+                classification="All-Star Sponsor Showcase",
+            )
+        ]
+    ).get_slate("2026-02-14")["games"][0]
+
+    assert game["classification"] == "All-Star Sponsor Showcase"
+    assert game["preseason"] is False
+
+
 def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     service = _service(
         [_event("late", "2026-01-03T04:30:00+00:00")],
@@ -299,6 +314,19 @@ def test_slate_requires_stored_events_even_when_success_metadata_exists():
             "last_success_at": "2026-01-02T10:00:00+00:00",
             "event_count": 0,
         },
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        service.get_slate("2026-01-15")
+
+
+def test_slate_requires_an_event_catalog_dependency():
+    service = SlateService(
+        None,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
     )
 
     with pytest.raises(ProviderUnavailableError):

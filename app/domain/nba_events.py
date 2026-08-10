@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
 import re
 
@@ -18,6 +19,14 @@ _GAME_TYPE_BY_ID_PREFIX = {
     "003": "All-Star",
     "004": "Playoffs",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class EventClassification:
+    """Canonical event kind beside its independently displayable label."""
+
+    kind: str
+    display: str
 
 
 def _normalized_words(value: str) -> str:
@@ -70,6 +79,19 @@ def display_event_classification(
     return canonical_event_kind(game_id)
 
 
+def resolve_stored_event_classification(
+    game_id: str, stored_classification: str = ""
+) -> EventClassification:
+    """Resolve one catalog row without letting its badge override a known kind."""
+
+    stored_display = _known_classification(stored_classification)
+    kind = canonical_event_kind(game_id, stored_display)
+    return EventClassification(
+        kind=kind,
+        display=kind if stored_display == "unknown" else stored_display,
+    )
+
+
 def _display_sublabel(value: str) -> str:
     sublabel = value.strip()
     normalized = _normalized_words(sublabel)
@@ -91,10 +113,12 @@ def _known_classification(value: str) -> str:
 
 
 __all__ = [
+    "EventClassification",
     "NBAGameStatus",
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
     "is_ordinary_classification",
     "is_preseason_kind",
+    "resolve_stored_event_classification",
 ]

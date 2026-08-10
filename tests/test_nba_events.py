@@ -6,6 +6,7 @@ from app.domain.nba_events import (
     is_all_star_kind,
     is_ordinary_classification,
     is_preseason_kind,
+    resolve_stored_event_classification,
 )
 
 
@@ -31,3 +32,17 @@ def test_event_predicates_do_not_expand_to_unrelated_labels(value):
     assert not is_all_star_kind(value)
     assert not is_preseason_kind(value)
     assert not is_ordinary_classification(value)
+
+
+def test_stored_classification_cannot_override_a_known_game_id_kind():
+    resolved = resolve_stored_event_classification("0022500001", "All-Star Showcase")
+
+    assert resolved.kind == "Regular Season"
+    assert resolved.display == "All-Star Showcase"
+
+
+def test_unknown_game_id_prefix_uses_stored_classification_as_kind_fallback():
+    resolved = resolve_stored_event_classification("0052500001", "All-Star Showcase")
+
+    assert resolved.kind == "All-Star Showcase"
+    assert resolved.display == "All-Star Showcase"
