@@ -752,38 +752,6 @@ class NBAStatsAdapter:
         normalized = normalize_archetype_game_logs(frame)
         return normalized[normalized["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
-    def get_season_player_game_logs(
-        self,
-        *,
-        season: str,
-        season_type: str = "Regular Season",
-    ) -> pd.DataFrame:
-        """Return all regular-season player logs in one bounded provider call."""
-        from app.providers.nba_stats import normalize_season_player_game_logs
-
-        factory = self._endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
-        try:
-            frame = self.run_endpoint(
-                "player_game_logs_season",
-                lambda timeout: factory(
-                    season_nullable=season,
-                    season_type_nullable=season_type,
-                    timeout=timeout,
-                ),
-                required_columns=GAME_LOG_REQUIRED_COLUMNS,
-                validator=normalize_season_player_game_logs,
-            )
-        except requests.exceptions.Timeout as error:
-            raise ProviderUnavailableError(
-                "The upstream stats provider timed out. Please try again shortly.",
-                detail=error,
-            ) from error
-        except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
-        return normalize_season_player_game_logs(frame)
-
     def fetch_player_game_logs(
         self,
         player_id: int,

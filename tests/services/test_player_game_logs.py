@@ -23,6 +23,10 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_service import PlayerGameLogIdentityError, PlayerGameLogService
 from app.services.nba_stats_adapter import parse_recorded_game_logs
+from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.event_catalog_service import EventCatalogService
+from app.services.statistic_catalog import StatisticCatalog
+from app.utils.telemetry import PlayerGameLogTelemetryEvent
 
 
 SEASON = "2025-26"
@@ -69,7 +73,9 @@ def _record(
 def _repository(tmp_path) -> PlayerGameLogRepository:
     engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
     run_migrations(engine)
-    return PlayerGameLogRepository(engine)
+    return PlayerGameLogRepository(
+        engine, statistic_catalog=StatisticCatalog.load_default()
+    )
 
 
 def _recorded_season_frame():
@@ -79,7 +85,9 @@ def _recorded_season_frame():
     )
 
 
-def _seed_identities(repository: PlayerGameLogRepository) -> None:
+def _seed_identities(
+    repository: PlayerGameLogRepository, *, completed: bool = True
+) -> None:
     published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
     with repository.engine.begin() as connection:
         connection.execute(
@@ -116,8 +124,8 @@ def _seed_identities(repository: PlayerGameLogRepository) -> None:
                     "away_team_name": away_code,
                     "away_team_tricode": away_code,
                     "scheduled_at": datetime.combine(game_date, datetime.min.time(), timezone.utc),
-                    "status_text": "Final",
-                    "status_code": 3,
+                    "status_text": "Final" if completed else "Scheduled",
+                    "status_code": 3 if completed else 1,
                     "postponed_status": None,
                     "postponement_evidence": None,
                     "classification": "Regular Season",
@@ -172,6 +180,32 @@ def test_failed_replacement_rolls_back_rows_and_freshness(tmp_path):
             [invalid],
             retrieved_at=RETRIEVED_AT + timedelta(days=1),
             source_provider="nba_stats",
+        )
+
+    assert repository.list_player_rows(SEASON, 101) == (original,)
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+
+
+@pytest.mark.parametrize("allow_empty", [False, True])
+def test_empty_replacement_preserves_last_valid_rows_and_freshness(
+    tmp_path, allow_empty
+):
+    repository = _repository(tmp_path)
+    original = _record()
+    repository.publish(
+        SEASON,
+        [original],
+        retrieved_at=RETRIEVED_AT,
+        source_provider="nba_stats",
+    )
+
+    with pytest.raises(ValueError, match="empty player game log snapshot"):
+        repository.publish(
+            SEASON,
+            [],
+            retrieved_at=RETRIEVED_AT + timedelta(days=1),
+            source_provider="nba_stats",
+            allow_empty=allow_empty,
         )
 
     assert repository.list_player_rows(SEASON, 101) == (original,)
@@ -250,6 +284,11 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
     assert rate.per_game["3PM"] == 3
     assert rate.per_game["FG2A"] == 11
     assert rate.per_game["PRA"] == 28
+    assert set(rate.per_game) == {
+        statistic.market_category
+        for statistic in StatisticCatalog.load_default().statistics
+        if statistic.market_category is not None
+    }
     assert repository.get_last_ten_minutes(SEASON, 101) == tuple(
         float(value) for value in range(3, 13)
     )
@@ -281,16 +320,41 @@ class _RecordedSeasonProvider:
         return self.frame.copy()
 
 
+class _RecordingTelemetry:
+    def __init__(self):
+        self.events: list[PlayerGameLogTelemetryEvent] = []
+
+    def record(self, event):
+        self.events.append(event)
+
+
+def _service(
+    repository: PlayerGameLogRepository,
+    provider: _RecordedSeasonProvider,
+    *,
+    clock=lambda: RETRIEVED_AT,
+    telemetry_recorder=None,
+) -> PlayerGameLogService:
+    return PlayerGameLogService(
+        repository.engine,
+        nba_stats_provider=provider,
+        repository=repository,
+        athlete_catalog=AthleteCatalogService(
+            repository.engine, nba_stats_provider=provider
+        ),
+        event_catalog=EventCatalogService(
+            repository.engine, nba_stats_provider=provider
+        ),
+        clock=clock,
+        telemetry_recorder=telemetry_recorder,
+    )
+
+
 def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     provider = _RecordedSeasonProvider()
-    service = PlayerGameLogService(
-        repository.engine,
-        nba_stats_provider=provider,
-        repository=repository,
-        clock=lambda: RETRIEVED_AT,
-    )
+    service = _service(repository, provider)
 
     result = service.refresh(SEASON)
 
@@ -306,21 +370,113 @@ def test_refresh_canonicalizes_recorded_season_rows_without_per_player_calls(tmp
     assert player_rows[0].three_pointers_made == 4
 
 
-def test_unjoined_player_identity_preserves_last_valid_publication(tmp_path):
+def test_refresh_timestamp_is_observed_after_provider_fetch(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    observations: list[str] = []
+
+    class ObservedProvider(_RecordedSeasonProvider):
+        def get_season_player_game_logs(self, **kwargs):
+            observations.append("provider")
+            return super().get_season_player_game_logs(**kwargs)
+
+    provider = ObservedProvider()
+
+    def clock():
+        observations.append("clock")
+        return RETRIEVED_AT
+
+    _service(repository, provider, clock=clock).refresh(SEASON)
+
+    assert observations == ["provider", "clock"]
+
+
+def test_preseason_empty_snapshot_can_record_honest_zero_row_freshness(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository, completed=False)
+    provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
+
+    result = _service(repository, provider).refresh(SEASON)
+
+    assert result.row_count == 0
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=RETRIEVED_AT,
+        row_count=0,
+    )
+
+
+def test_empty_snapshot_without_event_catalog_evidence_fails_closed(tmp_path):
+    repository = _repository(tmp_path)
+    provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
+
+    with pytest.raises(PlayerGameLogIdentityError, match="event catalog evidence"):
+        _service(repository, provider).refresh(SEASON)
+
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_empty_snapshot_with_completed_games_preserves_last_valid_publication(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     provider = _RecordedSeasonProvider()
-    service = PlayerGameLogService(
-        repository.engine,
-        nba_stats_provider=provider,
-        repository=repository,
-        clock=lambda: RETRIEVED_AT,
-    )
+    service = _service(repository, provider)
     service.refresh(SEASON)
     before = repository.list_player_rows(SEASON, 101)
 
-    provider.frame.loc[0, "PLAYER_ID"] = 999
-    with pytest.raises(PlayerGameLogIdentityError, match="athlete identity"):
+    provider.frame = provider.frame.iloc[0:0]
+    with pytest.raises(PlayerGameLogIdentityError, match="empty snapshot"):
+        service.refresh(SEASON, now=RETRIEVED_AT + timedelta(days=1))
+
+    assert repository.list_player_rows(SEASON, 101) == before
+    assert repository.get_freshness(SEASON).retrieved_at == RETRIEVED_AT
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "telemetry_field"),
+    [
+        pytest.param("PLAYER_ID", 999, "unjoined_athlete_count", id="athlete"),
+        pytest.param("GAME_ID", "0022599999", "unjoined_event_count", id="game"),
+        pytest.param("TEAM_ID", 999, "team_mismatch_count", id="team-not-in-game"),
+    ],
+)
+def test_individual_unjoined_rows_are_excluded_and_counted(
+    tmp_path, column, value, telemetry_field
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    provider.frame.loc[0, column] = value
+    telemetry = _RecordingTelemetry()
+
+    result = _service(
+        repository, provider, telemetry_recorder=telemetry
+    ).refresh(SEASON)
+
+    assert result.row_count == 3
+    assert len(telemetry.events) == 1
+    event = telemetry.events[0]
+    assert event.source_row_count == 4
+    assert event.published_row_count == 3
+    assert getattr(event, telemetry_field) == 1
+    assert (
+        event.unjoined_athlete_count
+        + event.unjoined_event_count
+        + event.team_mismatch_count
+    ) == 1
+
+
+def test_wholly_unjoined_snapshot_preserves_last_valid_publication(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    provider = _RecordedSeasonProvider()
+    service = _service(repository, provider)
+    service.refresh(SEASON)
+    before = repository.list_player_rows(SEASON, 101)
+
+    provider.frame["PLAYER_ID"] = 999
+    with pytest.raises(PlayerGameLogIdentityError, match="no canonical rows"):
         service.refresh(SEASON, now=RETRIEVED_AT + timedelta(days=1))
 
     assert repository.list_player_rows(SEASON, 101) == before

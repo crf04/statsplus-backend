@@ -322,6 +322,8 @@ def test_telemetry_route_returns_bounded_sanitized_metrics(client, monkeypatch):
         assert body["board_events_total"] == 0
         assert body["player_pool_events_total"] == 0
         assert body["player_pool_buffered_events"] == 0
+        assert body["player_game_log_events_total"] == 0
+        assert body["player_game_log_buffered_events"] == 0
         assert body["board_buffered_events"] == 0
         assert body["cache"]["nba_stats"] == {"hit": 1}
         assert len(body["recent_provider_events"]) == 1
@@ -330,6 +332,7 @@ def test_telemetry_route_returns_bounded_sanitized_metrics(client, monkeypatch):
         assert body["recent_board_events"] == []
         assert body["recent_board_request_events"] == []
         assert body["recent_player_pool_events"] == []
+        assert body["recent_player_game_log_events"] == []
         assert "Authorization" not in str(body)
         assert "Bearer" not in str(body)
     finally:

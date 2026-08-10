@@ -490,12 +490,16 @@ HTTP/authentication dependency.
 ### Durable player game logs
 
 `PlayerGameLogService.refresh(season)` consumes the season-wide NBA Stats seam
-once during Nightly Refresh. Before publication, every provider `PLAYER_ID`
-must join exactly to `athlete_catalog` for the requested season and every
-`GAME_ID` plus per-game `TEAM_ID` must join exactly to `event_catalog`. Team and
-opponent tricodes and home/away identity come from that canonical event. An
-unjoined athlete, game, or team fails the refresh before publication; no name
-or matchup-text guess is accepted.
+once during Nightly Refresh and stamps retrieval only after that provider call
+returns. It reads canonical identities through `AthleteCatalogService` and
+`EventCatalogService`; the player-log module does not query their tables
+directly. Each provider `PLAYER_ID` must join exactly to the requested season's
+Athlete Catalog, and each `GAME_ID` plus per-game `TEAM_ID` must join exactly to
+the Event Catalog. Team and opponent tricodes and home/away identity come from
+that canonical event. Individual well-formed rows that do not join are
+excluded and counted in bounded scalar-only telemetry; no name or matchup-text
+guess is accepted. A nonempty snapshot that yields no canonical rows fails the
+refresh before publication.
 
 Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
 and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
@@ -503,6 +507,10 @@ replacement and its `nba_stats` source, timezone-aware retrieval time, and row
 count commit in the same transaction. Exact duplicate provider rows collapse
 to one fact; conflicting duplicates fail closed. Any validation or database
 failure leaves both the prior rows and prior successful freshness unchanged.
+An empty provider snapshot is publishable only when the governed Event Catalog
+is present and contains no completed games, and it can never replace a prior
+nonempty publication. A missing Event Catalog or an empty snapshot after a
+completed game fails closed and preserves the last valid facts and freshness.
 Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
 TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
 FG2A, season rates, and rolling selections are derived at read time rather
@@ -510,7 +518,8 @@ than persisted in redundant tables.
 
 `PlayerGameLogRepository` is the internal query seam used by later matchup
 services. It returns Season-only per-game and per-minute Market Category
-rates, the last ten games' minutes in chronological sparkline order, H2H rows
+rates using the reviewed category spellings and component definitions from
+`statistic_catalog.yaml`, the last ten games' minutes in chronological sparkline order, H2H rows
 in deterministic recent-first order, and deterministic multi-player H2H rows
 for archetype sampling. Reads require a complete publication record; orphaned
 rows without one return no facts. Callers receive the stored retrieval time so

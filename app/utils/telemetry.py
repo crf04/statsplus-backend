@@ -113,12 +113,16 @@ _event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_request_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _player_pool_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
+_player_game_log_event_buffer: deque[dict[str, Any]] = deque(
+    maxlen=EVENT_BUFFER_CAPACITY
+)
 _buffer_lock = threading.Lock()
 
 _provider_events_total = 0
 _board_events_total = 0
 _board_request_events_total = 0
 _player_pool_events_total = 0
+_player_game_log_events_total = 0
 _provider_failures: dict[tuple[str, str], int] = {}
 _application_failures: dict[str, int] = {}
 _cache_counts: dict[str, dict[str, int]] = {}
@@ -250,6 +254,32 @@ class PlayerPoolTelemetryEvent:
             )
         ):
             raise ValueError("player pool telemetry counts must be non-negative integers")
+
+
+@dataclass(frozen=True)
+class PlayerGameLogTelemetryEvent:
+    """Scalar-only coverage counts for one player-game-log refresh."""
+
+    source_row_count: int
+    published_row_count: int
+    unjoined_athlete_count: int
+    unjoined_event_count: int
+    team_mismatch_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (
+                self.source_row_count,
+                self.published_row_count,
+                self.unjoined_athlete_count,
+                self.unjoined_event_count,
+                self.team_mismatch_count,
+            )
+        ):
+            raise ValueError(
+                "player game log telemetry counts must be non-negative integers"
+            )
 
 
 #: Closed label vocabularies for one published board read.  Everything an
@@ -475,6 +505,43 @@ def snapshot_recent_player_pool_events(limit: int = 50) -> list[dict[str, Any]]:
 
     with _buffer_lock:
         return list(_player_pool_event_buffer)[-limit:]
+
+
+class PlayerGameLogTelemetryRecorder:
+    """Typed recorder seam for player-game-log coverage aggregates."""
+
+    def record(self, event: PlayerGameLogTelemetryEvent) -> None:
+        raise NotImplementedError
+
+
+class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
+    """Record privacy-safe player-game-log counts in a bounded buffer."""
+
+    def record(self, event: PlayerGameLogTelemetryEvent) -> None:
+        payload = asdict(event)
+        logger.info(
+            "player_game_log_event source_row_count=%d published_row_count=%d "
+            "unjoined_athlete_count=%d unjoined_event_count=%d "
+            "team_mismatch_count=%d",
+            event.source_row_count,
+            event.published_row_count,
+            event.unjoined_athlete_count,
+            event.unjoined_event_count,
+            event.team_mismatch_count,
+        )
+        with _buffer_lock:
+            global _player_game_log_events_total
+            _player_game_log_event_buffer.append(payload)
+            _player_game_log_events_total += 1
+
+
+def snapshot_recent_player_game_log_events(
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return recent scalar-only player-game-log coverage aggregates."""
+
+    with _buffer_lock:
+        return list(_player_game_log_event_buffer)[-limit:]
 
 
 def record_board_telemetry(event: BoardTelemetryEvent) -> None:
@@ -720,6 +787,8 @@ def snapshot_metrics() -> dict[str, Any]:
             "board_request_events_total": _board_request_events_total,
             "player_pool_events_total": _player_pool_events_total,
             "player_pool_buffered_events": len(_player_pool_event_buffer),
+            "player_game_log_events_total": _player_game_log_events_total,
+            "player_game_log_buffered_events": len(_player_game_log_event_buffer),
             "board_request_buffered_events": len(_board_request_event_buffer),
             "board_buffered_events": len(_board_event_buffer),
             "board_buffered_capacity": EVENT_BUFFER_CAPACITY,
@@ -744,17 +813,19 @@ def clear_recorded_provider_events() -> None:
     deterministic between isolated test cases.
     """
     global _provider_events_total, _board_events_total, _board_request_events_total
-    global _player_pool_events_total
+    global _player_pool_events_total, _player_game_log_events_total
     global _provider_failures, _application_failures, _cache_counts
     with _buffer_lock:
         _event_buffer.clear()
         _board_event_buffer.clear()
         _board_request_event_buffer.clear()
         _player_pool_event_buffer.clear()
+        _player_game_log_event_buffer.clear()
         _provider_events_total = 0
         _board_events_total = 0
         _board_request_events_total = 0
         _player_pool_events_total = 0
+        _player_game_log_events_total = 0
         _provider_failures = {}
         _application_failures = {}
         _cache_counts = {}
@@ -918,6 +989,10 @@ __all__ = [
     "PlayerPoolTelemetryRecorder",
     "BoundedPlayerPoolTelemetryRecorder",
     "snapshot_recent_player_pool_events",
+    "PlayerGameLogTelemetryEvent",
+    "PlayerGameLogTelemetryRecorder",
+    "BoundedPlayerGameLogTelemetryRecorder",
+    "snapshot_recent_player_game_log_events",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",

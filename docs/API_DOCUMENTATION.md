@@ -451,7 +451,10 @@ endpoint. It refreshes the stats tables, current-season Event Catalog, and then
 durable current-season player game logs, retrying that ordered unit once. The
 player-log step uses one season-wide provider read and publishes normalized
 player/game facts plus source and retrieval freshness transactionally. Failed
-or unjoined data preserves the last valid publication. These stored facts back
+or wholly unjoinable data preserves the last valid publication; individual
+unjoined athlete, game, or team rows are excluded and counted without exposing
+their identities. Empty results require a present schedule with no completed
+games and cannot replace nonempty facts. These stored facts back
 future matchup rail and selection reads; this slice adds no public matchup
 route and does not change `GET /api/games/game_logs`.
 
@@ -484,6 +487,12 @@ collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries
 credentials, URLs, bodies, or exception text.
+
+The same endpoint includes `recent_player_game_log_events` plus
+`player_game_log_events_total` and `player_game_log_buffered_events`. Each
+entry contains only source/published row counts and the three unjoined-row
+counts; player, game, team, and provider identities are never telemetry
+dimensions.
 
 `recent_board_request_events` describes the published `GET /api/dfs/board`
 route: exactly one entry per authenticated request, whatever it ended in.

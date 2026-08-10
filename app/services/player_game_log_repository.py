@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from app.domain.utc import assume_utc
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
 from app.services.nba_stats_adapter import validate_canonical_season
+from app.services.statistic_catalog import StatisticCatalog
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +61,25 @@ class PlayerSeasonRate:
 class PlayerGameLogRepository:
     """Replace one season atomically and derive read models from its rows."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, statistic_catalog: StatisticCatalog) -> None:
         self.engine = engine
+        self._market_statistics = tuple(
+            statistic
+            for statistic in statistic_catalog.statistics
+            if statistic.market_category is not None
+        )
+        supported_components = self._base_stat_values(None)
+        unsupported = {
+            component
+            for statistic in self._market_statistics
+            for component in statistic.components
+            if component not in supported_components
+        }
+        if unsupported:
+            raise ValueError(
+                "player game logs cannot derive governed statistic components: "
+                f"{sorted(unsupported)}"
+            )
 
     def publish(
         self,
@@ -70,6 +88,7 @@ class PlayerGameLogRepository:
         *,
         retrieved_at: datetime,
         source_provider: str,
+        allow_empty: bool = False,
     ) -> int:
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
@@ -85,10 +104,22 @@ class PlayerGameLogRepository:
                 raise ValueError("conflicting player game log facts share one identity")
             unique[key] = record
 
+        if not unique and not allow_empty:
+            raise ValueError("empty player game log snapshot cannot be published")
+
         retrieved = assume_utc(retrieved_at)
         log_table = PlayerGameLog.__table__
         refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.begin() as connection:
+            existing_row_count = connection.execute(
+                select(refresh_table.c.row_count).where(
+                    refresh_table.c.season == canonical_season
+                )
+            ).scalar_one_or_none()
+            if not unique and existing_row_count is not None and existing_row_count > 0:
+                raise ValueError(
+                    "empty player game log snapshot cannot replace a valid publication"
+                )
             connection.execute(
                 delete(log_table).where(log_table.c.season == canonical_season)
             )
@@ -116,17 +147,21 @@ class PlayerGameLogRepository:
         self, season: str, player_id: int
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
-        if not self._has_complete_publication(canonical_season):
-            return ()
-        table = PlayerGameLog.__table__
+        log_table = PlayerGameLog.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(table)
-                .where(
-                    table.c.season == canonical_season,
-                    table.c.player_id == player_id,
+                select(log_table)
+                .join(
+                    refresh_table,
+                    refresh_table.c.season == log_table.c.season,
                 )
-                .order_by(table.c.game_date.desc(), table.c.game_id.desc())
+                .where(
+                    log_table.c.season == canonical_season,
+                    log_table.c.player_id == player_id,
+                    refresh_table.c.row_count > 0,
+                )
+                .order_by(log_table.c.game_date.desc(), log_table.c.game_id.desc())
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
@@ -153,9 +188,13 @@ class PlayerGameLogRepository:
         total_minutes = sum(row.minutes for row in rows)
         if not rows or total_minutes <= 0:
             return None
+        row_values = tuple(self._market_values(row) for row in rows)
         totals = {
-            market: sum(self._market_values(row)[market] for row in rows)
-            for market in self._market_values(rows[0])
+            statistic.market_category: sum(
+                values[statistic.market_category] for values in row_values
+            )
+            for statistic in self._market_statistics
+            if statistic.market_category is not None
         }
         return PlayerSeasonRate(
             season=validate_canonical_season(season),
@@ -203,50 +242,70 @@ class PlayerGameLogRepository:
         opponent_team_id: int,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
-        if not self._has_complete_publication(canonical_season):
-            return ()
-        table = PlayerGameLog.__table__
+        log_table = PlayerGameLog.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(table)
+                select(log_table)
+                .join(
+                    refresh_table,
+                    refresh_table.c.season == log_table.c.season,
+                )
                 .where(
-                    table.c.season == canonical_season,
-                    table.c.player_id.in_(player_ids),
-                    table.c.opponent_team_id == opponent_team_id,
+                    log_table.c.season == canonical_season,
+                    log_table.c.player_id.in_(player_ids),
+                    log_table.c.opponent_team_id == opponent_team_id,
+                    refresh_table.c.row_count > 0,
                 )
                 .order_by(
-                    table.c.game_date.desc(),
-                    table.c.player_id.asc(),
-                    table.c.game_id.desc(),
+                    log_table.c.game_date.desc(),
+                    log_table.c.player_id.asc(),
+                    log_table.c.game_id.desc(),
                 )
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
-    def _has_complete_publication(self, season: str) -> bool:
-        table = PlayerGameLogRefresh.__table__
-        with self.engine.connect() as connection:
-            return connection.execute(
-                select(table.c.season).where(table.c.season == season)
-            ).scalar_one_or_none() is not None
+    def _market_values(self, record: PlayerGameLogRecord) -> dict[str, float]:
+        base_values = self._base_stat_values(record)
+        return {
+            statistic.market_category: sum(
+                base_values[component] for component in statistic.components
+            )
+            for statistic in self._market_statistics
+            if statistic.market_category is not None
+        }
 
     @staticmethod
-    def _market_values(record: PlayerGameLogRecord) -> dict[str, float]:
+    def _base_stat_values(
+        record: PlayerGameLogRecord | None,
+    ) -> dict[str, float]:
+        if record is None:
+            return {
+                key: 0.0
+                for key in (
+                    "points",
+                    "rebounds",
+                    "assists",
+                    "three_pointers_made",
+                    "turnovers",
+                    "steals",
+                    "blocks",
+                    "field_goals_attempted",
+                    "three_pointers_attempted",
+                    "two_pointers_attempted",
+                )
+            }
         return {
-            "PTS": record.points,
-            "REB": record.rebounds,
-            "AST": record.assists,
-            "3PM": record.three_pointers_made,
-            "TOV": record.turnovers,
-            "STL": record.steals,
-            "BLK": record.blocks,
-            "PRA": record.points + record.rebounds + record.assists,
-            "PA": record.points + record.assists,
-            "PR": record.points + record.rebounds,
-            "RA": record.rebounds + record.assists,
-            "STKS": record.steals + record.blocks,
-            "FGA": record.field_goals_attempted,
-            "FG3A": record.three_pointers_attempted,
-            "FG2A": (
+            "points": record.points,
+            "rebounds": record.rebounds,
+            "assists": record.assists,
+            "three_pointers_made": record.three_pointers_made,
+            "turnovers": record.turnovers,
+            "steals": record.steals,
+            "blocks": record.blocks,
+            "field_goals_attempted": record.field_goals_attempted,
+            "three_pointers_attempted": record.three_pointers_attempted,
+            "two_pointers_attempted": (
                 record.field_goals_attempted - record.three_pointers_attempted
             ),
         }

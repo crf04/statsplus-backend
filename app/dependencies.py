@@ -216,11 +216,15 @@ def build_dependencies(
             mapping_repository=event_mapping_repository,
             settings=settings,
         )
-        player_game_log_repository = PlayerGameLogRepository(engine)
+        player_game_log_repository = PlayerGameLogRepository(
+            engine, statistic_catalog=statistic_catalog
+        )
         player_game_log_service = PlayerGameLogService(
             engine,
             nba_stats_provider=nba_stats_provider,
             repository=player_game_log_repository,
+            athlete_catalog=athlete_catalog_service,
+            event_catalog=event_catalog_service,
         )
 
     dfs_board_service = DFSBoardService(

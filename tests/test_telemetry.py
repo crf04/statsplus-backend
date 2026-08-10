@@ -459,6 +459,25 @@ def test_player_pool_recorder_counts_and_bounds_scalar_drop_events():
     ]
 
 
+def test_player_game_log_recorder_counts_and_bounds_scalar_join_events():
+    recorder = telemetry.BoundedPlayerGameLogTelemetryRecorder()
+    recorder.record(telemetry.PlayerGameLogTelemetryEvent(4, 1, 1, 1, 1))
+
+    metrics = telemetry.snapshot_metrics()
+
+    assert metrics["player_game_log_events_total"] == 1
+    assert metrics["player_game_log_buffered_events"] == 1
+    assert telemetry.snapshot_recent_player_game_log_events() == [
+        {
+            "source_row_count": 4,
+            "published_row_count": 1,
+            "unjoined_athlete_count": 1,
+            "unjoined_event_count": 1,
+            "team_mismatch_count": 1,
+        }
+    ]
+
+
 def test_every_board_request_outcome_serializes_through_the_buffer():
     for outcome, status_code in telemetry.BOARD_REQUEST_STATUSES.items():
         telemetry.record_board_request_event(

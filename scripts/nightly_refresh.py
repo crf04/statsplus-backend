@@ -19,9 +19,12 @@ from sqlalchemy import create_engine  # noqa: E402
 from app.config.settings import load_settings  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
+from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
+from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
 from app.services.player_game_log_service import PlayerGameLogService  # noqa: E402
+from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
     StatsFreshnessRepository,
 )
@@ -36,7 +39,6 @@ def run_nightly_refresh(
     """Run the complete unit, retrying from its first step exactly once."""
 
     for attempt in range(1, 3):
-        failed_step = "stats"
         succeeded = True
         for step, refresh in (
             ("stats", refresh_stats),
@@ -87,9 +89,18 @@ def _run(database_url: str) -> int:
         event_service = EventCatalogService(
             engine, settings=settings, nba_stats_provider=provider
         )
+        athlete_service = AthleteCatalogService(
+            engine, settings=settings, nba_stats_provider=provider
+        )
+        player_game_log_repository = PlayerGameLogRepository(
+            engine, statistic_catalog=StatisticCatalog.load_default()
+        )
         player_game_log_service = PlayerGameLogService(
             engine,
             nba_stats_provider=provider,
+            repository=player_game_log_repository,
+            athlete_catalog=athlete_service,
+            event_catalog=event_service,
         )
         return run_nightly_refresh(
             data_service.update_all_data,

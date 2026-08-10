@@ -588,7 +588,7 @@ def test_adapter_fetches_complete_season_logs_in_one_provider_call():
         def get_data_frames(self):
             return [_recorded_provider_frame()]
 
-    adapter = NBAStatsAdapter(
+    adapter = InjectedNBAStatsAdapter(
         settings=_test_settings(), endpoint_factory=RecordedEndpoint
     )
 
