@@ -89,7 +89,10 @@ def normalize_selection_direction(
     """Normalize higher/lower labels and retain unfamiliar labels verbatim."""
 
     if isinstance(label, SelectionDirection):
-        return NormalizedLabel(label, label.value)
+        # ``UNKNOWN`` is this application's word for "the provider named no
+        # direction", so it is never a provider label to retain.
+        original_label = None if label is SelectionDirection.UNKNOWN else label.value
+        return NormalizedLabel(label, original_label)
 
     normalized = label.strip().casefold() if isinstance(label, str) else ""
     values = {
@@ -190,6 +193,30 @@ def _decimal_value(value: Decimal | int | str | float, *, field: str) -> Decimal
     except (InvalidOperation, TypeError, ValueError) as error:
         raise NumericDomainError(f"{field} must be a finite decimal") from error
     return normalized_decimal(decimal, field=field)
+
+
+def _integral_value(value: Decimal | int | str | float, *, field: str) -> int:
+    """One exactly integral provider number, or one typed malformed field.
+
+    An American price is a whole number of odds units, so the accepted forms
+    are the ones that already name such a number exactly: an integer, or a
+    numeric value or numeric string whose value is integral.  A fractional
+    value is refused rather than truncated into a price the provider never
+    quoted, and a boolean, a nonfinite value, or a magnitude outside the
+    normalized numeric domain is refused too.
+
+    Every refusal is a :class:`NumericDomainError`, so it reaches each adapter
+    as the ``ValueError`` it already converts into one typed malformed record.
+    ``int()`` alone does not: it truncates ``-112.5`` silently and raises
+    ``OverflowError`` on an infinity, which no adapter's coverage translation
+    catches.
+    """
+
+    decimal = _decimal_value(value, field=field)
+    _sign, digits, exponent = decimal.as_tuple()
+    if exponent < 0 and any(digits[exponent:]):
+        raise NumericDomainError(f"{field} must be a whole number")
+    return int(decimal)
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,7 +525,7 @@ class Selection:
     direction_label: str | None = None
     status: str | None = None
     modifiers: tuple[SelectionModifier, ...] = ()
-    american_price: int | str | None = None
+    american_price: Decimal | int | str | float | None = None
     decimal_price: Decimal | int | str | float | None = None
 
     def __post_init__(self) -> None:
@@ -523,16 +550,11 @@ class Selection:
         modifiers = tuple(self.modifiers)
         if any(not isinstance(modifier, SelectionModifier) for modifier in modifiers):
             raise ValueError("selection modifiers must be SelectionModifier values")
-        american_price = self.american_price
-        if american_price is not None:
-            if isinstance(american_price, bool):
-                raise ValueError("selection american_price must be an integer or None")
-            try:
-                american_price = int(american_price)
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    "selection american_price must be an integer or None"
-                ) from error
+        american_price = (
+            None
+            if self.american_price is None
+            else _integral_value(self.american_price, field="selection american_price")
+        )
         decimal_price = (
             None
             if self.decimal_price is None

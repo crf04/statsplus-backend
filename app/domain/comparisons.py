@@ -191,6 +191,28 @@ _DECIMAL_SIGNALS = (
 )
 
 
+def _exact_context(precision: int) -> Context:
+    """A context that states every field it depends on and inherits none.
+
+    Precision, exponent range, rounding, capitals, and clamping are all named,
+    and every signal is trapped, so a computation performed through this
+    context's own methods either produces the exact number or raises -- it
+    never quietly rounds, clamps, or records something inexact, and no
+    thread-local state takes part in it.
+    """
+
+    return Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=MIN_EMIN,
+        Emax=MAX_EMAX,
+        capitals=1,
+        clamp=0,
+        flags=[],
+        traps=list(_DECIMAL_SIGNALS),
+    )
+
+
 def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
     """The exact difference of two normalized decimals, ambient context aside.
 
@@ -219,30 +241,55 @@ def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
 
     for name, value in (("minuend", minuend), ("subtrahend", subtrahend)):
         normalized_decimal(value, field=f"an exact difference {name}")
-    context = Context(
-        prec=MAX_EXACT_DIFFERENCE_SPAN,
-        rounding=ROUND_HALF_EVEN,
-        Emin=MIN_EMIN,
-        Emax=MAX_EMAX,
-        capitals=1,
-        clamp=0,
-        flags=[],
-        traps=list(_DECIMAL_SIGNALS),
-    )
-    return context.subtract(minuend, subtrahend)
+    return _exact_context(MAX_EXACT_DIFFERENCE_SPAN).subtract(minuend, subtrahend)
 
 
 def exact_seconds(value: object) -> Decimal:
-    """Convert a timedelta-like duration to exact decimal seconds."""
+    """Convert a timedelta-like duration to exact decimal seconds.
+
+    A duration is counted in whole microseconds, so the conversion is integer
+    arithmetic and the result is written straight from those digits.  No
+    decimal operation takes part, because every one of them reads the ambient
+    context: under a caller's narrow precision the old division and addition
+    rounded the age of an observation, and under a trapping context they
+    refused to produce it at all, so one snapshot could be aged two ways or
+    none.
+    """
 
     days = getattr(value, "days", None)
     seconds = getattr(value, "seconds", None)
     microseconds = getattr(value, "microseconds", None)
     if days is None or seconds is None or microseconds is None:
         raise ValueError("an exact duration must be a timedelta")
-    return Decimal(days * 86400 + seconds) + (
-        Decimal(microseconds) / Decimal(1_000_000)
-    )
+    total = (days * 86400 + seconds) * 1_000_000 + microseconds
+    sign = "-" if total < 0 else ""
+    return Decimal(f"{sign}{abs(total)}E-6")
+
+
+def exact_scaled_seconds(
+    quantity: object, *, unit_seconds: int, field: str
+) -> Decimal:
+    """Convert a configured quantity of one time unit to exact seconds.
+
+    A configured window is stated in hours, days, or seconds, and the board
+    compares it against an age this module computed exactly, so the conversion
+    must be exact too and must not depend on the context the request was served
+    inside.  The quantity enters the normalized numeric domain first -- a
+    nonfinite or absurdly scaled setting is one typed
+    :class:`NumericDomainError`, never a silently rounded window -- and the
+    multiplication is performed by a fully stated context wide enough for every
+    digit both factors can carry.
+    """
+
+    if isinstance(quantity, bool):
+        raise NumericDomainError(f"{field} must be a finite decimal")
+    try:
+        value = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise NumericDomainError(f"{field} must be a finite decimal") from error
+    normalized_decimal(value, field=field)
+    precision = MAX_EXACT_DIFFERENCE_SPAN + len(str(unit_seconds))
+    return _exact_context(precision).multiply(value, Decimal(unit_seconds))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1273,6 +1320,7 @@ __all__ = [
     "canonical_decimal",
     "canonical_selections",
     "exact_difference",
+    "exact_scaled_seconds",
     "exact_seconds",
     "market_content_key",
     "market_evidence_key",

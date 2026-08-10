@@ -28,6 +28,7 @@ from app.providers.dfs import (
     ProviderSnapshot,
     RetrievalContext,
     Selection,
+    SelectionDirection,
     SelectionModifier,
     StatisticEvidence,
     TeamEvidence,
@@ -218,6 +219,75 @@ def _market_payload_snapshot() -> ProviderSnapshot:
 def test_snapshot_codec_rejects_invalid_or_aliased_nested_wire_fields(mutate) -> None:
     payload = json.loads(serialize_provider_snapshot(_market_payload_snapshot()))
     mutate(payload["markets"][0])
+
+    with pytest.raises(ValueError):
+        deserialize_provider_snapshot(
+            _canonical(payload),
+            expected_contract_version="1",
+            expected_provider="dabble",
+            expected_query=NBAMarketQuery(),
+        )
+
+
+def _selection_snapshot(selection: Selection) -> ProviderSnapshot:
+    return replace(
+        _market_payload_snapshot(),
+        markets=(replace(_market_payload_snapshot().markets[0], selections=(selection,)),),
+    )
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        # The provider named no direction at all, so the market carries the
+        # closed UNKNOWN value and no provider label to preserve.
+        Selection(selection_id="s-1"),
+        Selection(selection_id="s-1", direction=SelectionDirection.UNKNOWN),
+        Selection(selection_id="s-1", direction=SelectionDirection.HIGHER),
+        Selection(selection_id="s-1", direction="higher"),
+        # An unfamiliar provider word is retained verbatim as the label.
+        Selection(selection_id="s-1", direction="over"),
+        Selection(selection_id="s-1", direction="provider-specific"),
+        Selection(selection_id="s-1", direction=None, direction_label="unknown"),
+    ],
+)
+def test_snapshot_codec_round_trips_every_selection_direction(selection) -> None:
+    original = _selection_snapshot(selection)
+
+    payload = serialize_provider_snapshot(original)
+    restored = deserialize_provider_snapshot(
+        payload,
+        expected_contract_version="1",
+        expected_provider="dabble",
+        expected_query=NBAMarketQuery(),
+    )
+
+    assert restored == original
+    decoded = restored.markets[0].selections[0]
+    assert decoded.direction is selection.direction
+    assert decoded.direction_label == selection.direction_label
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # An alias the constructor would canonicalize into a different pair of
+        # values is corrupt wire data, not a value this codec ever wrote.
+        lambda selection: selection.update({"direction": "over", "direction_label": None}),
+        lambda selection: selection.update(
+            {"direction": "Unknown", "direction_label": None}
+        ),
+        lambda selection: selection.update(
+            {"direction": "unknown", "direction_label": "higher"}
+        ),
+        lambda selection: selection.update({"direction": 1, "direction_label": None}),
+    ],
+)
+def test_snapshot_codec_rejects_a_noncanonical_wire_direction(mutate) -> None:
+    payload = json.loads(
+        serialize_provider_snapshot(_selection_snapshot(Selection(selection_id="s-1")))
+    )
+    mutate(payload["markets"][0]["selections"][0])
 
     with pytest.raises(ValueError):
         deserialize_provider_snapshot(

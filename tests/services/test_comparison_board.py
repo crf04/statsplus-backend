@@ -1378,6 +1378,139 @@ def test_an_exact_difference_ignores_ambient_precision_clamp_and_traps():
     assert hostile == [expected] * 4
 
 
+def _under_hostile_contexts(call):
+    """Run one call inside every hostile ambient decimal context."""
+
+    signals = (
+        Clamped,
+        DivisionByZero,
+        FloatOperation,
+        Inexact,
+        InvalidOperation,
+        Overflow,
+        Rounded,
+        Subnormal,
+        Underflow,
+    )
+    results = []
+    for emax, emin in ((0, 0), (MAX_EMAX, MIN_EMIN)):
+        with localcontext() as context:
+            context.prec = 1
+            context.Emax = emax
+            context.Emin = emin
+            context.clamp = 1
+            context.capitals = 0
+            context.rounding = ROUND_CEILING
+            for signal in signals:
+                context.traps[signal] = True
+            results.append(call())
+    return results
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "expected"),
+    [
+        (timedelta(0), "0"),
+        (timedelta(seconds=300), "300"),
+        (timedelta(seconds=300, microseconds=500000), "300.5"),
+        (timedelta(days=7), "604800"),
+        (timedelta(microseconds=1), "0.000001"),
+        (timedelta(days=-1, microseconds=1), "-86399.999999"),
+        (timedelta.max, "86399999999999.999999"),
+        (timedelta.min, "-86399999913600"),
+    ],
+)
+def test_exact_seconds_is_one_number_whatever_context_a_caller_is_inside(
+    elapsed, expected
+):
+    value = comparisons.exact_seconds(elapsed)
+
+    assert value == Decimal(expected)
+    assert _under_hostile_contexts(
+        lambda: comparisons.exact_seconds(elapsed).as_tuple()
+    ) == [value.as_tuple()] * 2
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({"max_age_hours": 72.0}, "259200"),
+        ({"max_age_hours": 72.5}, "261000"),
+        ({"max_age_hours": "0.5"}, "1800"),
+        ({"freshness_days": 7}, "604800"),
+        ({"freshness_days": "1.5"}, "129600"),
+        ({}, None),
+    ],
+)
+def test_a_configured_catalog_window_is_exact_in_any_ambient_context(
+    document, expected
+):
+    freshness = {"season": SEASON, "is_fresh": True, **document}
+
+    def read():
+        value = comparison_board._catalog_max_age_seconds(freshness)
+        return None if value is None else value.as_tuple()
+
+    stated = read()
+
+    if expected is None:
+        assert stated is None
+    else:
+        assert Decimal(stated) == Decimal(expected)
+    assert _under_hostile_contexts(read) == [stated] * 2
+
+
+def test_a_board_states_the_same_freshness_arithmetic_in_any_ambient_context():
+    # Nothing a board says about how old an observation or a catalog is may
+    # depend on the decimal context the request happened to be served inside.
+    def read():
+        catalog = FakeCatalog(
+            {
+                "season": SEASON,
+                "is_fresh": True,
+                "max_age_hours": 72.5,
+                "last_success_at": (
+                    GENERATED_AT - timedelta(seconds=90, microseconds=500000)
+                ).isoformat(),
+            }
+        )
+        service, _ = _service(
+            [
+                _snapshot(
+                    "dabble",
+                    (_market(),),
+                    retrieved_at=GENERATED_AT - timedelta(seconds=300, microseconds=500000),
+                )
+            ],
+            athlete_catalog=catalog,
+        )
+        board = _read(service)
+        entry = next(
+            entry
+            for entry in board.availability.catalogs
+            if entry.catalog == "athlete_catalog"
+        )
+        observation = board.markets[0].observation
+        return tuple(
+            str(value)
+            for value in (
+                entry.age_seconds,
+                entry.max_age_seconds,
+                observation.age_seconds,
+                observation.freshness,
+                board.groups[0].reference,
+            )
+        )
+
+    stated = read()
+
+    assert _under_hostile_contexts(read) == [stated] * 2
+    assert Decimal(stated[0]) == Decimal("90.5")
+    assert Decimal(stated[1]) == Decimal(261000)
+    assert Decimal(stated[2]) == Decimal("300.5")
+    assert stated[3] == str(MarketFreshness.STALE)
+
+
 def test_every_threshold_the_provider_contract_accepts_can_be_compared():
     # Nothing the normalized numeric boundary accepts may later refuse to
     # assemble into a stated comparison.

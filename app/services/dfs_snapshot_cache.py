@@ -42,6 +42,7 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     Selection,
+    SelectionDirection,
     SelectionModifier,
     SnapshotStatus,
     SportEvidence,
@@ -57,6 +58,9 @@ DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
 
 _SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
+_SELECTION_DIRECTION_VALUES = frozenset(
+    direction.value for direction in SelectionDirection
+)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
@@ -328,6 +332,13 @@ def _selection(value: Any) -> Selection:
         raise SnapshotCacheError("snapshot selection modifiers schema is invalid")
     decoded = dict(data)
     decoded["modifiers"] = tuple(_modifier(item) for item in modifiers)
+    # A canonical wire value names the closed direction it was written from, so
+    # it is decoded as that member rather than read back as a provider label
+    # the snapshot never carried.  A provider alias stays a string, so the
+    # canonical check rejects it.
+    direction = decoded["direction"]
+    if isinstance(direction, str) and direction in _SELECTION_DIRECTION_VALUES:
+        decoded["direction"] = SelectionDirection(direction)
     result = _nested(
         decoded,
         Selection,

@@ -52,6 +52,7 @@ from app.domain.comparisons import (
     ProviderReport,
     UnresolvedMarket,
     canonical_selections,
+    exact_scaled_seconds,
     exact_seconds,
     market_content_key,
     market_evidence_key,
@@ -180,10 +181,14 @@ def _catalog_max_age_seconds(freshness: Mapping[str, Any]) -> Decimal | None:
 
     hours = freshness.get("max_age_hours")
     if hours is not None:
-        return Decimal(str(hours)) * Decimal(3600)
+        return exact_scaled_seconds(
+            hours, unit_seconds=3600, field="catalog max_age_hours"
+        )
     days = freshness.get("freshness_days")
     if days is not None:
-        return Decimal(str(days)) * Decimal(86400)
+        return exact_scaled_seconds(
+            days, unit_seconds=86400, field="catalog freshness_days"
+        )
     return None
 
 
@@ -717,9 +722,8 @@ class ComparisonBoardService:
 
         providers = getattr(self.settings, "providers", None)
         reader = getattr(providers, accessor, None)
-        if not callable(reader):
-            return Decimal(str(default))
-        return Decimal(str(reader(provider)))
+        configured = default if not callable(reader) else reader(provider)
+        return exact_scaled_seconds(configured, unit_seconds=1, field=accessor)
 
     def _provider_reports(
         self, board: Any, observed_at: datetime, filters: ComparisonFilters

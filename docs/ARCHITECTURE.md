@@ -112,6 +112,15 @@ exponent and digit count, never by materializing the places between them, so
 domain is enforced there, nothing the contract accepts can later refuse to
 enter a Comparison Group.
 
+A selection's **American price** passes through that same boundary and is then
+required to be a whole number: an integer, or a numeric value or numeric string
+naming an integer exactly. A fractional value is refused rather than truncated
+into a price the provider never quoted, and so are a boolean, a nonfinite value,
+and a magnitude outside the normalized numeric domain. Each refusal is the same
+`NumericDomainError`, so it reaches an adapter as the `ValueError` it already
+converts into one typed malformed record instead of escaping as an
+`OverflowError` past that translation.
+
 `ProviderSnapshotCache` is an injected decorator around that seam. It stores
 only complete normalized snapshots in Redis under a provider/query key that
 includes the adapter-contract version; it never serializes a `DFSBoard`. The
@@ -155,7 +164,11 @@ carry a second, conflicting document. Anything a constructor would normalize,
 drop, canonicalize from an alias, or deduplicate is corrupt too, as is a value
 no domain constructor can represent — a wire number whose conversion raises
 `OverflowError`, for example. Every such failure is contained at this seam: the
-key is deleted and the request becomes a miss.
+key is deleted and the request becomes a miss. A closed vocabulary the codec
+itself wrote — a scoring period, a selection direction — is decoded as the
+member it names rather than as a provider label the snapshot never carried, so
+the canonical check compares like with like; a provider alias stays a string
+and is rejected by that same check.
 
 Cache decisions are recorded once per request as bounded cache counters only;
 the cache never emits a provider-operation event, and provider events never
@@ -893,7 +906,16 @@ signal, using that context's own method rather than an operator, so no
 thread-local precision, clamp, or trap can change or refuse it. Its precision
 is `MAX_EXACT_DIFFERENCE_SPAN`, the widest exact difference the normalized
 numeric domain admits, so every threshold the provider contract accepted
-subtracts exactly. No probability, expected value, recommendation,
+subtracts exactly.
+
+How old an observation or a catalog is inherits nothing either. `exact_seconds`
+counts a duration in whole microseconds and writes the result straight from
+those digits, so no decimal operation and therefore no ambient precision takes
+part; `exact_scaled_seconds` converts a configured window stated in hours,
+days, or seconds through the same fully stated context, after the configured
+quantity enters the normalized numeric domain. A caller's narrow precision or
+trapping context can no longer age one snapshot two ways, or refuse to age it
+at all. No probability, expected value, recommendation,
 average, preferred market, entry payout, or cross-provider fantasy assumption
 is produced anywhere in this seam.
 

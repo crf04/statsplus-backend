@@ -158,6 +158,86 @@ def test_a_provider_number_beyond_the_numeric_domain_is_refused(value):
         assert value not in str(raised.value)
 
 
+def test_an_unknown_direction_enum_carries_no_provider_label():
+    # ``SelectionDirection.UNKNOWN`` is this application's own word for "the
+    # provider did not say", so it is not a label the provider wrote.
+    normalized = normalize_selection_direction(SelectionDirection.UNKNOWN)
+
+    assert normalized.value is SelectionDirection.UNKNOWN
+    assert normalized.original_label is None
+    assert (
+        normalize_selection_direction(SelectionDirection.HIGHER).original_label
+        == "higher"
+    )
+    assert Selection(selection_id="s-1").direction_label is None
+    assert (
+        Selection(
+            selection_id="s-1", direction=SelectionDirection.UNKNOWN
+        ).direction_label
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (110, 110),
+        (-110, -110),
+        (0, 0),
+        ("110", 110),
+        ("-110", -110),
+        (110.0, 110),
+        (Decimal("-110"), -110),
+        (Decimal("1.10E+2"), 110),
+        ("-0", 0),
+        (f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT}", 10**NORMALIZED_DECIMAL_PLACE_LIMIT),
+    ],
+)
+def test_an_american_price_accepts_every_exactly_integral_value(value, expected):
+    selection = Selection(selection_id="s-1", american_price=value)
+
+    assert selection.american_price == expected
+    assert isinstance(selection.american_price, int)
+    assert not isinstance(selection.american_price, bool)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        110.5,
+        -110.5,
+        "110.5",
+        Decimal("1.5"),
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        "Infinity",
+        "-Infinity",
+        "NaN",
+        1e400,
+        "1E+400",
+        f"1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
+        Decimal("Infinity"),
+        Decimal("NaN"),
+        True,
+        False,
+        "",
+        "  ",
+        "even",
+        object(),
+    ],
+)
+def test_an_american_price_that_is_not_exactly_integral_is_refused(value):
+    # Every rejection is a ValueError, because that is what each provider
+    # adapter converts into one typed malformed record, and none of them quotes
+    # the value it refused.
+    with pytest.raises(ValueError) as raised:
+        Selection(selection_id="s-1", american_price=value)
+
+    if str(value).strip():
+        assert str(value) not in str(raised.value)
+
+
 def test_selection_modifier_is_decimal_evidence_not_a_payout():
     modifier = SelectionModifier(
         value="1.000",
