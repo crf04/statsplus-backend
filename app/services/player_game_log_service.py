@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 import math
@@ -56,6 +56,18 @@ class _CanonicalizationResult:
     team_mismatch_count: int
     unsupported_phase_count: int = 0
     duplicate_row_count: int = 0
+
+    @classmethod
+    def empty(
+        cls, *, source_row_count: int = 0
+    ) -> _CanonicalizationResult:
+        return cls(
+            records=(),
+            source_row_count=source_row_count,
+            unjoined_athlete_count=0,
+            unjoined_event_count=0,
+            team_mismatch_count=0,
+        )
 
 
 class _ExclusionReason(Enum):
@@ -203,6 +215,7 @@ class PlayerGameLogService:
                 canonicalized = self._canonicalize_phases(
                     canonical_season,
                     frames,
+                    source_row_count=source_row_count,
                     athletes=athletes,
                     events=events,
                 )
@@ -262,6 +275,7 @@ class PlayerGameLogService:
         season: str,
         frames: dict[str, pd.DataFrame],
         *,
+        source_row_count: int,
         athletes: list[dict[str, Any]],
         events: list[dict[str, Any]],
     ) -> _CanonicalizationResult:
@@ -282,10 +296,18 @@ class PlayerGameLogService:
             except _CanonicalizationAbort as error:
                 raise _CanonicalizationAbort(
                     str(error),
-                    self._combine_canonicalizations((*results, error.result)),
+                    replace(
+                        self._combine_canonicalizations(
+                            (*results, error.result)
+                        ),
+                        source_row_count=source_row_count,
+                    ),
                     malformed_row_count=error.malformed_row_count,
                 ) from error
-        return self._combine_canonicalizations(tuple(results))
+        return replace(
+            self._combine_canonicalizations(tuple(results)),
+            source_row_count=source_row_count,
+        )
 
     def _validate_canonicalization(
         self,
@@ -363,7 +385,6 @@ class PlayerGameLogService:
             result.unjoined_athlete_count
             or result.unjoined_event_count
             or result.team_mismatch_count
-            or result.unsupported_phase_count
         )
         return (
             has_unjoined_identity
@@ -459,7 +480,9 @@ class PlayerGameLogService:
         if missing:
             raise _CanonicalizationAbort(
                 "player game logs are missing required canonical facts",
-                _CanonicalizationResult((), len(frame.index), 0, 0, 0),
+                _CanonicalizationResult.empty(
+                    source_row_count=len(frame.index)
+                ),
                 malformed_row_count=1,
             )
 
@@ -758,28 +781,20 @@ class PlayerGameLogService:
         rejected: int = 0,
         recovered: int = 0,
     ) -> None:
-        source_count = result.source_row_count if result is not None else source
+        coverage = result or _CanonicalizationResult.empty(
+            source_row_count=source
+        )
         self.telemetry_recorder.record(
             PlayerGameLogTelemetryEvent(
-                source_row_count=source_count,
+                source_row_count=coverage.source_row_count,
                 published_row_count=published,
-                unjoined_athlete_count=(
-                    result.unjoined_athlete_count if result is not None else 0
-                ),
-                unjoined_event_count=(
-                    result.unjoined_event_count if result is not None else 0
-                ),
-                team_mismatch_count=(
-                    result.team_mismatch_count if result is not None else 0
-                ),
-                unsupported_phase_count=(
-                    result.unsupported_phase_count if result is not None else 0
-                ),
+                unjoined_athlete_count=coverage.unjoined_athlete_count,
+                unjoined_event_count=coverage.unjoined_event_count,
+                team_mismatch_count=coverage.team_mismatch_count,
+                unsupported_phase_count=coverage.unsupported_phase_count,
                 malformed_row_count=malformed,
                 rejected_publication_count=rejected,
-                duplicate_row_count=(
-                    result.duplicate_row_count if result is not None else 0
-                ),
+                duplicate_row_count=coverage.duplicate_row_count,
                 recovered_shrink_row_count=recovered,
             )
         )

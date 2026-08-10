@@ -517,8 +517,9 @@ bounded scalar-only telemetry; no name or matchup-text guess is accepted. A
 row whose governed catalog event is outside the explicit `Regular Season` and
 `Playoffs` durable phase set is likewise excluded with an
 `unsupported_phase_count`; it never becomes a stored fact. Stable snapshots
-with the same unsupported exclusions may republish, while new source growth
-hidden by those exclusions triggers the cumulative completeness guard. A
+and new source growth containing only governed unsupported-phase exclusions
+may republish and advance freshness; those rows are outside canonical identity
+coverage rather than failed joins. A
 nonempty snapshot that yields no canonical rows fails the refresh before
 publication. For every non-postponed governed `Regular Season` or `Playoffs`
 event that is final and scheduled no later than the source observation time,
@@ -535,9 +536,8 @@ telemetry and the incomplete replacement fails while prior facts remain
 served; no stale name or player identity is recovered from player logs.
 Structurally, numerically, or logically malformed rows abort the
 publication while retaining already observed bounded coverage counts. If a
-new cumulative source row cannot join an athlete, event, or team, or is outside
-the supported phase set, and canonical publication would otherwise remain at
-or below its prior size, the apparent
+new cumulative source row cannot join an athlete, event, or team and canonical
+publication would otherwise remain at or below its prior size, the apparent
 growth exposes incomplete canonical identity coverage and fails closed instead
 of stamping the unchanged snapshot fresh. This comparison uses the prior raw
 source-row count, not the prior canonical count, so an unchanged partially

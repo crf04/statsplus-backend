@@ -1126,6 +1126,37 @@ def test_malformed_playoff_rejection_reports_union_source_coverage(tmp_path):
     assert telemetry.events[0].rejected_publication_count == 1
 
 
+def test_malformed_regular_season_rejection_reports_union_source_coverage(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _service(repository, _RecordedSeasonProvider()).refresh(SEASON)
+    prior_freshness = repository.get_freshness(SEASON)
+    prior_rows = repository.list_player_rows(SEASON, 101)
+    _seed_completed_playoff_event(repository)
+    regular_frame = _recorded_season_frame()
+    regular_frame["MIN"] = regular_frame["MIN"].astype(object)
+    regular_frame.loc[0, "MIN"] = "not-a-number"
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="invalid minutes"):
+        _service(
+            repository,
+            _RecordedSeasonProvider(
+                frame=regular_frame,
+                playoff_frame=_recorded_playoff_frame(),
+            ),
+            telemetry_recorder=telemetry,
+        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert telemetry.events[0].source_row_count == 32
+    assert telemetry.events[0].malformed_row_count == 1
+    assert telemetry.events[0].rejected_publication_count == 1
+    assert repository.get_freshness(SEASON) == prior_freshness
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
+
+
 def test_mixed_unsupported_phase_rows_are_excluded_and_stably_republish(
     tmp_path,
 ):
@@ -1230,12 +1261,14 @@ def test_play_in_game_id_is_unsupported_even_when_catalog_claims_regular_season(
     }
 
 
-def test_new_unsupported_phase_growth_preserves_the_prior_publication(tmp_path):
+def test_new_governed_play_in_rows_do_not_block_valid_snapshot_freshness(
+    tmp_path,
+):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     initial_provider = _RecordedSeasonProvider()
     _service(repository, initial_provider).refresh(SEASON)
-    prior = repository.get_freshness(SEASON)
+    prior_rows = repository.list_player_rows(SEASON, 101)
     _seed_unsupported_phase_events(
         repository, ("0052500001", "Play-In Tournament")
     )
@@ -1246,16 +1279,25 @@ def test_new_unsupported_phase_growth_preserves_the_prior_publication(tmp_path):
         )
     )
     telemetry = _RecordingTelemetry()
+    refreshed_at = RETRIEVED_AT + timedelta(hours=1)
 
-    with pytest.raises(PlayerGameLogIdentityError, match="incomplete canonical"):
-        _service(
-            repository, provider, telemetry_recorder=telemetry
-        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+    result = _service(
+        repository, provider, telemetry_recorder=telemetry
+    ).refresh(SEASON, now=refreshed_at)
 
-    assert repository.get_freshness(SEASON) == prior
+    assert result.row_count == 22
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=refreshed_at,
+        row_count=22,
+        source_row_count=23,
+    )
     assert telemetry.events[0].source_row_count == 23
     assert telemetry.events[0].unsupported_phase_count == 1
-    assert telemetry.events[0].rejected_publication_count == 1
+    assert telemetry.events[0].published_row_count == 22
+    assert telemetry.events[0].rejected_publication_count == 0
 
 
 @pytest.mark.parametrize("failure_phase", ["Regular Season", "Playoffs"])
