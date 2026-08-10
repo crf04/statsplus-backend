@@ -22,7 +22,7 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -1127,6 +1127,216 @@ def has_readable_provider(reports: Iterable[ProviderReport]) -> bool:
     return any(report.is_readable for report in reports)
 
 
+# -- the one projection authority -----------------------------------------
+#
+# A published comparison member and a published unresolved market are not
+# independent statements: each is a projection of one retained
+# :class:`BoardMarket`.  Both projections are derived here, once, so the seam
+# that assembles a board and the invariant that judges one cannot drift apart
+# and quietly agree on a member no observation supports.  Neither reads
+# anything but the retained evidence handed to it, so this stays in the domain
+# and the service imports it rather than the other way round.
+
+
+def comparison_member_of(market: BoardMarket) -> ComparisonMember | None:
+    """The exact comparison projection of one retained observation.
+
+    ``None`` is not a defect: an observation with no threshold, or one aged
+    past the permitted maximum, states no comparable fact and so projects to no
+    member at all.  Such evidence can back nothing, which is exactly what a
+    caller of this function needs to learn.
+    """
+
+    if not isinstance(market, BoardMarket):
+        raise TypeError("a comparison member is projected from retained evidence")
+    if market.threshold is None or market.observation.freshness is None:
+        return None
+    return ComparisonMember(
+        market_reference=market.market_reference,
+        provider=market.provider,
+        threshold=market.threshold.value,
+        threshold_unit=market.threshold.unit,
+        variant=market.variant,
+        status=market.status,
+        retrieved_at=market.observation.retrieved_at,
+        freshness=market.observation.freshness,
+        selection_references=tuple(
+            selection.selection_reference for selection in market.selections
+        ),
+    )
+
+
+def unresolved_market_of(market: BoardMarket) -> UnresolvedMarket | None:
+    """The exact unresolved projection of one retained excluded observation.
+
+    ``None`` for an observation that entered a comparison: it names no
+    exclusion, so nothing about it can be stated as unresolved.
+    """
+
+    if not isinstance(market, BoardMarket):
+        raise TypeError("an unresolved market is projected from retained evidence")
+    if market.exclusion is None:
+        return None
+    return UnresolvedMarket(
+        market_reference=market.market_reference,
+        provider=market.provider,
+        reason=market.exclusion,
+        detail=market.exclusion_detail,
+    )
+
+
+def _same_published_fact(published: Any, derived: Any) -> bool:
+    """Whether two published facts are the same fact, at the scale written.
+
+    Equality alone is too weak for a board: ``Decimal("25.50")`` equals
+    ``Decimal("25.5")`` and yet reaches a caller as another number, and a tuple
+    of such numbers has the same problem one level down.
+    """
+
+    if isinstance(published, Decimal) or isinstance(derived, Decimal):
+        return (
+            isinstance(published, Decimal)
+            and isinstance(derived, Decimal)
+            and _same_published_decimal(published, derived)
+        )
+    if isinstance(published, tuple) or isinstance(derived, tuple):
+        return (
+            isinstance(published, tuple)
+            and isinstance(derived, tuple)
+            and len(published) == len(derived)
+            and all(
+                _same_published_fact(left, right)
+                for left, right in zip(published, derived)
+            )
+        )
+    return type(published) is type(derived) and published == derived
+
+
+def _projects_exactly(published: Any, derived: Any) -> bool:
+    """Whether every field a value publishes is the field its evidence derived.
+
+    Every field takes part, read from the dataclass itself, so a fact added to
+    a published value later is backed by its evidence from the day it exists
+    rather than the day someone remembers to list it here.
+    """
+
+    return derived is not None and all(
+        _same_published_fact(
+            getattr(published, field.name), getattr(derived, field.name)
+        )
+        for field in fields(published)
+    )
+
+
+def _by_reference(
+    markets: tuple[BoardMarket, ...],
+) -> dict[str, list[BoardMarket]]:
+    """Every retained observation of one market reference, kept together."""
+
+    clusters: dict[str, list[BoardMarket]] = {}
+    for market in markets:
+        clusters.setdefault(market.market_reference, []).append(market)
+    return clusters
+
+
+def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
+    """Require each contradicted reference to retain the whole contradiction.
+
+    A contradiction is a statement about a set of observations, so a cluster
+    that has lost one, repeated one, disagrees about how many there were, or
+    carries one more observation that never admits to contradicting anything is
+    not a contradiction an audit could read -- it is a board that would publish
+    ``2 of 3`` and let a reader conclude the missing observation agreed.
+
+    The converse is required too: two retained observations of one reference
+    that state no contradiction are two markets claiming one identity while
+    saying nothing about each other, and a board never produces that.
+    """
+
+    for cluster in clusters.values():
+        counts = {market.conflict_count for market in cluster}
+        if counts == {None}:
+            if len(cluster) > 1:
+                raise ValueError(
+                    "repeated observations of one market reference must state the "
+                    "contradiction they are"
+                )
+            continue
+        if None in counts:
+            raise ValueError(
+                "every observation of a contradicted reference states the "
+                "contradiction"
+            )
+        if len(counts) > 1:
+            raise ValueError(
+                "contradicting observations must state one contradiction count"
+            )
+        (count,) = counts
+        if len(cluster) != count:
+            raise ValueError(
+                "a contradiction must retain exactly the observations it counted"
+            )
+        ordinals = sorted(market.conflict_ordinal for market in cluster)
+        if ordinals != list(range(count)):
+            raise ValueError(
+                "contradicting observations must name each observation once"
+            )
+
+
+def _require_derived_members(
+    groups: tuple[ComparisonGroup, ...], clusters: dict[str, list[BoardMarket]]
+) -> None:
+    """Require every published member to be the projection of its own evidence."""
+
+    for group in groups:
+        for member in group.members:
+            backing = (
+                market
+                for market in clusters.get(member.market_reference, ())
+                if market.comparison_reference == group.reference
+            )
+            if not any(
+                _projects_exactly(member, comparison_member_of(market))
+                for market in backing
+            ):
+                raise ValueError(
+                    "a compared member must state exactly the evidence it was "
+                    "read from"
+                )
+
+
+def _require_derived_unresolved(
+    unresolved: tuple[UnresolvedMarket, ...], clusters: dict[str, list[BoardMarket]]
+) -> None:
+    """Require every unresolved market to describe its whole excluded cluster.
+
+    One reference is unresolved once however many observations contested it, so
+    the entry stands on the complete cluster rather than on whichever
+    observation happens to be first: every excluded observation of the
+    reference must state the same exclusion, and the entry must state that one.
+    """
+
+    for entry in unresolved:
+        projections = [
+            unresolved_market_of(market)
+            for market in clusters.get(entry.market_reference, ())
+            if not market.is_compared
+        ]
+        # Every unresolved reference was required to stand on retained excluded
+        # evidence before this runs, so the cluster is never empty here.
+        first = projections[0]
+        if not all(_projects_exactly(first, other) for other in projections):
+            raise ValueError(
+                "contradicting observations of one reference must state one "
+                "exclusion"
+            )
+        if not _projects_exactly(entry, first):
+            raise ValueError(
+                "an unresolved market must state exactly the evidence it was "
+                "read from"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ComparisonFilters:
     """Optional central narrowing of one comparison board read.
@@ -1307,6 +1517,14 @@ class ComparisonBoard:
         may stand on several retained observations; what is required is that at
         least one exists and that every retained observation names where it
         went.
+
+        Nor is a reference enough.  A member is published only where retained
+        evidence projects to exactly that member -- the same provider, the same
+        threshold at the same written scale and unit, the same status, variant,
+        retrieval, freshness, and selections -- and an unresolved market only
+        where its whole excluded cluster states exactly that exclusion.  Each
+        contradiction is required to be complete before either is read, so no
+        published fact ever stands on a partial one.
         """
 
         grouped: dict[str, str] = {}
@@ -1351,6 +1569,10 @@ class ComparisonBoard:
                 raise ValueError(
                     "retained excluded evidence must name an unresolved market"
                 )
+        clusters = _by_reference(markets)
+        _require_complete_conflicts(clusters)
+        _require_derived_members(groups, clusters)
+        _require_derived_unresolved(unresolved, clusters)
 
     @property
     def is_empty(self) -> bool:
@@ -1495,6 +1717,7 @@ __all__ = [
     "UnresolvedMarket",
     "canonical_decimal",
     "canonical_selections",
+    "comparison_member_of",
     "exact_difference",
     "exact_scaled_seconds",
     "exact_seconds",
@@ -1505,4 +1728,5 @@ __all__ = [
     "normalized_decimal",
     "observation_evidence_key",
     "selection_reference",
+    "unresolved_market_of",
 ]

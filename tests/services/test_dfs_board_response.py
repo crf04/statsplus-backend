@@ -25,6 +25,7 @@ from app.domain.statistics import ScoringPeriod
 from app.providers.dfs import (
     CoverageEvidence,
     MarketStatus,
+    MarketVariant,
     NBAMarketQuery,
     ProviderSnapshot,
     Selection,
@@ -48,9 +49,11 @@ from app.services.dfs_board_response import (
 )
 from app.utils.telemetry import BoardRequestEvent
 from app.domain.comparisons import (
+    ComparisonExclusion,
     ComparisonFilters,
     ComparisonGroup,
     ComparisonSummary,
+    MarketFreshness,
 )
 
 from tests.services.test_comparison_board import (
@@ -1328,3 +1331,151 @@ def test_a_published_board_partitions_every_reference_it_states():
             assert market["comparison_reference"] in references
         else:
             assert market["market_reference"] in unresolved
+
+
+# -- every published projection restates its own retained evidence ----------
+
+
+def test_every_published_member_restates_the_market_it_was_read_from():
+    """A reader can check each member against the evidence in the same body."""
+
+    payload = serialize_board(_read_group_board())
+    retained = {market["market_reference"]: market for market in payload["markets"]}
+
+    assert payload["comparison_groups"]
+    for group in payload["comparison_groups"]:
+        for member in group["members"]:
+            market = retained[member["market_reference"]]
+            assert member["provider"] == market["provider"]
+            assert member["threshold"] == market["threshold"]["value"]
+            assert member["threshold_unit"] == market["threshold"]["unit"]
+            assert member["status"] == market["status"]
+            assert member["variant"] == market["variant"]
+            assert member["retrieved_at"] == market["observation"]["retrieved_at"]
+            assert member["freshness"] == market["observation"]["freshness"]
+            assert member["selection_references"] == sorted(
+                selection["selection_reference"] for selection in market["selections"]
+            )
+
+
+def _unresolved_board():
+    """One read whose only market states no threshold, so it stays unresolved."""
+
+    return _read_markets((_market(market_id="m-1", threshold=None),))
+
+
+def test_a_published_unresolved_market_restates_its_excluded_evidence():
+    payload = serialize_board(_unresolved_board())
+
+    (entry,) = payload["unresolved_markets"]
+    (market,) = payload["markets"]
+    assert entry["market_reference"] == market["market_reference"]
+    assert entry["provider"] == market["provider"]
+    assert entry["reason"] == market["exclusion"] == "missing_threshold"
+    assert entry["detail"] == market["exclusion_detail"]
+
+
+def test_a_published_contradiction_states_its_whole_cluster(monkeypatch):
+    _forced_reference(monkeypatch)
+    board = _read_markets(
+        (_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5"))
+    )
+
+    payload = serialize_board(board)
+
+    (entry,) = payload["unresolved_markets"]
+    cluster = payload["markets"]
+    assert entry["reason"] == "conflicting_market_identity"
+    assert [market["conflict_ordinal"] for market in cluster] == [0, 1]
+    assert {market["conflict_count"] for market in cluster} == {2}
+    for market in cluster:
+        assert market["market_reference"] == entry["market_reference"]
+        assert market["provider"] == entry["provider"]
+        assert market["exclusion"] == entry["reason"]
+        assert market["exclusion_detail"] == entry["detail"]
+
+
+#: Each falsification publishes a member that is internally valid -- its own
+#: group summary is re-derived from it -- and yet states a fact the market
+#: retained beside it does not.
+FALSE_MEMBERS = {
+    "provider": {"provider": "ghost"},
+    "threshold": {"threshold": Decimal("99.5")},
+    "threshold_scale": {"threshold": Decimal("25.50")},
+    "threshold_unit": {"threshold_unit": "points"},
+    "status": {"status": MarketStatus.SUSPENDED},
+    "variant": {"variant": MarketVariant.ALTERNATE},
+    "freshness": {"freshness": MarketFreshness.STALE},
+    "retrieved_at": {"retrieved_at": RETRIEVED_AT - timedelta(seconds=60)},
+    "selection_references": {"selection_references": ("sel_2_unpublished",)},
+}
+
+
+@pytest.mark.parametrize("falsified", sorted(FALSE_MEMBERS), ids=sorted(FALSE_MEMBERS))
+def test_no_falsified_member_can_reach_the_serializer(falsified):
+    """A member is refused where the board is built, so no body carries one."""
+
+    board = _read_group_board()
+    group = board.groups[0]
+    members = tuple(
+        sorted(
+            (
+                dataclasses.replace(group.members[0], **FALSE_MEMBERS[falsified]),
+                *group.members[1:],
+            ),
+            key=lambda member: member.order,
+        )
+    )
+
+    with pytest.raises(ValueError, match="member must state exactly the evidence"):
+        serialize_board(
+            dataclasses.replace(
+                board,
+                groups=(
+                    ComparisonGroup(
+                        key=group.key,
+                        members=members,
+                        summary=ComparisonSummary.of(members),
+                    ),
+                    *board.groups[1:],
+                ),
+            )
+        )
+
+
+FALSE_UNRESOLVED = {
+    "provider": {"provider": "ghost"},
+    "reason": {"reason": ComparisonExclusion.STALE_SNAPSHOT},
+    "detail": {"detail": "invented"},
+}
+
+
+@pytest.mark.parametrize(
+    "falsified", sorted(FALSE_UNRESOLVED), ids=sorted(FALSE_UNRESOLVED)
+)
+def test_no_falsified_unresolved_market_can_reach_the_serializer(falsified):
+    board = _unresolved_board()
+
+    with pytest.raises(ValueError, match="unresolved market must state exactly"):
+        serialize_board(
+            dataclasses.replace(
+                board,
+                unresolved=(
+                    dataclasses.replace(
+                        board.unresolved[0], **FALSE_UNRESOLVED[falsified]
+                    ),
+                ),
+            )
+        )
+
+
+def test_no_partial_contradiction_can_reach_the_serializer(monkeypatch):
+    """Publishing one of two contradicting observations would read as agreement."""
+
+    _forced_reference(monkeypatch)
+    board = _read_markets((_spelled("25.5", "25.5"), _spelled("27.5", "27.5")))
+
+    with pytest.raises(ValueError, match="exactly the observations it counted"):
+        serialize_board(
+            dataclasses.replace(board, markets=board.markets[:1], market_count=1)
+        )

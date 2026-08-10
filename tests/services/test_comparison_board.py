@@ -1404,17 +1404,18 @@ def test_a_comparison_key_requires_an_explicit_scoring_period():
         )
 
 
-def _member(reference="mkt_1_a", threshold="25.5", provider="dabble"):
-    return ComparisonMember(
-        market_reference=reference,
-        provider=provider,
-        threshold=Decimal(threshold),
-        threshold_unit="count",
-        variant=MarketVariant.STANDARD,
-        status=MarketStatus.AVAILABLE,
-        retrieved_at=RETRIEVED_AT,
-        freshness=MarketFreshness.FRESH,
-    )
+def _member(reference="mkt_1_a", threshold="25.5", provider="dabble", **overrides):
+    values = {
+        "market_reference": reference,
+        "provider": provider,
+        "threshold": Decimal(threshold),
+        "threshold_unit": "count",
+        "variant": MarketVariant.STANDARD,
+        "status": MarketStatus.AVAILABLE,
+        "retrieved_at": RETRIEVED_AT,
+        "freshness": MarketFreshness.FRESH,
+    }
+    return ComparisonMember(**{**values, **overrides})
 
 
 def test_a_summary_must_state_the_exact_difference_and_sorted_references():
@@ -3530,13 +3531,18 @@ def test_every_assembled_group_states_exactly_its_own_members():
 
 
 def _compared_market(reference, comparison_reference, **overrides):
-    return comparisons.BoardMarket(
-        market_reference=reference,
-        provider="dabble",
-        observation=_board_observation(),
-        comparison_reference=comparison_reference,
-        **overrides,
-    )
+    """Retained evidence that exactly projects to ``_member(reference)``."""
+
+    values = {
+        "market_reference": reference,
+        "provider": "dabble",
+        "observation": _board_observation(freshness=MarketFreshness.FRESH),
+        "threshold": comparisons.BoardThreshold(value=Decimal("25.5"), unit="count"),
+        "status": MarketStatus.AVAILABLE,
+        "variant": MarketVariant.STANDARD,
+        "comparison_reference": comparison_reference,
+    }
+    return comparisons.BoardMarket(**{**values, **overrides})
 
 
 def _excluded_market(reference, **overrides):
@@ -3725,6 +3731,305 @@ def test_an_assembled_board_partitions_every_reference_it_kept():
     assert not grouped & unresolved
     assert grouped | unresolved == retained
     assert len(board.groups) + board.unresolved_count <= board.market_count
+
+
+# -- one projection authority, shared by assembly and invariant -------------
+
+
+def test_a_member_is_projected_from_the_evidence_alone():
+    evidence = _compared_market("mkt_1_a", _key().reference)
+
+    assert comparisons.comparison_member_of(evidence) == _member()
+
+
+@pytest.mark.parametrize(
+    "unprojectable",
+    [
+        {"threshold": None},
+        {"observation": _board_observation()},  # aged past the permitted maximum
+    ],
+)
+def test_evidence_stating_no_comparable_fact_projects_to_no_member(unprojectable):
+    evidence = _compared_market("mkt_1_a", _key().reference, **unprojectable)
+
+    assert comparisons.comparison_member_of(evidence) is None
+
+
+def test_an_unresolved_market_is_projected_from_the_evidence_alone():
+    evidence = _excluded_market("mkt_1_a")
+
+    assert comparisons.unresolved_market_of(evidence) == _unresolved_market("mkt_1_a")
+
+
+def test_compared_evidence_projects_to_no_unresolved_market():
+    evidence = _compared_market("mkt_1_a", _key().reference)
+
+    assert comparisons.unresolved_market_of(evidence) is None
+
+
+@pytest.mark.parametrize(
+    "project", [comparisons.comparison_member_of, comparisons.unresolved_market_of]
+)
+def test_only_retained_evidence_can_be_projected(project):
+    with pytest.raises(TypeError, match="projected from retained evidence"):
+        project(_member())
+
+
+# -- every published projection is derived from the evidence it cites -------
+
+#: Each falsification is a legitimate retained observation that nonetheless
+#: states a different fact than the member published above it.  A reference on
+#: both sides is not the question here: the evidence is present, compared, and
+#: names the right comparison, and is still not what the member says.
+FALSE_MEMBER_EVIDENCE = {
+    "provider": {"provider": "prizepicks"},
+    "threshold_value": {
+        "threshold": comparisons.BoardThreshold(value=Decimal("26.5"), unit="count")
+    },
+    "threshold_scale": {
+        "threshold": comparisons.BoardThreshold(value=Decimal("25.50"), unit="count")
+    },
+    "threshold_unit": {
+        "threshold": comparisons.BoardThreshold(value=Decimal("25.5"), unit="points")
+    },
+    "missing_threshold": {"threshold": None},
+    "status": {"status": MarketStatus.SUSPENDED},
+    "variant": {"variant": MarketVariant.ALTERNATE},
+    "freshness": {
+        "observation": _board_observation(freshness=MarketFreshness.STALE)
+    },
+    "unaged_observation": {"observation": _board_observation()},
+    "retrieved_at": {
+        "observation": _board_observation(
+            retrieved_at=RETRIEVED_AT - timedelta(seconds=60),
+            age_seconds=Decimal("90"),
+            freshness=MarketFreshness.FRESH,
+        )
+    },
+    "selections": {
+        "selections": (
+            comparisons.BoardSelection(selection_reference="sel_2_unpublished"),
+        )
+    },
+}
+
+
+@pytest.mark.parametrize("falsified", sorted(FALSE_MEMBER_EVIDENCE))
+def test_a_member_must_state_exactly_the_evidence_it_was_read_from(falsified):
+    group = _single_member_group()
+
+    with pytest.raises(ValueError, match="member must state exactly the evidence"):
+        _partition_board(
+            groups=(group,),
+            markets=(
+                _compared_market(
+                    "mkt_1_a", group.reference, **FALSE_MEMBER_EVIDENCE[falsified]
+                ),
+            ),
+        )
+
+
+def test_a_member_states_its_selection_references_however_evidence_listed_them():
+    """Listing order is not a fact, so a sorted member still states the same."""
+
+    references = ("sel_2_higher", "sel_2_lower")
+    group = _group_of((_member(selection_references=references),))
+
+    board = _partition_board(
+        groups=(group,),
+        markets=(
+            _compared_market(
+                "mkt_1_a",
+                group.reference,
+                selections=tuple(
+                    comparisons.BoardSelection(selection_reference=reference)
+                    for reference in reversed(references)
+                ),
+            ),
+        ),
+    )
+
+    assert board.groups[0].members[0].selection_references == references
+
+
+#: Each falsification is retained excluded evidence that states a different
+#: exclusion than the single unresolved market published from it.
+FALSE_UNRESOLVED_EVIDENCE = {
+    "provider": {"provider": "prizepicks"},
+    "reason": {"exclusion": ComparisonExclusion.FUTURE_SNAPSHOT},
+    "detail": {"exclusion_detail": "catalog_stale"},
+}
+
+
+@pytest.mark.parametrize("falsified", sorted(FALSE_UNRESOLVED_EVIDENCE))
+def test_an_unresolved_market_must_state_exactly_its_excluded_evidence(falsified):
+    with pytest.raises(
+        ValueError, match="unresolved market must state exactly the evidence"
+    ):
+        _partition_board(
+            unresolved=(_unresolved_market("mkt_1_a"),),
+            markets=(
+                _excluded_market("mkt_1_a", **FALSE_UNRESOLVED_EVIDENCE[falsified]),
+            ),
+        )
+
+
+def test_an_unresolved_market_states_the_detail_its_evidence_stated():
+    board = _partition_board(
+        unresolved=(
+            comparisons.UnresolvedMarket(
+                market_reference="mkt_1_a",
+                provider="dabble",
+                reason=ComparisonExclusion.UNRESOLVED_ATHLETE,
+                detail="ambiguous",
+            ),
+        ),
+        markets=(
+            _excluded_market(
+                "mkt_1_a",
+                exclusion=ComparisonExclusion.UNRESOLVED_ATHLETE,
+                exclusion_detail="ambiguous",
+            ),
+        ),
+    )
+
+    assert board.unresolved[0].detail == "ambiguous"
+
+
+def test_contradicting_observations_must_state_one_exclusion():
+    """A cluster that disagrees about why it is excluded describes nothing."""
+
+    with pytest.raises(ValueError, match="must state one exclusion"):
+        _partition_board(
+            unresolved=(
+                _unresolved_market(
+                    "mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
+                ),
+            ),
+            markets=(
+                _conflicted_market(conflict_ordinal=0, conflict_count=2),
+                _conflicted_market(
+                    conflict_ordinal=1,
+                    conflict_count=2,
+                    exclusion_detail="conflicting_normalized_content",
+                ),
+            ),
+        )
+
+
+def test_an_unresolved_conflict_must_describe_the_cluster_it_stands_on():
+    with pytest.raises(
+        ValueError, match="unresolved market must state exactly the evidence"
+    ):
+        _partition_board(
+            unresolved=(
+                comparisons.UnresolvedMarket(
+                    market_reference="mkt_1_a",
+                    provider="dabble",
+                    reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY,
+                    detail="something_else",
+                ),
+            ),
+            markets=(
+                _conflicted_market(
+                    conflict_ordinal=ordinal,
+                    conflict_count=2,
+                    exclusion_detail="conflicting_normalized_content",
+                )
+                for ordinal in (0, 1)
+            ),
+        )
+
+
+# -- a contradiction cluster is complete, or it is not a contradiction ------
+
+
+def _conflict_board(*markets, detail="conflicting_normalized_content"):
+    return _partition_board(
+        unresolved=(
+            comparisons.UnresolvedMarket(
+                market_reference="mkt_1_a",
+                provider="dabble",
+                reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY,
+                detail=detail,
+            ),
+        ),
+        markets=markets,
+    )
+
+
+def _conflict_observation(ordinal, count, **overrides):
+    return _conflicted_market(
+        conflict_ordinal=ordinal,
+        conflict_count=count,
+        exclusion_detail="conflicting_normalized_content",
+        **overrides,
+    )
+
+
+def test_a_contradiction_retains_exactly_the_observations_it_counted():
+    with pytest.raises(ValueError, match="exactly the observations it counted"):
+        _conflict_board(
+            _conflict_observation(0, 3),
+            _conflict_observation(1, 3),
+        )
+
+
+def test_contradicting_observations_cannot_repeat_one_ordinal():
+    with pytest.raises(ValueError, match="name each observation once"):
+        _conflict_board(
+            _conflict_observation(0, 2),
+            _conflict_observation(0, 2, provider="prizepicks"),
+        )
+
+
+def test_contradicting_observations_must_agree_on_how_many_there_were():
+    with pytest.raises(ValueError, match="must state one contradiction count"):
+        _conflict_board(
+            _conflict_observation(0, 2),
+            _conflict_observation(1, 3),
+        )
+
+
+def test_no_observation_of_a_contradicted_reference_may_stay_unmarked():
+    with pytest.raises(ValueError, match="every observation of a contradicted"):
+        _conflict_board(
+            _conflict_observation(0, 2),
+            _conflict_observation(1, 2),
+            _excluded_market(
+                "mkt_1_a",
+                exclusion=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY,
+                exclusion_detail="conflicting_normalized_content",
+            ),
+        )
+
+
+def test_repeated_observations_of_one_reference_state_their_contradiction():
+    """Two observations that contradict nothing are not two of one market."""
+
+    with pytest.raises(ValueError, match="state the contradiction they are"):
+        _partition_board(
+            unresolved=(_unresolved_market("mkt_1_a"),),
+            markets=(
+                _excluded_market("mkt_1_a"),
+                _excluded_market("mkt_1_a", provider="prizepicks"),
+            ),
+        )
+
+
+@pytest.mark.parametrize("ordinals", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
+def test_a_complete_contradiction_cluster_is_kept_whole(ordinals):
+    board = _conflict_board(
+        *(_conflict_observation(ordinal, 3) for ordinal in ordinals)
+    )
+
+    assert board.market_count == 3
+    assert board.unresolved_count == 1
+    assert [market.conflict_ordinal for market in board.conflicting_markets] == [
+        0,
+        1,
+        2,
+    ]
 
 
 # -- board read evidence states relationships it could have observed --------

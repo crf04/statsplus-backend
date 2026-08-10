@@ -70,6 +70,7 @@ from app.domain.comparisons import (
     ProviderReport,
     UnresolvedMarket,
     canonical_selections,
+    comparison_member_of,
     exact_scaled_seconds,
     exact_seconds,
     market_content_key,
@@ -78,6 +79,7 @@ from app.domain.comparisons import (
     market_reference,
     observation_evidence_key,
     selection_reference,
+    unresolved_market_of,
 )
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.errors import AppError, ProviderUnavailableError
@@ -435,35 +437,29 @@ class ComparisonBoardService:
                 if not self._passes_canonical_filters(key, filters):
                     continue
                 observed += 1
-                markets.append(
-                    self._board_market(
-                        market,
-                        reference,
-                        observation,
-                        key,
-                        exclusion,
-                        detail,
-                        conflict_ordinal=None if conflict_count is None else ordinal,
-                        conflict_count=conflict_count,
-                    )
+                # Everything published about this observation is projected from
+                # the evidence retained for it, by the domain's own projection
+                # authority, so a member or an unresolved entry can never state
+                # a fact the retained market does not.
+                retained = self._board_market(
+                    market,
+                    reference,
+                    observation,
+                    key,
+                    exclusion,
+                    detail,
+                    conflict_ordinal=None if conflict_count is None else ordinal,
+                    conflict_count=conflict_count,
                 )
+                markets.append(retained)
                 if key is None:
                     # One reference is unresolved once, however many
                     # observations contested it; each of them stays readable in
                     # ``markets``.
                     if conflict_count is None or ordinal == 0:
-                        unresolved.append(
-                            UnresolvedMarket(
-                                market_reference=reference,
-                                provider=market.provider,
-                                reason=exclusion,
-                                detail=detail,
-                            )
-                        )
+                        unresolved.append(unresolved_market_of(retained))
                     continue
-                members.setdefault(key, []).append(
-                    self._member(market, reference, observation)
-                )
+                members.setdefault(key, []).append(comparison_member_of(retained))
 
         # The provider reports are derived before the ceiling is applied
         # because they describe the retrieval, which is complete either way: a
@@ -737,27 +733,6 @@ class ComparisonBoardService:
         return not (
             filters.canonical_statistic_ids
             and key.canonical_statistic_id not in filters.canonical_statistic_ids
-        )
-
-    @staticmethod
-    def _member(
-        market: PlayerProjectionMarket,
-        reference: str,
-        observation: BoardObservation,
-    ) -> ComparisonMember:
-        return ComparisonMember(
-            market_reference=reference,
-            provider=market.provider,
-            threshold=market.threshold.value,
-            threshold_unit=market.threshold.unit,
-            variant=MarketVariant(market.variant),
-            status=MarketStatus(market.status),
-            retrieved_at=observation.retrieved_at,
-            freshness=observation.freshness,
-            selection_references=tuple(
-                selection_reference(reference, selection)
-                for selection in canonical_selections(market.selections)
-            ),
         )
 
     @staticmethod

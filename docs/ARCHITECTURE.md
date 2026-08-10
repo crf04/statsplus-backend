@@ -1083,6 +1083,37 @@ retained, so one unresolved reference may stand on several retained
 observations. An empty board satisfies this trivially, and it is why
 `group_count + unresolved_count` can never exceed `market_count`.
 
+A reference is not evidence either. Every published projection must be
+factually derived from the retained observation it cites, so the board also
+validates what each one *says*. A `ComparisonMember` is published only where a
+retained, compared `BoardMarket` of that reference, assigned to that same
+comparison, projects to exactly it — same provider, same threshold at the same
+written scale and unit, same status, variant, retrieval instant, freshness, and
+selection references, every field of the value taking part. An
+`UnresolvedMarket` is published only where the *complete* same-reference
+excluded cluster states one exclusion and the entry states that one, so a
+single observation's reason, detail, and provider project exactly, and a
+contradiction is described by the whole cluster rather than by whichever
+observation happens to be first.
+
+Both projections are derived by one domain authority,
+`comparison_member_of` and `unresolved_market_of` in `app.domain.comparisons`.
+The assembly builds each published value with it and the board invariant
+re-derives one with it, from the retained market alone, so the seam that states
+a fact and the seam that judges it cannot drift; neither reads a provider,
+catalog, or service module, so the shared authority creates no cycle.
+
+Contradiction evidence is checked for completeness before either projection is
+read, because a partial contradiction would let a reader conclude the missing
+observation agreed. Every retained observation of one contradicted reference
+states the same `conflict_count`, there are exactly that many of them, their
+ordinals are exactly `range(count)` with none missing or repeated, and none of
+them may stay unmarked; each is excluded as `conflicting_market_identity`, so
+the one unresolved entry the cluster produces states that reason and the
+cluster's own detail. Conversely, two retained observations of one reference
+that state no contradiction are refused: a reference is either one observation
+or a complete contradiction.
+
 `BoardReadEvidence` carries counts without the collections behind them, so it
 enforces that same relation directly: a read cannot have established more
 comparisons and unresolved markets together than the observations it made. The
