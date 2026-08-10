@@ -938,6 +938,17 @@ is `MAX_EXACT_DIFFERENCE_SPAN`, the widest exact difference the normalized
 numeric domain admits, so every threshold the provider contract accepted
 subtracts exactly.
 
+A summary is derived evidence, never independent evidence. A `ComparisonGroup`
+validates its summary against `ComparisonSummary.of(members)` after ordering its
+members, so it can carry only the derivation its own members produce: a false
+provider count, market count, minimum, maximum, spread, freshness, or market
+reference list is refused where the group is built rather than published beside
+the markets that contradict it. The comparison is at the scale a threshold is
+written in, not merely at the value it compares equal to, because a board
+publishes `Decimal("25.50")` and `Decimal("25.5")` as different strings even
+though Python compares them equal. The rule is independent of member order,
+since nothing the derivation states depends on which member sorts first.
+
 How old an observation or a catalog is inherits nothing either. `exact_seconds`
 counts a duration in whole microseconds and writes the result straight from
 those digits, so no decimal operation and therefore no ambient precision takes
@@ -1017,7 +1028,273 @@ and is reported as disabled for that board. There is deliberately no fuzzy or
 partial name filter. The post-filter market ceiling is
 `DFS_COMPARISON_MAX_MARKETS` (default 10000); a larger read raises
 `ComparisonBoardTooLargeError` (`board_too_large`) carrying the observed count
-and the supported narrowing filters, and nothing is ever truncated.
+and the supported narrowing filters, and nothing is ever truncated. The refusal
+also retains the completed read's `BoardReadEvidence` — provider reports,
+disabled providers, comparison availability, and the group, market, and
+unresolved counts — which is observed rather than published, so telemetry
+describes the read that actually happened while the caller's details stay as
+bounded as before.
+
+Readability outranks the ceiling, and only the ceiling. When a read *is* over
+the ceiling, whether any provider could be read from decides which refusal it
+is: an unreadable over-ceiling read states nothing at any size, so refusing it
+as too large would tell a caller to narrow filters that cannot make an outage
+readable. That read alone builds no board. It raises its own result variant,
+`UnreadableComparisonBoardError`, carrying only that read's `BoardReadEvidence`
+— comparison availability, provider reports, disabled providers, and the
+observed group, market, and unresolved counts — and no serializable board. The
+response seam catches it, contributes the evidence to the request's
+observation, and reports it as the same sanitized 503 a readable outage is; the
+evidence itself is never published, and the serializer refuses anything that is
+not a `ComparisonBoard`. Nothing publishable is dropped, because every
+observation on such a read is beyond its provider's permitted maximum age or
+ahead of the board's own clock and so entered no group.
+
+An unreadable read *under* the ceiling is not refused in the domain at all. It
+returns an ordinary `ComparisonBoard` that retains every market it observed —
+each one unresolved as `stale_snapshot` or `future_snapshot`, with no group and
+no readable provider report — so the whole read stays auditable as a board. The
+publication seam is what answers it: `has_readable_provider` over that board's
+own provider reports turns it into the same sanitized 503, from the same
+evidence, one layer later.
+
+The variant exists so that no board can state a count its own collections
+contradict. A `ComparisonBoard` retains exactly what it counted — `market_count`
+equals its retained markets, `unresolved_count` its retained unresolved markets,
+each an exact non-negative integer rather than anything Python merely compares
+equal to one, and `is_empty` is read from groups, unresolved markets, and
+retained markets together — so an over-ceiling outage, which has counts but
+retains nothing, cannot be expressed as a board at all.
+`UnreadableComparisonBoardError` is a `ProviderUnavailableError` rather than a
+sibling of `ComparisonBoardTooLargeError`, so should it ever escape the response
+seam the central handler already answers it as the safe 503 an outage is, with
+no evidence in its public details and no 400 telling a caller to narrow filters.
+
+Agreeing counts are not yet a coherent board, so a `ComparisonBoard` also
+validates that its three collections are one partition of the evidence it
+retained. Every market reference a group's members cite, and every reference
+stated as unresolved, is backed by a retained `BoardMarket` on the same board;
+each reference lands on exactly one side, entering at most one comparison and
+being stated unresolved at most once; and every retained market names where it
+went — a compared one names the comparison whose members cite it, an excluded
+one names a reference the board reports as unresolved. Backing is not one market
+per reference: contradicting observations of one source identity are all
+retained, so one unresolved reference may stand on several retained
+observations. An empty board satisfies this trivially, and it is why
+`group_count + unresolved_count` can never exceed `market_count`.
+
+A reference is not evidence either. Every published projection must be
+factually derived from the retained observation it cites, so the board also
+validates what each one *says*. A `ComparisonMember` is published only where a
+retained, compared `BoardMarket` of that reference, assigned to that same
+comparison, projects to exactly it — same provider, same threshold at the same
+written scale and unit, same status, variant, retrieval instant, freshness, and
+selection references, every field of the value taking part. An
+`UnresolvedMarket` is published only where the *complete* same-reference
+excluded cluster states one exclusion and the entry states that one, so a
+single observation's reason, detail, and provider project exactly, and a
+contradiction is described by the whole cluster rather than by whichever
+observation happens to be first.
+
+Both projections are derived by one domain authority,
+`comparison_member_of` and `unresolved_market_of` in `app.domain.comparisons`.
+The assembly builds each published value with it and the board invariant
+re-derives one with it, from the retained market alone, so the seam that states
+a fact and the seam that judges it cannot drift; neither reads a provider,
+catalog, or service module, so the shared authority creates no cycle.
+
+Contradiction evidence is checked for completeness before either projection is
+read, because a partial contradiction would let a reader conclude the missing
+observation agreed. Every retained observation of one contradicted reference
+states the same `conflict_count`, there are exactly that many of them, their
+ordinals are exactly `range(count)` with none missing or repeated, and none of
+them may stay unmarked; each is excluded as `conflicting_market_identity`, so
+the one unresolved entry the cluster produces states that reason and the
+cluster's own detail. Conversely, two retained observations of one reference
+that state no contradiction are refused: a reference is either one observation
+or a complete contradiction.
+
+The exclusion and the evidence for it are required of each other in both
+directions. A `BoardMarket` that states `conflict_ordinal` and `conflict_count`
+is excluded as `conflicting_market_identity`, and a market excluded as
+`conflicting_market_identity` states them, so the reason can never be published
+for a lone observation with nothing to disagree with.
+
+Structure is not disagreement. A structurally complete cluster whose retained
+observations state the same evidence is a repeat that failed to collapse, so
+the board requires the cluster's `count` observations to state `count` distinct
+facts. Distinctness is read in exactly the semantics the retention seam
+collapses repeats by, and by the same authorities: `market_content_key` from
+`app.domain.market_content`, which a `BoardMarket` answers by the same
+attribute names a normalized market does, paired with `observation_evidence_key`
+over the snapshot observation it was read in. There is no second list of what
+counts as a difference, so a fact proves a disagreement here exactly when it
+proves one upstream. A differing market ID, threshold value or unit, status,
+variant, name, team, event, statistic, resolved comparability, direction, exact
+price, or modifier is a contradiction; a differing retrieval instant, snapshot
+status, age, or freshness is one too, because the observation is part of what
+the retention seam keeps apart.
+
+Audit content proves nothing here. The scale an exact decimal was written at,
+the provider's own `original_value` text, and the order equivalent selections
+were listed in are all retained, published exactly, and still order the
+evidence — but `Decimal("25.50")` and `Decimal("25.5")` are one line, so a
+cluster separated only by them is a repeat the board refuses rather than a
+disagreement it invents. An exact semantic repeat has already collapsed at the
+retention seam, so a cluster the board assembles always satisfies this. Where an
+observation sits in the cluster takes no part either: an ordinal is a
+statement about the cluster, never evidence the cluster is one.
+
+`BoardReadEvidence` carries counts without the collections behind them, so it
+enforces that same relation directly: a read cannot have established more
+comparisons and unresolved markets together than the observations it made. The
+count-only evidence a refusal carries satisfies it — an unreadable read states
+no group and one unresolved reference per observation, and an over-ceiling
+readable read states groups and unresolved references drawn from disjoint
+subsets of what it observed.
+
+Both seams judge readability through one domain authority,
+`ProviderReport.is_readable` and `has_readable_provider`, so the seam that
+refuses an over-ceiling read and the seam that reports an under-ceiling outage
+cannot disagree about what readable means.
+
+### Published DFS Board
+
+```text
+GET /api/dfs/board
+  → require_auth (Firebase bearer token)
+  → PendingBoardObservation opens                     ← the observation starts here
+  → DFSBoardResponseService.respond_to_query(request.args, observation=...)
+      → publication gate (feature flag + provider registry)
+      → parse_board_request(...) → NBAMarketQuery + ComparisonFilters
+      → ComparisonBoardService.get_comparisons(...)   → BoardReadEvidence observed
+      → HTTP outcome, version 1 payload, weak ETag
+  → private, revalidatable JSON (200), or 304 / 400 / 404 / 503 / 500
+  → blueprint after_request: private caching and security headers, every status
+                             and the one event, finalized from that status
+```
+
+The route in `app.routes.dfs_routes` decides nothing. It authenticates and
+formats; `app.services.dfs_board_response` decides whether the board is
+published, what the query string means, whether the board is usable, what the
+payload is, what the entity tag is, and whether the caller already holds it.
+Both the route module and the response service create no provider, Redis, or
+database client: the application factory composes `dfs_board_response_service`
+from the comparison board alone, which itself wraps the already-composed
+collector.
+
+The order of the first two steps is a contract, not an implementation detail.
+Publication is settled before a parameter is read, so an authenticated request
+to an unpublished board is 404 whatever its query says, and reaches no parser,
+provider, database, or cache. Authentication remains above the service, so an
+unauthenticated request is 401 and is recorded as no board request at all.
+
+**Publication.** The board is published only when `DFS_BOARD_ENABLED=true`
+*and* `DFS_ENABLED_PROVIDERS` names at least one provider. Both are off by
+default in every environment, so development and tests opt in explicitly.
+Enabling the flag without a registry fails startup with `ConfigurationError`
+rather than exposing a route that can never call a provider; production
+additionally requires a non-empty registry regardless of the flag. An
+unpublished board answers an authenticated request with 404
+`dfs_board_disabled` and calls no provider.
+
+**Outcomes.** A read is 200 when at least one provider produced a *readable*
+snapshot — complete, partial, permitted-stale, or empty-complete. An empty
+complete snapshot is a valid empty board, not an outage. Readability is judged
+from the provider report's own typed evidence, the derived `MarketFreshness`
+and the future-observation flag, never from exclusion text: a retrieval that
+succeeded but is past its stale-if-error ceiling, or timestamped ahead of the
+board's clock, carries no freshness, enters no comparison, and leaves every one
+of its markets unresolved. A board of only those states nothing, so it is the
+503 it is rather than an empty 200. The ceiling is inclusive, so a snapshot
+exactly at it is still readable — and being readable, such a read is subject to
+the market ceiling again, so an over-large board built from it is the 400 it
+was before. The 503 carries the same bounded Provider
+Outcome vocabulary the board reports on success — provider name, status, stable
+failure reason, freshness, future-observation flag, coverage warning codes, and
+cache state. No upstream text, URL, payload, or credential can reach a caller
+through it.
+
+**Filters.** Every supplied filter is read as a narrowing the caller meant. An
+empty value or an empty comma-separated member — `providers=`, `providers=,`,
+`providers=dabble,`, a blank canonical identity, `season=` — is
+`400 invalid_input`, never a silent widening to the unfiltered board or the
+default season, and it reaches no provider. A repeated identity is accepted and
+collapsed. Omitting a parameter is the only way to accept a default.
+
+**Conditional requests.** The response carries a weak `ETag` computed over the
+board's stated facts with the instant of observation and every age derived from
+it excluded, so an unchanged board revalidates as 304 instead of resending a
+board that differs only in how old it says it is. The tag identifies a board, so
+it is set on 200 and 304 only and never on a failure.
+
+`Cache-Control: private, no-cache, max-age=0, must-revalidate`,
+`Vary: Authorization`, `X-Content-Type-Options: nosniff`, and `X-Request-ID` are
+stated once, by a blueprint `after_request` scoped to this route, so every
+status carries them — including the 401, the parser's 400, the gate's 404, the
+503, and a centrally handled 500, each produced by a different layer. `Vary` is
+added rather than assigned, so a CORS `Origin` survives beside it. No other
+blueprint's caching is affected.
+
+**Observability.** Exactly one `BoardRequestEvent` per authenticated request,
+and its lifecycle is deliberately split across the two layers that each know
+half of it.
+
+A `PendingBoardObservation` opens in the route *before* the dependency graph is
+read, before the publication gate, and before a parameter is parsed, so a
+request that fails before it reaches a board is still one request that
+happened. It is passed into the response service rather than reached for
+through a Flask global, so the service stays free of request state. The service
+contributes only what it knows: the typed `BoardReadEvidence` a completed read
+established, and the typed failure it raised.
+
+The event is finalized once, by the blueprint `after_request`, from the status
+of the response the caller actually received. That is the only place the status
+is settled — a dependency that never resolved, a serialization that raised
+after the board was assembled, and a centrally handled `AppError` all decide it
+after the service has stopped speaking — so the event and the response can
+never describe two different requests. `after_request` runs for every status,
+including a centrally handled 500, so a served board that failed to render is
+recorded as the `error` it was rather than the `served` it intended. Finalizing
+again does nothing: one request is one event.
+
+Because a refusal after retrieval has already learned everything a served board
+would have shown, `ComparisonBoardTooLargeError` carries that read's
+`BoardReadEvidence`, and the observation absorbs it. A board refused at the
+ceiling therefore reports its real observed market count, provider statuses,
+failure reasons, freshness, cache states, disabled providers, and comparison
+availability — the same facts its public `observed_market_count` already
+states — instead of an empty read that looks like it never happened.
+
+The event records latency, the HTTP outcome and status, comparison
+availability, provider status and failure-reason counts, freshness and
+cache-state counts, and group/market/unresolved/disabled counts. Outcome and
+status are one closed pairing (`served`/200, `not_modified`/304, `invalid`/400,
+`too_large`/400, `disabled`/404, `error`/500, `unavailable`/503) enforced where
+the event is built, alongside the finite non-negative duration and boolean-free
+counts. Two outcomes share the 400, so the refusal the service raised chooses
+between them and every other status names its outcome alone; a status the
+vocabulary cannot state is a defect, logged and counted as `error`. Every label
+comes from a closed vocabulary in `app.utils.telemetry`; no athlete, event,
+market, selection, or provider-source ID and no upstream text can become a
+metric dimension. An unauthenticated request opens no observation and records
+nothing: telemetry begins where the caller's identity does. Operators read the
+most recent 50 as `recent_board_request_events` on `GET /api/data/telemetry`.
+The collector's own `BoardTelemetryEvent` remains the record of one retrieval.
+
+**Operations.** Catalog freshness gates comparisons but never retrieval, so a
+stale catalog yields a 200 board with `comparison_availability.available:
+false` and the catalog identity and age that explain it. Athlete and event
+catalogs are refreshed by deployment-owned scheduling with
+`scripts/refresh_athlete_catalog.py` and `scripts/refresh_event_catalog.py`
+(daily is the reviewed cadence; API workers run no scheduler). Redis fails open:
+with `ENABLE_CACHE=false` or an unreachable Redis, snapshots are retrieved
+directly and each provider report states its `cache` state. Ambiguous
+identities are governed offline with `scripts/athlete_mappings.py` and
+`scripts/event_mappings.py`; version 1 exposes no mapping mutation route.
+Version 1 reports facts only — minimum, maximum, Threshold Spread, counts,
+freshness, and references — and never a probability, expected value,
+recommendation, or entry payout.
 
 PBP Stats:
 

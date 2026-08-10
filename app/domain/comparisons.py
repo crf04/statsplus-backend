@@ -22,7 +22,7 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -198,6 +198,22 @@ def exact_difference(minuend: Decimal, subtrahend: Decimal) -> Decimal:
     for name, value in (("minuend", minuend), ("subtrahend", subtrahend)):
         normalized_decimal(value, field=f"an exact difference {name}")
     return _exact_context(MAX_EXACT_DIFFERENCE_SPAN).subtract(minuend, subtrahend)
+
+
+def _exact_count(value: object, field: str) -> None:
+    """Require one public count to be an exact non-negative built-in integer.
+
+    ``False == 0`` and ``Decimal("2") == 2`` in Python, so a count checked only
+    by equality against what was retained accepts a boolean, a float, or a
+    decimal that happens to agree -- and then states it, so a body whose
+    contract says a market count is an integer can publish ``false`` or
+    ``2.0``.  Every count is required to be an ``int`` that is not a ``bool``
+    before any equality reads it, so a value that could never be a count is
+    refused where it is constructed rather than downstream.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be an exact count")
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +396,8 @@ class ComparisonSummary:
             raise ValueError("comparison summary spread must be the exact difference")
         if not isinstance(self.freshness, ComparisonFreshness):
             raise ValueError("comparison summary requires a ComparisonFreshness")
+        _exact_count(self.provider_count, "a comparison summary provider count")
+        _exact_count(self.market_count, "a comparison summary market count")
         references = tuple(self.market_references)
         if tuple(sorted(references)) != references:
             raise ValueError("comparison summary market references must be sorted")
@@ -416,9 +434,44 @@ class ComparisonSummary:
         )
 
 
+def _same_published_decimal(left: Decimal, right: Decimal) -> bool:
+    """Whether two exact decimals are the same *published* number.
+
+    ``Decimal("25.50") == Decimal("25.5")`` in Python, but a board writes a
+    threshold in the scale the provider published, so the two reach a caller as
+    different strings.  A summary is therefore compared against its members at
+    the scale it would be written in, not merely at the value it compares equal
+    to.
+    """
+
+    return left.as_tuple() == right.as_tuple()
+
+
+def _states_exactly(summary: "ComparisonSummary", derived: "ComparisonSummary") -> bool:
+    """Whether a summary is field-for-field the derivation of its members."""
+
+    return (
+        _same_published_decimal(summary.minimum_threshold, derived.minimum_threshold)
+        and _same_published_decimal(summary.maximum_threshold, derived.maximum_threshold)
+        and _same_published_decimal(summary.threshold_spread, derived.threshold_spread)
+        and summary.provider_count == derived.provider_count
+        and summary.market_count == derived.market_count
+        and summary.freshness is derived.freshness
+        and summary.market_references == derived.market_references
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ComparisonGroup:
-    """One canonical identity and every market that offers it."""
+    """One canonical identity and every market that offers it.
+
+    The summary is derived evidence, never independent evidence: a group may
+    carry only the summary its own members produce.  A count, a bound, a
+    spread, or a reference list that its members do not state is refused where
+    the group is built, so nothing downstream -- the serializer least of all --
+    can publish a comparison whose headline contradicts the markets printed
+    beneath it.
+    """
 
     key: ComparisonKey
     members: tuple[ComparisonMember, ...]
@@ -434,6 +487,12 @@ class ComparisonGroup:
             raise ValueError("comparison members must be ComparisonMember values")
         if tuple(sorted(members, key=lambda member: member.order)) != members:
             raise ValueError("comparison members must be deterministically ordered")
+        if not isinstance(self.summary, ComparisonSummary):
+            raise ValueError("a comparison group requires a ComparisonSummary")
+        if not _states_exactly(self.summary, ComparisonSummary.of(members)):
+            raise ValueError(
+                "a comparison group summary must state exactly its members"
+            )
 
     @property
     def reference(self) -> str:
@@ -581,6 +640,12 @@ class BoardStatisticResolution:
     unit: str | None = None
     reason: str | None = None
     comparable: bool = False
+
+    @property
+    def is_comparable(self) -> bool:
+        """The comparability the shared market semantics ask every match for."""
+
+        return self.comparable
 
     @classmethod
     def of(cls, match: StatisticMatch | None) -> "BoardStatisticResolution | None":
@@ -853,6 +918,11 @@ class BoardMarket:
                 "contradiction evidence states both an ordinal and a count"
             )
         if self.conflict_count is not None:
+            # Typed before compared: ``True < 2`` and ``Decimal("2") < 2`` both
+            # answer, so an ordinal or a count is refused as a count before any
+            # relational check reads it.
+            _exact_count(self.conflict_ordinal, "a board market conflict ordinal")
+            _exact_count(self.conflict_count, "a board market conflict count")
             if self.conflict_count < 2:
                 raise ValueError("a contradiction requires at least two observations")
             if not 0 <= self.conflict_ordinal < self.conflict_count:
@@ -861,6 +931,16 @@ class BoardMarket:
                 raise ValueError(
                     "a contradicted observation is excluded as a conflicting identity"
                 )
+        elif self.exclusion is ComparisonExclusion.CONFLICTING_MARKET_IDENTITY:
+            # The other direction of the same fact.  A market excluded for a
+            # conflicting identity with nothing to conflict with would publish
+            # an unresolved reason that says several observations disagreed
+            # while the board retains one, so the label is refused without the
+            # contradiction it names.
+            raise ValueError(
+                "a conflicting identity exclusion states the contradiction it "
+                "belongs to"
+            )
         object.__setattr__(self, "selections", tuple(self.selections))
 
     @property
@@ -897,6 +977,17 @@ class BoardCoverage:
     skipped_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        for name in (
+            "fetched_count",
+            "eligible_count",
+            "normalized_count",
+            "skipped_count",
+        ):
+            _exact_count(getattr(self, name), f"a coverage {name.replace('_', ' ')}")
+        # The one count a provider may leave unstated: nothing said how many
+        # there were to fetch.  Stated, it is a count like any other.
+        if self.expected_total is not None:
+            _exact_count(self.expected_total, "a coverage expected total")
         for name in ("warning_codes", "skipped_reasons"):
             codes = tuple(
                 sorted({getattr(code, "value", code) for code in getattr(self, name)})
@@ -1005,11 +1096,296 @@ class ProviderReport:
                 raise ValueError("provider report age_seconds must be an exact Decimal")
             if self.age_seconds < 0:
                 raise ValueError("provider report age_seconds can never be negative")
+        _exact_count(self.market_count, "a provider report market count")
         if self.coverage is not None and not isinstance(self.coverage, BoardCoverage):
             raise ValueError("provider report coverage must be BoardCoverage or None")
         if self.cache is not None and not isinstance(self.cache, BoardCacheState):
             raise ValueError("provider report cache must be BoardCacheState or None")
         object.__setattr__(self, "warning_codes", tuple(sorted(self.warning_codes)))
+
+    @property
+    def is_readable(self) -> bool:
+        """Whether this provider contributed a snapshot the board could read.
+
+        A complete, partial, permitted-stale, or empty-complete answer is
+        readable; emptiness is a fact about the provider's current offerings,
+        not an outage.  A retrieval that succeeded is not by itself readable:
+        an observation past its provider's stale-if-error ceiling, or
+        timestamped ahead of the board's own clock, resolves no market at all.
+
+        Both are read from this report's own typed evidence -- the freshness the
+        board derived and the future-observation flag -- never from exclusion
+        text.  A complete or partial outcome always carries a snapshot and so
+        always carries an observation, so an absent freshness means exactly that
+        the observation was beyond the permitted maximum age.
+        """
+
+        return (
+            self.status in READABLE_PROVIDER_STATUSES
+            and not self.future_observation
+            and self.freshness is not None
+        )
+
+
+#: Provider outcome statuses that carry a snapshot at all.  Anything else
+#: contributed no observation for the board to judge.
+READABLE_PROVIDER_STATUSES = frozenset({"complete", "partial"})
+
+
+def has_readable_provider(reports: Iterable[ProviderReport]) -> bool:
+    """Whether any provider contributed a snapshot the board could read.
+
+    This is the single authority both the comparison assembly and the published
+    response consult, so the seam that decides a board is unusable and the seam
+    that reports the outage can never disagree about what readable means.
+    """
+
+    return any(report.is_readable for report in reports)
+
+
+# -- the one projection authority -----------------------------------------
+#
+# A published comparison member and a published unresolved market are not
+# independent statements: each is a projection of one retained
+# :class:`BoardMarket`.  Both projections are derived here, once, so the seam
+# that assembles a board and the invariant that judges one cannot drift apart
+# and quietly agree on a member no observation supports.  Neither reads
+# anything but the retained evidence handed to it, so this stays in the domain
+# and the service imports it rather than the other way round.
+
+
+def comparison_member_of(market: BoardMarket) -> ComparisonMember | None:
+    """The exact comparison projection of one retained observation.
+
+    ``None`` is not a defect: an observation with no threshold, or one aged
+    past the permitted maximum, states no comparable fact and so projects to no
+    member at all.  Such evidence can back nothing, which is exactly what a
+    caller of this function needs to learn.
+    """
+
+    if not isinstance(market, BoardMarket):
+        raise TypeError("a comparison member is projected from retained evidence")
+    if market.threshold is None or market.observation.freshness is None:
+        return None
+    return ComparisonMember(
+        market_reference=market.market_reference,
+        provider=market.provider,
+        threshold=market.threshold.value,
+        threshold_unit=market.threshold.unit,
+        variant=market.variant,
+        status=market.status,
+        retrieved_at=market.observation.retrieved_at,
+        freshness=market.observation.freshness,
+        selection_references=tuple(
+            selection.selection_reference for selection in market.selections
+        ),
+    )
+
+
+def unresolved_market_of(market: BoardMarket) -> UnresolvedMarket | None:
+    """The exact unresolved projection of one retained excluded observation.
+
+    ``None`` for an observation that entered a comparison: it names no
+    exclusion, so nothing about it can be stated as unresolved.
+    """
+
+    if not isinstance(market, BoardMarket):
+        raise TypeError("an unresolved market is projected from retained evidence")
+    if market.exclusion is None:
+        return None
+    return UnresolvedMarket(
+        market_reference=market.market_reference,
+        provider=market.provider,
+        reason=market.exclusion,
+        detail=market.exclusion_detail,
+    )
+
+
+def _same_published_fact(published: Any, derived: Any) -> bool:
+    """Whether two published facts are the same fact, at the scale written.
+
+    Equality alone is too weak for a board: ``Decimal("25.50")`` equals
+    ``Decimal("25.5")`` and yet reaches a caller as another number, and a tuple
+    of such numbers has the same problem one level down.
+    """
+
+    if isinstance(published, Decimal) or isinstance(derived, Decimal):
+        return (
+            isinstance(published, Decimal)
+            and isinstance(derived, Decimal)
+            and _same_published_decimal(published, derived)
+        )
+    if isinstance(published, tuple) or isinstance(derived, tuple):
+        return (
+            isinstance(published, tuple)
+            and isinstance(derived, tuple)
+            and len(published) == len(derived)
+            and all(
+                _same_published_fact(left, right)
+                for left, right in zip(published, derived)
+            )
+        )
+    return type(published) is type(derived) and published == derived
+
+
+def _projects_exactly(published: Any, derived: Any) -> bool:
+    """Whether every field a value publishes is the field its evidence derived.
+
+    Every field takes part, read from the dataclass itself, so a fact added to
+    a published value later is backed by its evidence from the day it exists
+    rather than the day someone remembers to list it here.
+    """
+
+    return derived is not None and all(
+        _same_published_fact(
+            getattr(published, field.name), getattr(derived, field.name)
+        )
+        for field in fields(published)
+    )
+
+
+def _by_reference(
+    markets: tuple[BoardMarket, ...],
+) -> dict[str, list[BoardMarket]]:
+    """Every retained observation of one market reference, kept together."""
+
+    clusters: dict[str, list[BoardMarket]] = {}
+    for market in markets:
+        clusters.setdefault(market.market_reference, []).append(market)
+    return clusters
+
+
+def board_market_evidence_key(market: BoardMarket) -> bytes:
+    """What one retained observation says, in the semantics a repeat is read in.
+
+    A contradiction is a disagreement about an offering, so distinctness is
+    read in exactly the pair the retention seam collapses repeats by: the
+    shared canonical market semantics of ``market_content_key``, which a
+    ``BoardMarket`` answers by the same attribute names a normalized market
+    does, and ``observation_evidence_key`` over the snapshot observation the
+    market was read in.  Nothing else takes part, and nothing is listed here
+    twice: a fact is substantive at this seam exactly when it is substantive at
+    the one upstream.
+
+    Audit content therefore proves nothing.  A provider that writes one
+    threshold ``25.50`` and another ``25.5``, pads an exact price or modifier,
+    or relists equivalent selections the other way round has restated one
+    offering; those spellings are still retained, published exactly, and still
+    order the evidence, but they never make a repeat read as a disagreement.
+    Where an observation sits in a contradiction takes no part either: an
+    ordinal is a statement about the cluster, never evidence the cluster is one.
+    """
+
+    # Both halves are self-delimiting, so their concatenation stays injective.
+    return market_content_key(market) + observation_evidence_key(market.observation)
+
+
+def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
+    """Require each contradicted reference to retain the whole contradiction.
+
+    A contradiction is a statement about a set of observations, so a cluster
+    that has lost one, repeated one, disagrees about how many there were, or
+    carries one more observation that never admits to contradicting anything is
+    not a contradiction an audit could read -- it is a board that would publish
+    ``2 of 3`` and let a reader conclude the missing observation agreed.
+
+    The converse is required too: two retained observations of one reference
+    that state no contradiction are two markets claiming one identity while
+    saying nothing about each other, and a board never produces that.
+    """
+
+    for cluster in clusters.values():
+        counts = {market.conflict_count for market in cluster}
+        if counts == {None}:
+            if len(cluster) > 1:
+                raise ValueError(
+                    "repeated observations of one market reference must state the "
+                    "contradiction they are"
+                )
+            continue
+        if None in counts:
+            raise ValueError(
+                "every observation of a contradicted reference states the "
+                "contradiction"
+            )
+        if len(counts) > 1:
+            raise ValueError(
+                "contradicting observations must state one contradiction count"
+            )
+        (count,) = counts
+        if len(cluster) != count:
+            raise ValueError(
+                "a contradiction must retain exactly the observations it counted"
+            )
+        ordinals = sorted(market.conflict_ordinal for market in cluster)
+        if ordinals != list(range(count)):
+            raise ValueError(
+                "contradicting observations must name each observation once"
+            )
+        # Structure is not disagreement.  A cluster whose observations state the
+        # same evidence is a repeat that failed to collapse, not a source
+        # contradicting itself, and publishing it would tell a caller that
+        # several providers' answers could not be reconciled when only one
+        # answer was ever given.  An exact repeat collapses before a board is
+        # built, so every observation the cluster counted states its own facts.
+        if len({board_market_evidence_key(market) for market in cluster}) != count:
+            raise ValueError(
+                "contradicting observations must state evidence that disagrees"
+            )
+
+
+def _require_derived_members(
+    groups: tuple[ComparisonGroup, ...], clusters: dict[str, list[BoardMarket]]
+) -> None:
+    """Require every published member to be the projection of its own evidence."""
+
+    for group in groups:
+        for member in group.members:
+            backing = (
+                market
+                for market in clusters.get(member.market_reference, ())
+                if market.comparison_reference == group.reference
+            )
+            if not any(
+                _projects_exactly(member, comparison_member_of(market))
+                for market in backing
+            ):
+                raise ValueError(
+                    "a compared member must state exactly the evidence it was "
+                    "read from"
+                )
+
+
+def _require_derived_unresolved(
+    unresolved: tuple[UnresolvedMarket, ...], clusters: dict[str, list[BoardMarket]]
+) -> None:
+    """Require every unresolved market to describe its whole excluded cluster.
+
+    One reference is unresolved once however many observations contested it, so
+    the entry stands on the complete cluster rather than on whichever
+    observation happens to be first: every excluded observation of the
+    reference must state the same exclusion, and the entry must state that one.
+    """
+
+    for entry in unresolved:
+        projections = [
+            unresolved_market_of(market)
+            for market in clusters.get(entry.market_reference, ())
+            if not market.is_compared
+        ]
+        # Every unresolved reference was required to stand on retained excluded
+        # evidence before this runs, so the cluster is never empty here.
+        first = projections[0]
+        if not all(_projects_exactly(first, other) for other in projections):
+            raise ValueError(
+                "contradicting observations of one reference must state one "
+                "exclusion"
+            )
+        if not _projects_exactly(entry, first):
+            raise ValueError(
+                "an unresolved market must state exactly the evidence it was "
+                "read from"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1122,6 +1498,7 @@ class ComparisonBoard:
     disabled_providers: tuple[str, ...] = ()
     filters: ComparisonFilters = ComparisonFilters()
     market_count: int = 0
+    unresolved_count: int | None = None
     contract_version: str = "1"
 
     def __post_init__(self) -> None:
@@ -1143,8 +1520,22 @@ class ComparisonBoard:
             raise ValueError("retained markets must be BoardMarket values")
         if tuple(sorted(markets, key=lambda market: market.order)) != markets:
             raise ValueError("retained markets must be deterministically ordered")
-        if markets and len(markets) != self.market_count:
+        # A board counts exactly what it kept.  There is no count-only board:
+        # a read that retained nothing it would have published is not a board
+        # at all, and states what it observed as
+        # :class:`BoardReadEvidence` instead, so nothing that reaches the
+        # serializer can report a count its own collections contradict.
+        _exact_count(self.market_count, "a board market count")
+        if len(markets) != self.market_count:
             raise ValueError("a board must retain every market it counted")
+        if self.unresolved_count is None:
+            object.__setattr__(self, "unresolved_count", len(unresolved))
+        else:
+            _exact_count(self.unresolved_count, "a board unresolved count")
+            if self.unresolved_count != len(unresolved):
+                raise ValueError(
+                    "a board must retain every unresolved market it counted"
+                )
         reports = tuple(self.provider_reports)
         if tuple(sorted(reports, key=lambda report: report.provider)) != reports:
             raise ValueError("provider reports must be deterministically ordered")
@@ -1155,12 +1546,95 @@ class ComparisonBoard:
             raise ValueError("disabled providers must be deterministically ordered")
         if not isinstance(self.filters, ComparisonFilters):
             raise ValueError("a comparison board requires ComparisonFilters")
+        self._require_backed_partition(groups, unresolved, markets)
+
+    @staticmethod
+    def _require_backed_partition(
+        groups: tuple["ComparisonGroup", ...],
+        unresolved: tuple["UnresolvedMarket", ...],
+        markets: tuple[BoardMarket, ...],
+    ) -> None:
+        """Require the three collections to be one partition of retained evidence.
+
+        A board is not three independent lists that merely count consistently.
+        Every market reference a comparison cites, and every reference stated as
+        unresolved, is read from retained :class:`BoardMarket` evidence on this
+        same board -- and each reference lands on exactly one side, so a caller
+        auditing a comparison always finds the observation behind it and never
+        finds the same market both compared and excluded.
+
+        Backing is not one market per reference.  Contradicting observations of
+        one source identity are all retained, so a single unresolved reference
+        may stand on several retained observations; what is required is that at
+        least one exists and that every retained observation names where it
+        went.
+
+        Nor is a reference enough.  A member is published only where retained
+        evidence projects to exactly that member -- the same provider, the same
+        threshold at the same written scale and unit, the same status, variant,
+        retrieval, freshness, and selections -- and an unresolved market only
+        where its whole excluded cluster states exactly that exclusion.  Each
+        contradiction is required to be complete before either is read, so no
+        published fact ever stands on a partial one.
+        """
+
+        grouped: dict[str, str] = {}
+        for group in groups:
+            for member in group.members:
+                if member.market_reference in grouped:
+                    raise ValueError(
+                        "a market reference may enter only one comparison"
+                    )
+                grouped[member.market_reference] = group.reference
+        unresolved_references: set[str] = set()
+        for entry in unresolved:
+            if entry.market_reference in unresolved_references:
+                raise ValueError("a market reference is unresolved only once")
+            unresolved_references.add(entry.market_reference)
+        if unresolved_references & set(grouped):
+            raise ValueError(
+                "a market reference is compared or unresolved, never both"
+            )
+        compared_backing = {
+            market.market_reference for market in markets if market.is_compared
+        }
+        excluded_backing = {
+            market.market_reference for market in markets if not market.is_compared
+        }
+        if set(grouped) - compared_backing:
+            raise ValueError(
+                "every compared market requires the evidence it was read from"
+            )
+        if unresolved_references - excluded_backing:
+            raise ValueError(
+                "every unresolved market requires the evidence it was read from"
+            )
+        for market in markets:
+            if market.is_compared:
+                if grouped.get(market.market_reference) != market.comparison_reference:
+                    raise ValueError(
+                        "retained compared evidence must name the comparison its "
+                        "market entered"
+                    )
+            elif market.market_reference not in unresolved_references:
+                raise ValueError(
+                    "retained excluded evidence must name an unresolved market"
+                )
+        clusters = _by_reference(markets)
+        _require_complete_conflicts(clusters)
+        _require_derived_members(groups, clusters)
+        _require_derived_unresolved(unresolved, clusters)
 
     @property
     def is_empty(self) -> bool:
-        """Whether a complete read found nothing to compare and nothing left over."""
+        """Whether a complete read found nothing to compare and nothing left over.
 
-        return not self.groups and not self.unresolved
+        Read from everything the board retained, so it can never disagree with
+        the counts: a board that kept a market is not empty, whether that
+        market entered a comparison or stayed unresolved.
+        """
+
+        return not self.groups and not self.unresolved and not self.markets
 
     @property
     def mixed_freshness_groups(self) -> tuple[ComparisonGroup, ...]:
@@ -1196,9 +1670,69 @@ class ComparisonBoard:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class BoardReadEvidence:
+    """What one board read established, whether or not it published a board.
+
+    A read that is refused after retrieval -- one over the market ceiling, say
+    -- has already learned everything an operator needs to explain it: how many
+    markets it observed, which providers answered and how fresh and cached
+    their answers were, and whether comparison identity was available at all.
+    Keeping those facts on their own value, rather than only inside the
+    :class:`ComparisonBoard` a refusal never builds, is what lets the refusal be
+    observed as accurately as a success.
+
+    Every field is either a count or an already-sanitized board value, so this
+    carries no provider, athlete, event, market, or selection identity of its
+    own and nothing here can widen what telemetry may state.
+    """
+
+    availability: ComparisonAvailability
+    provider_reports: tuple[ProviderReport, ...] = ()
+    disabled_providers: tuple[str, ...] = ()
+    group_count: int = 0
+    market_count: int = 0
+    unresolved_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.availability, ComparisonAvailability):
+            raise ValueError("board read evidence requires a ComparisonAvailability")
+        for name in ("group_count", "market_count", "unresolved_count"):
+            _exact_count(
+                getattr(self, name),
+                f"a board read evidence {name.replace('_', ' ')}",
+            )
+        # Typed counts are not yet possible counts.  Each comparison stands on
+        # at least one retained observation, each unresolved reference stands on
+        # at least one more, and no reference is on both sides, so a read can
+        # never have established more comparisons and unresolved markets
+        # together than the observations it made.  Contradictions only widen
+        # that gap, never close it, so the relation holds for the count-only
+        # evidence a refusal carries exactly as it does for a published board.
+        if self.group_count + self.unresolved_count > self.market_count:
+            raise ValueError(
+                "board read evidence cannot state more comparisons and unresolved "
+                "markets than the markets it observed"
+            )
+
+    @classmethod
+    def of(cls, board: ComparisonBoard) -> "BoardReadEvidence":
+        """The same evidence, read from a board that was published."""
+
+        return cls(
+            availability=board.availability,
+            provider_reports=board.provider_reports,
+            disabled_providers=board.disabled_providers,
+            group_count=len(board.groups),
+            market_count=board.market_count,
+            unresolved_count=board.unresolved_count,
+        )
+
+
 __all__ = [
     "MAX_EXACT_DIFFERENCE_SPAN",
     "NORMALIZED_DECIMAL_PLACE_LIMIT",
+    "READABLE_PROVIDER_STATUSES",
     "REFERENCE_VERSION",
     "SUPPORTED_NARROWING_FILTERS",
     "BoardAppearance",
@@ -1211,6 +1745,7 @@ __all__ = [
     "BoardModifier",
     "BoardNamedEvidence",
     "BoardObservation",
+    "BoardReadEvidence",
     "BoardSelection",
     "BoardStatistic",
     "BoardStatisticResolution",
@@ -1233,13 +1768,16 @@ __all__ = [
     "UnresolvedMarket",
     "canonical_decimal",
     "canonical_selections",
+    "comparison_member_of",
     "exact_difference",
     "exact_scaled_seconds",
     "exact_seconds",
+    "has_readable_provider",
     "market_content_key",
     "market_evidence_key",
     "market_reference",
     "normalized_decimal",
     "observation_evidence_key",
     "selection_reference",
+    "unresolved_market_of",
 ]

@@ -13,6 +13,18 @@ recommendation, average, preferred market, entry payout, or cross-provider
 fantasy assumption is derived here, and nothing is ever truncated: a read that
 would exceed the configured ceiling is refused with the count it observed and
 the filters that would narrow it.
+
+Readability comes first, but only where the ceiling would otherwise speak.  A
+read no provider could be read from is an outage rather than an over-large
+board, however many markets it observed, so an over-ceiling read is refused as
+too large only when something on it could still be published.  The unreadable
+over-ceiling read builds no board at all: it raises
+:class:`UnreadableComparisonBoardError`, carrying bounded evidence for the
+response seam to report, because a board that retained nothing it counted would
+contradict itself.  An unreadable read within the ceiling is returned as an
+ordinary, fully retained board; the response seam recognizes the outage on it
+and translates it to a 503.  Both seams judge readability through the one
+domain authority in :func:`app.domain.comparisons.has_readable_provider`.
 """
 
 from __future__ import annotations
@@ -38,6 +50,7 @@ from app.domain.comparisons import (
     BoardMarket,
     BoardNamedEvidence,
     BoardObservation,
+    BoardReadEvidence,
     BoardSelection,
     BoardStatistic,
     BoardStatisticResolution,
@@ -57,16 +70,19 @@ from app.domain.comparisons import (
     ProviderReport,
     UnresolvedMarket,
     canonical_selections,
+    comparison_member_of,
     exact_scaled_seconds,
     exact_seconds,
     market_content_key,
     market_evidence_key,
+    has_readable_provider,
     market_reference,
     observation_evidence_key,
     selection_reference,
+    unresolved_market_of,
 )
 from app.domain.statistics import MatchState, ScoringPeriod
-from app.errors import AppError
+from app.errors import AppError, ProviderUnavailableError
 from app.providers.dfs import (
     MarketStatus,
     MarketVariant,
@@ -91,7 +107,16 @@ EVENT_CATALOG = "event_catalog"
 
 
 class ComparisonBoardTooLargeError(AppError):
-    """The post-filter board exceeds the configured market ceiling."""
+    """The post-filter board exceeds the configured market ceiling.
+
+    The refusal carries two separate things.  ``public_details`` is the bounded
+    contract a caller acts on -- what the read observed and what would narrow
+    it.  ``board_evidence`` is the completed retrieval and classification the
+    read had already finished when the ceiling stopped it, kept so an operator
+    observing the refusal sees the same providers, freshness, cache states, and
+    availability a published board would have shown, rather than a board that
+    looks like it never happened.  It is not published to a caller.
+    """
 
     status_code = 400
     code = "board_too_large"
@@ -105,11 +130,57 @@ class ComparisonBoardTooLargeError(AppError):
         observed_market_count: int,
         market_limit: int,
         supported_filters: tuple[str, ...] = SUPPORTED_NARROWING_FILTERS,
+        board_evidence: BoardReadEvidence | None = None,
         message: str | None = None,
     ) -> None:
         self.observed_market_count = observed_market_count
         self.market_limit = market_limit
         self.supported_filters = tuple(supported_filters)
+        self.board_evidence = board_evidence
+        super().__init__(message)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        """What the read observed and what would make it smaller.
+
+        A refusal is only actionable if the caller learns both, so the count is
+        the whole post-filter board rather than the point a truncating reader
+        would have stopped at.
+        """
+
+        return {
+            "observed_market_count": self.observed_market_count,
+            "market_limit": self.market_limit,
+            "supported_filters": list(self.supported_filters),
+        }
+
+
+class UnreadableComparisonBoardError(ProviderUnavailableError):
+    """No provider on this read could be read from, so no board was built.
+
+    This is the internal result of a read that finished retrieval and found
+    nothing publishable in it.  It carries the completed read's
+    :class:`BoardReadEvidence` and deliberately no board: there is no board to
+    carry, and a caller learns about the outage from the response seam, which
+    catches this and states the bounded Provider Outcome vocabulary the public
+    503 contract documents.
+
+    It is a :class:`~app.errors.ProviderUnavailableError` rather than a sibling
+    of :class:`ComparisonBoardTooLargeError` so that the central error handler
+    already answers it as the same safe 503 an outage is, without publishing
+    any evidence, should it ever escape the response seam.  Nothing about it is
+    a too-large refusal: an outage cannot be narrowed by a filter.
+    """
+
+    def __init__(
+        self,
+        *,
+        board_evidence: BoardReadEvidence,
+        message: str | None = None,
+    ) -> None:
+        if not isinstance(board_evidence, BoardReadEvidence):
+            raise TypeError("an unreadable board read states typed board evidence")
+        self.board_evidence = board_evidence
         super().__init__(message)
 
 
@@ -366,44 +437,65 @@ class ComparisonBoardService:
                 if not self._passes_canonical_filters(key, filters):
                     continue
                 observed += 1
-                markets.append(
-                    self._board_market(
-                        market,
-                        reference,
-                        observation,
-                        key,
-                        exclusion,
-                        detail,
-                        conflict_ordinal=None if conflict_count is None else ordinal,
-                        conflict_count=conflict_count,
-                    )
+                # Everything published about this observation is projected from
+                # the evidence retained for it, by the domain's own projection
+                # authority, so a member or an unresolved entry can never state
+                # a fact the retained market does not.
+                retained = self._board_market(
+                    market,
+                    reference,
+                    observation,
+                    key,
+                    exclusion,
+                    detail,
+                    conflict_ordinal=None if conflict_count is None else ordinal,
+                    conflict_count=conflict_count,
                 )
+                markets.append(retained)
                 if key is None:
                     # One reference is unresolved once, however many
                     # observations contested it; each of them stays readable in
                     # ``markets``.
                     if conflict_count is None or ordinal == 0:
-                        unresolved.append(
-                            UnresolvedMarket(
-                                market_reference=reference,
-                                provider=market.provider,
-                                reason=exclusion,
-                                detail=detail,
-                            )
-                        )
+                        unresolved.append(unresolved_market_of(retained))
                     continue
-                members.setdefault(key, []).append(
-                    self._member(market, reference, observation)
-                )
+                members.setdefault(key, []).append(comparison_member_of(retained))
+
+        # The provider reports are derived before the ceiling is applied
+        # because they describe the retrieval, which is complete either way: a
+        # refused read is still a read whose providers answered.
+        reports = self._provider_reports(board, observed_at, filters)
 
         # The whole read is classified before the ceiling is applied, so the
         # count reported back is what the caller's filters actually observed
         # rather than the point a truncating reader would have stopped at.
+        #
+        # Readability outranks size.  A read no provider could be read from
+        # states nothing at any ceiling, so there is no board for a ceiling to
+        # be exceeded by, and refusing it as too large would tell a caller to
+        # narrow filters that cannot make an outage readable.  Such a read
+        # fails with its own type instead, carrying only the bounded evidence
+        # the response seam needs to report the outage: every observation on it
+        # is beyond the permitted maximum age or ahead of this board's clock,
+        # so it holds no group and nothing publishable was dropped.  No board
+        # is built for it, because a board that retained nothing it counted
+        # would contradict itself and could still reach the serializer.
         if observed > self.max_markets:
-            raise ComparisonBoardTooLargeError(
-                observed_market_count=observed,
-                market_limit=self.max_markets,
+            evidence = BoardReadEvidence(
+                availability=availability,
+                provider_reports=reports,
+                disabled_providers=board.disabled_providers,
+                group_count=len(members),
+                market_count=observed,
+                unresolved_count=len(unresolved),
             )
+            if has_readable_provider(reports):
+                raise ComparisonBoardTooLargeError(
+                    observed_market_count=observed,
+                    market_limit=self.max_markets,
+                    board_evidence=evidence,
+                )
+            raise UnreadableComparisonBoardError(board_evidence=evidence)
 
         groups = tuple(
             _group(key, members[key])
@@ -416,7 +508,7 @@ class ComparisonBoardService:
             groups=groups,
             unresolved=tuple(sorted(unresolved, key=lambda entry: entry.order)),
             markets=tuple(sorted(markets, key=lambda entry: entry.order)),
-            provider_reports=self._provider_reports(board, observed_at, filters),
+            provider_reports=reports,
             disabled_providers=board.disabled_providers,
             filters=filters,
             market_count=observed,
@@ -644,27 +736,6 @@ class ComparisonBoardService:
         )
 
     @staticmethod
-    def _member(
-        market: PlayerProjectionMarket,
-        reference: str,
-        observation: BoardObservation,
-    ) -> ComparisonMember:
-        return ComparisonMember(
-            market_reference=reference,
-            provider=market.provider,
-            threshold=market.threshold.value,
-            threshold_unit=market.threshold.unit,
-            variant=MarketVariant(market.variant),
-            status=MarketStatus(market.status),
-            retrieved_at=observation.retrieved_at,
-            freshness=observation.freshness,
-            selection_references=tuple(
-                selection_reference(reference, selection)
-                for selection in canonical_selections(market.selections)
-            ),
-        )
-
-    @staticmethod
     def _board_market(
         market: PlayerProjectionMarket,
         reference: str,
@@ -826,4 +897,5 @@ __all__ = [
     "DEFAULT_MAX_COMPARISON_MARKETS",
     "ComparisonBoardService",
     "ComparisonBoardTooLargeError",
+    "UnreadableComparisonBoardError",
 ]

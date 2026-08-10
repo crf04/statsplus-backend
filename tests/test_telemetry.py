@@ -328,3 +328,141 @@ def test_recent_events_include_cache_hit_and_failure_outcomes():
         telemetry.OUTCOME_SUCCESS,
         telemetry.OUTCOME_MALFORMED,
     }
+
+
+def _board_request_event(**overrides):
+    values = {
+        "duration_ms": 12.5,
+        "outcome": "served",
+        "status_code": 200,
+        "comparison_availability": "available",
+        "provider_status_counts": (("complete", 2),),
+        "failure_reason_counts": (),
+        "freshness_counts": (("fresh", 2),),
+        "cache_counts": (("hit", 1), ("miss", 1)),
+        "group_count": 1,
+        "market_count": 2,
+        "unresolved_count": 0,
+        "disabled_provider_count": 1,
+        "started_at": "2026-08-09T20:00:30+00:00",
+        "request_id": "board-1",
+    }
+    values.update(overrides)
+    return telemetry.BoardRequestEvent(**values)
+
+
+def test_board_request_events_are_recorded_and_counted():
+    telemetry.record_board_request_event(_board_request_event())
+
+    recorded = telemetry.get_recorded_board_request_events()
+    assert len(recorded) == 1
+    assert recorded[0]["outcome"] == "served"
+    assert recorded[0]["cache_counts"] == {"hit": 1, "miss": 1}
+    assert telemetry.snapshot_metrics()["board_request_events_total"] == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"outcome": "truncated"},
+        {"comparison_availability": "nikola-jokic"},
+        {"provider_status_counts": (("player-203999", 1),)},
+        {"failure_reason_counts": (("connection refused by host", 1),)},
+        {"freshness_counts": (("0022500001", 1),)},
+        {"cache_counts": (("mkt_2_abc", 1),)},
+        {"duration_ms": -1.0},
+        {"started_at": "2026-08-09T20:00:30"},
+        {"request_id": "not a valid id"},
+    ],
+)
+def test_a_board_request_event_refuses_unbounded_labels(overrides):
+    with pytest.raises(ValueError):
+        _board_request_event(**overrides)
+
+
+@pytest.mark.parametrize(
+    "duration",
+    [float("nan"), float("inf"), float("-inf"), -0.001, True, False, "12.5", None],
+)
+def test_a_board_request_duration_must_be_a_finite_non_negative_number(duration):
+    """A duration is measured, so nothing unmeasurable may be recorded as one."""
+
+    with pytest.raises(ValueError):
+        _board_request_event(duration_ms=duration)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "group_count",
+        "market_count",
+        "unresolved_count",
+        "disabled_provider_count",
+        "status_code",
+    ],
+)
+def test_a_board_request_count_is_never_a_boolean(field):
+    with pytest.raises(ValueError):
+        _board_request_event(**{field: True})
+
+
+def test_a_board_request_label_count_is_never_a_boolean():
+    with pytest.raises(ValueError):
+        _board_request_event(provider_status_counts=(("complete", True),))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status_code"),
+    [
+        ("served", 200),
+        ("not_modified", 304),
+        ("invalid", 400),
+        ("too_large", 400),
+        ("disabled", 404),
+        ("error", 500),
+        ("unavailable", 503),
+    ],
+)
+def test_every_board_request_outcome_states_its_one_status(outcome, status_code):
+    event = _board_request_event(outcome=outcome, status_code=status_code)
+
+    assert event.outcome == outcome
+    assert event.status_code == status_code
+    assert telemetry.BOARD_REQUEST_STATUSES[outcome] == status_code
+    assert telemetry.BOARD_REQUEST_OUTCOMES == set(telemetry.BOARD_REQUEST_STATUSES)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status_code"),
+    [("served", 404), ("disabled", 200), ("unavailable", 500), ("invalid", 404)],
+)
+def test_a_board_request_outcome_cannot_claim_another_status(outcome, status_code):
+    with pytest.raises(ValueError):
+        _board_request_event(outcome=outcome, status_code=status_code)
+
+
+def test_every_board_request_outcome_serializes_through_the_buffer():
+    for outcome, status_code in telemetry.BOARD_REQUEST_STATUSES.items():
+        telemetry.record_board_request_event(
+            _board_request_event(outcome=outcome, status_code=status_code)
+        )
+
+    recorded = telemetry.get_recorded_board_request_events()
+    assert [event["outcome"] for event in recorded] == list(
+        telemetry.BOARD_REQUEST_STATUSES
+    )
+    assert [event["status_code"] for event in recorded] == list(
+        telemetry.BOARD_REQUEST_STATUSES.values()
+    )
+    assert telemetry.snapshot_metrics()["board_request_events_total"] == len(recorded)
+
+
+def test_a_board_request_log_line_states_no_identity(caplog):
+    caplog.set_level(logging.INFO)
+
+    telemetry.record_board_request_event(_board_request_event())
+
+    assert "board_request" in caplog.text
+    assert "Authorization" not in caplog.text
+    assert "https://" not in caplog.text
+    assert "Bearer " not in caplog.text

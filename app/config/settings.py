@@ -141,6 +141,20 @@ class CacheSettings(BaseModel):
     tls: bool = False
 
 
+class FeatureSettings(BaseModel):
+    """Explicit exposure flags for features that are published separately.
+
+    A flag is off unless an operator turns it on.  Publishing the DFS Board
+    needs a prepared catalog, Redis policy, and provider credentials, so the
+    route stays absent until the deployment says otherwise -- in every
+    environment, including local development and tests.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    dfs_board_enabled: bool = False
+
+
 class ProviderSettings(BaseModel):
     """Timeout, retry, pooling, and internal DFS board settings."""
 
@@ -444,6 +458,7 @@ class RuntimeSettings(BaseModel):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    features: FeatureSettings = Field(default_factory=FeatureSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
@@ -593,6 +608,10 @@ def _build_settings(
         password=reader.text("REDISPASSWORD", None, "REDIS_PASSWORD"),
         tls=reader.boolean("REDISTLS", False, "REDIS_TLS"),
     )
+    features = _validated_model(
+        FeatureSettings,
+        dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
+    )
     providers = _validated_model(
         ProviderSettings,
         nba_stats_timeout_seconds=reader.decimal("NBA_STATS_TIMEOUT_SECONDS", 10.0),
@@ -657,6 +676,7 @@ def _build_settings(
             database=_validated_model(DatabaseSettings, url=database_url),
             auth=auth,
             cache=cache,
+            features=features,
             providers=providers,
             llm=llm,
             cors=cors,
@@ -774,6 +794,18 @@ def _validate_environment_requirements(
                     f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON ({error.msg})"
                 )
 
+    # Publishing the board needs both halves of its configuration.  A flag with
+    # no registry behind it would expose a route that can never call a provider,
+    # so it fails startup in every environment rather than at a later request.
+    if (
+        settings.features.dfs_board_enabled
+        and not settings.providers.dfs_enabled_providers
+    ):
+        errors.append(
+            "DFS_BOARD_ENABLED=true requires DFS_ENABLED_PROVIDERS to name at "
+            "least one provider"
+        )
+
     if (
         settings.auth.firebase_admin_disabled
         and settings.environment not in LOCAL_ENVIRONMENTS
@@ -836,6 +868,7 @@ __all__ = [
     "CORSSettings",
     "ConfigurationError",
     "DatabaseSettings",
+    "FeatureSettings",
     "LLMSettings",
     "NBASeasonSettings",
     "ProviderSettings",

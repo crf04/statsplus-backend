@@ -532,3 +532,45 @@ def test_catalog_settings_refuse_a_direct_window_outside_the_domain(values):
 
     with pytest.raises(ValueError):
         CatalogSettings(**values)
+
+
+def test_dfs_board_feature_flag_is_off_by_default(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.delenv("DFS_BOARD_ENABLED", raising=False)
+
+    settings = load_settings()
+
+    assert settings.features.dfs_board_enabled is False
+
+
+def test_dfs_board_feature_flag_opts_in_explicitly(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("DFS_BOARD_ENABLED", "true")
+    monkeypatch.setenv("DFS_ENABLED_PROVIDERS", "prizepicks")
+
+    settings = load_settings()
+
+    assert settings.features.dfs_board_enabled is True
+    assert settings.providers.dfs_enabled_providers == ("prizepicks",)
+
+
+def test_dfs_board_feature_flag_requires_an_enabled_provider(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("DFS_BOARD_ENABLED", "true")
+    monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
+
+    with pytest.raises(ConfigurationError) as error:
+        load_settings()
+
+    assert "DFS_ENABLED_PROVIDERS" in str(error.value)
+
+
+def test_production_requires_an_explicit_provider_registry(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "production")
+    monkeypatch.setenv("DFS_BOARD_ENABLED", "true")
+    monkeypatch.delenv("DFS_ENABLED_PROVIDERS", raising=False)
+
+    with pytest.raises(ConfigurationError) as error:
+        load_settings()
+
+    assert "DFS_ENABLED_PROVIDERS" in str(error.value)

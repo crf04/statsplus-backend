@@ -1,0 +1,70 @@
+{
+  "comparison_availability": {
+    "available": true,
+    "catalogs": [
+      {
+        "age_seconds": "28830.000000",
+        "available": true,
+        "catalog": "athlete_catalog",
+        "last_success_at": "2026-08-09T12:00:00+00:00",
+        "max_age_seconds": "604800",
+        "reason": null,
+        "season": "2025-26"
+      },
+      {
+        "age_seconds": "28830.000000",
+        "available": true,
+        "catalog": "event_catalog",
+        "last_success_at": "2026-08-09T12:00:00+00:00",
+        "max_age_seconds": "259200.0",
+        "reason": null,
+        "season": "2025-26"
+      }
+    ]
+  },
+  "comparison_groups": [],
+  "contract_version": "1",
+  "disabled_providers": [
+    "prizepicks",
+    "underdog"
+  ],
+  "filters": {
+    "canonical_athlete_ids": [],
+    "canonical_event_ids": [],
+    "canonical_statistic_ids": [],
+    "market_statuses": [],
+    "providers": []
+  },
+  "generated_at": "2026-08-09T20:00:30+00:00",
+  "market_count": 0,
+  "markets": [],
+  "provider_reports": [
+    {
+      "age_seconds": "30.000000",
+      "cache": null,
+      "coverage": {
+        "eligible_count": 0,
+        "expected_total": null,
+        "fanout_complete": true,
+        "fetched_count": 0,
+        "is_complete": true,
+        "normalized_count": 0,
+        "pagination_complete": true,
+        "skipped_count": 0,
+        "skipped_reasons": [],
+        "warning_codes": []
+      },
+      "freshness": "fresh",
+      "future_observation": false,
+      "market_count": 0,
+      "provider": "dabble",
+      "reason": null,
+      "retrieved_at": "2026-08-09T20:00:00+00:00",
+      "snapshot_status": "complete",
+      "status": "complete",
+      "warning_codes": []
+    }
+  ],
+  "season": "2025-26",
+  "unresolved_markets": []
+}

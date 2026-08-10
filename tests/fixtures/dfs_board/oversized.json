@@ -1,0 +1,17 @@
+{
+  "error": {
+    "code": "board_too_large",
+    "details": {
+      "market_limit": 1,
+      "observed_market_count": 2,
+      "supported_filters": [
+        "canonical_athlete_ids",
+        "canonical_event_ids",
+        "canonical_statistic_ids",
+        "market_statuses",
+        "providers"
+      ]
+    },
+    "message": "The requested board is too large. Narrow it with the supported filters."
+  }
+}

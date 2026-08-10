@@ -2,7 +2,7 @@
 
 ## Overview
 
-This Flask API exposes NBA player, team, game-log, data-refresh, health, user, and natural-language query endpoints. The natural-language endpoint uses deterministic NLP first and can fall back to OpenAI when configured.
+This Flask API exposes NBA player, team, game-log, data-refresh, health, user, DFS Board, and natural-language query endpoints. The natural-language endpoint uses deterministic NLP first and can fall back to OpenAI when configured.
 
 Base URL for local development:
 
@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/game_logs`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/game_logs`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -63,6 +63,12 @@ The public error categories and HTTP statuses are:
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
+| DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
+
+An error may carry an optional `details` object when a caller cannot act on the
+failure without structured facts. It is present only where this document says
+so, and contains only bounded, closed-vocabulary values.
 
 Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the
@@ -329,16 +335,34 @@ GET /api/data/telemetry
 
 `GET /api/data/telemetry` returns bounded, sanitized provider, board, and
 application telemetry counters on the documented seams, with the most recent
-50 provider and board events. Board aggregates are kept in a separate bounded
-scalar collection and do not increment provider event or provider-failure
+50 provider events, internal board-collection events, and published board
+request events. Board aggregates are kept in separate bounded scalar
+collections and do not increment provider event or provider-failure
 counters. Provider failures are counted at the provider seams and
 application failures by the central error handler; neither list ever carries
-credentials, URLs, bodies, or exception text. Example shape:
+credentials, URLs, bodies, or exception text.
+
+`recent_board_request_events` describes the published `GET /api/dfs/board`
+route: exactly one entry per authenticated request, whatever it ended in.
+`outcome` and `status_code` are one closed pair — `served`/`200`,
+`not_modified`/`304`, `invalid`/`400`, `too_large`/`400`, `disabled`/`404`,
+`error`/`500`, `unavailable`/`503` — and they are taken from the status the
+caller actually received, so a board that was assembled but failed to render is
+an `error`/`500` rather than the `served` it intended. A request refused at the
+market ceiling reports the counts and provider facts its read had already
+observed, matching the `observed_market_count` in its own 400 body. An
+unauthenticated request records nothing,
+because telemetry begins where the caller's identity does. Every label is a
+closed vocabulary and every other field is a count: provider names may appear
+as configured registry names, but no provider-source, athlete, event, market,
+or selection ID and no upstream text can become a label. Example shape:
 
 ```json
 {
   "provider_events_total": 1,
   "board_events_total": 0,
+  "board_request_events_total": 1,
+  "board_request_buffered_events": 1,
   "board_buffered_events": 0,
   "board_buffered_capacity": 5000,
   "provider_failures": { "nba_stats": { "timeout": 1 } },
@@ -377,6 +401,24 @@ credentials, URLs, bodies, or exception text. Example shape:
       "eligible_count": 12,
       "normalized_count": 12,
       "skipped_count": 8
+    }
+  ],
+  "recent_board_request_events": [
+    {
+      "started_at": "2026-08-09T20:00:30+00:00",
+      "duration_ms": 12.5,
+      "request_id": "a1b2…",
+      "outcome": "served",
+      "status_code": 200,
+      "comparison_availability": "available",
+      "provider_status_counts": { "complete": 2 },
+      "failure_reason_counts": {},
+      "freshness_counts": { "fresh": 2 },
+      "cache_counts": { "hit": 1, "miss": 1 },
+      "group_count": 1,
+      "market_count": 2,
+      "unresolved_count": 0,
+      "disabled_provider_count": 1
     }
   ]
 }
@@ -445,6 +487,173 @@ Example start response (`202 Accepted`):
 shaped play-type table directly with `200 OK`.
 
 Use the bundled database for read-only demo exploration before running refresh endpoints.
+
+## DFS Board
+
+```http
+GET /api/dfs/board
+Authorization: Bearer <firebase-id-token>
+```
+
+One authenticated endpoint exposes the central factual DFS Board. There are no
+provider-specific public routes: Dabble, PrizePicks, and Underdog are reached
+only through this board.
+
+### Availability
+
+The board is published only when the deployment sets both `DFS_BOARD_ENABLED=true`
+and a non-empty `DFS_ENABLED_PROVIDERS`. Both default to off in every
+environment, so development and tests opt in explicitly. An unpublished board
+answers an authenticated request with `404 dfs_board_disabled` and calls no
+provider. Startup fails if the flag is set without a provider registry.
+
+Publication is decided immediately after authentication and before the query
+string is read, so *every* authenticated request to an unpublished board is
+`404 dfs_board_disabled` — including one carrying an unknown, malformed, or
+empty filter, which would otherwise be `400`. No parser, provider, database, or
+cache is reached. Authentication still comes first: without credentials the
+answer is `401`, published or not.
+
+### Filters
+
+Every filter names an exact identity the board itself established. There is no
+fuzzy or partial name filter. Values may repeat (`providers=dabble&providers=underdog`)
+or be comma-separated (`providers=dabble,underdog`), and at most 100 values are
+accepted per filter. Surrounding whitespace is trimmed, and naming one identity
+twice (`providers=dabble,dabble`) is accepted and collapsed to one.
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `season` | canonical NBA season (`2025-26`) | Season to read; defaults to the current season. |
+| `providers` | `dabble`, `prizepicks`, `underdog` | Restrict retrieval; an excluded provider is never called. |
+| `canonical_athlete_ids` | integer NBA player IDs | Restrict to these Canonical Athletes. |
+| `canonical_event_ids` | NBA game IDs | Restrict to these Canonical Events. |
+| `canonical_statistic_ids` | Statistic Catalog IDs | Restrict to these Canonical Statistics. |
+| `market_statuses` | `available`, `suspended` | Restrict to these Market Statuses. |
+
+Any other query parameter, an unsupported vocabulary value, an unparsable
+identity, or a non-canonical season returns `400 invalid_input` in the shared
+error shape. A misspelled filter is refused rather than ignored.
+
+A supplied filter is never widened back to "no filter". An empty value or an
+empty member of a comma-separated list is `400 invalid_input` too — `providers=`,
+`providers=,`, `providers=dabble,`, `market_statuses=`, a blank canonical ID, and
+`season=` are all refused, and none of them calls a provider or reads a
+database. Omit the parameter entirely to accept the unfiltered board or the
+default season.
+
+### Response semantics
+
+A `200` body states contract version `1`. Every exact decimal — thresholds,
+spreads, modifiers, prices, ages — is a JSON **string** in the scale the
+provider published, never a JSON number. Every timestamp is timezone-aware UTC.
+Collections are deterministically ordered, so equivalent observations produce
+identical JSON and identical entity tags.
+
+The body carries `comparison_availability` with each canonical catalog's
+identity, last success, age, and configured maximum age; `comparison_groups`
+with exact minimum, maximum, Threshold Spread, counts, freshness, and sorted
+market references; `unresolved_markets` with the closed exclusion vocabulary
+that explains each; `markets` with the complete retained normalized evidence and
+provenance for every observation; `provider_reports` with each provider's
+status, stable failure reason, coverage counts and completion evidence, age,
+freshness, and cache state; and `disabled_providers`.
+
+Version 1 reports facts only. It produces no probability, expected value,
+recommendation, average, preferred market, or entry payout.
+
+### Statuses
+
+| Status | When |
+| --- | --- |
+| `200` | At least one provider produced a *readable* snapshot — complete, partial, permitted-stale, or empty-complete. An empty complete snapshot is a valid empty board, not an outage. |
+| `304` | The caller's `If-None-Match` already holds an equivalent board. |
+| `400 invalid_input` | A filter cannot be parsed or is outside a supported vocabulary. |
+| `400 board_too_large` | The post-filter board exceeds `DFS_COMPARISON_MAX_MARKETS` *and* at least one provider was readable. Nothing is truncated; `details` states `observed_market_count`, `market_limit`, and `supported_filters`. |
+| `401` | Missing or invalid Firebase credentials. |
+| `404 dfs_board_disabled` | The deployment does not publish the board. |
+| `503 provider_unavailable` | No provider produced a readable snapshot, whatever the read's size. `details` states the sanitized Provider Outcomes and the disabled providers. |
+
+A snapshot is *readable* only while the board can still compare it. A retrieval
+that succeeded but is older than that provider's `DFS_<PROVIDER>_CACHE_STALE_IF_ERROR_SECONDS`
+ceiling, or timestamped ahead of the board's own clock, resolves no market at
+all — every market it carried is `stale_snapshot` or `future_snapshot` — so a
+board carrying only those answers `503` rather than a `200` stating nothing. The
+maximum age is inclusive: a snapshot exactly at the ceiling is still readable.
+
+Readability is decided before size. A read no provider could be read from is
+`503` however many markets it observed, because narrowing filters cannot make an
+outage readable; `board_too_large` is only ever returned for a read at least one
+provider *was* readable on.
+Each sanitized Provider Outcome in the `503` body therefore also states its
+`freshness` (`fresh`, `stale`, or `null`) and `future_observation`, so a caller
+can tell a failed retrieval from an unreadable one.
+
+### Caching
+
+Responses carry a weak `ETag`. It identifies the board's stated facts: the
+instant of observation and the ages derived from it are deliberately excluded,
+so an unchanged board revalidates as `304` rather than resending a board that
+differs only in how long ago it was read. Send the tag back verbatim in
+`If-None-Match`.
+
+An authenticated board is never shared. *Every* response from this route —
+`200`, `304`, `400`, `401`, `404`, `503`, and a centrally handled `500` alike —
+carries `Cache-Control: private, no-cache, max-age=0, must-revalidate`,
+`Vary: Authorization`, `X-Content-Type-Options: nosniff`, and `X-Request-ID`, so
+no failure for one caller can be served from a shared cache to another. `Vary`
+is added rather than replaced, so a `Vary: Origin` from CORS survives beside it.
+
+`ETag` is the exception: it identifies one board, so it appears on `200` and
+`304` only and never on a failure.
+
+### Executable response fixtures
+
+The complete-success, mixed partial/stale, empty, oversized, unauthenticated,
+disabled, total-failure, unreadable-snapshot, and unreadable-oversized responses
+are recorded verbatim in
+`tests/fixtures/dfs_board/` and asserted byte-for-byte by
+`tests/test_dfs_routes.py`, so these examples cannot drift from behavior:
+
+| Response | Fixture |
+| --- | --- |
+| Complete success | `tests/fixtures/dfs_board/complete.json` |
+| Mixed partial/stale | `tests/fixtures/dfs_board/mixed_partial_stale.json` |
+| Empty complete | `tests/fixtures/dfs_board/empty.json` |
+| Oversized | `tests/fixtures/dfs_board/oversized.json` |
+| Unauthenticated | `tests/fixtures/dfs_board/unauthenticated.json` |
+| Disabled | `tests/fixtures/dfs_board/disabled.json` |
+| Total failure | `tests/fixtures/dfs_board/total_failure.json` |
+| Unreadable snapshot | `tests/fixtures/dfs_board/unusable_snapshot.json` |
+| Unreadable and over the ceiling | `tests/fixtures/dfs_board/unreadable_oversized.json` |
+
+Rerecord them with `RECORD_BOARD_FIXTURES=1 pytest tests/test_dfs_routes.py`
+after an intended contract change, and review the diff.
+
+### Operating the board
+
+- **Configuration.** `DFS_BOARD_ENABLED`, `DFS_ENABLED_PROVIDERS`,
+  `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`,
+  `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, and the
+  `DFS_CACHE_*` windows. See `.env.example` for safe disabled defaults.
+- **Catalog refresh.** Comparisons need fresh Athlete and Event Catalogs.
+  Deployment-owned scheduling runs `scripts/refresh_athlete_catalog.py` and
+  `scripts/refresh_event_catalog.py` daily with explicit seasons; API workers
+  run no scheduler. A missing or over-age catalog makes
+  `comparison_availability.available` false and keeps normalized markets
+  visible — it never turns a board into an outage. Windows are
+  `ATHLETE_CATALOG_FRESHNESS_DAYS` (7) and `EVENT_CATALOG_MAX_AGE_HOURS` (72).
+- **Redis degradation.** The snapshot cache fails open. With `ENABLE_CACHE=false`
+  or an unreachable Redis, providers are retrieved directly and each provider
+  report states its `cache` status and any refresh failure reason. Cache
+  availability is not board availability.
+- **Mapping review.** Ambiguous or conflicting provider identities are governed
+  offline with `scripts/athlete_mappings.py` and `scripts/event_mappings.py`
+  (list, dry-run, approve, reject, override, clear, history). Manual decisions
+  require an operator identity and reason. Version 1 has no mapping mutation
+  HTTP API.
+- **Scope.** NBA pregame Player Projection Markets only. Live, closed, settled,
+  team, match, futures, entry-placement, and non-NBA offerings are out of scope.
 
 ## User Endpoints
 

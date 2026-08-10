@@ -13,6 +13,7 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
+| `FeatureSettings` | `dfs_board_enabled` — whether this deployment publishes the DFS Board route at all | `DFS_BOARD_ENABLED` (default `false`) |
 | `ProviderSettings` | NBA Stats/PBP settings plus the internal DFS enabled-provider registry, deadline, transport caps, Dabble fan-out bound, and ProviderSnapshot cache windows | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, and provider-specific `DFS_<PROVIDER>_CACHE_*` overrides |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
@@ -34,7 +35,18 @@ The internal DFS collector receives an explicit injected provider registry. In
 development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
 adapters. Tests and local experiments may explicitly configure the recorded
 provider adapters (`dabble`, `prizepicks`, and `underdog`). Production must
-provide a non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list.
+provide a non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list, whether or
+not the board is published.
+
+Publishing the board needs both halves of that configuration.
+`DFS_BOARD_ENABLED=true` says the route may be exposed and
+`DFS_ENABLED_PROVIDERS` says which providers it may call; either alone
+publishes nothing, and `GET /api/dfs/board` answers an authenticated request
+with `404 dfs_board_disabled` before reading its query string. Both default to
+off in **every** environment, including local development and tests, so a
+deployment opts in explicitly. `DFS_BOARD_ENABLED=true` with an empty registry
+is refused at startup with `ConfigurationError` in every environment, rather
+than exposing a route that could never call a provider.
 
 The board deadline defaults to 15 seconds. Each DFS GET defaults to a 3-second
 connect cap and an 8-second read cap, both reduced to the remaining absolute
@@ -116,7 +128,7 @@ Local and test startup is credential-free by default:
 Production startup raises `ConfigurationError` with the invalid field names
 when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
 credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
-or the local bypass is enabled. This prevents the process from starting with a
+`DFS_ENABLED_PROVIDERS` names no provider, or the local bypass is enabled. This prevents the process from starting with a
 configuration that cannot enforce its security contract.
 
 For example, a deployment should set:

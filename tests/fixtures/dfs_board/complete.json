@@ -1,0 +1,301 @@
+{
+  "comparison_availability": {
+    "available": true,
+    "catalogs": [
+      {
+        "age_seconds": "28830.000000",
+        "available": true,
+        "catalog": "athlete_catalog",
+        "last_success_at": "2026-08-09T12:00:00+00:00",
+        "max_age_seconds": "604800",
+        "reason": null,
+        "season": "2025-26"
+      },
+      {
+        "age_seconds": "28830.000000",
+        "available": true,
+        "catalog": "event_catalog",
+        "last_success_at": "2026-08-09T12:00:00+00:00",
+        "max_age_seconds": "259200.0",
+        "reason": null,
+        "season": "2025-26"
+      }
+    ]
+  },
+  "comparison_groups": [
+    {
+      "comparison_reference": "cmp_2_35a1366919681b76b226f610e0bf6b0e",
+      "key": {
+        "canonical_athlete_id": 203999,
+        "canonical_event_id": "0022500001",
+        "canonical_statistic_id": "points",
+        "scoring_period": "full_game"
+      },
+      "members": [
+        {
+          "freshness": "fresh",
+          "market_reference": "mkt_2_3b2177fefb20d681983ef8d81b7dd7f4",
+          "provider": "dabble",
+          "retrieved_at": "2026-08-09T20:00:00+00:00",
+          "selection_references": [],
+          "status": "available",
+          "threshold": "25.5",
+          "threshold_unit": "count",
+          "variant": "standard"
+        },
+        {
+          "freshness": "fresh",
+          "market_reference": "mkt_2_aa5e26e91ebb786a4612d8a5d750a4b9",
+          "provider": "prizepicks",
+          "retrieved_at": "2026-08-09T20:00:00+00:00",
+          "selection_references": [],
+          "status": "available",
+          "threshold": "26.0",
+          "threshold_unit": "count",
+          "variant": "standard"
+        }
+      ],
+      "summary": {
+        "freshness": "fresh",
+        "market_count": 2,
+        "market_references": [
+          "mkt_2_3b2177fefb20d681983ef8d81b7dd7f4",
+          "mkt_2_aa5e26e91ebb786a4612d8a5d750a4b9"
+        ],
+        "maximum_threshold": "26.0",
+        "minimum_threshold": "25.5",
+        "provider_count": 2,
+        "threshold_spread": "0.5"
+      }
+    }
+  ],
+  "contract_version": "1",
+  "disabled_providers": [
+    "underdog"
+  ],
+  "filters": {
+    "canonical_athlete_ids": [],
+    "canonical_event_ids": [],
+    "canonical_statistic_ids": [],
+    "market_statuses": [],
+    "providers": []
+  },
+  "generated_at": "2026-08-09T20:00:30+00:00",
+  "market_count": 2,
+  "markets": [
+    {
+      "appearance": null,
+      "athlete": {
+        "canonical_id": null,
+        "name": "Nikola Jokic",
+        "provider_id": "a-1",
+        "team": null
+      },
+      "comparison_reference": "cmp_2_35a1366919681b76b226f610e0bf6b0e",
+      "competition": null,
+      "conflict_count": null,
+      "conflict_ordinal": null,
+      "event": {
+        "away_team": {
+          "abbreviation": null,
+          "canonical_id": 1610612743,
+          "name": null,
+          "provider_id": null
+        },
+        "canonical_id": null,
+        "ends_at": null,
+        "home_team": {
+          "abbreviation": null,
+          "canonical_id": 1610612747,
+          "name": null,
+          "provider_id": null
+        },
+        "label": "DEN @ LAL",
+        "provider_id": "e-1",
+        "starts_at": null,
+        "status_label": null,
+        "updated_at": null
+      },
+      "exclusion": null,
+      "exclusion_detail": null,
+      "league": null,
+      "market_id": "m-1",
+      "market_reference": "mkt_2_3b2177fefb20d681983ef8d81b7dd7f4",
+      "observation": {
+        "age_seconds": "30.000000",
+        "freshness": "fresh",
+        "is_future": false,
+        "observed_at": "2026-08-09T20:00:30+00:00",
+        "provider": "dabble",
+        "retrieved_at": "2026-08-09T20:00:00+00:00",
+        "snapshot_status": "complete"
+      },
+      "opponent": null,
+      "provider": "dabble",
+      "scoring_period": "full_game",
+      "scoring_period_label": "full_game",
+      "selections": [],
+      "sport": null,
+      "starts_at": null,
+      "statistic": {
+        "canonical_id": null,
+        "components": [],
+        "label": "points",
+        "provider_id": null
+      },
+      "statistic_resolution": {
+        "canonical_id": "points",
+        "comparable": true,
+        "reason": null,
+        "scoring_period": "full_game",
+        "state": "canonical",
+        "unit": "count"
+      },
+      "status": "available",
+      "status_label": "available",
+      "team": null,
+      "threshold": {
+        "original_value": null,
+        "unit": "count",
+        "value": "25.5"
+      },
+      "updated_at": null,
+      "variant": "standard",
+      "variant_label": "standard"
+    },
+    {
+      "appearance": null,
+      "athlete": {
+        "canonical_id": null,
+        "name": "Nikola Jokic",
+        "provider_id": "a-1",
+        "team": null
+      },
+      "comparison_reference": "cmp_2_35a1366919681b76b226f610e0bf6b0e",
+      "competition": null,
+      "conflict_count": null,
+      "conflict_ordinal": null,
+      "event": {
+        "away_team": {
+          "abbreviation": null,
+          "canonical_id": 1610612743,
+          "name": null,
+          "provider_id": null
+        },
+        "canonical_id": null,
+        "ends_at": null,
+        "home_team": {
+          "abbreviation": null,
+          "canonical_id": 1610612747,
+          "name": null,
+          "provider_id": null
+        },
+        "label": "DEN @ LAL",
+        "provider_id": "e-1",
+        "starts_at": null,
+        "status_label": null,
+        "updated_at": null
+      },
+      "exclusion": null,
+      "exclusion_detail": null,
+      "league": null,
+      "market_id": "m-2",
+      "market_reference": "mkt_2_aa5e26e91ebb786a4612d8a5d750a4b9",
+      "observation": {
+        "age_seconds": "30.000000",
+        "freshness": "fresh",
+        "is_future": false,
+        "observed_at": "2026-08-09T20:00:30+00:00",
+        "provider": "prizepicks",
+        "retrieved_at": "2026-08-09T20:00:00+00:00",
+        "snapshot_status": "complete"
+      },
+      "opponent": null,
+      "provider": "prizepicks",
+      "scoring_period": "full_game",
+      "scoring_period_label": "full_game",
+      "selections": [],
+      "sport": null,
+      "starts_at": null,
+      "statistic": {
+        "canonical_id": null,
+        "components": [],
+        "label": "points",
+        "provider_id": null
+      },
+      "statistic_resolution": {
+        "canonical_id": "points",
+        "comparable": true,
+        "reason": null,
+        "scoring_period": "full_game",
+        "state": "canonical",
+        "unit": "count"
+      },
+      "status": "available",
+      "status_label": "available",
+      "team": null,
+      "threshold": {
+        "original_value": null,
+        "unit": "count",
+        "value": "26.0"
+      },
+      "updated_at": null,
+      "variant": "standard",
+      "variant_label": "standard"
+    }
+  ],
+  "provider_reports": [
+    {
+      "age_seconds": "30.000000",
+      "cache": null,
+      "coverage": {
+        "eligible_count": 1,
+        "expected_total": null,
+        "fanout_complete": true,
+        "fetched_count": 1,
+        "is_complete": true,
+        "normalized_count": 1,
+        "pagination_complete": true,
+        "skipped_count": 0,
+        "skipped_reasons": [],
+        "warning_codes": []
+      },
+      "freshness": "fresh",
+      "future_observation": false,
+      "market_count": 1,
+      "provider": "dabble",
+      "reason": null,
+      "retrieved_at": "2026-08-09T20:00:00+00:00",
+      "snapshot_status": "complete",
+      "status": "complete",
+      "warning_codes": []
+    },
+    {
+      "age_seconds": "30.000000",
+      "cache": null,
+      "coverage": {
+        "eligible_count": 1,
+        "expected_total": null,
+        "fanout_complete": true,
+        "fetched_count": 1,
+        "is_complete": true,
+        "normalized_count": 1,
+        "pagination_complete": true,
+        "skipped_count": 0,
+        "skipped_reasons": [],
+        "warning_codes": []
+      },
+      "freshness": "fresh",
+      "future_observation": false,
+      "market_count": 1,
+      "provider": "prizepicks",
+      "reason": null,
+      "retrieved_at": "2026-08-09T20:00:00+00:00",
+      "snapshot_status": "complete",
+      "status": "complete",
+      "warning_codes": []
+    }
+  ],
+  "season": "2025-26",
+  "unresolved_markets": []
+}
