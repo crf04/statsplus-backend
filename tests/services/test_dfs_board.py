@@ -454,17 +454,27 @@ def test_implementation_defects_propagate():
 def test_deadline_drops_pending_and_late_provider_results():
     release = threading.Event()
     started = threading.Event()
+    clock = ControlledClock()
 
     class LateProvider(FakeProvider):
         def get_snapshot(self, query, context):
             self.calls.append((query, context))
             started.set()
+            clock.advance(2)
             release.wait()
             return self.result
 
     provider = LateProvider("dabble")
-    context = _context(seconds=0.04)
-    service = DFSBoardService(provider_registry={"dabble": provider})
+    context = RetrievalContext(
+        deadline=clock.wall + timedelta(seconds=10),
+        request_id="board-test",
+    )
+    service = DFSBoardService(
+        provider_registry={"dabble": provider},
+        deadline_seconds=1,
+        clock=clock.now,
+        monotonic=clock.monotonic,
+    )
 
     try:
         board = service.get_board(NBAMarketQuery(), context)
