@@ -540,10 +540,11 @@ publication while retaining already observed bounded coverage counts. If a
 new cumulative source row cannot join an athlete, event, or team and canonical
 publication would otherwise remain at or below its prior size, the apparent
 growth exposes incomplete canonical identity coverage and fails closed instead
-of stamping the unchanged snapshot fresh. This comparison uses the prior raw
-source-row count, not the prior canonical count, so an unchanged partially
-unjoined snapshot can be republished idempotently and later recover when its
-governed catalog identities arrive.
+of stamping the unchanged snapshot fresh. The season sidecar stores the raw
+provider count and the identity-relevant count after governed unsupported-phase
+rows are removed, so prior and current publications use comparable denominators.
+An unchanged partially unjoined snapshot can therefore republish idempotently,
+while prior Play-In rows cannot mask new unjoined identity growth.
 
 Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
 and NBA game ID, with an explicit governed `season_type` constrained to
@@ -551,9 +552,11 @@ and NBA game ID, with an explicit governed `season_type` constrained to
 season. Both phase observations form one season replacement; its `nba_stats`
 source, timezone-aware retrieval time, and union row count commit in the same
 transaction. The sidecar also records the bounded,
-nonnegative raw `source_row_count`; it can exceed the canonical row count after
-exact duplicates or governed exclusions but never be smaller. Exact duplicate
-provider rows collapse to one fact and increment bounded duplicate telemetry;
+nonnegative raw `source_row_count` and `identity_source_row_count`; the latter
+excludes only governed unsupported-phase rows. Both can exceed the canonical
+row count after exact duplicates or identity exclusions but never be smaller.
+Exact duplicate provider rows collapse to one fact and increment bounded
+duplicate telemetry;
 conflicting duplicates fail closed at canonicalization, and the repository
 repeats that invariant for direct persistence callers. Any validation or
 database failure leaves both the prior rows and prior successful freshness

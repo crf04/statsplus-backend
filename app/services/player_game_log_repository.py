@@ -72,6 +72,7 @@ class PlayerGameLogFreshness:
     retrieved_at: datetime | None
     row_count: int
     source_row_count: int
+    identity_source_row_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +154,7 @@ class PlayerGameLogRepository:
         retrieved_at: datetime,
         source_provider: str,
         source_row_count: int,
+        identity_source_row_count: int | None = None,
         allow_empty: bool = False,
         current_catalog_game_ids: frozenset[str] | None = None,
         recoverable_game_ids: frozenset[str] = frozenset(),
@@ -166,6 +168,17 @@ class PlayerGameLogRepository:
             or source_row_count < 0
         ):
             raise ValueError("source_row_count must be a non-negative integer")
+        if identity_source_row_count is None:
+            identity_source_row_count = source_row_count
+        if (
+            isinstance(identity_source_row_count, bool)
+            or not isinstance(identity_source_row_count, int)
+            or identity_source_row_count < 0
+            or identity_source_row_count > source_row_count
+        ):
+            raise ValueError(
+                "identity_source_row_count must be between zero and source_row_count"
+            )
 
         unique: dict[tuple[int, str], PlayerGameLogRecord] = {}
         canonical_input_count = 0
@@ -187,6 +200,10 @@ class PlayerGameLogRepository:
         if source_row_count < canonical_input_count:
             raise ValueError(
                 "source_row_count cannot be smaller than canonical input rows"
+            )
+        if identity_source_row_count < canonical_input_count:
+            raise ValueError(
+                "identity_source_row_count cannot be smaller than canonical input rows"
             )
 
         retrieved = assume_utc(retrieved_at)
@@ -235,6 +252,7 @@ class PlayerGameLogRepository:
                 "retrieved_at": retrieved,
                 "row_count": len(unique),
                 "source_row_count": source_row_count,
+                "identity_source_row_count": identity_source_row_count,
             }
             result = connection.execute(
                 update(refresh_table)
@@ -282,13 +300,14 @@ class PlayerGameLogRepository:
                 )
             ).mappings().one_or_none()
         if row is None:
-            return PlayerGameLogFreshness(canonical_season, None, None, 0, 0)
+            return PlayerGameLogFreshness(canonical_season, None, None, 0, 0, 0)
         return PlayerGameLogFreshness(
             season=canonical_season,
             source_provider=row["source_provider"],
             retrieved_at=assume_utc(row["retrieved_at"]),
             row_count=int(row["row_count"]),
             source_row_count=int(row["source_row_count"]),
+            identity_source_row_count=int(row["identity_source_row_count"]),
         )
 
     def get_season_rate(

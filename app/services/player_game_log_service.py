@@ -353,6 +353,9 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at,
                 source_provider=SOURCE_PROVIDER,
                 source_row_count=result.source_row_count,
+                identity_source_row_count=(
+                    result.source_row_count - result.unsupported_phase_count
+                ),
                 current_catalog_game_ids=frozenset(
                     str(event["nba_game_id"]) for event in events
                 ),
@@ -381,7 +384,7 @@ class PlayerGameLogService:
     def _growth_hidden_by_unjoined_identity(
         result: _CanonicalizationResult, prior: PlayerGameLogFreshness
     ) -> bool:
-        identity_source_row_count = (
+        current_identity_source_row_count = (
             result.source_row_count - result.unsupported_phase_count
         )
         has_unjoined_identity = bool(
@@ -393,7 +396,7 @@ class PlayerGameLogService:
             has_unjoined_identity
             and prior.retrieved_at is not None
             and prior.row_count > 0
-            and identity_source_row_count > prior.source_row_count
+            and current_identity_source_row_count > prior.identity_source_row_count
             and len(result.records) <= prior.row_count
         )
 
@@ -628,15 +631,6 @@ class PlayerGameLogService:
         athlete_map: dict[int, dict[str, Any]],
         event_map: dict[str, dict[str, Any]],
     ) -> _CanonicalRow:
-        player_id = int(
-            self._number(
-                row["PLAYER_ID"], "player identity", integral=True, minimum=1
-            )
-        )
-        athlete = athlete_map.get(player_id)
-        if athlete is None:
-            return _Excluded(_ExclusionReason.ATHLETE)
-        player_name = str(athlete["display_name"])
         game_id = self._game_id(row["GAME_ID"])
         event = event_map.get(game_id)
         if event is None:
@@ -648,6 +642,15 @@ class PlayerGameLogService:
             raise PlayerGameLogIdentityError(
                 "a player game log phase does not match its governed event"
             )
+        player_id = int(
+            self._number(
+                row["PLAYER_ID"], "player identity", integral=True, minimum=1
+            )
+        )
+        athlete = athlete_map.get(player_id)
+        if athlete is None:
+            return _Excluded(_ExclusionReason.ATHLETE)
+        player_name = str(athlete["display_name"])
         team_id = int(
             self._number(
                 row["TEAM_ID"], "team identity", integral=True, minimum=1

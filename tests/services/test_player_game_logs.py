@@ -364,6 +364,7 @@ def test_publish_deduplicates_identical_player_game_facts_and_records_freshness(
         retrieved_at=RETRIEVED_AT,
         row_count=1,
         source_row_count=2,
+        identity_source_row_count=2,
     )
     assert StatsFreshnessRepository(
         repository.engine, surface=PLAYER_GAME_LOG_SURFACE
@@ -640,6 +641,7 @@ def test_truncated_cumulative_snapshot_preserves_larger_publication(tmp_path):
         retrieved_at=RETRIEVED_AT,
         row_count=25,
         source_row_count=25,
+        identity_source_row_count=25,
     )
 
 
@@ -687,6 +689,7 @@ def test_rows_without_complete_publication_metadata_fail_closed(tmp_path):
         retrieved_at=None,
         row_count=0,
         source_row_count=0,
+        identity_source_row_count=0,
     )
     assert repository.list_player_rows(SEASON, 101) == ()
 
@@ -727,6 +730,7 @@ def test_current_season_reads_require_global_surface_observation(tmp_path):
         retrieved_at=RETRIEVED_AT,
         row_count=1,
         source_row_count=1,
+        identity_source_row_count=1,
     )
     assert repository.list_player_rows(SEASON, 101) == ()
     assert repository.list_player_rows(HISTORICAL_SEASON, 101) == (historical,)
@@ -1058,6 +1062,7 @@ def test_refresh_publishes_complete_regular_season_and_playoff_logs_atomically(
         retrieved_at=RETRIEVED_AT,
         row_count=32,
         source_row_count=32,
+        identity_source_row_count=32,
     )
     assert StatsFreshnessRepository(
         repository.engine, surface=PLAYER_GAME_LOG_SURFACE
@@ -1293,10 +1298,51 @@ def test_new_governed_play_in_rows_do_not_block_valid_snapshot_freshness(
         retrieved_at=refreshed_at,
         row_count=22,
         source_row_count=23,
+        identity_source_row_count=22,
     )
     assert telemetry.events[0].source_row_count == 23
     assert telemetry.events[0].unsupported_phase_count == 1
     assert telemetry.events[0].published_row_count == 22
+    assert telemetry.events[0].rejected_publication_count == 0
+
+
+@pytest.mark.parametrize("player_id", [pytest.param(999, id="unknown"), pytest.param(None, id="missing")])
+def test_play_in_phase_is_classified_before_missing_athlete_identity(
+    tmp_path, player_id
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _service(repository, _RecordedSeasonProvider()).refresh(SEASON)
+    prior_rows = repository.list_player_rows(SEASON, 101)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Play-In Tournament")
+    )
+    unsupported = _unsupported_phase_row("0052500001")
+    unsupported["PLAYER_ID"] = player_id
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat(
+            [_recorded_season_frame(), unsupported], ignore_index=True
+        )
+    )
+    telemetry = _RecordingTelemetry()
+    refreshed_at = RETRIEVED_AT + timedelta(hours=1)
+
+    result = _service(
+        repository, provider, telemetry_recorder=telemetry
+    ).refresh(SEASON, now=refreshed_at)
+
+    assert result.row_count == 22
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
+    assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
+        season=SEASON,
+        source_provider="nba_stats",
+        retrieved_at=refreshed_at,
+        row_count=22,
+        source_row_count=23,
+        identity_source_row_count=22,
+    )
+    assert telemetry.events[0].unjoined_athlete_count == 0
+    assert telemetry.events[0].unsupported_phase_count == 1
     assert telemetry.events[0].rejected_publication_count == 0
 
 
@@ -1333,11 +1379,48 @@ def test_play_in_growth_does_not_destabilize_a_prior_unjoined_identity(
         retrieved_at=refreshed_at,
         row_count=21,
         source_row_count=23,
+        identity_source_row_count=22,
     )
     assert telemetry.events[0].unjoined_athlete_count == 1
     assert telemetry.events[0].unsupported_phase_count == 1
     assert telemetry.events[0].published_row_count == 21
     assert telemetry.events[0].rejected_publication_count == 0
+
+
+def test_prior_play_in_rows_cannot_mask_new_unjoined_identity_growth(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    _seed_unsupported_phase_events(
+        repository, ("0052500001", "Play-In Tournament")
+    )
+    baseline_frame = pd.concat(
+        [_recorded_season_frame(), _unsupported_phase_row("0052500001")],
+        ignore_index=True,
+    )
+    _service(
+        repository, _RecordedSeasonProvider(frame=baseline_frame)
+    ).refresh(SEASON)
+    prior_freshness = repository.get_freshness(SEASON)
+    assert prior_freshness.identity_source_row_count == 22
+    prior_rows = repository.list_player_rows(SEASON, 101)
+    unknown = _recorded_season_frame().iloc[[0]].copy()
+    unknown["PLAYER_ID"] = 999
+    provider = _RecordedSeasonProvider(
+        frame=pd.concat([baseline_frame, unknown], ignore_index=True)
+    )
+    telemetry = _RecordingTelemetry()
+
+    with pytest.raises(PlayerGameLogIdentityError, match="incomplete canonical"):
+        _service(
+            repository, provider, telemetry_recorder=telemetry
+        ).refresh(SEASON, now=RETRIEVED_AT + timedelta(hours=1))
+
+    assert repository.get_freshness(SEASON) == prior_freshness
+    assert repository.list_player_rows(SEASON, 101) == prior_rows
+    assert telemetry.events[0].source_row_count == 24
+    assert telemetry.events[0].unjoined_athlete_count == 1
+    assert telemetry.events[0].unsupported_phase_count == 1
+    assert telemetry.events[0].rejected_publication_count == 1
 
 
 @pytest.mark.parametrize("failure_phase", ["Regular Season", "Playoffs"])
@@ -1534,6 +1617,7 @@ def test_voided_game_removals_with_an_addition_report_actual_recovery(tmp_path):
         retrieved_at=RETRIEVED_AT + timedelta(hours=1),
         row_count=22,
         source_row_count=22,
+        identity_source_row_count=22,
     )
     assert telemetry.events[0].recovered_shrink_row_count == 3
     assert telemetry.events[0].rejected_publication_count == 0
@@ -1635,6 +1719,7 @@ def test_preseason_empty_snapshot_can_record_honest_zero_row_freshness(tmp_path)
         retrieved_at=RETRIEVED_AT,
         row_count=0,
         source_row_count=0,
+        identity_source_row_count=0,
     )
 
 
@@ -2060,6 +2145,7 @@ def test_stable_partially_unjoined_snapshot_can_republish(
         retrieved_at=second_at,
         row_count=21,
         source_row_count=22,
+        identity_source_row_count=22,
     )
 
 

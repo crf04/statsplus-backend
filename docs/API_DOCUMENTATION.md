@@ -471,18 +471,22 @@ identities. Rows governed as Play-In or another phase outside the explicit
 `unsupported_phase_count`. Stable exclusions and source growth containing only
 those governed unsupported phases may republish and advance freshness; they do
 not represent an athlete, game, or team identity-join failure, including when
-a previously observed unjoined identity remains stable.
+a previously observed unjoined identity remains stable. Governed event phase
+is classified before athlete identity, so an unknown athlete on an exact
+unsupported event remains an unsupported-phase exclusion.
 Every completed, non-postponed governed `Regular Season` or `Playoffs` game
 through the source observation time must have logs from its exact phase for
 both exact teams and at least the configured
 `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` distinct positive-minute
 players per team (default `5`). This rejects a truncated first publication
 without estimating a season total and does not require future games or DNPs.
-The season sidecar stores both canonical and bounded raw source-row counts.
-Stable partial exclusions can therefore republish idempotently; source growth
-hidden by an unjoined athlete, game, or team fails as incomplete canonical
-identity evidence instead of republishing an unchanged cumulative snapshot as
-fresh, and publication recovers when those exact governed identities arrive.
+The season sidecar stores canonical, bounded raw source-row, and
+identity-relevant source-row counts. The identity count excludes only governed
+unsupported phases, making prior and current denominators comparable. Stable
+partial exclusions can therefore republish idempotently; source growth hidden
+by an unjoined athlete, game, or team fails as incomplete canonical identity
+evidence instead of republishing an unchanged cumulative snapshot as fresh,
+and publication recovers when those exact governed identities arrive.
 SQLAlchemy failures from prerequisite freshness/identity reads or publication
 are re-raised and emit one bounded rejection aggregate with already-observed
 coverage counts; publication failures first roll back.

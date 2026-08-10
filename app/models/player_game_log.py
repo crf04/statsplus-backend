@@ -78,10 +78,13 @@ class PlayerGameLogRefresh(Base):
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     row_count = Column(Integer, nullable=False)
     source_row_count = Column(Integer, nullable=False)
+    identity_source_row_count = Column(Integer, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
-            "source_row_count >= row_count AND row_count >= 0",
+            "source_row_count >= identity_source_row_count "
+            "AND identity_source_row_count >= row_count "
+            "AND row_count >= 0",
             name="ck_player_game_log_refresh_counts",
         ),
     )
