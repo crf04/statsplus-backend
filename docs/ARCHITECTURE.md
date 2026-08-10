@@ -682,11 +682,22 @@ The board contradiction machinery is shared where it is genuinely identical:
 `_contradicts` and `_contradictory_identities` in `app.services.dfs_board` take
 the fact vocabulary and tier chains as parameters, so athletes compare a name,
 a canonical ID, and one team while events compare a canonical claim, a start
-time, and two independent home/away sides. What differs is not shared: an event
-conflict is recorded with the canonical games the markets named as typed
-candidates rather than in a contradiction table of its own, because an event's
-disputed side is the game and the decision's own evidence columns already carry
-the representative provider facts.
+time, and two independent home/away sides. An event conflict records both
+sides of what it disputes: the canonical games the markets named as typed
+`event_mapping_decision_candidates`, and every provider evidence the
+observation asserted as typed `event_mapping_decision_contradictions`, because
+the decision row itself carries only the representative evidence.
+
+The provider's own canonical event claim (`EventEvidence.canonical_id`) decides
+whether two markets contradict each other, so it is durable evidence like the
+rest: `provider_canonical_event_id` is written onto the mapping row, the
+decision row, and each contradiction row, is part of the idempotency
+fingerprint, and is operable from the CLI. The repository is composed with the
+same configured `EVENT_MAPPING_MATCH_WINDOW_HOURS` the resolver uses, and every
+in-lock recheck of a governed decision compares start times with it; re-reading
+settings inside the transaction would let a configuration change land
+mid-decision, and falling back to the reviewed default would accept evidence a
+narrower configuration has already called a different fixture.
 
 Two rules are specific to events. A durable mapping is created only when a
 stable upstream event identity exists: a market with teams and a start time but
@@ -728,7 +739,11 @@ durable observation carrying every fact any of them reported and resolved as a
 whole, while markets that disagree about the fixture fail closed as one
 `mapping_conflict` reasoned `contradictory_provider_evidence`. Repeated reads,
 repeated markets, and a reordered repeat of one snapshot all leave the same
-durable row and append no further decision.
+durable row and append no further decision. Both the merge and the conflict
+order the observations by every field of the evidence they carry, not only by
+the facts that identify the fixture, so markets that agree about the game while
+spelling its label, status, end time, or update instant differently still yield
+one combined observation that does not depend on the provider's listing order.
 
 PBP Stats:
 
@@ -794,9 +809,10 @@ the conflict happened to be recorded on. These commands require an
 explicit writable database URL and never contact a provider.
 
 Migration 008 creates the provider event mapping, append-only decision,
-decision candidate, durable rejection, and per-identity lock tables
-(`provider_event_mappings`, `event_mapping_decisions`,
-`event_mapping_decision_candidates`, `event_mapping_rejections`, and
+decision candidate, decision contradiction, durable rejection, and per-identity
+lock tables (`provider_event_mappings`, `event_mapping_decisions`,
+`event_mapping_decision_candidates`,
+`event_mapping_decision_contradictions`, `event_mapping_rejections`, and
 `event_mapping_locks`). Its database checks mirror migration 006's for the event
 vocabulary: the closed mapping-state set (`ambiguous`, `auto`,
 `manual_approved`, `manual_override`, `mapping_conflict`, `rejected`,
@@ -805,8 +821,15 @@ coherence — only `auto`, `manual_approved`, and `manual_override` may be activ
 — cleared-rejection coherence, and conflict-column coherence, so a row that has
 left `mapping_conflict` may not keep naming a conflicting game. The boolean
 literals are `true`/`false`, so the checks are valid on PostgreSQL as well as
-SQLite, and the candidate rows are `ON DELETE CASCADE` children of their
-decision. Operators use `scripts/event_mappings.py` for read-only listing, dry
+SQLite, and the candidate and contradiction rows are `ON DELETE CASCADE`
+children of their decision, each keyed by it and ordered by the deterministic
+evidence order the observation was recorded in. Migration 008 is applied by
+model-driven creates, so re-running it is a no-op on a database that already
+has the tables. `tests/integration/test_postgres.py` exercises the schema, the
+cascade, the savepoint/row-lock concurrency, and the idempotency and manual
+precedence rules against a real PostgreSQL database when `TEST_DATABASE_URL` is
+set, and is skipped otherwise so the default suite stays offline.
+Operators use `scripts/event_mappings.py` for read-only listing, dry
 runs, audited approve/override/reject/clear actions, and history, with the same
 writable-URL requirement and no provider contact; the command builds the
 catalog read seam with a provider that refuses every call, so it is offline by

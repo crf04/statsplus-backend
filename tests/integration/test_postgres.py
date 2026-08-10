@@ -10,7 +10,7 @@ never be dropped by a test run.
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -873,3 +873,579 @@ def test_contradictory_evidence_round_trips_on_postgres(mapping_engine):
         provider="prizepicks", provider_athlete_id="pp-15"
     )
     assert recorded.contradictory_evidence == evidence
+
+
+# --- provider event mappings ----------------------------------------------
+
+
+EVENT_SEASON = "2025-26"
+EVENT_LAL = 1610612747
+EVENT_SAS = 1610612759
+EVENT_TIP_OFF = datetime(2025, 10, 23, tzinfo=timezone.utc)
+EVENT_NOW = datetime(2025, 10, 22, 12, tzinfo=timezone.utc)
+
+
+def _catalog_values(game_id, *, offset_hours=0.0, home_team_id=EVENT_LAL):
+    return {
+        "nba_game_id": game_id,
+        "season": EVENT_SEASON,
+        "scheduled_at": EVENT_TIP_OFF + timedelta(hours=offset_hours),
+        "home_team_id": home_team_id,
+        "home_team_name": "Los Angeles Lakers",
+        "home_team_tricode": "LAL",
+        "away_team_id": EVENT_SAS,
+        "away_team_name": "San Antonio Spurs",
+        "away_team_tricode": "SAS",
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "postponed_status": None,
+        "postponement_evidence": None,
+        "classification": "Regular Season",
+        "first_seen_at": EVENT_NOW,
+        "last_seen_at": EVENT_NOW,
+    }
+
+
+@pytest.fixture
+def event_mapping_engine(postgres_url):
+    """Provide a migrated Postgres database for the event mapping repository."""
+    from sqlalchemy import insert
+
+    from app.migrations import run_migrations
+    from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+
+    engine = create_engine(postgres_url)
+    Base.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                _catalog_values("0022500001"),
+                _catalog_values("0022500002", offset_hours=48),
+            ],
+        )
+        connection.execute(
+            insert(EventCatalogRefresh.__table__).values(
+                season=EVENT_SEASON,
+                last_attempt_at=EVENT_NOW,
+                last_success_at=EVENT_NOW,
+                event_count=2,
+            )
+        )
+
+    yield engine
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+class _EventCatalogRows:
+    """The two read seams the event resolver needs, without a refresh path."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_events(self, season):
+        return [row for row in self.rows if row["season"] == season]
+
+    def get_freshness(self, season):
+        return {"season": season, "fresh": True, "last_success_at": EVENT_NOW}
+
+
+def _event_evidence(
+    *,
+    provider_id="ud-1",
+    canonical_id=None,
+    label="Lakers vs Spurs",
+    starts_at=EVENT_TIP_OFF,
+    home="LAL",
+    away_name=None,
+    status_label="scheduled",
+):
+    from app.providers.dfs import EventEvidence, TeamEvidence
+
+    return EventEvidence(
+        provider_id=provider_id,
+        canonical_id=canonical_id,
+        label=label,
+        starts_at=starts_at,
+        status_label=status_label,
+        home_team=TeamEvidence(provider_id=f"ud-{home.lower()}", abbreviation=home),
+        away_team=TeamEvidence(
+            provider_id="ud-sas", abbreviation="SAS", name=away_name
+        ),
+    )
+
+
+def _event_resolution(
+    *,
+    evidence=None,
+    rows=None,
+    repository=None,
+    observed_at=None,
+):
+    from app.services.event_resolver import EventResolver
+
+    rows = rows if rows is not None else [_catalog_values("0022500001")]
+    return EventResolver(
+        _EventCatalogRows(rows), mapping_repository=repository
+    ).resolve(
+        "underdog",
+        evidence if evidence is not None else _event_evidence(),
+        EVENT_SEASON,
+        observed_at=observed_at,
+    )
+
+
+def _event_contradiction(*, away_name=None):
+    """One fail-closed observation asserting two events for one identity."""
+    from app.services.event_resolver import EventResolution, EventResolutionState
+
+    asserted = (
+        _event_evidence(canonical_id="ud-evt-1", home="LAL"),
+        _event_evidence(
+            canonical_id="ud-evt-2",
+            label="Celtics vs Spurs",
+            home="BOS",
+            away_name=away_name,
+            status_label="live",
+        ),
+    )
+    return EventResolution(
+        provider="underdog",
+        provider_evidence=asserted[0],
+        season=EVENT_SEASON,
+        state=EventResolutionState.MAPPING_CONFLICT,
+        contradictory_evidence=asserted,
+        reason="contradictory_provider_evidence",
+    )
+
+
+def test_migration_008_event_schema_applies_to_postgres(event_mapping_engine):
+    """The event mapping tables, including contradictions, must exist here.
+
+    Migration 008 owns the whole event mapping schema, so a child table added
+    to it has to be created by the same migration on a real database rather
+    than only by the model metadata a test fixture creates.
+    """
+    with event_mapping_engine.connect() as connection:
+        tables = set(
+            connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
+                )
+            ).scalars().all()
+        )
+        columns = set(
+            connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'event_mapping_decision_contradictions'"
+                )
+            ).scalars().all()
+        )
+        primary_key = connection.execute(
+            text(
+                "SELECT a.attname FROM pg_index i "
+                "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                "AND a.attnum = ANY(i.indkey) "
+                "WHERE i.indrelid = "
+                "'event_mapping_decision_contradictions'::regclass "
+                "AND i.indisprimary"
+            )
+        ).scalars().all()
+        cascade = connection.execute(
+            text(
+                "SELECT c.confdeltype FROM pg_constraint c "
+                "WHERE c.conrelid = "
+                "'event_mapping_decision_contradictions'::regclass "
+                "AND c.contype = 'f'"
+            )
+        ).scalars().all()
+        checks = set(
+            connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'provider_event_mappings'::regclass "
+                    "AND contype = 'c'"
+                )
+            ).scalars().all()
+        )
+
+    assert {
+        "provider_event_mappings",
+        "event_mapping_decisions",
+        "event_mapping_decision_candidates",
+        "event_mapping_decision_contradictions",
+        "event_mapping_rejections",
+        "event_mapping_locks",
+    } <= tables
+    assert {
+        "decision_id",
+        "evidence_index",
+        "provider_event_id",
+        "provider_canonical_event_id",
+        "provider_starts_at",
+        "provider_ends_at",
+        "provider_updated_at",
+        "provider_home_team_abbreviation",
+        "provider_away_team_name",
+    } <= columns
+    assert sorted(primary_key) == ["decision_id", "evidence_index"]
+    # 'c' is ON DELETE CASCADE: a decision's evidence may not outlive it.
+    assert cascade == ["c"]
+    assert {
+        "ck_provider_event_mapping_state",
+        "ck_provider_event_mapping_active_state",
+        "ck_provider_event_mapping_conflict_fields",
+    } <= checks
+    assert "provider_canonical_event_id" in set(
+        _postgres_columns(event_mapping_engine, "provider_event_mappings")
+    )
+    assert "provider_canonical_event_id" in set(
+        _postgres_columns(event_mapping_engine, "event_mapping_decisions")
+    )
+
+
+def _postgres_columns(engine, table_name):
+    with engine.connect() as connection:
+        return connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = :table"
+            ),
+            {"table": table_name},
+        ).scalars().all()
+
+
+@pytest.mark.parametrize(
+    ("state", "is_active", "conflict_event_id"),
+    [
+        ("auto", False, None),
+        ("ambiguous", True, None),
+        ("auto", True, "0022500002"),
+    ],
+)
+def test_the_event_schema_rejects_an_incoherent_row_on_postgres(
+    event_mapping_engine, state, is_active, conflict_event_id
+):
+    """The governance checks must be enforced by Postgres, not only by SQLite."""
+    from sqlalchemy import insert
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.event_mapping import ProviderEventMapping
+
+    with pytest.raises(IntegrityError):
+        with event_mapping_engine.begin() as connection:
+            connection.execute(
+                insert(ProviderEventMapping.__table__).values(
+                    provider="underdog",
+                    provider_event_id="ud-1",
+                    mapping_state=state,
+                    is_active=is_active,
+                    conflict_canonical_event_id=conflict_event_id,
+                    first_seen_at=EVENT_NOW,
+                    last_seen_at=EVENT_NOW,
+                )
+            )
+
+
+def test_event_mapping_round_trip_on_postgres(event_mapping_engine):
+    """State, decisions, candidates, and the provider claim must round-trip."""
+    from app.services.event_mapping_repository import EventMappingRepository
+
+    repository = EventMappingRepository(event_mapping_engine)
+
+    automatic = repository.record_resolution(
+        _event_resolution(evidence=_event_evidence(canonical_id="ud-evt-1"))
+    )
+    assert automatic.state == "auto"
+    assert automatic.persisted is True
+    assert automatic.mapping.provider_canonical_event_id == "ud-evt-1"
+
+    ambiguous = repository.record_resolution(
+        _event_resolution(
+            evidence=_event_evidence(provider_id="ud-2"),
+            rows=[
+                _catalog_values("0022500001"),
+                _catalog_values("0022500003", offset_hours=3),
+            ],
+        )
+    )
+    assert ambiguous.state == "ambiguous"
+    (queued,) = repository.list_unresolved(provider="underdog")
+    assert [candidate.canonical_event_id for candidate in queued.candidates] == [
+        "0022500001",
+        "0022500003",
+    ]
+    assert queued.candidates[1].start_offset_seconds == 3 * 3600
+
+    approved = repository.approve(
+        "underdog",
+        "ud-2",
+        "0022500002",
+        season=EVENT_SEASON,
+        operator_id="ops@example.com",
+        reason="reviewed the schedule",
+    )
+    assert approved.mapping.canonical_event_id == "0022500002"
+    assert repository.list_unresolved(provider="underdog") == []
+
+    repository.reject(
+        "underdog", "ud-1", operator_id="ops@example.com", reason="not an NBA fixture"
+    )
+    assert repository.is_rejected("underdog", "ud-1")
+    assert repository.clear_rejection(
+        "underdog", "ud-1", operator_id="ops@example.com", reason="new evidence"
+    )
+    assert repository.is_rejected("underdog", "ud-1") is False
+
+
+def test_deleting_an_event_decision_cascades_its_children_on_postgres(
+    event_mapping_engine,
+):
+    """Candidates and contradictions belong to the decision that recorded them."""
+    from sqlalchemy import delete, func, select
+
+    from app.models.event_mapping import (
+        EventMappingDecision,
+        EventMappingDecisionCandidate,
+        EventMappingDecisionContradiction,
+    )
+    from app.services.event_mapping_repository import EventMappingRepository
+
+    repository = EventMappingRepository(event_mapping_engine)
+    repository.record_resolution(
+        _event_resolution(
+            evidence=_event_evidence(provider_id="ud-2"),
+            rows=[
+                _catalog_values("0022500001"),
+                _catalog_values("0022500003", offset_hours=3),
+            ],
+        )
+    )
+    repository.record_resolution(_event_contradiction())
+
+    def _counts(connection):
+        return tuple(
+            connection.execute(select(func.count()).select_from(table)).scalar()
+            for table in (
+                EventMappingDecisionCandidate.__table__,
+                EventMappingDecisionContradiction.__table__,
+            )
+        )
+
+    with event_mapping_engine.begin() as connection:
+        assert _counts(connection) == (2, 2)
+        connection.execute(delete(EventMappingDecision.__table__))
+        assert _counts(connection) == (0, 0)
+
+
+def test_an_event_contradiction_round_trips_and_is_idempotent_on_postgres(
+    event_mapping_engine,
+):
+    """Every evidence a contradiction asserted is durable, once.
+
+    The same contradiction observed again is not a second observation, and
+    reversing the order it was asserted in does not make it one; changing any
+    part of it -- including the evidence the decision was not recorded on --
+    does.
+    """
+    from dataclasses import replace
+
+    from app.services.event_mapping_repository import EventMappingRepository
+
+    repository = EventMappingRepository(event_mapping_engine)
+    contradiction = _event_contradiction()
+
+    first = repository.record_resolution(contradiction)
+    repeated = repository.record_resolution(contradiction)
+    reordered = repository.record_resolution(
+        replace(
+            contradiction,
+            contradictory_evidence=tuple(
+                reversed(contradiction.contradictory_evidence)
+            ),
+        )
+    )
+    changed = repository.record_resolution(
+        _event_contradiction(away_name="San Antonio Spurs")
+    )
+
+    assert first.persisted is True
+    assert repeated.persisted is False
+    assert reordered.persisted is False
+    assert changed.persisted is True
+
+    decisions = repository.history(provider="underdog", provider_event_id="ud-1")
+    assert [decision.decision_state for decision in decisions] == [
+        "mapping_conflict",
+        "mapping_conflict",
+    ]
+    evidence = decisions[0].contradictory_evidence
+    assert [item.provider_canonical_event_id for item in evidence] == [
+        "ud-evt-1",
+        "ud-evt-2",
+    ]
+    assert [item.provider_home_team_abbreviation for item in evidence] == ["LAL", "BOS"]
+    assert [item.provider_event_id for item in evidence] == ["ud-1", "ud-1"]
+    assert {item.provider_starts_at for item in evidence} == {
+        EVENT_TIP_OFF.isoformat()
+    }
+    assert [item.provider_away_team_name for item in evidence] == [None, None]
+    assert [
+        item.provider_away_team_name for item in decisions[1].contradictory_evidence
+    ] == [None, "San Antonio Spurs"]
+    # The operator's queue reads the same durable rows.
+    (conflict,) = repository.list_conflicts(provider="underdog")
+    assert conflict.latest_decision.contradictory_evidence == (
+        decisions[1].contradictory_evidence
+    )
+
+
+def test_concurrent_first_event_write_writes_one_row_on_postgres(
+    event_mapping_engine, postgres_url
+):
+    """Overlapping event writers must serialize in the database.
+
+    Each worker owns its own engine, so the repository's process-local identity
+    lock cannot stand in for the row lock, and the duplicate lock-row insert has
+    to be rolled back to its savepoint or Postgres would leave the surrounding
+    transaction aborted.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.event_mapping_repository import EventMappingRepository
+
+    workers = 4
+    barrier = threading.Barrier(workers, timeout=30)
+    engines = [create_engine(postgres_url) for _ in range(workers)]
+    resolution = _event_resolution()
+
+    def _write(engine):
+        repository = EventMappingRepository(engine)
+        barrier.wait()
+        return repository.persist_auto_decision(resolution)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(_write, engines))
+        assert (
+            len(
+                {
+                    id(
+                        EventMappingRepository._identity_locks[
+                            (id(engine), "underdog", "ud-1")
+                        ]
+                    )
+                    for engine in engines
+                }
+            )
+            == workers
+        )
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    reader = EventMappingRepository(event_mapping_engine)
+    assert sum(result.persisted for result in results) == 1
+    assert len(reader.list_mappings()) == 1
+    assert len(reader.history(provider="underdog")) == 1
+
+
+def test_a_stale_event_observation_never_supersedes_a_manual_decision_on_postgres(
+    event_mapping_engine,
+):
+    """Operator precedence and the observation clock hold on Postgres too.
+
+    Timestamps come back from Postgres with a time zone and from SQLite without
+    one, so the fencing comparison is exactly the kind of rule a SQLite-only
+    suite cannot prove.
+    """
+    from app.services.event_mapping_repository import EventMappingRepository
+
+    repository = EventMappingRepository(
+        event_mapping_engine, clock=lambda: EVENT_NOW
+    )
+    repository.record_resolution(
+        _event_resolution(observed_at=EVENT_NOW - timedelta(hours=1))
+    )
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500002",
+        season=EVENT_SEASON,
+        operator_id="ops@example.com",
+        reason="the provider labels this fixture wrongly",
+    )
+
+    stale = repository.record_resolution(
+        _event_resolution(
+            repository=repository, observed_at=EVENT_NOW - timedelta(hours=2)
+        )
+    )
+    fresh = repository.record_resolution(
+        _event_resolution(
+            repository=repository, observed_at=EVENT_NOW + timedelta(hours=1)
+        )
+    )
+
+    assert stale.state == "manual_approved"
+    assert stale.persisted is False
+    assert fresh.state == "manual_approved"
+    assert fresh.persisted is False
+    mapping = repository.get_active_mapping("underdog", "ud-1")
+    assert mapping.canonical_event_id == "0022500002"
+    assert [
+        decision.decision_state
+        for decision in repository.history(provider="underdog", provider_event_id="ud-1")
+    ] == ["auto", "manual_approved"]
+
+
+def test_the_configured_match_window_governs_the_recheck_on_postgres(
+    event_mapping_engine,
+):
+    """The window the repository rechecks with is the configured one."""
+    from app.config.settings import CatalogSettings, RuntimeSettings
+    from app.services.event_mapping_repository import EventMappingRepository
+    from app.services.event_resolver import EventResolver
+
+    settings = RuntimeSettings(
+        environment="testing",
+        catalog=CatalogSettings(event_match_window_hours=1),
+    )
+    repository = EventMappingRepository(
+        event_mapping_engine, clock=lambda: EVENT_NOW, settings=settings
+    )
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=EVENT_SEASON,
+        operator_id="ops@example.com",
+        reason="reviewed",
+        provider_evidence=_event_evidence(),
+    )
+
+    rescheduled = EventResolver(
+        _EventCatalogRows([_catalog_values("0022500001")]),
+        mapping_repository=repository,
+        match_window=timedelta(hours=1),
+    ).resolve(
+        "underdog",
+        _event_evidence(starts_at=EVENT_TIP_OFF + timedelta(hours=2)),
+        EVENT_SEASON,
+    )
+    result = repository.record_resolution(rescheduled)
+
+    assert result.state == "mapping_conflict"
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
+        "mapping_conflict"
+    )

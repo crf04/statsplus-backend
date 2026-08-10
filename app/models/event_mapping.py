@@ -83,6 +83,11 @@ class ProviderEventMapping(Base):
     canonical_away_team_name = Column(String(128), nullable=True)
     canonical_away_team_tricode = Column(String(8), nullable=True)
 
+    #: The canonical event ID the provider itself claims for this identity.  It
+    #: is provider evidence rather than a canonical NBA game: two markets that
+    #: claim different ones contradict each other, so it is retained beside the
+    #: rest of the typed evidence.
+    provider_canonical_event_id = Column(String(128), nullable=True)
     provider_event_label = Column(String(255), nullable=True)
     provider_starts_at = Column(DateTime(timezone=True), nullable=True)
     provider_status_label = Column(String(128), nullable=True)
@@ -152,6 +157,7 @@ class EventMappingDecision(Base):
     canonical_away_team_name = Column(String(128), nullable=True)
     canonical_away_team_tricode = Column(String(8), nullable=True)
 
+    provider_canonical_event_id = Column(String(128), nullable=True)
     provider_event_label = Column(String(255), nullable=True)
     provider_starts_at = Column(DateTime(timezone=True), nullable=True)
     provider_status_label = Column(String(128), nullable=True)
@@ -230,6 +236,44 @@ class EventMappingDecisionCandidate(Base):
     )
 
 
+class EventMappingDecisionContradiction(Base):
+    """One typed provider event evidence a contradictory observation asserted.
+
+    A fail-closed conflict is recorded on one representative evidence, but what
+    the operator has to review is every fixture the markets named.  The rest of
+    the contradiction is therefore stored as typed rows beside the decision,
+    exactly like its candidates, rather than surviving only in the observation
+    that produced it.  The end and update instants are kept here even though the
+    decision row has no column for them: they are part of what the markets
+    disagreed over.
+    """
+
+    __tablename__ = "event_mapping_decision_contradictions"
+
+    decision_id = Column(
+        Integer,
+        ForeignKey("event_mapping_decisions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    #: Position in the decision's own deterministic evidence order.
+    evidence_index = Column(Integer, primary_key=True)
+    provider_event_id = Column(String(128), nullable=True)
+    provider_canonical_event_id = Column(String(128), nullable=True)
+    provider_event_label = Column(String(255), nullable=True)
+    provider_starts_at = Column(DateTime(timezone=True), nullable=True)
+    provider_ends_at = Column(DateTime(timezone=True), nullable=True)
+    provider_updated_at = Column(DateTime(timezone=True), nullable=True)
+    provider_status_label = Column(String(128), nullable=True)
+    provider_home_team_id = Column(String(128), nullable=True)
+    provider_home_team_canonical_id = Column(Integer, nullable=True)
+    provider_home_team_name = Column(String(255), nullable=True)
+    provider_home_team_abbreviation = Column(String(16), nullable=True)
+    provider_away_team_id = Column(String(128), nullable=True)
+    provider_away_team_canonical_id = Column(Integer, nullable=True)
+    provider_away_team_name = Column(String(255), nullable=True)
+    provider_away_team_abbreviation = Column(String(16), nullable=True)
+
+
 class EventMappingRejection(Base):
     """Durable suppression state for one provider event identity."""
 
@@ -290,6 +334,7 @@ __all__ = [
     "EVENT_MAPPING_STATES",
     "EventMappingDecision",
     "EventMappingDecisionCandidate",
+    "EventMappingDecisionContradiction",
     "EventMappingLock",
     "EventMappingRejection",
     "ProviderEventMapping",

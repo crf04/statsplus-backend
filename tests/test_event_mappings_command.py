@@ -278,3 +278,107 @@ def test_cli_never_contacts_a_provider(tmp_path):
             catalog.refresh(SEASON)
     finally:
         _engine.dispose()
+
+
+def test_cli_records_and_reports_the_provider_canonical_event_claim(tmp_path, capsys):
+    """The provider's own canonical event ID is operable evidence.
+
+    It decides whether two markets contradict each other, so an operator has to
+    be able to supply it, see it on the mapping row, and read it back out of the
+    audit.
+    """
+
+    database_url = _seed_database(tmp_path)
+    claim = ["--canonical-event-claim", "ud-evt-1"]
+
+    dry_run = _run(
+        capsys,
+        *_identity(database_url, "dry-run"),
+        "--season",
+        SEASON,
+        *_matchup_evidence(),
+        *claim,
+    )
+    approved = _run(
+        capsys,
+        *_identity(database_url, "approve"),
+        "--season",
+        SEASON,
+        "--canonical-event-id",
+        "0022500001",
+        "--operator",
+        "ops",
+        "--reason",
+        "reviewed the schedule",
+        *_matchup_evidence(),
+        *claim,
+    )
+    history = _run(
+        capsys,
+        "history",
+        "--database-url",
+        database_url,
+        "--provider",
+        "underdog",
+        "--provider-event-id",
+        "ud-1",
+    )
+
+    assert dry_run["provider_evidence"]["canonical_id"] == "ud-evt-1"
+    assert approved["mapping"]["provider_canonical_event_id"] == "ud-evt-1"
+    assert [decision["provider_canonical_event_id"] for decision in history] == [
+        "ud-evt-1"
+    ]
+
+
+def test_cli_reports_every_evidence_a_contradiction_asserted(tmp_path, capsys):
+    """An operator reviewing a conflict sees all of it, not its representative."""
+
+    from datetime import datetime as _datetime
+
+    from app.providers.dfs import EventEvidence, TeamEvidence
+    from app.services.event_mapping_repository import EventMappingRepository
+    from app.services.event_resolver import EventResolution, EventResolutionState
+
+    database_url = _seed_database(tmp_path)
+    engine = create_engine(database_url)
+    repository = EventMappingRepository(engine)
+    contradicting = tuple(
+        EventEvidence(
+            provider_id="ud-1",
+            canonical_id=canonical_id,
+            label=label,
+            starts_at=TIP_OFF,
+            home_team=TeamEvidence(abbreviation=home),
+            away_team=TeamEvidence(abbreviation="SAS"),
+        )
+        for canonical_id, label, home in (
+            ("ud-evt-1", "Lakers vs Spurs", "LAL"),
+            ("ud-evt-2", "Celtics vs Spurs", "BOS"),
+        )
+    )
+    repository.record_resolution(
+        EventResolution(
+            provider="underdog",
+            provider_evidence=contradicting[0],
+            season=SEASON,
+            state=EventResolutionState.MAPPING_CONFLICT,
+            contradictory_evidence=contradicting,
+            reason="contradictory_provider_evidence",
+            observed_at=_datetime.now(timezone.utc),
+        )
+    )
+    engine.dispose()
+
+    listing = _run(capsys, "list", "--database-url", database_url, "--all")
+
+    (conflict,) = listing["conflicts"]
+    evidence = conflict["latest_decision"]["contradictory_evidence"]
+    assert [item["provider_canonical_event_id"] for item in evidence] == [
+        "ud-evt-1",
+        "ud-evt-2",
+    ]
+    assert [item["provider_home_team_abbreviation"] for item in evidence] == [
+        "LAL",
+        "BOS",
+    ]

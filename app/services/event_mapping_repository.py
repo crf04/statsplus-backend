@@ -17,7 +17,7 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 
@@ -30,6 +30,7 @@ from app.models.event_catalog import EventCatalogEntry
 from app.models.event_mapping import (
     EventMappingDecision,
     EventMappingDecisionCandidate,
+    EventMappingDecisionContradiction,
     EventMappingLock,
     EventMappingRejection,
     ProviderEventMapping,
@@ -42,12 +43,12 @@ from app.services.event_mapping_errors import (
 )
 from app.services.event_resolver import (
     CLAIMING_EVENT_MAPPING_STATES,
-    DEFAULT_EVENT_MATCH_WINDOW,
     WITHDRAWN_EVENT_CLAIM_STATES,
     CanonicalEvent,
     EventResolution,
     EventResolutionState,
     EventResolver,
+    event_match_window,
     stored_timestamp,
 )
 from app.utils.db import is_demo_database_url
@@ -113,6 +114,7 @@ _MAPPING_EVIDENCE_DECISION_STATES = frozenset(
 
 #: The typed provider evidence columns shared by the mapping and decision rows.
 _PROVIDER_EVIDENCE_COLUMNS = (
+    "provider_canonical_event_id",
     "provider_event_label",
     "provider_starts_at",
     "provider_status_label",
@@ -124,6 +126,33 @@ _PROVIDER_EVIDENCE_COLUMNS = (
     "provider_away_team_canonical_id",
     "provider_away_team_name",
     "provider_away_team_abbreviation",
+)
+
+#: The typed columns one contradicting provider evidence is retained in.  The
+#: end and update instants are here but not on the decision row: the decision
+#: keeps one representative evidence, while a contradiction is everything the
+#: markets disagreed over.
+_CONTRADICTION_COLUMNS = (
+    "provider_event_id",
+    "provider_canonical_event_id",
+    "provider_event_label",
+    "provider_starts_at",
+    "provider_ends_at",
+    "provider_updated_at",
+    "provider_status_label",
+    "provider_home_team_id",
+    "provider_home_team_canonical_id",
+    "provider_home_team_name",
+    "provider_home_team_abbreviation",
+    "provider_away_team_id",
+    "provider_away_team_canonical_id",
+    "provider_away_team_name",
+    "provider_away_team_abbreviation",
+)
+
+#: Contradiction columns a database returns without a time zone.
+_CONTRADICTION_INSTANT_COLUMNS = frozenset(
+    {"provider_starts_at", "provider_ends_at", "provider_updated_at"}
 )
 
 #: The canonical NBA game columns shared by the mapping and decision rows.
@@ -218,6 +247,7 @@ class ProviderEventMappingRecord:
     canonical_away_team_id: int | None
     canonical_away_team_name: str | None
     canonical_away_team_tricode: str | None
+    provider_canonical_event_id: str | None
     provider_event_label: str | None
     provider_starts_at: str | None
     provider_status_label: str | None
@@ -248,6 +278,7 @@ class ProviderEventMappingRecord:
             "canonical_away_team_id": self.canonical_away_team_id,
             "canonical_away_team_name": self.canonical_away_team_name,
             "canonical_away_team_tricode": self.canonical_away_team_tricode,
+            "provider_canonical_event_id": self.provider_canonical_event_id,
             "provider_event_label": self.provider_event_label,
             "provider_starts_at": self.provider_starts_at,
             "provider_status_label": self.provider_status_label,
@@ -298,6 +329,46 @@ class EventMappingCandidateRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class EventMappingEvidenceRecord:
+    """One typed provider event evidence a contradictory observation asserted."""
+
+    provider_event_id: str | None
+    provider_canonical_event_id: str | None
+    provider_event_label: str | None
+    provider_starts_at: str | None
+    provider_ends_at: str | None
+    provider_updated_at: str | None
+    provider_status_label: str | None
+    provider_home_team_id: str | None
+    provider_home_team_canonical_id: int | None
+    provider_home_team_name: str | None
+    provider_home_team_abbreviation: str | None
+    provider_away_team_id: str | None
+    provider_away_team_canonical_id: int | None
+    provider_away_team_name: str | None
+    provider_away_team_abbreviation: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider_event_id": self.provider_event_id,
+            "provider_canonical_event_id": self.provider_canonical_event_id,
+            "provider_event_label": self.provider_event_label,
+            "provider_starts_at": self.provider_starts_at,
+            "provider_ends_at": self.provider_ends_at,
+            "provider_updated_at": self.provider_updated_at,
+            "provider_status_label": self.provider_status_label,
+            "provider_home_team_id": self.provider_home_team_id,
+            "provider_home_team_canonical_id": self.provider_home_team_canonical_id,
+            "provider_home_team_name": self.provider_home_team_name,
+            "provider_home_team_abbreviation": self.provider_home_team_abbreviation,
+            "provider_away_team_id": self.provider_away_team_id,
+            "provider_away_team_canonical_id": self.provider_away_team_canonical_id,
+            "provider_away_team_name": self.provider_away_team_name,
+            "provider_away_team_abbreviation": self.provider_away_team_abbreviation,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EventMappingDecisionRecord:
     """One append-only decision or durable unresolved observation."""
 
@@ -314,6 +385,7 @@ class EventMappingDecisionRecord:
     canonical_away_team_id: int | None
     canonical_away_team_name: str | None
     canonical_away_team_tricode: str | None
+    provider_canonical_event_id: str | None
     provider_event_label: str | None
     provider_starts_at: str | None
     provider_status_label: str | None
@@ -330,6 +402,9 @@ class EventMappingDecisionRecord:
     observed_at: str | None
     created_at: str
     candidates: tuple[EventMappingCandidateRecord, ...] = ()
+    #: Every typed evidence a fail-closed observation contradicted itself over.
+    #: The decision itself carries only the representative one.
+    contradictory_evidence: tuple[EventMappingEvidenceRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -346,6 +421,7 @@ class EventMappingDecisionRecord:
             "canonical_away_team_id": self.canonical_away_team_id,
             "canonical_away_team_name": self.canonical_away_team_name,
             "canonical_away_team_tricode": self.canonical_away_team_tricode,
+            "provider_canonical_event_id": self.provider_canonical_event_id,
             "provider_event_label": self.provider_event_label,
             "provider_starts_at": self.provider_starts_at,
             "provider_status_label": self.provider_status_label,
@@ -362,6 +438,9 @@ class EventMappingDecisionRecord:
             "observed_at": self.observed_at,
             "created_at": self.created_at,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "contradictory_evidence": [
+                evidence.to_dict() for evidence in self.contradictory_evidence
+            ],
         }
 
 
@@ -522,13 +601,28 @@ class EventMappingRepository:
     _identity_locks: dict[tuple[int, str, str], threading.RLock] = {}
     _identity_locks_guard = threading.Lock()
 
-    def __init__(self, engine: Engine, *, clock: Any | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        clock: Any | None = None,
+        match_window: timedelta | float | None = None,
+        settings: Any | None = None,
+    ) -> None:
         self.engine = engine
         if is_demo_database_url(str(getattr(engine, "url", ""))):
             raise InvalidConfigurationError(
                 "The bundled demo database is read-only and cannot store event mappings."
             )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # The window a governed decision is rechecked against is deployment
+        # policy, so it is resolved once here -- at the composition point that
+        # already configures the resolver -- and used by every in-lock recheck.
+        # Re-reading settings inside the transaction would let a configuration
+        # change land mid-decision; falling back to the reviewed default would
+        # accept evidence a narrower configuration has already called a
+        # different fixture.
+        self.match_window = event_match_window(match_window, settings)
 
     @contextmanager
     def _transaction(self, provider: str, provider_id: str):
@@ -1048,7 +1142,7 @@ class EventMappingRepository:
                 return stale
             self._advance_observation_clock(connection, provider, provider_id, resolution)
             existing = self._select_mapping(connection, provider, provider_id, lock=True)
-            if self._is_repeated_conflict(existing, resolution):
+            if self._is_repeated_conflict(connection, existing, resolution):
                 # The resolver read the conflict this row already records, so
                 # there is nothing new to append and the retained conflicting
                 # game must not be overwritten with an empty one.
@@ -1594,9 +1688,8 @@ class EventMappingRepository:
             .values(last_observed_at=observed_at)
         )
 
-    @classmethod
     def _conflict_still_applies(
-        cls,
+        self,
         connection: Connection,
         provider: str,
         provider_id: str,
@@ -1623,15 +1716,16 @@ class EventMappingRepository:
 
         if resolution is None:
             return True
-        governed = cls._latest_manual_decision(connection, provider, provider_id) or mapping
-        # The repository does not own the reviewed window, and re-reading
-        # settings here would let a configuration change silently unseat a
-        # decision, so the recheck uses the resolver's default tolerance: the
-        # question is only whether the provider now reports a plainly different
-        # fixture under the approved identity.
+        governed = (
+            self._latest_manual_decision(connection, provider, provider_id) or mapping
+        )
+        # The recheck compares start times with the window this repository was
+        # composed with -- the same policy the resolver applied outside the
+        # transaction -- so a deployment that narrowed it does not have its
+        # decision quietly rechecked against the reviewed default instead.
         return any(
             EventResolver._manual_evidence_conflicts(
-                governed, evidence, DEFAULT_EVENT_MATCH_WINDOW
+                governed, evidence, self.match_window
             )
             for evidence in resolution.asserted_evidence
         )
@@ -1903,6 +1997,10 @@ class EventMappingRepository:
             self._insert_candidates(
                 connection, int(decision["id"]), resolution.candidates
             )
+        if decision is not None:
+            self._insert_contradictory_evidence(
+                connection, int(decision["id"]), resolution.contradictory_evidence
+            )
         return decision
 
     @staticmethod
@@ -1946,6 +2044,94 @@ class EventMappingRepository:
                 for candidate in candidates
             ],
         )
+
+    @classmethod
+    def _insert_contradictory_evidence(
+        cls,
+        connection: Connection,
+        decision_id: int,
+        evidence: tuple[EventEvidence, ...],
+    ) -> None:
+        """Retain every evidence a contradictory observation asserted.
+
+        The decision row records one representative evidence, so without these
+        rows the rest of the contradiction would exist only in the observation
+        that produced it and would be missing from the operator's conflict
+        queue and the identity's history.  The rows are written in the
+        repository's own total evidence order rather than the caller's, so the
+        same set of contradicting markets is stored identically however it was
+        observed.
+        """
+
+        if not evidence:
+            return
+        connection.execute(
+            insert(EventMappingDecisionContradiction.__table__),
+            [
+                {"decision_id": decision_id, "evidence_index": index, **values}
+                for index, values in enumerate(cls._ordered_contradiction(evidence))
+            ],
+        )
+
+    @classmethod
+    def _ordered_contradiction(
+        cls,
+        evidence: tuple[EventEvidence, ...],
+    ) -> list[dict[str, Any]]:
+        """One contradiction as typed values in a total, stable order."""
+
+        return sorted(
+            (cls._contradiction_values(item) for item in evidence),
+            key=cls._contradiction_order,
+        )
+
+    @staticmethod
+    def _contradiction_values(evidence: EventEvidence) -> dict[str, Any]:
+        """Every retained field of one contradicting provider evidence."""
+
+        if not isinstance(evidence, EventEvidence):
+            raise TypeError("contradictory evidence must be EventEvidence")
+        values: dict[str, Any] = {
+            "provider_event_id": evidence.provider_id,
+            "provider_canonical_event_id": evidence.canonical_id,
+            "provider_event_label": evidence.label,
+            "provider_status_label": evidence.status_label,
+        }
+        for column, value in (
+            ("provider_starts_at", evidence.starts_at),
+            ("provider_ends_at", evidence.ends_at),
+            ("provider_updated_at", evidence.updated_at),
+        ):
+            instant = stored_timestamp(value)
+            values[column] = None if instant is None else _utc(instant)
+        for side in ("home", "away"):
+            team = getattr(evidence, f"{side}_team")
+            values[f"provider_{side}_team_id"] = team.provider_id if team else None
+            values[f"provider_{side}_team_canonical_id"] = (
+                team.canonical_id if team else None
+            )
+            values[f"provider_{side}_team_name"] = team.name if team else None
+            values[f"provider_{side}_team_abbreviation"] = (
+                team.abbreviation if team else None
+            )
+        return values
+
+    @staticmethod
+    def _contradiction_order(values: Mapping[str, Any]) -> list[tuple[bool, str]]:
+        """A total order over contradicting evidence, on every field it carries.
+
+        The fields are compared in their declared order -- identity first, then
+        presentation, then each side of the matchup -- so what an evidence
+        claims decides before how it is spelled.  A fact nothing reported orders
+        after every reported one rather than comparing as an empty string, so
+        two evidences compare equal only when they report exactly the same
+        thing.
+        """
+
+        return [
+            (values[column] is None, "" if values[column] is None else str(values[column]))
+            for column in _CONTRADICTION_COLUMNS
+        ]
 
     @staticmethod
     def _insert_decision_values(
@@ -2080,6 +2266,7 @@ class EventMappingRepository:
             raise TypeError("provider_evidence must be EventEvidence")
         starts_at = stored_timestamp(evidence.starts_at)
         values: dict[str, Any] = {
+            "provider_canonical_event_id": evidence.canonical_id,
             "provider_event_label": evidence.label,
             "provider_starts_at": None if starts_at is None else _utc(starts_at),
             "provider_status_label": evidence.status_label,
@@ -2114,6 +2301,7 @@ class EventMappingRepository:
     @classmethod
     def _is_repeated_conflict(
         cls,
+        connection: Connection,
         existing: Mapping[str, Any] | None,
         resolution: EventResolution,
     ) -> bool:
@@ -2126,6 +2314,12 @@ class EventMappingRepository:
         report a team another omits, so only a fact the read actually asserts is
         compared, and a repeat is a read that adds nothing the row does not
         already record.
+
+        The mapping row holds one representative evidence, so the contradiction
+        itself is compared with the rows the recorded conflict retained.  A read
+        that changes any evidence the operator has to review -- including one
+        the decision was not recorded on -- is a different conflict, however
+        unchanged the representative looks.
         """
 
         if existing is None or resolution.canonical_event is not None:
@@ -2134,13 +2328,63 @@ class EventMappingRepository:
             return False
         values = cls._resolution_values(resolution)
         recorded = cls._existing_evidence_values(existing)
-        return all(
-            values[column] is None or recorded[column] == values[column]
+        if any(
+            values[column] is not None and recorded[column] != values[column]
             for column in _PROVIDER_EVIDENCE_COLUMNS
-        )
+        ):
+            return False
+        return cls._recorded_contradiction(
+            connection, *cls._resolution_key(resolution)
+        ) == [
+            cls._contradiction_order(values)
+            for values in cls._ordered_contradiction(resolution.contradictory_evidence)
+        ]
 
     @staticmethod
-    def _idempotency_key(resolution: EventResolution) -> str:
+    def _recorded_contradiction(
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+    ) -> list[list[tuple[bool, str]]]:
+        """The contradiction the identity's recorded conflict already retains."""
+
+        decision_id = connection.execute(
+            select(EventMappingDecision.id)
+            .where(
+                and_(
+                    EventMappingDecision.provider == provider,
+                    EventMappingDecision.provider_event_id == provider_id,
+                    EventMappingDecision.decision_state
+                    == EventResolutionState.MAPPING_CONFLICT.value,
+                )
+            )
+            .order_by(EventMappingDecision.id.desc())
+            .limit(1)
+        ).scalar()
+        if decision_id is None:
+            return []
+        rows = connection.execute(
+            select(EventMappingDecisionContradiction.__table__)
+            .where(EventMappingDecisionContradiction.decision_id == int(decision_id))
+            .order_by(EventMappingDecisionContradiction.evidence_index)
+        ).mappings().all()
+        return [
+            EventMappingRepository._contradiction_order(
+                {
+                    column: (
+                        _utc(stored_timestamp(row[column]))
+                        if column in _CONTRADICTION_INSTANT_COLUMNS
+                        and row[column] is not None
+                        else row[column]
+                    )
+                    for column in _CONTRADICTION_COLUMNS
+                }
+            )
+            for row in rows
+        ]
+
+    @classmethod
+    def _idempotency_key(cls, resolution: EventResolution) -> str:
         evidence = resolution.provider_evidence
         starts_at = stored_timestamp(evidence.starts_at)
         payload = {
@@ -2149,6 +2393,7 @@ class EventMappingRepository:
             "season": resolution.season,
             "state": resolution.state.value,
             "canonical_event_id": resolution.canonical_event_id,
+            "provider_canonical_event_id": evidence.canonical_id,
             "provider_event_label": evidence.label,
             "provider_starts_at": None if starts_at is None else _utc(starts_at).isoformat(),
             "provider_status_label": evidence.status_label,
@@ -2181,26 +2426,22 @@ class EventMappingRepository:
                 ),
                 key=lambda candidate: str(candidate[0]),
             ),
-            # A contradiction is fingerprinted by everything it contradicts, not
-            # only the evidence it happened to be recorded on, so a snapshot
-            # that lists the same markets in another order is the same
-            # observation rather than a new one.
-            "contradictory_evidence": sorted(
-                (
-                    [
-                        item.label,
-                        None
-                        if item.starts_at is None
-                        else stored_timestamp(item.starts_at).isoformat(),
-                        None if item.home_team is None else item.home_team.canonical_id,
-                        None if item.home_team is None else item.home_team.abbreviation,
-                        None if item.away_team is None else item.away_team.canonical_id,
-                        None if item.away_team is None else item.away_team.abbreviation,
-                    ]
-                    for item in resolution.contradictory_evidence
-                ),
-                key=lambda item: [str(value) for value in item],
-            ),
+            # A contradiction is fingerprinted by everything it contradicts, in
+            # every field the audit retains, not only by the evidence it
+            # happened to be recorded on.  A snapshot that lists the same
+            # markets in another order is then the same observation, while a
+            # read that changes any part of what an operator has to review --
+            # including a part of it the decision was not recorded on -- is
+            # news rather than a repeat.
+            "contradictory_evidence": [
+                {
+                    column: _iso(value) if isinstance(value, datetime) else value
+                    for column, value in values.items()
+                }
+                for values in cls._ordered_contradiction(
+                    resolution.contradictory_evidence
+                )
+            ],
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -2226,6 +2467,7 @@ class EventMappingRepository:
             canonical_away_team_id=row["canonical_away_team_id"],
             canonical_away_team_name=row["canonical_away_team_name"],
             canonical_away_team_tricode=row["canonical_away_team_tricode"],
+            provider_canonical_event_id=row["provider_canonical_event_id"],
             provider_event_label=row["provider_event_label"],
             provider_starts_at=_iso(row["provider_starts_at"]),
             provider_status_label=row["provider_status_label"],
@@ -2264,10 +2506,64 @@ class EventMappingRepository:
         rows = [row for row in rows if row is not None]
         decision_ids = [int(row["id"]) for row in rows]
         candidates = cls._select_candidates(connection, decision_ids)
+        contradictions = cls._select_contradictory_evidence(connection, decision_ids)
         return [
-            cls._decision_record(row, candidates.get(int(row["id"]), ()))
+            cls._decision_record(
+                row,
+                candidates.get(int(row["id"]), ()),
+                contradictions.get(int(row["id"]), ()),
+            )
             for row in rows
         ]
+
+    @staticmethod
+    def _select_contradictory_evidence(
+        connection: Connection,
+        decision_ids: list[int],
+    ) -> dict[int, tuple[EventMappingEvidenceRecord, ...]]:
+        if not decision_ids:
+            return {}
+        rows = connection.execute(
+            select(EventMappingDecisionContradiction.__table__)
+            .where(EventMappingDecisionContradiction.decision_id.in_(decision_ids))
+            .order_by(
+                EventMappingDecisionContradiction.decision_id,
+                EventMappingDecisionContradiction.evidence_index,
+            )
+        ).mappings().all()
+        evidence: dict[int, tuple[EventMappingEvidenceRecord, ...]] = {}
+        for row in rows:
+            decision_id = int(row["decision_id"])
+            evidence[decision_id] = evidence.get(decision_id, ()) + (
+                EventMappingEvidenceRecord(
+                    provider_event_id=row["provider_event_id"],
+                    provider_canonical_event_id=row["provider_canonical_event_id"],
+                    provider_event_label=row["provider_event_label"],
+                    provider_starts_at=_iso(stored_timestamp(row["provider_starts_at"])),
+                    provider_ends_at=_iso(stored_timestamp(row["provider_ends_at"])),
+                    provider_updated_at=_iso(
+                        stored_timestamp(row["provider_updated_at"])
+                    ),
+                    provider_status_label=row["provider_status_label"],
+                    provider_home_team_id=row["provider_home_team_id"],
+                    provider_home_team_canonical_id=row[
+                        "provider_home_team_canonical_id"
+                    ],
+                    provider_home_team_name=row["provider_home_team_name"],
+                    provider_home_team_abbreviation=row[
+                        "provider_home_team_abbreviation"
+                    ],
+                    provider_away_team_id=row["provider_away_team_id"],
+                    provider_away_team_canonical_id=row[
+                        "provider_away_team_canonical_id"
+                    ],
+                    provider_away_team_name=row["provider_away_team_name"],
+                    provider_away_team_abbreviation=row[
+                        "provider_away_team_abbreviation"
+                    ],
+                ),
+            )
+        return evidence
 
     @staticmethod
     def _select_candidates(
@@ -2308,6 +2604,7 @@ class EventMappingRepository:
     def _decision_record(
         row: Mapping[str, Any] | None,
         candidates: tuple[EventMappingCandidateRecord, ...] = (),
+        contradictory_evidence: tuple[EventMappingEvidenceRecord, ...] = (),
     ) -> EventMappingDecisionRecord | None:
         if row is None:
             return None
@@ -2325,6 +2622,7 @@ class EventMappingRepository:
             canonical_away_team_id=row["canonical_away_team_id"],
             canonical_away_team_name=row["canonical_away_team_name"],
             canonical_away_team_tricode=row["canonical_away_team_tricode"],
+            provider_canonical_event_id=row["provider_canonical_event_id"],
             provider_event_label=row["provider_event_label"],
             provider_starts_at=_iso(row["provider_starts_at"]),
             provider_status_label=row["provider_status_label"],
@@ -2341,6 +2639,7 @@ class EventMappingRepository:
             observed_at=_iso(row["observed_at"]),
             created_at=_iso(row["created_at"]) or "",
             candidates=candidates,
+            contradictory_evidence=contradictory_evidence,
         )
 
     @staticmethod
@@ -2368,6 +2667,7 @@ __all__ = [
     "EventMappingCandidateRecord",
     "EventMappingConflictRecord",
     "EventMappingDecisionRecord",
+    "EventMappingEvidenceRecord",
     "EventMappingPersistenceError",
     "EventMappingPersistenceResult",
     "EventMappingRejectionRecord",

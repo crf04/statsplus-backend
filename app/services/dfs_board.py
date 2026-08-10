@@ -496,11 +496,47 @@ def _event_contradicts(facts: Mapping[str, Any], other: Mapping[str, Any]) -> bo
     )
 
 
-def _event_evidence_order(resolution: Any) -> tuple[str, ...]:
-    """A total order over event observations depending only on their evidence."""
+#: Every field of one event evidence the board retains, in the order they are
+#: compared.  Identity facts alone cannot order two observations: markets that
+#: name the same fixture may still spell its matchup label, status, end time, or
+#: update instant differently, and those are exactly the facts a merge carries
+#: onto the durable row.
+_EVENT_EVIDENCE_FIELDS = (
+    "provider_id",
+    "canonical_id",
+    "label",
+    "starts_at",
+    "ends_at",
+    "updated_at",
+    "status_label",
+)
+_EVENT_TEAM_EVIDENCE_FIELDS = ("provider_id", "canonical_id", "name", "abbreviation")
 
-    facts = _event_evidence_facts(resolution)
-    return tuple("" if facts[fact] is None else str(facts[fact]) for fact in sorted(facts))
+
+def _event_evidence_order(resolution: Any) -> tuple[tuple[bool, str], ...]:
+    """A total order over event observations depending only on their evidence.
+
+    Every retained field takes part, so two observations compare equal only
+    when they report exactly the same evidence.  Ordering on the identity facts
+    alone left presentation-only differences tied, and a stable sort then let
+    the provider's listing order decide which label, status, end time, and
+    update instant the merged observation carried -- so a reordered read of one
+    snapshot rewrote the durable row and appended a second observation.  A fact
+    nothing reported is ordered after every reported one rather than compared as
+    an empty string, which no provider can then collide with.
+    """
+
+    evidence = resolution.provider_evidence
+    values = [getattr(evidence, field) for field in _EVENT_EVIDENCE_FIELDS]
+    for side in ("home_team", "away_team"):
+        team = getattr(evidence, side)
+        values.extend(
+            None if team is None else getattr(team, field)
+            for field in _EVENT_TEAM_EVIDENCE_FIELDS
+        )
+    return tuple(
+        (value is None, "" if value is None else str(value)) for value in values
+    )
 
 
 def _fail_closed_event_conflict(resolutions: Iterable[Any]) -> Any:
@@ -520,7 +556,7 @@ def _fail_closed_event_conflict(resolutions: Iterable[Any]) -> Any:
     resolutions = sorted(resolutions, key=_event_evidence_order)
     candidates: list[Any] = []
     evidence: list[Any] = []
-    seen_evidence: set[tuple[str, ...]] = set()
+    seen_evidence: set[tuple[tuple[bool, str], ...]] = set()
     for resolution in resolutions:
         canonical = resolution.canonical_event
         if canonical is not None and canonical not in candidates:

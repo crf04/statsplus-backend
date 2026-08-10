@@ -235,8 +235,10 @@ catalog data leaves the normalized markets visible with no event comparison
 identity and records nothing. `list`, `dry-run`, `approve`, `override`,
 `reject`, `clear`, and `history` behave exactly as the athlete commands do,
 including the `unresolved` and `conflicts` review queues, the `--operator` and
-`--reason` requirements, and the retained provider evidence (`--label`,
-`--starts-at`, `--status-label`, and the `--home-*`/`--away-*` team options).
+`--reason` requirements, and the retained provider evidence
+(`--canonical-event-claim`, `--label`, `--starts-at`, `--status-label`, and the
+`--home-*`/`--away-*` team options). A conflict reports every evidence the
+markets asserted, not only the one it was recorded on.
 
 ## Run locally
 

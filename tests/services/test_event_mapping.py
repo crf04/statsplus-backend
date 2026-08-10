@@ -19,6 +19,7 @@ from app.models.event_mapping import (
     EVENT_MAPPING_STATES,
     EventMappingDecision,
     EventMappingDecisionCandidate,
+    EventMappingDecisionContradiction,
     EventMappingLock,
     EventMappingRejection,
     ProviderEventMapping,
@@ -449,6 +450,7 @@ def test_migration_008_creates_event_mapping_tables(tmp_path):
         "provider_event_mappings",
         "event_mapping_decisions",
         "event_mapping_decision_candidates",
+        "event_mapping_decision_contradictions",
         "event_mapping_rejections",
         "event_mapping_locks",
     } <= tables
@@ -461,6 +463,7 @@ def test_migration_008_creates_event_mapping_tables(tmp_path):
         ProviderEventMapping.__table__,
         EventMappingDecision.__table__,
         EventMappingDecisionCandidate.__table__,
+        EventMappingDecisionContradiction.__table__,
         EventMappingRejection.__table__,
         EventMappingLock.__table__,
     ],
@@ -542,7 +545,9 @@ def _repository(engine, now) -> EventMappingRepository:
     return EventMappingRepository(engine, clock=lambda: now)
 
 
-def _catalog_resolver(engine, repository, *, clock=None, **kwargs) -> EventResolver:
+def _catalog_resolver(
+    engine, repository, *, clock=None, match_window=None, **kwargs
+) -> EventResolver:
     """A resolver reading the real catalog tables through the service seam."""
 
     from app.services.event_catalog_service import EventCatalogService
@@ -557,7 +562,9 @@ def _catalog_resolver(engine, repository, *, clock=None, **kwargs) -> EventResol
         clock=(clock or (lambda: _NOW)),
         **kwargs,
     )
-    return EventResolver(service, mapping_repository=repository)
+    return EventResolver(
+        service, mapping_repository=repository, match_window=match_window
+    )
 
 
 def test_an_automatic_observation_is_durable_and_idempotent(event_db):
@@ -1310,3 +1317,332 @@ def test_a_board_without_event_collaborators_reports_no_event_outcomes(event_db)
 
     assert board.event_mapping_outcomes == ()
     assert len(board.resolved_markets) == 1
+
+
+# -- presentation evidence and provider canonical claims ---------------------
+
+
+def _presentation_evidence(
+    *,
+    label: str,
+    status_label: str,
+    ends_at: datetime,
+    updated_at: datetime,
+) -> EventEvidence:
+    """One fixture described with the same identity facts, spelled two ways."""
+
+    return EventEvidence(
+        provider_id="ud-1",
+        label=label,
+        starts_at=TIP_OFF,
+        ends_at=ends_at,
+        updated_at=updated_at,
+        status_label=status_label,
+        home_team=TeamEvidence(abbreviation="LAL"),
+        away_team=TeamEvidence(abbreviation="SAS"),
+    )
+
+
+def test_presentation_differences_never_let_market_order_decide(event_db):
+    """Compatible markets that differ only in presentation are one observation.
+
+    The identity facts agree, so the markets describe the same fixture; the
+    matchup label, status label, end time, and update instant are presentation.
+    Whichever order the provider lists them in, the durable evidence and the
+    audit have to be the same, or a reordered repeat of one snapshot rewrites
+    the row and appends a second observation.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    verbose = _market(
+        "m-1",
+        event=_presentation_evidence(
+            label="Lakers vs Spurs",
+            status_label="scheduled",
+            ends_at=TIP_OFF + timedelta(hours=3),
+            updated_at=_OBSERVED_BEFORE,
+        ),
+    )
+    terse = _market(
+        "m-2",
+        event=_presentation_evidence(
+            label="LAL @ SAS",
+            status_label="live",
+            ends_at=TIP_OFF + timedelta(hours=4),
+            updated_at=_OBSERVED_AFTER,
+        ),
+    )
+    query = NBAMarketQuery(season=SEASON)
+
+    _board_service(
+        _snapshot(verbose, terse), resolver=resolver, repository=repository
+    ).get_board(query)
+    forward = repository.get_active_mapping("underdog", "ud-1")
+    _board_service(
+        _snapshot(terse, verbose), resolver=resolver, repository=repository
+    ).get_board(query)
+    reordered = repository.get_active_mapping("underdog", "ud-1")
+
+    assert forward.provider_event_label == reordered.provider_event_label
+    assert forward.provider_status_label == reordered.provider_status_label
+    # The label and the status come from one market rather than from whichever
+    # of them happened to be listed first.
+    assert (
+        forward.provider_event_label,
+        forward.provider_status_label,
+    ) in {("Lakers vs Spurs", "scheduled"), ("LAL @ SAS", "live")}
+    assert len(repository.history(provider="underdog", provider_event_id="ud-1")) == 1
+
+
+def test_a_provider_canonical_event_claim_is_durable_and_fingerprinted(event_db):
+    """The provider's own canonical event ID is typed, retained evidence.
+
+    It decides whether two markets contradict each other, so an observation
+    that changes nothing else still changes what the provider claims and has to
+    reach the durable row and the audit.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+
+    claimed = repository.record_resolution(
+        resolver.resolve("underdog", _evidence(canonical_id="ud-evt-1"), SEASON)
+    )
+    repeated = repository.record_resolution(
+        resolver.resolve("underdog", _evidence(canonical_id="ud-evt-1"), SEASON)
+    )
+    reclaimed = repository.record_resolution(
+        resolver.resolve("underdog", _evidence(canonical_id="ud-evt-2"), SEASON)
+    )
+
+    assert claimed.persisted is True
+    assert repeated.persisted is False
+    assert reclaimed.persisted is True
+    mapping = repository.get_active_mapping("underdog", "ud-1")
+    assert mapping.provider_canonical_event_id == "ud-evt-2"
+    assert [
+        decision.provider_canonical_event_id
+        for decision in repository.history(
+            provider="underdog", provider_event_id="ud-1"
+        )
+    ] == ["ud-evt-1", "ud-evt-2"]
+
+
+def test_a_manual_decision_records_the_provider_canonical_claim(event_db):
+    engine, now = event_db
+    repository = _repository(engine, now)
+
+    approved = repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+
+    assert approved.mapping.provider_canonical_event_id == "ud-evt-1"
+    assert approved.decision.provider_canonical_event_id == "ud-evt-1"
+
+
+# -- durable contradictory evidence ------------------------------------------
+
+
+def _contradicting_markets(
+    *,
+    away_team_name: str | None = None,
+) -> tuple[PlayerProjectionMarket, PlayerProjectionMarket]:
+    """Two markets of one fixture that cannot both be true.
+
+    They name different home teams, so the identity fails closed.  The away
+    team name only ever varies on the market that is *not* the representative
+    one, which is what makes it evidence an operator would lose.
+    """
+
+    return (
+        _market(
+            "m-1",
+            event=EventEvidence(
+                provider_id="ud-1",
+                canonical_id="ud-evt-1",
+                label="Lakers vs Spurs",
+                starts_at=TIP_OFF,
+                ends_at=TIP_OFF + timedelta(hours=3),
+                updated_at=_OBSERVED_BEFORE,
+                status_label="scheduled",
+                home_team=TeamEvidence(provider_id="ud-lal", abbreviation="LAL"),
+                away_team=TeamEvidence(provider_id="ud-sas", abbreviation="SAS"),
+            ),
+        ),
+        _market(
+            "m-2",
+            event=EventEvidence(
+                provider_id="ud-1",
+                canonical_id="ud-evt-2",
+                label="Celtics vs Spurs",
+                starts_at=TIP_OFF,
+                status_label="live",
+                home_team=TeamEvidence(provider_id="ud-bos", abbreviation="BOS"),
+                away_team=TeamEvidence(
+                    provider_id="ud-sas",
+                    abbreviation="SAS",
+                    name=away_team_name,
+                ),
+            ),
+        ),
+    )
+
+
+def test_a_contradiction_retains_every_typed_evidence_it_asserted(event_db):
+    """The whole contradiction is durable, not only its representative.
+
+    The decision row carries one evidence, so without typed child rows every
+    other event the markets named would exist only in the read that produced
+    it, and an operator's queue would show a conflict it cannot review.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    markets = _contradicting_markets()
+
+    _board_service(
+        _snapshot(*markets), resolver=resolver, repository=repository
+    ).get_board(NBAMarketQuery(season=SEASON))
+
+    (decision,) = repository.history(provider="underdog", provider_event_id="ud-1")
+    evidence = decision.contradictory_evidence
+    assert len(evidence) == 2
+    assert {item.provider_event_id for item in evidence} == {"ud-1"}
+    assert {item.provider_canonical_event_id for item in evidence} == {
+        "ud-evt-1",
+        "ud-evt-2",
+    }
+    assert {item.provider_home_team_abbreviation for item in evidence} == {
+        "LAL",
+        "BOS",
+    }
+    assert {item.provider_home_team_id for item in evidence} == {"ud-lal", "ud-bos"}
+    assert {item.provider_event_label for item in evidence} == {
+        "Lakers vs Spurs",
+        "Celtics vs Spurs",
+    }
+    assert {item.provider_status_label for item in evidence} == {"scheduled", "live"}
+    assert {item.provider_starts_at for item in evidence} == {TIP_OFF.isoformat()}
+    assert {item.provider_ends_at for item in evidence} == {
+        (TIP_OFF + timedelta(hours=3)).isoformat(),
+        None,
+    }
+    assert {item.provider_updated_at for item in evidence} == {
+        _OBSERVED_BEFORE.isoformat(),
+        None,
+    }
+    # The operator's queue reads the same rows the history does.
+    (queued,) = repository.list_conflicts(provider="underdog")
+    assert queued.latest_decision.contradictory_evidence == evidence
+    assert queued.latest_decision.to_dict()["contradictory_evidence"][0][
+        "provider_canonical_event_id"
+    ] in {"ud-evt-1", "ud-evt-2"}
+
+
+def test_a_reordered_repeat_of_one_contradiction_is_the_same_observation(event_db):
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    markets = _contradicting_markets()
+    query = NBAMarketQuery(season=SEASON)
+
+    _board_service(
+        _snapshot(*markets), resolver=resolver, repository=repository
+    ).get_board(query)
+    (first,) = repository.history(provider="underdog", provider_event_id="ud-1")
+    _board_service(
+        _snapshot(*reversed(markets)), resolver=resolver, repository=repository
+    ).get_board(query)
+    decisions = repository.history(provider="underdog", provider_event_id="ud-1")
+
+    assert len(decisions) == 1
+    assert decisions[0].contradictory_evidence == first.contradictory_evidence
+
+
+def test_a_changed_nonrepresentative_contradiction_is_a_new_observation(event_db):
+    """Evidence the decision was not recorded on is still evidence.
+
+    A contradiction the operator has to review changed when any part of it
+    changed, so a read that only names the away team on the market the conflict
+    was *not* recorded on is news rather than a repeat.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    query = NBAMarketQuery(season=SEASON)
+
+    _board_service(
+        _snapshot(*_contradicting_markets()),
+        resolver=resolver,
+        repository=repository,
+    ).get_board(query)
+    _board_service(
+        _snapshot(*_contradicting_markets(away_team_name="San Antonio Spurs")),
+        resolver=resolver,
+        repository=repository,
+    ).get_board(query)
+
+    decisions = repository.history(provider="underdog", provider_event_id="ud-1")
+    assert [decision.decision_state for decision in decisions] == [
+        "mapping_conflict",
+        "mapping_conflict",
+    ]
+    assert [
+        sorted(
+            item.provider_away_team_name or ""
+            for item in decision.contradictory_evidence
+        )
+        for decision in decisions
+    ] == [["", ""], ["", "San Antonio Spurs"]]
+
+
+# -- the configured match window governs every recheck -----------------------
+
+
+def test_the_manual_recheck_uses_the_configured_match_window(event_db):
+    """The window an operator's decision is rechecked against is configured.
+
+    The repository rechecks a conflict inside its own transaction, so a
+    deployment that narrowed the window would otherwise have every recheck
+    fall back to the reviewed default and accept evidence the resolver had
+    already called a different fixture.
+    """
+
+    engine, now = event_db
+    settings = RuntimeSettings(
+        environment="testing",
+        catalog=CatalogSettings(event_match_window_hours=1),
+    )
+    repository = EventMappingRepository(engine, clock=lambda: now, settings=settings)
+    resolver = _catalog_resolver(engine, repository, match_window=timedelta(hours=1))
+    repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(),
+    )
+
+    rescheduled = resolver.resolve(
+        "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=2)), SEASON
+    )
+    result = repository.record_resolution(rescheduled)
+
+    assert rescheduled.state is EventResolutionState.MAPPING_CONFLICT
+    assert result.state == "mapping_conflict"
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
+        "mapping_conflict"
+    )

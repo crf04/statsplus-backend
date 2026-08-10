@@ -93,6 +93,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_evidence_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--canonical-event-claim",
+        dest="canonical_event_claim",
+        help="the canonical event ID the provider itself claims",
+    )
     parser.add_argument("--label", help="provider matchup label evidence")
     parser.add_argument("--starts-at", help="provider start time (ISO 8601)")
     parser.add_argument("--status-label", help="provider event status evidence")
@@ -139,7 +144,7 @@ def _build_services(database_url: str):
     catalog = EventCatalogService(
         engine, nba_stats_provider=_OfflineScheduleProvider(), settings=settings
     )
-    repository = EventMappingRepository(engine)
+    repository = EventMappingRepository(engine, settings=settings)
     resolver = EventResolver(
         catalog, mapping_repository=repository, settings=settings
     )
@@ -173,6 +178,7 @@ def _team_evidence(args: argparse.Namespace, side: str) -> TeamEvidence | None:
 def _evidence(args: argparse.Namespace) -> EventEvidence:
     return EventEvidence(
         provider_id=args.provider_event_id,
+        canonical_id=args.canonical_event_claim,
         label=args.label,
         starts_at=args.starts_at,
         status_label=args.status_label,
@@ -189,6 +195,7 @@ def _optional_evidence(args: argparse.Namespace) -> EventEvidence | None:
     """
 
     supplied = (
+        args.canonical_event_claim,
         args.label,
         args.starts_at,
         args.status_label,

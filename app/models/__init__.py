@@ -65,6 +65,7 @@ from .athlete_mapping import (  # noqa: E402
 from .event_mapping import (  # noqa: E402
     EventMappingDecision,
     EventMappingDecisionCandidate,
+    EventMappingDecisionContradiction,
     EventMappingLock,
     EventMappingRejection,
     ProviderEventMapping,
@@ -89,6 +90,7 @@ __all__ = [
     'ProviderEventMapping',
     'EventMappingDecision',
     'EventMappingDecisionCandidate',
+    'EventMappingDecisionContradiction',
     'EventMappingLock',
     'EventMappingRejection',
 ]

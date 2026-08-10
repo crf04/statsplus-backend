@@ -190,7 +190,10 @@ def build_dependencies(
             settings=settings,
             nba_stats_provider=nba_stats_provider,
         )
-        event_mapping_repository = EventMappingRepository(engine)
+        # The repository rechecks a governed decision inside its own
+        # transaction, so it is composed with the same configured match window
+        # the resolver applies outside it.
+        event_mapping_repository = EventMappingRepository(engine, settings=settings)
         event_resolver = EventResolver(
             event_catalog_service,
             mapping_repository=event_mapping_repository,

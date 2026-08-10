@@ -37,6 +37,35 @@ from app.services.event_mapping_errors import (
 DEFAULT_EVENT_MATCH_WINDOW = timedelta(hours=6)
 
 
+def event_match_window(
+    match_window: timedelta | float | None = None,
+    settings: Any | None = None,
+) -> timedelta:
+    """Resolve the configured distance one seam compares start times with.
+
+    Every seam that judges whether provider evidence still describes the game
+    it was mapped to has to use the same window, so the policy is read once
+    here -- from an explicit value, from settings, or from the reviewed default
+    -- rather than being re-derived wherever a comparison happens.
+    """
+
+    if match_window is None and settings is not None:
+        configured = getattr(
+            getattr(settings, "catalog", None), "event_match_window_hours", None
+        )
+        match_window = None if configured is None else float(configured)
+    if match_window is None:
+        return DEFAULT_EVENT_MATCH_WINDOW
+    window = (
+        match_window
+        if isinstance(match_window, timedelta)
+        else timedelta(hours=float(match_window))
+    )
+    if window.total_seconds() <= 0:
+        raise ValueError("the event match window must be greater than zero")
+    return window
+
+
 class EventResolutionState(str, Enum):
     """Closed outcomes of one provider-event resolution attempt."""
 
@@ -291,28 +320,7 @@ class EventResolver:
             raise TypeError("event catalog must expose get_freshness")
         self.catalog = event_catalog
         self.mapping_repository = mapping_repository
-        self.match_window = self._window(match_window, settings)
-
-    @staticmethod
-    def _window(
-        match_window: timedelta | float | None,
-        settings: Any | None,
-    ) -> timedelta:
-        if match_window is None and settings is not None:
-            configured = getattr(
-                getattr(settings, "catalog", None), "event_match_window_hours", None
-            )
-            match_window = None if configured is None else float(configured)
-        if match_window is None:
-            return DEFAULT_EVENT_MATCH_WINDOW
-        window = (
-            match_window
-            if isinstance(match_window, timedelta)
-            else timedelta(hours=float(match_window))
-        )
-        if window.total_seconds() <= 0:
-            raise ValueError("the event match window must be greater than zero")
-        return window
+        self.match_window = event_match_window(match_window, settings)
 
     # -- resolution --------------------------------------------------------
 
@@ -888,6 +896,7 @@ __all__ = [
     "EventResolution",
     "EventResolutionState",
     "EventResolver",
+    "event_match_window",
     "normalize_team_label",
     "stored_timestamp",
 ]

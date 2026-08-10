@@ -183,6 +183,7 @@ def _create_event_mapping_tables(connection: Connection) -> None:
     from app.models.event_mapping import (
         EventMappingDecision,
         EventMappingDecisionCandidate,
+        EventMappingDecisionContradiction,
         EventMappingLock,
         EventMappingRejection,
         ProviderEventMapping,
@@ -190,9 +191,10 @@ def _create_event_mapping_tables(connection: Connection) -> None:
 
     ProviderEventMapping.__table__.create(connection, checkfirst=True)
     EventMappingDecision.__table__.create(connection, checkfirst=True)
-    # The candidate table references the decision it belongs to, so it is
-    # created after the decision table.
+    # The candidate and contradiction tables reference the decision they belong
+    # to, so they are created after the decision table.
     EventMappingDecisionCandidate.__table__.create(connection, checkfirst=True)
+    EventMappingDecisionContradiction.__table__.create(connection, checkfirst=True)
     EventMappingRejection.__table__.create(connection, checkfirst=True)
     EventMappingLock.__table__.create(connection, checkfirst=True)
 
