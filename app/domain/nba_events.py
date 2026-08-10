@@ -71,6 +71,17 @@ def is_final_event(event: Mapping[str, object]) -> bool:
     )
 
 
+def is_regular_season_event(event: Mapping[str, object]) -> bool:
+    """Whether canonical game-ID authority classifies an event as Regular Season."""
+
+    game_id = event.get("nba_game_id")
+    classification = event.get("classification")
+    return canonical_event_kind(
+        str(game_id) if game_id is not None else "",
+        str(classification) if classification is not None else "",
+    ) == "Regular Season"
+
+
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
     """Return canonical event kind, with a real game ID as authority."""
 
@@ -142,5 +153,6 @@ __all__ = [
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",
+    "is_regular_season_event",
     "resolve_stored_event_classification",
 ]

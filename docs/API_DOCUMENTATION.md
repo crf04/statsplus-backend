@@ -459,10 +459,14 @@ nonempty Athlete Catalog.
 Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
 preserves the last valid publication; individual well-formed unjoined athlete,
 game, or team rows are excluded and counted without exposing their identities.
-Empty results require a present schedule with no events classified final and
-cannot replace nonempty facts. These stored facts back future matchup rail and
-selection reads; this slice adds no public matchup route and does not change
-`GET /api/games/game_logs`.
+An athlete missing from a refreshed catalog can reuse only its exact durable
+NBA ID and canonical name from the prior complete same-season NBA Stats
+publication; new identities and mismatched events or teams remain excluded.
+Empty Regular Season results require a present schedule with no completed
+Regular Season events; completed preseason, exhibition, All-Star, playoff, or
+other-phase games do not count. Empty results cannot replace nonempty facts.
+These stored facts back future matchup rail and selection reads; this slice
+adds no public matchup route and does not change `GET /api/games/game_logs`.
 
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
@@ -497,8 +501,8 @@ credentials, URLs, bodies, or exception text.
 The same endpoint includes `recent_player_game_log_events` plus
 `player_game_log_events_total` and `player_game_log_buffered_events`. Each
 entry contains only source/published row counts, the three unjoined-row counts,
-plus malformed-row and rejected-publication counts; player, game, team, and
-provider identities are never telemetry dimensions.
+plus malformed-row, rejected-publication, and exact-duplicate-row counts;
+player, game, team, and provider identities are never telemetry dimensions.
 
 `recent_board_request_events` describes the published `GET /api/dfs/board`
 route: exactly one entry per authenticated request, whatever it ended in.

@@ -221,6 +221,44 @@ class PlayerGameLogRepository:
             row_count=int(row["row_count"]),
         )
 
+    def get_published_player_identities(
+        self, season: str, *, source_provider: str
+    ) -> dict[int, str]:
+        """Return unambiguous player identities from one complete source snapshot."""
+
+        canonical_season = validate_canonical_season(season)
+        log_table = PlayerGameLog.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(log_table.c.player_id, log_table.c.player_name)
+                .join(
+                    refresh_table,
+                    refresh_table.c.season == log_table.c.season,
+                )
+                .where(
+                    log_table.c.season == canonical_season,
+                    refresh_table.c.source_provider == source_provider,
+                    refresh_table.c.row_count > 0,
+                )
+                .distinct()
+            ).all()
+        identities: dict[int, str] = {}
+        conflicts: set[int] = set()
+        for player_id, player_name in rows:
+            canonical_id = int(player_id)
+            canonical_name = str(player_name)
+            existing = identities.get(canonical_id)
+            if existing is not None and existing != canonical_name:
+                conflicts.add(canonical_id)
+            else:
+                identities[canonical_id] = canonical_name
+        return {
+            player_id: player_name
+            for player_id, player_name in identities.items()
+            if player_id not in conflicts
+        }
+
     def get_season_rate(
         self, season: str, player_id: int
     ) -> PlayerSeasonRate | None:

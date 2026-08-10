@@ -502,24 +502,32 @@ to the requested season's Athlete Catalog, and each `GAME_ID` plus per-game
 and home/away identity come from that canonical event. Individual well-formed
 rows that do not join are excluded and counted in bounded scalar-only
 telemetry; no name or matchup-text guess is accepted. A nonempty snapshot that
-yields no canonical rows fails the refresh before publication. Structurally,
-numerically, or logically malformed rows abort the publication and increment
-only a bounded scalar malformed-row count before the error propagates.
+yields no canonical rows fails the refresh before publication. If a fresh
+Athlete Catalog drops a player already present in the last complete
+same-season `nba_stats` publication, only that exact durable NBA player ID and
+canonical name may be reused. A never-published or durably ambiguous player
+remains unjoined, and recovered athlete identity never relaxes the exact event
+or team joins. Structurally, numerically, or logically malformed rows abort the
+publication while retaining already observed bounded coverage counts.
 
 Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
 and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
 replacement and its `nba_stats` source, timezone-aware retrieval time, and row
 count commit in the same transaction. Exact duplicate provider rows collapse
-to one fact; conflicting duplicates fail closed. Any validation or database
-failure leaves both the prior rows and prior successful freshness unchanged.
-An empty provider snapshot is publishable only when the governed Event Catalog
-is present and contains no events classified final by the shared governed NBA
-event predicate, and it can never replace a prior nonempty publication. A
-missing Event Catalog or an empty snapshot after a completed game fails closed
-and preserves the last valid facts and freshness. Because a season-wide log
-snapshot is cumulative, a nonempty replacement with fewer canonical rows than
-the prior successful publication also fails closed; equal-size corrections and
-growth remain publishable.
+to one fact and increment bounded duplicate telemetry; conflicting duplicates
+fail closed. Any validation or database failure leaves both the prior rows and
+prior successful freshness unchanged. An empty Regular Season provider
+snapshot is publishable only when the governed Event Catalog is present and
+contains no Regular Season event classified final by the shared governed NBA
+event predicates. Completed preseason, exhibition, All-Star, playoff, and
+other-phase events do not block that empty Regular Season publication. An
+empty snapshot can never replace a prior nonempty publication. A missing Event
+Catalog or an empty snapshot after a completed Regular Season game fails
+closed and preserves the last valid facts and freshness. Because a season-wide
+log snapshot is cumulative, a nonempty replacement with fewer canonical rows
+than the prior successful publication also fails closed; equal-size
+corrections and growth remain publishable. Every rejected refresh records
+bounded scalar rejection and accumulated coverage counts without identities.
 Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
 TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
 FG2A, season rates, and rolling selections are derived at read time rather

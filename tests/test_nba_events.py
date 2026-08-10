@@ -9,6 +9,7 @@ from app.domain.nba_events import (
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
+    is_regular_season_event,
     resolve_stored_event_classification,
 )
 
@@ -26,6 +27,19 @@ def test_final_event_accepts_governed_code_and_terminal_text(event):
 
 def test_final_event_rejects_nonterminal_schedule_status():
     assert not is_final_event({"status_code": 1, "status_text": "7:00 pm ET"})
+
+
+def test_regular_season_event_uses_canonical_game_id_authority():
+    assert is_regular_season_event(
+        {"nba_game_id": "0022500001", "classification": "Preseason"}
+    )
+
+
+@pytest.mark.parametrize("game_id", ["0012500001", "0032500001", "0042500001"])
+def test_regular_season_event_excludes_other_governed_phases(game_id):
+    assert not is_regular_season_event(
+        {"nba_game_id": game_id, "classification": "Regular Season"}
+    )
 
 
 @pytest.mark.parametrize(
