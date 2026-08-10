@@ -599,9 +599,24 @@ def _withheld_event_observation(resolutions: Iterable[Any]) -> Any:
     unavailable as a whole, and the representative is chosen by sorting the
     observations rather than by taking the first, so the markets in any order
     leave the board reporting the same single outcome.
+
+    Freshness is read once per market, so a refresh aging out part way through
+    one board read leaves a group where some markets were placed and others
+    were not.  Only what the catalog could not place can represent such a
+    group: sorting all of them let a placed resolution stand for the fixture
+    whenever its evidence sorted first, which reported -- and persisted -- a
+    canonical or governed identity for a read that could not place the fixture
+    as a whole.
     """
 
-    return sorted(resolutions, key=_event_evidence_order)[0]
+    return sorted(
+        (
+            resolution
+            for resolution in resolutions
+            if resolution.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+        ),
+        key=_event_evidence_order,
+    )[0]
 
 
 def _merged_event_evidence(resolutions: Iterable[Any]) -> EventEvidence:

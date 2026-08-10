@@ -36,10 +36,12 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
-from app.services.dfs_board import DFSBoardService
+from app.services.dfs_board import DFSBoardService, _withheld_event_observation
 from app.services.event_mapping_errors import EventMappingPersistenceError
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import (
+    CanonicalEvent,
+    EventResolution,
     EventResolutionState,
     EventResolver,
     normalize_team_label,
@@ -1411,6 +1413,141 @@ def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
     assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
         "0022500001"
     )
+
+
+#: Evidence for the same fixture whose presentational label sorts before the
+#: default one, so a resolution carrying it is the first of a group in evidence
+#: order.
+_EARLY_EVIDENCE = _evidence(label="AAA vs BBB")
+
+
+class _PerMarketResolver:
+    """A resolver whose catalog usability changes between per-market reads.
+
+    Freshness is read once per market, so a refresh expiring -- or a catalog
+    being emptied -- part way through one board read leaves the fixture's
+    markets resolved against different catalog states.
+    """
+
+    def __init__(self, resolvers: dict[str, EventResolver]) -> None:
+        self._resolvers = resolvers
+
+    def resolve_market(self, market, season, *, observed_at=None):
+        return self._resolvers[market.market_id].resolve_market(
+            market, season, observed_at=observed_at
+        )
+
+    def resolve(self, *args, **kwargs):  # pragma: no cover - guard
+        raise AssertionError("a group the catalog cannot place never merges")
+
+
+def test_a_withheld_group_never_represents_itself_with_a_fresh_resolution():
+    """The representative comes from what the catalog could not place.
+
+    Sorting the whole group let a resolution the catalog *did* place stand for
+    a group containing an unusable-catalog result, which would report a
+    canonical identity -- and persist one -- for a fixture the read could not
+    place as a whole.
+    """
+
+    placed = EventResolution(
+        provider="underdog",
+        provider_evidence=_EARLY_EVIDENCE,
+        season=SEASON,
+        state=EventResolutionState.AUTO,
+        canonical_event=CanonicalEvent(
+            nba_game_id="0022500001", season=SEASON, scheduled_at=TIP_OFF
+        ),
+        reason="canonical_matchup_within_window",
+    )
+    withheld = EventResolution(
+        provider="underdog",
+        provider_evidence=_evidence(),
+        season=SEASON,
+        state=EventResolutionState.EVENT_CATALOG_UNAVAILABLE,
+        reason="event_catalog_stale",
+    )
+
+    for group in ((placed, withheld), (withheld, placed)):
+        representative = _withheld_event_observation(group)
+
+        assert representative.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+        assert representative.canonical_event is None
+        assert representative.candidates == ()
+        assert representative.contradictory_evidence == ()
+        # The typed evidence of what could not be placed is kept as it stands.
+        assert representative.provider_evidence == withheld.provider_evidence
+
+
+@pytest.mark.parametrize("decision", [None, "approve", "override"])
+def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(
+    event_db, decision
+):
+    """A catalog that goes unusable mid-read withholds the whole fixture.
+
+    One market resolved against a usable catalog and another against an
+    unusable one is not two observations of the fixture: the read could not
+    place it as a whole.  The board reports the withheld outcome in either
+    listing order -- even though the placed resolution sorts first -- records
+    nothing, and keeps every normalized market.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    if decision is not None:
+        getattr(repository, decision)(
+            "underdog",
+            "ud-1",
+            "0022500001",
+            season=SEASON,
+            operator_id="ops",
+            reason="reviewed",
+            provider_evidence=_evidence(),
+        )
+    decided = [record.decision_state for record in repository.history()]
+    markets = (
+        _market("m-placed", event=_EARLY_EVIDENCE),
+        _market("m-withheld"),
+    )
+    usable = _catalog_resolver(engine, repository)
+    # The same catalog read after its refresh aged past the allowed age.
+    unusable = _catalog_resolver(
+        engine, repository, clock=lambda: _NOW + timedelta(hours=4), max_age_hours=1
+    )
+    # The control: the placed market alone reaches a canonical identity.
+    placed = usable.resolve_market(markets[0], SEASON)
+    resolver = _PerMarketResolver({"m-placed": usable, "m-withheld": unusable})
+    query = NBAMarketQuery(season=SEASON)
+
+    assert placed.state is not EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+    assert placed.canonical_event_id == "0022500001"
+
+    for listing in (markets, tuple(reversed(markets)), markets):
+        board = _board_service(
+            _snapshot(*listing), resolver=resolver, repository=repository
+        ).get_board(query)
+
+        (outcome,) = board.event_mapping_outcomes
+        assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
+        assert outcome.canonical_event_id is None
+        assert outcome.persisted is False
+        assert outcome.resolution.reason == "event_catalog_stale"
+        assert outcome.resolution.candidates == ()
+        assert outcome.resolution.contradictory_evidence == ()
+        # The representative is the market the catalog could not place.
+        assert outcome.resolution.provider_evidence.label == "Lakers vs Spurs"
+        # Every normalized market stays on the board.
+        assert len(board.resolved_markets) == len(markets)
+        assert repository.list_conflicts() == []
+        assert [record.decision_state for record in repository.history()] == decided
+
+    if decision is None:
+        assert repository.list_mappings() == []
+    else:
+        assert repository.get_active_mapping("underdog", "ud-1").mapping_state == {
+            "approve": "manual_approved",
+            "override": "manual_override",
+        }[decision]
 
 
 def _disagreeing_markets() -> tuple[PlayerProjectionMarket, ...]:
