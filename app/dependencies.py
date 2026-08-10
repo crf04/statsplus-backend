@@ -74,6 +74,7 @@ def build_dependencies(
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
     from app.services.player_pool import PlayerPoolService
+    from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
     from app.services.statistic_catalog import StatisticCatalog
@@ -233,7 +234,15 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
-    player_pool_service = PlayerPoolService(dfs_board_service, statistic_catalog)
+    player_pool_snapshot_repository = (
+        None if is_demo_database_url(settings.database.url)
+        else PlayerPoolSnapshotRepository(engine)
+    )
+    player_pool_service = PlayerPoolService(
+        dfs_board_service,
+        statistic_catalog,
+        snapshot_repository=player_pool_snapshot_repository,
+    )
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,

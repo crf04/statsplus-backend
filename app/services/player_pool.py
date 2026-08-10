@@ -1,12 +1,24 @@
-"""Build the slate Player Pool from one live, normalized DFS board."""
+"""Build and persist the governed slate Player Pool from normalized DFS boards."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Protocol
+from decimal import Decimal
+import logging
+import time
+from typing import Any, Callable, Iterable, Mapping, Protocol
+from uuid import uuid4
 
+from app.domain.freshness import (
+    exact_age_seconds,
+    exact_seconds,
+    time_window_seconds,
+    within_max_age,
+)
 from app.domain.statistics import MatchState, ScoringPeriod
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     EventEvidence,
@@ -15,13 +27,49 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
 )
+from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.dfs_board import DFSBoard, ProviderOutcome
+from app.services.event_mapping_errors import EventMappingPersistenceError
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolRefreshResult,
+    PlayerPoolSnapshotScope,
+    StoredPlayerPoolSnapshot,
+)
 from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryEvent,
 )
+
+
+POOL_REUSE_MAX_AGE_SECONDS = time_window_seconds(
+    15, unit_seconds=60, field="Player Pool reuse maximum age"
+)
+POOL_STALE_MAX_AGE_SECONDS = time_window_seconds(
+    6, unit_seconds=3600, field="Player Pool stale-serve maximum age"
+)
+REFRESH_LEASE_SECONDS = time_window_seconds(
+    60, field="Player Pool refresh lease"
+)
+FOLLOWER_WAIT_MAX_SECONDS = time_window_seconds(
+    65, field="Player Pool follower wait maximum"
+)
+FOLLOWER_POLL_INITIAL_SECONDS = time_window_seconds(
+    "0.05", field="Player Pool follower initial poll"
+)
+FOLLOWER_POLL_MAX_SECONDS = time_window_seconds(
+    "0.5", field="Player Pool follower maximum poll"
+)
+POOL_CLOCK_SKEW_TOLERANCE_SECONDS = time_window_seconds(
+    60, field="Player Pool clock-skew tolerance"
+)
+EXPECTED_COLLECTION_FAILURES = (
+    ProviderUnavailableError,
+    AthleteMappingPersistenceError,
+    EventMappingPersistenceError,
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +113,49 @@ class DFSBoardReader(Protocol):
     def get_board(self, query: NBAMarketQuery) -> DFSBoard: ...
 
 
+class PlayerPoolSnapshotReaderWriter(Protocol):
+    def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None: ...
+
+    def try_acquire_refresh(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
+        now: datetime,
+        lease_seconds: object,
+    ) -> bool: ...
+
+    def get_refresh_result(
+        self, scope: PlayerPoolSnapshotScope
+    ) -> PlayerPoolRefreshResult: ...
+
+    def replace_owned(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
+        payload: Mapping[str, Any],
+        retrieved_at: datetime,
+        now: datetime,
+    ) -> bool: ...
+
+    def finish_failure_owned(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
+        now: datetime,
+    ) -> bool: ...
+
+    def release_refresh(self, scope: PlayerPoolSnapshotScope, *, owner: str) -> None: ...
+
+
 class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
 
 
 class PlayerPoolService:
-    """Collect a live DFS board and retain only qualifying joined markets."""
+    """Collect, persist, and reuse qualifying joined Player Pool markets."""
 
     def __init__(
         self,
@@ -78,6 +163,10 @@ class PlayerPoolService:
         statistic_catalog: StatisticCatalog,
         *,
         telemetry_recorder: PlayerPoolTelemetryRecorder | None = None,
+        snapshot_repository: PlayerPoolSnapshotReaderWriter | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.board_service = board_service
         self.market_categories = {
@@ -88,8 +177,162 @@ class PlayerPoolService:
         self.telemetry_recorder = (
             telemetry_recorder or BoundedPlayerPoolTelemetryRecorder()
         )
+        self.snapshot_repository = snapshot_repository
+        self.clock = clock
+        self.sleeper = sleeper
+        self.monotonic = monotonic
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
+        scope = PlayerPoolSnapshotScope.create(season, game_ids)
+        repository = self.snapshot_repository
+        if repository is None:
+            return self._collect_pool(season=scope.season, game_ids=scope.game_ids)
+
+        baseline = repository.get_refresh_result(scope).version
+        waiting = False
+        wait_deadline = self.monotonic() + float(FOLLOWER_WAIT_MAX_SECONDS)
+        poll_seconds = float(FOLLOWER_POLL_INITIAL_SECONDS)
+        while True:
+            now = assume_utc(self.clock())
+            stored = repository.get(scope)
+            if self._within_age(stored, now, POOL_REUSE_MAX_AGE_SECONDS):
+                return self._decode_pool(stored.payload)
+
+            completed = repository.get_refresh_result(scope)
+            if waiting:
+                if completed.version > baseline:
+                    completed_stored = repository.get(scope)
+                    if completed.outcome == "success" and completed_stored is not None:
+                        return self._decode_pool(completed_stored.payload)
+                    if completed.outcome == "failure":
+                        return self._fallback_pool(completed_stored, now, {})
+                    baseline = completed.version
+
+            lease_expires_at = completed.lease_expires_at
+            if lease_expires_at is not None and assume_utc(lease_expires_at) > now:
+                waiting = True
+                if self.monotonic() >= wait_deadline:
+                    return self._fallback_pool(stored, now, {})
+                self.sleeper(poll_seconds)
+                poll_seconds = min(
+                    poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS)
+                )
+                continue
+
+            owner = uuid4().hex
+            if repository.try_acquire_refresh(
+                scope,
+                owner=owner,
+                now=now,
+                lease_seconds=REFRESH_LEASE_SECONDS,
+            ):
+                return self._refresh_owned(
+                    scope, owner=owner, prior=stored, baseline_version=baseline
+                )
+            waiting = True
+            if self.monotonic() >= wait_deadline:
+                return self._fallback_pool(stored, now, {})
+            self.sleeper(poll_seconds)
+            poll_seconds = min(poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS))
+
+    def _refresh_owned(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        owner: str,
+        prior: StoredPlayerPoolSnapshot | None,
+        baseline_version: int,
+    ) -> PlayerPool:
+        repository = self.snapshot_repository
+        if repository is None:  # narrowed by the caller; retained for protocol safety
+            raise RuntimeError("snapshot repository is required for an owned refresh")
+        try:
+            now = assume_utc(self.clock())
+            completed = repository.get_refresh_result(scope)
+            stored = repository.get(scope)
+            if self._within_age(stored, now, POOL_REUSE_MAX_AGE_SECONDS):
+                return self._decode_pool(stored.payload)
+            if completed.version > baseline_version:
+                completed_stored = repository.get(scope)
+                if completed.outcome == "success" and completed_stored is not None:
+                    return self._decode_pool(completed_stored.payload)
+                if completed.outcome == "failure":
+                    return self._fallback_pool(completed_stored or prior, now, {})
+            fallback = stored or prior
+            try:
+                refreshed = self._collect_pool(
+                    season=scope.season, game_ids=scope.game_ids
+                )
+            except EXPECTED_COLLECTION_FAILURES:
+                finished_at = assume_utc(self.clock())
+                recorded = repository.finish_failure_owned(
+                    scope, owner=owner, now=finished_at
+                )
+                if not recorded:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
+                return self._fallback_pool(fallback, finished_at, {})
+
+            providers = refreshed.freshness["providers"]
+            finished_at = assume_utc(self.clock())
+            total_failure = not providers or all(
+                provider["status"] == "missing" for provider in providers.values()
+            )
+            if total_failure:
+                recorded = repository.finish_failure_owned(
+                    scope, owner=owner, now=finished_at
+                )
+                if not recorded:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
+                return self._fallback_pool(fallback, finished_at, providers)
+
+            retrieved_at = refreshed.freshness.get("retrieved_at")
+            if retrieved_at is not None:
+                published = repository.replace_owned(
+                    scope,
+                    owner=owner,
+                    payload=self._encode_pool(refreshed),
+                    retrieved_at=parse_utc_iso(retrieved_at),
+                    now=finished_at,
+                )
+                if not published:
+                    logger.warning("player_pool_refresh outcome=fence_lost")
+                    winner = repository.get_refresh_result(scope)
+                    if winner.version > baseline_version and winner.outcome == "success":
+                        winner_snapshot = repository.get(scope)
+                        if winner_snapshot is not None:
+                            return self._decode_pool(winner_snapshot.payload)
+            return refreshed
+        finally:
+            repository.release_refresh(scope, owner=owner)
+
+    @staticmethod
+    def _within_age(
+        stored: StoredPlayerPoolSnapshot | None,
+        now: datetime,
+        maximum_age: Any,
+    ) -> bool:
+        if stored is None:
+            return False
+        elapsed = exact_seconds(assume_utc(now) - assume_utc(stored.retrieved_at))
+        if elapsed < 0:
+            future_skew = exact_age_seconds(-elapsed, field="Player Pool future skew")
+            if not within_max_age(future_skew, POOL_CLOCK_SKEW_TOLERANCE_SECONDS):
+                raise ValueError("Player Pool snapshot timestamp is too far in the future")
+            elapsed = Decimal(0)
+        age = exact_age_seconds(elapsed, field="Player Pool snapshot age")
+        return within_max_age(age, maximum_age)
+
+    def _fallback_pool(
+        self,
+        stored: StoredPlayerPoolSnapshot | None,
+        now: datetime,
+        failed_providers: Mapping[str, Any],
+    ) -> PlayerPool:
+        if self._within_age(stored, now, POOL_STALE_MAX_AGE_SECONDS):
+            return self._stale_pool(stored.payload, failed_providers)
+        return PlayerPool((), {}, self._unavailable_freshness(failed_providers))
+
+    def _collect_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         board = self.board_service.get_board(
             NBAMarketQuery(
                 season=season,
@@ -138,8 +381,7 @@ class PlayerPoolService:
                     player_id,
                     _PlayerContribution(team_id=team_id, name=name, providers={}),
                 )
-                categories = entry.providers.setdefault(provider, set())
-                categories.add(category)
+                entry.providers.setdefault(provider, set()).add(category)
 
         players = tuple(
             PoolPlayer(
@@ -181,6 +423,120 @@ class PlayerPoolService:
         )
 
     @staticmethod
+    def _encode_pool(pool: PlayerPool) -> dict[str, Any]:
+        return {
+            "players": [
+                {
+                    "canonical_player_id": player.canonical_player_id,
+                    "name": player.name,
+                    "team_id": player.team_id,
+                    "market_categories": list(player.market_categories),
+                    "provenance": {
+                        provider: list(categories)
+                        for provider, categories in player.provenance.items()
+                    },
+                }
+                for player in pool.players
+            ],
+            "team_counts": {
+                str(team_id): count for team_id, count in pool.team_counts.items()
+            },
+            "freshness": dict(pool.freshness),
+        }
+
+    @staticmethod
+    def _decode_pool(payload: Mapping[str, Any]) -> PlayerPool:
+        players = tuple(
+            PoolPlayer(
+                canonical_player_id=int(player["canonical_player_id"]),
+                name=str(player["name"]),
+                team_id=int(player["team_id"]),
+                market_categories=tuple(player["market_categories"]),
+                provenance={
+                    str(provider): tuple(categories)
+                    for provider, categories in player["provenance"].items()
+                },
+            )
+            for player in payload["players"]
+        )
+        return PlayerPool(
+            players=players,
+            team_counts={
+                int(team_id): int(count)
+                for team_id, count in payload["team_counts"].items()
+            },
+            freshness=PlayerPoolService._normalize_freshness(payload["freshness"]),
+        )
+
+    @staticmethod
+    def _normalize_freshness(value: Mapping[str, Any]) -> dict[str, Any]:
+        providers = {
+            str(provider): {
+                "status": state["status"],
+                "retrieved_at": (
+                    parse_utc_iso(state["retrieved_at"]).isoformat()
+                    if state.get("retrieved_at") is not None
+                    else None
+                ),
+            }
+            for provider, state in value["providers"].items()
+        }
+        normalized = {
+            "retrieved_at": (
+                parse_utc_iso(value["retrieved_at"]).isoformat()
+                if value.get("retrieved_at") is not None
+                else None
+            ),
+            "providers": providers,
+        }
+        if "status" in value:
+            normalized["status"] = value["status"]
+        return normalized
+
+    @classmethod
+    def _stale_pool(
+        cls,
+        payload: Mapping[str, Any],
+        failed_providers: Mapping[str, Any],
+    ) -> PlayerPool:
+        pool = cls._decode_pool(payload)
+        providers = {
+            provider: {
+                "status": (
+                    "stale-served" if state["retrieved_at"] is not None else "missing"
+                ),
+                "retrieved_at": state["retrieved_at"],
+            }
+            for provider, state in pool.freshness["providers"].items()
+        }
+        for provider in failed_providers:
+            providers.setdefault(
+                provider, {"status": "missing", "retrieved_at": None}
+            )
+        return PlayerPool(
+            players=pool.players,
+            team_counts=pool.team_counts,
+            freshness={
+                "status": "stale-served",
+                "retrieved_at": pool.freshness["retrieved_at"],
+                "providers": providers,
+            },
+        )
+
+    @staticmethod
+    def _unavailable_freshness(
+        failed_providers: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "status": "unavailable",
+            "retrieved_at": None,
+            "providers": {
+                provider: {"status": "missing", "retrieved_at": None}
+                for provider in sorted(failed_providers)
+            },
+        }
+
+    @staticmethod
     def _qualifying_shape(market: PlayerProjectionMarket) -> bool:
         return (
             market.status is MarketStatus.AVAILABLE
@@ -190,10 +546,7 @@ class PlayerPoolService:
 
     def _market_category(self, market: PlayerProjectionMarket) -> str | None:
         match = market.statistic_match
-        if (
-            match is None
-            or match.state is not MatchState.CANONICAL
-        ):
+        if match is None or match.state is not MatchState.CANONICAL:
             return None
         return self.market_categories.get(match.canonical_id)
 
@@ -218,8 +571,7 @@ class PlayerPoolService:
             key = cls._evidence_key(resolution.provider, resolution.provider_evidence)
             if (
                 key is None
-                or
-                player_id is None
+                or player_id is None
                 or canonical is None
                 or canonical.team_id is None
                 or canonical.player_id != player_id
@@ -262,10 +614,12 @@ class PlayerPoolService:
         retrieved: list[datetime] = []
         for outcome in sorted(outcomes, key=lambda value: value.provider):
             if outcome.usable and outcome.snapshot is not None:
-                observed_at = outcome.snapshot.retrieved_at.astimezone(timezone.utc)
+                observed_at = assume_utc(outcome.snapshot.retrieved_at)
                 retrieved.append(observed_at)
                 providers[outcome.provider] = {
-                    "status": "fresh",
+                    "status": (
+                        "stale-served" if outcome.cache_status == "stale" else "fresh"
+                    ),
                     "retrieved_at": observed_at.isoformat(),
                 }
             else:
@@ -277,11 +631,20 @@ class PlayerPoolService:
             "retrieved_at": min(retrieved).isoformat() if retrieved else None,
             "providers": providers,
         }
+        statuses = {provider["status"] for provider in providers.values()}
         if not retrieved:
             freshness["status"] = "unavailable"
-        elif len(retrieved) == len(providers):
+        elif statuses == {"fresh"}:
             freshness["status"] = "fresh"
+        elif statuses == {"stale-served"}:
+            freshness["status"] = "stale-served"
         return freshness
 
 
-__all__ = ["DFSBoardReader", "PlayerPool", "PlayerPoolReader", "PlayerPoolService", "PoolPlayer"]
+__all__ = [
+    "DFSBoardReader",
+    "PlayerPool",
+    "PlayerPoolReader",
+    "PlayerPoolService",
+    "PoolPlayer",
+]

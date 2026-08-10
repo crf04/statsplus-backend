@@ -284,11 +284,30 @@ market without both joins cannot affect a slate count. Pool membership is the
 union by canonical player ID, with deterministic Market Categories and
 per-provider provenance retained on each internal `PoolPlayer`.
 
-The live slice does not synthesize players and does not persist snapshots. A
-usable empty provider snapshot is `fresh`; a failed provider is `missing`.
-Unanimously usable observations make the aggregate `fresh`, mixed usable and
-missing observations omit aggregate status for the frontend's partial
-derivation, and total failure is `unavailable`. Unknown provider stat market
+The Player Pool never synthesizes players. It persists the governed canonical
+pool result for each season and exact Slate game set in the application
+database; raw provider labels and identities do not enter this store. A
+snapshot at most 15 minutes old is reused with its original provider
+`retrieved_at` values. This is an inclusive reuse maximum age, not the
+exclusive `fresh` window used by the lower provider cache. The first request
+past that maximum refreshes lazily. Refresh replacement is atomic, and a
+database refresh lease makes callers in different application workers for the
+same scope share one refresh. The lease is normalized by the shared time-window
+authority and is longer than the board's bounded collection/mapping operation;
+publication is still fenced by ownership and expiry. Followers use bounded,
+read-only exponential-backoff polling while a lease is healthy and attempt a
+write takeover only after expiry. A partial refresh replaces the stored union with only its
+usable providers and reports failed providers as `missing`. Only total failure
+may stale-serve the preceding snapshot, through an inclusive six-hour maximum,
+marking each contributing provider `stale-served`; cached provider outcomes
+already marked stale retain that truth. After six hours the pool is
+honestly empty and `unavailable`. A usable empty provider snapshot is `fresh`;
+a failed provider is `missing`.
+Only unanimously fresh observations make the aggregate `fresh`; unanimously
+stale-served usable observations make it `stale-served`. Any mix of fresh,
+stale-served, and missing observations omits aggregate status for the
+frontend's partial/degraded derivation, and total failure is `unavailable`.
+Unknown provider stat market
 occurrences and unjoined athlete
 or event occurrences, plus canonical athletes whose team is not one of the
 governed game's teams, are counted in a bounded Player Pool telemetry event,
