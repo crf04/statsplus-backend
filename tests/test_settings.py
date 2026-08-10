@@ -50,6 +50,30 @@ def test_player_game_log_max_age_defaults_to_thirty_hours_and_is_configurable():
     assert configured.catalog.player_game_log_max_age_hours == 36
 
 
+def test_player_game_log_sport_minimum_defaults_to_five_and_is_configurable():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME": "7",
+        }
+    )
+
+    assert defaults.catalog.player_game_log_min_active_players_per_team_game == 5
+    assert configured.catalog.player_game_log_min_active_players_per_team_game == 7
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_player_game_log_sport_minimum_must_be_a_positive_integer(value):
+    with pytest.raises(ConfigurationError):
+        load_settings(
+            environ={
+                "FLASK_ENV": "testing",
+                "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME": value,
+            }
+        )
+
+
 def test_local_settings_have_typed_safe_defaults(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -545,6 +569,8 @@ def test_catalog_windows_are_exact_decimals_never_floats():
         {"event_match_window_hours": "1e129"},
         {"event_match_window_hours": -1},
         {"player_game_log_max_age_hours": 0},
+        {"player_game_log_min_active_players_per_team_game": 0},
+        {"player_game_log_min_active_players_per_team_game": True},
         {"athlete_freshness_days": 0},
         {"athlete_freshness_days": 11575},
     ],

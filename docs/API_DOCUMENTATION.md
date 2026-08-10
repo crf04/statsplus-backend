@@ -462,12 +462,14 @@ publish the season-owned Athlete Catalog or its freshness, so Nightly's named
 Athlete Catalog step is required. Schedule precedes that step, so an Athlete
 Catalog failure skips player logs without suppressing the required schedule
 refresh, and the prior player-log publication remains valid.
-Failed, wholly unjoinable, malformed, or smaller-than-prior cumulative data
-preserves the last valid publication; individual well-formed unjoined athlete,
-game, or team rows are excluded and counted without exposing their identities.
+Failed, wholly unjoinable, malformed, or eligible-identity-removing cumulative
+data preserves the last valid publication; individual well-formed unjoined
+athlete, game, or team rows are excluded and counted without exposing their
+identities.
 Every completed, non-postponed governed Regular Season game through the source
-observation time must have logs for both exact teams and at least five distinct
-positive-minute players per team. This rejects a truncated first publication
+observation time must have logs for both exact teams and at least the configured
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` distinct positive-minute
+players per team (default `5`). This rejects a truncated first publication
 without estimating a season total and does not require future games or DNPs.
 The season sidecar stores both canonical and bounded raw source-row counts.
 Stable partial exclusions can therefore republish idempotently; source growth
@@ -477,14 +479,15 @@ fresh, and publication recovers when those exact governed identities arrive.
 SQLAlchemy failures from prerequisite freshness/identity reads or publication
 are re-raised and emit one bounded rejection aggregate with already-observed
 coverage counts; publication failures first roll back.
-An athlete missing from a refreshed catalog can reuse only its exact durable
-NBA ID and canonical name from the prior complete same-season NBA Stats
-publication; new identities and mismatched events or teams remain excluded.
-An otherwise smaller cumulative replacement is accepted only when every
-removed stored row belongs to a game the fresh Event Catalog removed or made
-ineligible by phase/postponement. The recovery is exposed as a bounded removed
-row count; unexplained shrink still preserves the prior publication and emits
-one rejection aggregate.
+Canonical athlete identity comes only from the fresh Athlete Catalog. A player
+missing from that owner is excluded and counted; the incomplete replacement
+fails while the prior publication remains readable until the catalog owner
+recovers. Every publication compares the complete prior and candidate
+player/game identity sets. Removed stored keys are accepted only when all of
+their games were removed from the fresh Event Catalog or made ineligible by
+phase/postponement; an eligible-game removal fails even if additions create net
+growth. Recovery telemetry exposes the actual bounded admitted removed-key
+count rather than the net row-count change.
 Empty Regular Season results require a present schedule with no completed
 Regular Season events; completed preseason, exhibition, All-Star, playoff, or
 other-phase games do not count, and a postponed event with a terminal-looking

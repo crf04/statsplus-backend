@@ -36,7 +36,10 @@ def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
     )
     settings = SimpleNamespace(
         nba=SimpleNamespace(current_season="2025-26"),
-        catalog=SimpleNamespace(player_game_log_max_age_hours=30),
+        catalog=SimpleNamespace(
+            player_game_log_max_age_hours=30,
+            player_game_log_min_active_players_per_team_game=5,
+        ),
     )
 
     def build_data_service(actual_engine, **kwargs):
@@ -77,6 +80,7 @@ def test_run_wires_owner_services_into_the_four_step_refresh(monkeypatch):
             "repository": player_log_repository,
             "athlete_catalog": athlete_service,
             "event_catalog": event_service,
+            "minimum_active_players_per_team_game": 5,
         }
         return player_log_service
 

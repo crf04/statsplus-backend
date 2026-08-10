@@ -58,7 +58,6 @@ def _two_pointer_attempts(record: PlayerGameLogRecord) -> float:
 _DERIVED_COMPONENT_VALUES: dict[str, Callable[[PlayerGameLogRecord], float]] = {
     "two_pointers_attempted": _two_pointer_attempts
 }
-DEFAULT_PLAYER_GAME_LOG_MAX_AGE = timedelta(hours=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +67,12 @@ class PlayerGameLogFreshness:
     retrieved_at: datetime | None
     row_count: int
     source_row_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerGameLogPublication:
+    row_count: int
+    recovered_removed_row_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +93,9 @@ class PlayerGameLogRepository:
         engine: Engine,
         *,
         statistic_catalog: StatisticCatalog,
+        stats_surface_max_age: timedelta,
         stats_surface_season: str | None = None,
         clock: Callable[[], datetime] | None = None,
-        stats_surface_max_age: timedelta = DEFAULT_PLAYER_GAME_LOG_MAX_AGE,
     ) -> None:
         self.engine = engine
         self._stats_surface_season = (
@@ -142,7 +147,7 @@ class PlayerGameLogRepository:
         allow_empty: bool = False,
         current_catalog_game_ids: frozenset[str] | None = None,
         recoverable_game_ids: frozenset[str] = frozenset(),
-    ) -> int:
+    ) -> PlayerGameLogPublication:
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
@@ -187,30 +192,26 @@ class PlayerGameLogRepository:
                 raise ValueError(
                     "empty player game log snapshot cannot replace a valid publication"
                 )
-            if (
-                unique
-                and existing_row_count is not None
-                and len(unique) < existing_row_count
-            ):
+            published_keys = set(
+                connection.execute(
+                    select(log_table.c.player_id, log_table.c.game_id).where(
+                        log_table.c.season == canonical_season
+                    )
+                ).all()
+            )
+            removed_keys = published_keys.difference(unique)
+            if removed_keys:
                 if current_catalog_game_ids is None:
                     raise ValueError(
-                        "a smaller player game log snapshot cannot replace cumulative facts"
+                        "a player game log publication cannot remove cumulative facts"
                     )
-                published_keys = set(
-                    connection.execute(
-                        select(log_table.c.player_id, log_table.c.game_id).where(
-                            log_table.c.season == canonical_season
-                        )
-                    ).all()
-                )
-                removed_keys = published_keys.difference(unique)
                 if any(
                     game_id in current_catalog_game_ids
                     and game_id not in recoverable_game_ids
                     for _player_id, game_id in removed_keys
                 ):
                     raise ValueError(
-                        "a smaller player game log snapshot cannot replace cumulative facts"
+                        "a player game log publication cannot remove eligible cumulative facts"
                     )
             connection.execute(
                 delete(log_table).where(log_table.c.season == canonical_season)
@@ -238,7 +239,10 @@ class PlayerGameLogRepository:
                 self._surface_freshness.record_success(
                     retrieved, connection=connection
                 )
-        return len(unique)
+        return PlayerGameLogPublication(
+            row_count=len(unique),
+            recovered_removed_row_count=len(removed_keys),
+        )
 
     def list_player_rows(
         self, season: str, player_id: int
@@ -276,44 +280,6 @@ class PlayerGameLogRepository:
             row_count=int(row["row_count"]),
             source_row_count=int(row["source_row_count"]),
         )
-
-    def get_published_player_identities(
-        self, season: str, *, source_provider: str
-    ) -> dict[int, str]:
-        """Return unambiguous player identities from one complete source snapshot."""
-
-        canonical_season = validate_canonical_season(season)
-        log_table = PlayerGameLog.__table__
-        refresh_table = PlayerGameLogRefresh.__table__
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(log_table.c.player_id, log_table.c.player_name)
-                .join(
-                    refresh_table,
-                    refresh_table.c.season == log_table.c.season,
-                )
-                .where(
-                    log_table.c.season == canonical_season,
-                    refresh_table.c.source_provider == source_provider,
-                    refresh_table.c.row_count > 0,
-                )
-                .distinct()
-            ).all()
-        identities: dict[int, str] = {}
-        conflicts: set[int] = set()
-        for player_id, player_name in rows:
-            canonical_id = int(player_id)
-            canonical_name = str(player_name)
-            existing = identities.get(canonical_id)
-            if existing is not None and existing != canonical_name:
-                conflicts.add(canonical_id)
-            else:
-                identities[canonical_id] = canonical_name
-        return {
-            player_id: player_name
-            for player_id, player_name in identities.items()
-            if player_id not in conflicts
-        }
 
     def get_season_rate(
         self, season: str, player_id: int
@@ -440,6 +406,7 @@ class PlayerGameLogRepository:
 
 __all__ = [
     "PlayerGameLogFreshness",
+    "PlayerGameLogPublication",
     "PlayerGameLogRecord",
     "PlayerGameLogRepository",
     "PlayerSeasonRate",

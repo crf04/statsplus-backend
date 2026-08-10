@@ -111,6 +111,9 @@ def _run(database_url: str) -> int:
             repository=player_game_log_repository,
             athlete_catalog=athlete_service,
             event_catalog=event_service,
+            minimum_active_players_per_team_game=(
+                settings.catalog.player_game_log_min_active_players_per_team_game
+            ),
         )
         return run_nightly_refresh(
             refresh_stats=data_service.update_all_data,

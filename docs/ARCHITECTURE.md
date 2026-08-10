@@ -514,15 +514,18 @@ bounded scalar-only telemetry; no name or matchup-text guess is accepted. A
 nonempty snapshot that yields no canonical rows fails the refresh before
 publication. For every non-postponed governed Regular Season event that is
 final and scheduled no later than the source observation time, the canonical
-snapshot must cover both exact event teams with at least five distinct players
-recording positive minutes per team. This exact completed-game invariant makes
-a truncated first publication fail closed without guessing an expected season
-total or requiring rows for future games or DNPs. If a fresh
-Athlete Catalog drops a player already present in the last complete
-same-season `nba_stats` publication, only that exact durable NBA player ID and
-canonical name may be reused. A never-published or durably ambiguous player
-remains unjoined, and recovered athlete identity never relaxes the exact event
-or team joins. Structurally, numerically, or logically malformed rows abort the
+snapshot must cover both exact event teams with at least the configured number
+of distinct players recording positive minutes per team (five by default). The
+positive whole-number minimum is injected from
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME`; it is named configuration,
+not an implicit sport constant. This exact completed-game invariant makes a
+truncated first publication fail closed without guessing an expected season
+total or requiring rows for future games or DNPs. Canonical player identity
+comes only from the fresh Athlete Catalog owner. If that catalog drops a
+previously known player, the source rows become bounded unjoined-athlete
+telemetry and the incomplete replacement fails while prior facts remain
+served; no stale name or player identity is recovered from player logs.
+Structurally, numerically, or logically malformed rows abort the
 publication while retaining already observed bounded coverage counts. If a
 new cumulative source row cannot join an athlete, event, or team and canonical
 publication would otherwise remain at or below its prior size, the apparent
@@ -542,11 +545,14 @@ provider rows collapse to one fact and increment bounded duplicate telemetry;
 conflicting duplicates fail closed at canonicalization, and the repository
 repeats that invariant for direct persistence callers. Any validation or
 database failure leaves both the prior rows and prior successful freshness
-unchanged and emits bounded rejection telemetry. A smaller canonical snapshot
-is accepted only as an exact recovery when every removed fact belongs to a
-game that the fresh Event Catalog has removed or explicitly made ineligible by
-phase/postponement; arbitrary provider shrink still fails. Recovery emits only
-the bounded removed-row count, never a game or athlete identifier. One
+unchanged and emits bounded rejection telemetry. Every replacement compares
+the complete prior and candidate `(player_id, game_id)` identity sets, even
+when additions make the candidate row count equal or larger. Removed facts are
+accepted only when every removed key belongs to a game that the fresh Event
+Catalog has removed or explicitly made ineligible by phase/postponement;
+removing a fact for an eligible game always fails. Recovery telemetry records
+the actual admitted removed-key count, never a net row-count delta or a game or
+athlete identifier. One
 service-boundary SQLAlchemy handler covers prerequisite catalog, identity, and
 freshness reads plus publication after repository rollback, without swallowing
 the error or counting it twice. An empty Regular Season
@@ -559,10 +565,10 @@ that empty Regular Season publication. An empty snapshot can never replace a
 prior nonempty publication. A missing Event Catalog or an empty snapshot after
 a completed Regular Season game within the source observation boundary fails
 closed and preserves the last valid facts and freshness. Because a season-wide
-log snapshot is cumulative, an unexplained nonempty replacement with fewer
-canonical rows than the prior successful publication also fails closed;
-equal-size corrections, growth, and the exact governed recovery above remain
-publishable. Every rejected refresh records
+log snapshot is cumulative, any unexplained removal of an eligible canonical
+identity fails closed even when additions produce net growth. Corrections that
+retain all identities, pure growth, and the exact governed recovery above
+remain publishable. Every rejected refresh records
 bounded scalar rejection and accumulated coverage counts without identities.
 Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
 TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,

@@ -75,6 +75,8 @@ the most important variables:
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `SLATE_SCHEDULE_MAX_AGE_HOURS` | No | `30`; freshness window for the nightly slate schedule surface |
+| `PLAYER_GAME_LOG_MAX_AGE_HOURS` | No | `30`; maximum age for configured-current-season durable player-log reads |
+| `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` | No | `5`; required positive-minute players for each team in a completed game |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
