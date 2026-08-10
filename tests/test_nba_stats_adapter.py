@@ -35,6 +35,7 @@ from app.providers.nba_stats import (
     REQUIRED_GAME_LOG_COLUMNS,
     normalize_archetype_game_logs,
     normalize_player_game_logs,
+    normalize_season_player_game_logs,
 )
 from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
 from app.services.game_service import GameService
@@ -482,6 +483,13 @@ def test_archetype_normalization_preserves_player_ids_for_cluster_filtering():
     assert normalized.loc[0, "PRA"] == 47
 
 
+def test_season_normalization_preserves_player_ids_and_exact_minutes():
+    normalized = normalize_season_player_game_logs(_recorded_provider_frame())
+
+    assert list(normalized["PLAYER_ID"]) == [203076] * 6
+    assert normalized.loc[0, "MIN"] == 35.233333333333334
+
+
 def test_missing_required_provider_column_is_centralized_provider_error():
     raw_frame = _recorded_provider_frame().drop(columns=["PTS"])
 
@@ -565,6 +573,33 @@ def test_adapter_fetches_and_filters_archetype_logs_through_provider_seam():
             "season_nullable": "2025-26",
             "season_type_nullable": "Regular Season",
             "opp_team_id_nullable": 1610612744,
+            "timeout": 2.5,
+        }
+    ]
+
+
+def test_adapter_fetches_complete_season_logs_in_one_provider_call():
+    calls: list[dict] = []
+
+    class RecordedEndpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [_recorded_provider_frame()]
+
+    adapter = NBAStatsAdapter(
+        settings=_test_settings(), endpoint_factory=RecordedEndpoint
+    )
+
+    normalized = adapter.get_season_player_game_logs(season="2025-26")
+
+    assert normalized.loc[0, "PLAYER_ID"] == 203076
+    assert normalized.loc[0, "MIN"] == 35.233333333333334
+    assert calls == [
+        {
+            "season_nullable": "2025-26",
+            "season_type_nullable": "Regular Season",
             "timeout": 2.5,
         }
     ]

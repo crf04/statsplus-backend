@@ -446,6 +446,15 @@ stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
+The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
+endpoint. It refreshes the stats tables, current-season Event Catalog, and then
+durable current-season player game logs, retrying that ordered unit once. The
+player-log step uses one season-wide provider read and publishes normalized
+player/game facts plus source and retrieval freshness transactionally. Failed
+or unjoined data preserves the last valid publication. These stored facts back
+future matchup rail and selection reads; this slice adds no public matchup
+route and does not change `GET /api/games/game_logs`.
+
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),
 `progress`, timestamps, and a sanitized `failure_summary` (provider or

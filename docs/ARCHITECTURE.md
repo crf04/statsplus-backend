@@ -74,7 +74,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -377,12 +377,22 @@ class NBAStatsProvider(Protocol):
         self, *, player_ids: Sequence[int], opponent_team_id: int,
         season: str, season_type: str = "Regular Season",
     ) -> pandas.DataFrame: ...
+
+    def get_season_player_game_logs(
+        self, *, season: str,
+        season_type: str = "Regular Season",
+    ) -> pandas.DataFrame: ...
 ```
 
 The production adapter owns endpoint construction, timeout, concurrency,
 telemetry, response normalization, and provider error translation. Tests inject
 the protocol into `GameService` or `PlayerService` rather than patching
 `nba_api`.
+
+`get_season_player_game_logs` is the refresh-only durable-log seam. It makes
+one season-wide `PlayerGameLogs` call, retains canonical `PLAYER_ID`, and keeps
+the provider's exact minutes rather than the request-time game-log route's
+historical whole-minute presentation. It is never called from an HTTP request.
 
 `NBAStatsAdapter.fetch_whole_season_schedule(season=...)` is the provider seam
 for the canonical event catalog. It accepts only an explicit canonical
@@ -469,11 +479,44 @@ freshness. `StatsFreshnessRepository.get()` returns the frozen stored fact
 `StatsFreshness(last_successful_completion=...)`; a null completion explicitly
 distinguishes the before-first-run state. A later presentation seam owns its
 translation into API `retrieved_at` and freshness status. The process-level
-`scripts/nightly_refresh.py` command runs that same stats service followed by
-the current-season Event Catalog refresh, retries the complete ordered unit
-exactly once after either failure, and returns a nonzero process status when
-both attempts fail. It is deployment-scheduled and has no HTTP/authentication
-dependency.
+`scripts/nightly_refresh.py` command runs that same stats service, the
+current-season Event Catalog refresh, and then the current-season
+player-game-log refresh. The schedule precedes game logs so every stored log
+joins against current canonical game/team identity. The command retries the
+complete ordered unit exactly once after any step fails and returns a nonzero
+process status when both attempts fail. It is deployment-scheduled and has no
+HTTP/authentication dependency.
+
+### Durable player game logs
+
+`PlayerGameLogService.refresh(season)` consumes the season-wide NBA Stats seam
+once during Nightly Refresh. Before publication, every provider `PLAYER_ID`
+must join exactly to `athlete_catalog` for the requested season and every
+`GAME_ID` plus per-game `TEAM_ID` must join exactly to `event_catalog`. Team and
+opponent tricodes and home/away identity come from that canonical event. An
+unjoined athlete, game, or team fails the refresh before publication; no name
+or matchup-text guess is accepted.
+
+Migration 011 creates `player_game_logs`, keyed by season, canonical player ID,
+and NBA game ID, plus `player_game_log_refreshes`, keyed by season. One season
+replacement and its `nba_stats` source, timezone-aware retrieval time, and row
+count commit in the same transaction. Exact duplicate provider rows collapse
+to one fact; conflicting duplicates fail closed. Any validation or database
+failure leaves both the prior rows and prior successful freshness unchanged.
+Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
+TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
+FG2A, season rates, and rolling selections are derived at read time rather
+than persisted in redundant tables.
+
+`PlayerGameLogRepository` is the internal query seam used by later matchup
+services. It returns Season-only per-game and per-minute Market Category
+rates, the last ten games' minutes in chronological sparkline order, H2H rows
+in deterministic recent-first order, and deterministic multi-player H2H rows
+for archetype sampling. Reads require a complete publication record; orphaned
+rows without one return no facts. Callers receive the stored retrieval time so
+their stats-surface freshness policy can report stale or missing data without
+synthesizing logs. Neither migration 011 nor these services add a public
+route.
 `DataRefreshJobService` writes queued/running/succeeded/failed transitions and
 a sanitized `failure_summary` (exception/provider text is never stored), and
 its partial unique index enforces at most one queued or running job per
@@ -1497,8 +1540,10 @@ construction.
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
 opening it for writes. Migration 009 creates the singleton `stats_refreshes`
-completion record. Migration tests must use a temporary database, and the
-validator must not be used to repair the fixture.
+completion record; migration 010 creates Player Pool snapshots; migration 011
+creates normalized player-game-log facts and their season freshness record.
+Migration tests must use a temporary database, and the validator must not be
+used to repair the fixture.
 
 ## Test seams
 

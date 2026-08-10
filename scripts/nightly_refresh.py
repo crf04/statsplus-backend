@@ -21,6 +21,7 @@ from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
+from app.services.player_game_log_service import PlayerGameLogService  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
     StatsFreshnessRepository,
 )
@@ -28,23 +29,30 @@ from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: 
 
 
 def run_nightly_refresh(
-    refresh_stats: Callable[[], Any], refresh_schedule: Callable[[], Any]
+    refresh_stats: Callable[[], Any],
+    refresh_schedule: Callable[[], Any],
+    refresh_player_game_logs: Callable[[], Any],
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
 
     for attempt in range(1, 3):
         failed_step = "stats"
-        try:
-            stats_succeeded = refresh_stats() is not False
-        except Exception:
-            stats_succeeded = False
-        if stats_succeeded:
-            failed_step = "schedule"
+        succeeded = True
+        for step, refresh in (
+            ("stats", refresh_stats),
+            ("schedule", refresh_schedule),
+            ("player game logs", refresh_player_game_logs),
+        ):
+            failed_step = step
             try:
-                refresh_schedule()
-                return 0
+                if refresh() is False:
+                    succeeded = False
+                    break
             except Exception:
-                pass
+                succeeded = False
+                break
+        if succeeded:
+            return 0
         disposition = "retrying" if attempt == 1 else "no retries remain"
         print(
             f"Nightly Refresh attempt {attempt} failed during "
@@ -79,9 +87,14 @@ def _run(database_url: str) -> int:
         event_service = EventCatalogService(
             engine, settings=settings, nba_stats_provider=provider
         )
+        player_game_log_service = PlayerGameLogService(
+            engine,
+            nba_stats_provider=provider,
+        )
         return run_nightly_refresh(
             data_service.update_all_data,
             lambda: event_service.refresh(settings.nba.current_season),
+            lambda: player_game_log_service.refresh(settings.nba.current_season),
         )
     finally:
         engine.dispose()

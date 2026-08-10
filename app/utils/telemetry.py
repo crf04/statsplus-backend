@@ -51,6 +51,7 @@ NBA_STATS_OPERATIONS = frozenset(
     {
         "health_probe",
         "player_game_logs",
+        "player_game_logs_season",
         "player_game_logs_recorded",
         "player_roster",
         "player_roster_recorded",

@@ -49,6 +49,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "008_create_event_mappings",
         "009_create_stats_freshness",
         "010_create_player_pool_snapshots",
+        "011_create_player_game_logs",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -74,6 +75,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "event_mapping_locks",
             "stats_refreshes",
             "player_pool_snapshots",
+            "player_game_logs",
+            "player_game_log_refreshes",
         ]
     )
     assert {
@@ -119,6 +122,40 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "refresh_version",
         "refresh_outcome",
     }
+    assert {
+        column["name"] for column in inspect(engine).get_columns("player_game_logs")
+    } == {
+        "season",
+        "player_id",
+        "game_id",
+        "player_name",
+        "game_date",
+        "team_id",
+        "team_tricode",
+        "opponent_team_id",
+        "opponent_team_tricode",
+        "is_home",
+        "minutes",
+        "points",
+        "rebounds",
+        "assists",
+        "field_goals_made",
+        "field_goals_attempted",
+        "three_pointers_made",
+        "three_pointers_attempted",
+        "turnovers",
+        "steals",
+        "blocks",
+    }
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_game_log_refreshes")
+    } == {
+        "season",
+        "source_provider",
+        "retrieved_at",
+        "row_count",
+    }
 
     with engine.connect() as connection:
         assert connection.execute(
@@ -134,6 +171,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (8, "008_create_event_mappings"),
             (9, "009_create_stats_freshness"),
             (10, "010_create_player_pool_snapshots"),
+            (11, "011_create_player_game_logs"),
         ]
 
 
@@ -158,12 +196,15 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "008_create_event_mappings",
         "009_create_stats_freshness",
         "010_create_player_pool_snapshots",
+        "011_create_player_game_logs",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
     assert inspect(engine).has_table("athlete_catalog")
     assert inspect(engine).has_table("event_catalog")
     assert inspect(engine).has_table("player_pool_snapshots")
+    assert inspect(engine).has_table("player_game_logs")
+    assert inspect(engine).has_table("player_game_log_refreshes")
 
 
 def test_demo_database_validation_is_read_only():
@@ -242,6 +283,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "event_mapping_locks",
             "stats_refreshes",
             "player_pool_snapshots",
+            "player_game_logs",
+            "player_game_log_refreshes",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -353,6 +396,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "008_create_event_mappings",
         "009_create_stats_freshness",
         "010_create_player_pool_snapshots",
+        "011_create_player_game_logs",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -382,9 +426,13 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
     upgraded = run_migrations(engine)
     repeated = run_migrations(engine)
 
-    assert upgraded.applied == ("010_create_player_pool_snapshots",)
-    assert upgraded.current_version == 10
+    assert upgraded.applied == (
+        "010_create_player_pool_snapshots",
+        "011_create_player_game_logs",
+    )
+    assert upgraded.current_version == 11
     assert repeated.applied == ()
-    assert repeated.current_version == 10
+    assert repeated.current_version == 11
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
+    assert inspect(engine).has_table("player_game_logs")

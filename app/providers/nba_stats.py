@@ -243,6 +243,14 @@ class NBAStatsProvider(Protocol):
     ) -> pd.DataFrame:
         """Return normalized logs for cluster members against one opponent."""
 
+    def get_season_player_game_logs(
+        self,
+        *,
+        season: str,
+        season_type: str = DEFAULT_SEASON_TYPE,
+    ) -> pd.DataFrame:
+        """Return every canonical player game log for one season."""
+
     def get_player_roster(self, *, season: str) -> pd.DataFrame:
         """Return the season-scoped canonical player roster."""
 
@@ -411,6 +419,7 @@ def _normalize_game_logs(
     raw_frame: pd.DataFrame,
     *,
     preserve_player_id: bool,
+    round_minutes: bool = True,
 ) -> pd.DataFrame:
     """Normalize one ``nba_api`` game-log response to an app-facing schema.
 
@@ -461,7 +470,11 @@ def _normalize_game_logs(
     # GameService historically exposed whole-minute values.  Keep that
     # contract at the provider boundary and avoid a pandas dtype surprise for
     # callers using an empty response.
-    frame["MIN"] = frame["MIN"].round().astype(int)
+    frame["MIN"] = (
+        frame["MIN"].round().astype(int)
+        if round_minutes
+        else frame["MIN"].astype(float)
+    )
     if preserve_player_id:
         frame["PLAYER_ID"] = frame["PLAYER_ID"].round().astype(int)
     frame["GAME_DATE"] = frame["GAME_DATE"].astype(str)
@@ -494,6 +507,16 @@ def normalize_archetype_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize game logs while retaining ``PLAYER_ID`` for cluster filters."""
 
     return _normalize_game_logs(raw_frame, preserve_player_id=True)
+
+
+def normalize_season_player_game_logs(raw_frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a full-season snapshot with identity and exact minutes."""
+
+    return _normalize_game_logs(
+        raw_frame,
+        preserve_player_id=True,
+        round_minutes=False,
+    )
 
 
 class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
@@ -560,6 +583,21 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         )
         return frame[frame["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
+    def get_season_player_game_logs(
+        self,
+        *,
+        season: str,
+        season_type: str = DEFAULT_SEASON_TYPE,
+    ) -> pd.DataFrame:
+        """Fetch all player rows for one season in one provider call."""
+
+        return self._get_normalized_game_logs(
+            normalize=normalize_season_player_game_logs,
+            operation="player_game_logs_season",
+            season_nullable=season,
+            season_type_nullable=season_type,
+        )
+
     def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
         return _InstrumentedNBAStatsAdapter.fetch_whole_season_schedule(self, season=season)
 
@@ -601,6 +639,7 @@ __all__ = [
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
     "normalize_player_game_logs",
+    "normalize_season_player_game_logs",
     "ROSTER_COLUMNS",
     "validate_canonical_season",
 ]
