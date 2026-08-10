@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Protocol
+from datetime import datetime, timedelta, timezone
+import threading
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.providers.dfs import (
@@ -17,6 +18,7 @@ from app.providers.dfs import (
 )
 from app.services.dfs_board import DFSBoard, ProviderOutcome
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryRecorder,
@@ -78,6 +80,8 @@ class PlayerPoolService:
         statistic_catalog: StatisticCatalog,
         *,
         telemetry_recorder: PlayerPoolTelemetryRecorder | None = None,
+        snapshot_repository: PlayerPoolSnapshotRepository | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.board_service = board_service
         self.market_categories = {
@@ -88,8 +92,48 @@ class PlayerPoolService:
         self.telemetry_recorder = (
             telemetry_recorder or BoundedPlayerPoolTelemetryRecorder()
         )
+        self.snapshot_repository = snapshot_repository
+        self.clock = clock
+        self._locks_guard = threading.Lock()
+        self._locks: dict[tuple[str, tuple[str, ...]], threading.Lock] = {}
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
+        slate_games = tuple(sorted({str(game_id) for game_id in game_ids}))
+        if self.snapshot_repository is None:
+            return self._collect_pool(season=season, game_ids=slate_games)
+        key = (season, slate_games)
+        with self._locks_guard:
+            lock = self._locks.setdefault(key, threading.Lock())
+        with lock:
+            return self._get_persisted_pool(season=season, game_ids=slate_games)
+
+    def _get_persisted_pool(self, *, season: str, game_ids: tuple[str, ...]) -> PlayerPool:
+        now = self.clock().astimezone(timezone.utc)
+        stored = self.snapshot_repository.get(season=season, game_ids=game_ids)
+        if stored is not None and now - stored.retrieved_at <= timedelta(minutes=15):
+            return self._decode_pool(stored.payload)
+
+        refreshed = self._collect_pool(season=season, game_ids=game_ids)
+        providers = refreshed.freshness["providers"]
+        total_failure = bool(providers) and all(
+            provider["status"] == "missing" for provider in providers.values()
+        )
+        if not total_failure:
+            retrieved_at = refreshed.freshness.get("retrieved_at")
+            if retrieved_at is not None:
+                self.snapshot_repository.replace(
+                    season=season,
+                    game_ids=game_ids,
+                    payload=self._encode_pool(refreshed),
+                    retrieved_at=datetime.fromisoformat(retrieved_at),
+                )
+            return refreshed
+
+        if stored is not None and now - stored.retrieved_at <= timedelta(hours=6):
+            return self._stale_pool(stored.payload, providers)
+        return refreshed
+
+    def _collect_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         board = self.board_service.get_board(
             NBAMarketQuery(
                 season=season,
@@ -178,6 +222,73 @@ class PlayerPoolService:
             players=players,
             team_counts=team_counts,
             freshness=self._freshness(board.provider_outcomes),
+        )
+
+    @staticmethod
+    def _encode_pool(pool: PlayerPool) -> dict[str, Any]:
+        return {
+            "players": [
+                {
+                    "canonical_player_id": player.canonical_player_id,
+                    "name": player.name,
+                    "team_id": player.team_id,
+                    "market_categories": list(player.market_categories),
+                    "provenance": {
+                        provider: list(categories)
+                        for provider, categories in player.provenance.items()
+                    },
+                }
+                for player in pool.players
+            ],
+            "team_counts": {str(team_id): count for team_id, count in pool.team_counts.items()},
+            "freshness": dict(pool.freshness),
+        }
+
+    @staticmethod
+    def _decode_pool(payload: Mapping[str, Any]) -> PlayerPool:
+        players = tuple(
+            PoolPlayer(
+                canonical_player_id=int(player["canonical_player_id"]),
+                name=str(player["name"]),
+                team_id=int(player["team_id"]),
+                market_categories=tuple(player["market_categories"]),
+                provenance={
+                    str(provider): tuple(categories)
+                    for provider, categories in player["provenance"].items()
+                },
+            )
+            for player in payload["players"]
+        )
+        return PlayerPool(
+            players=players,
+            team_counts={int(team_id): int(count) for team_id, count in payload["team_counts"].items()},
+            freshness=payload["freshness"],
+        )
+
+    @classmethod
+    def _stale_pool(
+        cls,
+        payload: Mapping[str, Any],
+        failed_providers: Mapping[str, Any],
+    ) -> PlayerPool:
+        pool = cls._decode_pool(payload)
+        providers = {
+            provider: {
+                "status": "stale-served" if state["retrieved_at"] is not None else "missing",
+                "retrieved_at": state["retrieved_at"],
+            }
+            for provider, state in pool.freshness["providers"].items()
+        }
+        for provider in failed_providers:
+            providers.setdefault(provider, {"status": "missing", "retrieved_at": None})
+        return PlayerPool(
+            players=pool.players,
+            team_counts=pool.team_counts,
+            freshness={
+                "status": "stale-served",
+                "retrieved_at": pool.freshness["retrieved_at"],
+                "providers": providers,
+            },
         )
 
     @staticmethod

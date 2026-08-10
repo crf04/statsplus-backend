@@ -272,9 +272,15 @@ is fresh information and produces zero counts. If every provider is missing,
 the aggregate is `unavailable`. If every attempted provider succeeds, the
 aggregate is `fresh`. When usable and missing provider observations disagree,
 aggregate `status` is omitted so the frontend derives its documented partial
-presentation from the provider entries. The union uses every usable observation. This route
-performs a live board collection on every request; stored-snapshot and
-stale-served behavior belongs to the later persistence slice.
+presentation from the provider entries. The union uses every usable observation.
+Player Pool snapshots are persisted by season and exact Slate game set. A
+snapshot no more than 15 minutes old is reused without another board fetch and
+retains each provider's actual `retrieved_at`. The first later request refreshes
+the pool lazily. A partial refresh replaces the prior union with only usable
+providers and marks failures `missing`. On total board failure, the last pool
+is served through six hours with aggregate and contributing-provider status
+`stale-served`; beyond six hours the pool is empty and `unavailable`. No
+synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union.
 

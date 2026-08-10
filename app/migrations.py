@@ -206,6 +206,13 @@ def _create_stats_freshness_table(connection: Connection) -> None:
     StatsRefresh.__table__.create(connection, checkfirst=True)
 
 
+def _create_player_pool_snapshot_table(connection: Connection) -> None:
+    """Create persisted governed Player Pool observations."""
+    from app.models.player_pool_snapshot import PlayerPoolSnapshot
+
+    PlayerPoolSnapshot.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -220,6 +227,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(8, "008_create_event_mappings", _create_event_mapping_tables),
     Migration(9, "009_create_stats_freshness", _create_stats_freshness_table),
+    Migration(10, "010_create_player_pool_snapshots", _create_player_pool_snapshot_table),
 )
 
 

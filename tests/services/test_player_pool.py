@@ -1,10 +1,12 @@
 """Behavioral tests for the live Player Pool assembled from DFS boards."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import fields, replace
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import pytest
+from sqlalchemy import create_engine
 
 from app.domain.statistics import MatchReason, MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
@@ -20,7 +22,9 @@ from app.providers.dfs import (
     ProviderSnapshot,
     SnapshotStatus,
 )
+from app.migrations import run_migrations
 from app.services.player_pool import PlayerPoolService
+from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
 from app.services.athlete_resolver import (
     AthleteResolution,
     AthleteResolver,
@@ -79,6 +83,16 @@ class RecordedBoardService:
     def get_board(self, query):
         self.queries.append(query)
         return self.board
+
+
+class SequencedBoardService:
+    def __init__(self, *boards):
+        self.boards = list(boards)
+        self.queries = []
+
+    def get_board(self, query):
+        self.queries.append(query)
+        return self.boards.pop(0)
 
 
 class RecordedTelemetry:
@@ -214,6 +228,148 @@ def _board(provider_outcomes, athlete_outcomes=(), event_outcomes=()):
         generated_at=NOW, mapping_outcomes=tuple(athlete_outcomes),
         event_mapping_outcomes=tuple(event_outcomes),
     )
+
+
+def _persistent_service(tmp_path, board_service, clock):
+    engine = create_engine(f"sqlite:///{tmp_path / 'pool.sqlite3'}")
+    run_migrations(engine)
+    return PlayerPoolService(
+        board_service,
+        CATALOG,
+        snapshot_repository=PlayerPoolSnapshotRepository(engine),
+        clock=clock,
+    )
+
+
+def _joined_board(*provider_players):
+    outcomes = []
+    athletes = []
+    events = []
+    for provider, provider_player_id, canonical_player_id in provider_players:
+        outcomes.append(
+            _provider_outcome(
+                provider,
+                [_market(provider, provider_player_id, "points")],
+            )
+        )
+        athletes.append(
+            _athlete_outcome(
+                provider,
+                provider_player_id,
+                canonical_player_id,
+                1,
+                f"Player {canonical_player_id}",
+            )
+        )
+        events.append(_event_outcome(provider, "game-1", "0022500001"))
+    return _board(outcomes, athletes, events)
+
+
+def test_persisted_pool_reuses_snapshot_through_fifteen_minutes(tmp_path):
+    now = [NOW]
+    boards = SequencedBoardService(_joined_board(("prizepicks", "pp-1", 101)))
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+
+    first = service.get_pool(season="2025-26", game_ids={"0022500001"})
+    now[0] += timedelta(minutes=15)
+    second = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert len(boards.queries) == 1
+    assert second == first
+    assert second.freshness["retrieved_at"] == NOW.isoformat()
+
+
+def test_total_failure_stale_serves_snapshot_through_six_hours(tmp_path):
+    now = [NOW]
+    boards = SequencedBoardService(
+        _joined_board(("prizepicks", "pp-1", 101)),
+        _board((_provider_outcome("prizepicks", failed=True),)),
+    )
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+    service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    now[0] += timedelta(hours=6)
+    stale = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert [player.canonical_player_id for player in stale.players] == [101]
+    assert stale.freshness == {
+        "status": "stale-served",
+        "retrieved_at": NOW.isoformat(),
+        "providers": {
+            "prizepicks": {
+                "status": "stale-served",
+                "retrieved_at": NOW.isoformat(),
+            }
+        },
+    }
+
+
+def test_total_failure_past_six_hours_returns_honest_unavailable_pool(tmp_path):
+    now = [NOW]
+    boards = SequencedBoardService(
+        _joined_board(("prizepicks", "pp-1", 101)),
+        _board((_provider_outcome("prizepicks", failed=True),)),
+    )
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+    service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    now[0] += timedelta(hours=6, microseconds=1)
+    unavailable = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert unavailable.players == ()
+    assert unavailable.team_counts == {}
+    assert unavailable.freshness == {
+        "status": "unavailable",
+        "retrieved_at": None,
+        "providers": {
+            "prizepicks": {"status": "missing", "retrieved_at": None}
+        },
+    }
+
+
+def test_partial_refresh_replaces_union_and_reports_missing_provider(tmp_path):
+    now = [NOW]
+    initial = _joined_board(
+        ("prizepicks", "pp-1", 101),
+        ("underdog", "ud-2", 202),
+    )
+    partial = _joined_board(("prizepicks", "pp-1", 101))
+    partial = replace(
+        partial,
+        provider_outcomes=partial.provider_outcomes
+        + (_provider_outcome("underdog", failed=True),),
+    )
+    boards = SequencedBoardService(initial, partial)
+    service = _persistent_service(tmp_path, boards, lambda: now[0])
+    service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    now[0] += timedelta(minutes=15, microseconds=1)
+    refreshed = service.get_pool(season="2025-26", game_ids={"0022500001"})
+
+    assert [player.canonical_player_id for player in refreshed.players] == [101]
+    assert "status" not in refreshed.freshness
+    assert refreshed.freshness["providers"]["underdog"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
+
+
+def test_simultaneous_pool_requests_share_one_atomic_refresh(tmp_path):
+    boards = SequencedBoardService(_joined_board(("prizepicks", "pp-1", 101)))
+    service = _persistent_service(tmp_path, boards, lambda: NOW)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pools = tuple(
+            executor.map(
+                lambda _: service.get_pool(
+                    season="2025-26", game_ids={"0022500001"}
+                ),
+                range(2),
+            )
+        )
+
+    assert len(boards.queries) == 1
+    assert pools[0] == pools[1]
 
 
 @pytest.mark.parametrize(("provider_team", "canonical_team"), [("PHO", "PHX"), ("NO", "NOP")])
