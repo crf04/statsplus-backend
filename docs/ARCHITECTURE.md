@@ -74,8 +74,8 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_opponent`, `health_probe` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -484,7 +484,8 @@ distinguishes the before-first-run state. A later presentation seam owns its
 translation into API `retrieved_at` and freshness status. The process-level
 `scripts/nightly_refresh.py` command runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog
-refresh, and then the current-season player-game-log refresh. The two catalogs
+refresh, the current-season player-game-log refresh, Season player Diets, and
+then team matchup facts. The two catalogs
 precede game logs so every stored log joins against current canonical
 player/game/team identity. `DataService.update_all_data` publishes the legacy
 `player_information` table, not the season-owned Athlete Catalog or its
@@ -692,11 +693,69 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+### Durable Season player Diet facts
+
+`PlayerDietService` is the Nightly Refresh's fifth ordered step, after the
+stats-table, Event Catalog, Athlete Catalog, and durable player-game-log
+refreshes and before team matchup facts. It exposes only
+`refresh(season)` and `get_for_players(season, player_ids)`. The query is a
+stored bulk read and never contacts a provider. Player Diets are Season-only:
+there is no player Last-15 window and no traditional Diet Base.
+
+One refresh has a fixed 16-call plan: the 11 offensive `PLAY_TYPES` through
+player Synergy with `POSS_PCT`, `POSS`, and `GP`; the three `SHOOTING_TYPES`
+through league-wide `LeagueDashPlayerPtShot` GeneralRange calls with
+`FGA_FREQUENCY`, `FGA`, and `GP`; one league-wide
+`LeagueDashPlayerShotLocations` call; and one PBP player-totals call. Shot-zone
+games played come from the three fixed player-shot observations; the joined
+union must cover every shot-location player and may not disagree on `GP`.
+When the shot-type Base is malformed or cannot join, the shot-zone response is
+still validated independently but cannot become a fact without authoritative
+games played. Prior valid zone facts remain stored, and the newer shot-zone
+observation is therefore
+`unavailable/missing_games_played_evidence`, not
+`unavailable/provider_invalid_response`.
+There are no per-player shot calls and no request-time fallback.
+
+Canonical player identity comes only from the fresh, nonempty Season Athlete
+Catalog. NBA rows retain `PLAYER_ID`; PBP rows retain `EntityId`. Names are
+evidence only and are never a join. An unjoined provider identity makes its
+whole Base unavailable rather than publishing a partial canonical Base.
+Available facts require unique `(season, player, Base, slice)` identities,
+finite shares in `[0,1]`, finite nonnegative volumes, and positive whole-number
+games played. Provider-origin finite domain violations and duplicate fact
+identities degrade only their Base as
+`unavailable/provider_invalid_response`; validation is repeated at repository
+publication as a direct-caller guard. Play types store provider possession
+share and possession volume directly; they never reuse the legacy
+percentage-of-points transform. Shot
+types store provider FGA frequency and FGA. Shot zones store five nonoverlapping
+display slices, using the provider's aggregate `Corner 3` and excluding its
+duplicating left/right children and Backcourt. Assist-location volume uses the
+five nonoverlapping PBP location counters divided by total assists. PBP's wire
+rows are sparse: canonical identity, games played, and total assists are strict;
+an omitted named location counter stays absent and never becomes a synthetic
+zero fact.
+
+Migration 013 creates `player_diet_facts` and
+`player_diet_surface_observations` after landed migrations 011 and 012. Facts
+carry raw share, raw volume, games played, volume unit, provider, and a
+timezone-aware retrieval time. Observations are the single per-Base authority
+for `available`, `unavailable`, or `missing` plus a bounded reason. All four
+observations and every available Base are validated before one transaction.
+The transaction replaces available Bases and the observation set together;
+degraded Bases retain their last valid facts with their older retrieval time,
+while the newer observation states the degradation. A transport or database
+failure publishes nothing, so Nightly's existing whole-unit retry starts again
+from stats. Bulk reads return even very small raw shares; display thresholds
+are deliberately outside this module, and absent requested players or slices
+never receive synthetic zero facts.
+
 ### Window-aware team matchup facts
 
-`TeamMatchupRefreshService` is the Nightly Refresh's fifth ordered step, after
-the stats-table, canonical Event Catalog, Athlete Catalog, and durable player
-game-log refreshes. It publishes two
+`TeamMatchupRefreshService` is the Nightly Refresh's sixth ordered step, after
+the stats-table, canonical Event Catalog, Athlete Catalog, durable player
+game-log, and Season player-Diet refreshes. It publishes two
 internal team windows for the current product: Season and exact rolling 15
 games. There is deliberately no public matchup route in this layer; the narrow
 consumer seams are `TeamMatchupQueryService.get_window(scope)` and
@@ -780,7 +839,8 @@ becomes a fact-free unavailable observation and leaves prior valid facts
 intact. A provider transport,
 constraint, or transaction failure likewise leaves both prior snapshots
 intact; the Nightly Refresh retries the complete stats → schedule →
-athlete catalog → player game logs → team matchups unit once. A provider response that reaches its adapter but is
+athlete catalog → player game logs → player diets → team matchups unit once. A
+provider response that reaches its adapter but is
 malformed instead degrades only that surface as
 `unavailable/provider_malformed_response`, preserves its prior valid facts,
 and allows other surfaces to publish. The query service defensively degrades only an
@@ -1792,6 +1852,7 @@ construction.
 Migration 012 creates the raw window-aware team matchup tables described
 above after migration 011's canonical player game logs. Migration tests pin
 that order and exercise a fresh apply plus an idempotent rerun.
+Migration 013 then creates the Season player Diet fact and observation tables.
 
 The tracked `nba_play_types.db` file is a public read-only fixture. Run
 `scripts/validate_demo_db.py` to check its required tables and columns without
@@ -1809,6 +1870,10 @@ used to repair the fixture.
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
 - Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`) with no network.
+- Player Diet provider contracts: run `tests/fixtures/player_diets/` through
+  `parse_recorded_player_diet` and
+  `PBPTotalsAdapter.parse_player_diet_totals`; these fixtures pin canonical
+  player IDs and raw Season share, volume, and game fields without network.
 - DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
   against its recorded fixtures through `get_snapshot`; the shared compliance
   suite verifies the same immutable `ProviderSnapshot` boundary for all three.

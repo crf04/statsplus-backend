@@ -236,6 +236,17 @@ def _create_team_matchup_fact_tables(connection: Connection) -> None:
     TeamMatchupSurfaceObservationRow.__table__.create(connection, checkfirst=True)
 
 
+def _create_player_diet_fact_tables(connection: Connection) -> None:
+    """Create Season player Diet facts and per-Base observations."""
+    from app.models.player_diet import (
+        PlayerDietFactRow,
+        PlayerDietSurfaceObservationRow,
+    )
+
+    PlayerDietFactRow.__table__.create(connection, checkfirst=True)
+    PlayerDietSurfaceObservationRow.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -253,6 +264,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(10, "010_create_player_pool_snapshots", _create_player_pool_snapshot_table),
     Migration(11, "011_create_player_game_logs", _create_player_game_log_tables),
     Migration(12, "012_create_team_matchup_facts", _create_team_matchup_fact_tables),
+    Migration(13, "013_create_player_diet_facts", _create_player_diet_fact_tables),
 )
 
 

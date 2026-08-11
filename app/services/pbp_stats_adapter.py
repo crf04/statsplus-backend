@@ -61,6 +61,23 @@ PBP_REQUIRED_COLUMNS: dict[PBPDataKind, tuple[str, ...]] = {
     "player": PBP_PLAYER_REQUIRED_COLUMNS,
     "opponent": PBP_OPPONENT_REQUIRED_COLUMNS,
 }
+PBP_PLAYER_DIET_IDENTITY_COLUMNS: tuple[str, ...] = (
+    "EntityId",
+    "Name",
+    "GamesPlayed",
+    "Assists",
+)
+PBP_PLAYER_DIET_VOLUME_COLUMNS: tuple[str, ...] = (
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+PBP_PLAYER_DIET_COLUMNS = (
+    *PBP_PLAYER_DIET_IDENTITY_COLUMNS,
+    *PBP_PLAYER_DIET_VOLUME_COLUMNS,
+)
 
 
 class PBPTotalsAdapter:
@@ -151,6 +168,23 @@ class PBPTotalsAdapter:
                 ) from error
             return type(self).parse_totals(payload, data_type=data_type)
 
+    def fetch_player_diet_totals(self, *, season: str) -> pd.DataFrame:
+        """Fetch one league-wide player total set for assist-location Diets."""
+
+        params = {
+            "Season": season,
+            "SeasonType": PBP_REGULAR_SEASON,
+            "Type": "Player",
+        }
+        with self._request("get_totals_player_diet", params) as response:
+            try:
+                payload = response.json()
+            except ValueError as error:
+                raise ProviderResponseError(
+                    "PBP Stats returned a response that was not valid JSON."
+                ) from error
+            return type(self).parse_player_diet_totals(payload)
+
     def health_probe(self) -> int:
         """Check ``api.pbpstats.com`` using its own timeout and telemetry seam."""
         with self._request(
@@ -206,6 +240,43 @@ class PBPTotalsAdapter:
             )
         return pd.DataFrame(rows)
 
+    @staticmethod
+    def parse_player_diet_totals(payload: Any) -> pd.DataFrame:
+        """Project sparse PBP player rows to the exact Diet contract."""
+
+        rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ProviderResponseError(
+                "PBP Stats player Diet payload is missing a list of rows."
+            )
+        if not all(isinstance(row, dict) for row in rows):
+            raise ProviderResponseError(
+                "PBP Stats player Diet payload contains malformed rows."
+            )
+        if any(
+            any(column not in row for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS)
+            for row in rows
+        ):
+            raise ProviderResponseError(
+                "PBP Stats player Diet payload has an invalid schema."
+            )
+        return pd.DataFrame(
+            [
+                {
+                    **{
+                        column: row[column]
+                        for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS
+                    },
+                    **{
+                        column: row.get(column)
+                        for column in PBP_PLAYER_DIET_VOLUME_COLUMNS
+                    },
+                }
+                for row in rows
+            ],
+            columns=PBP_PLAYER_DIET_COLUMNS,
+        )
+
 
 __all__ = [
     "PBP_TOTALS_URL",
@@ -213,5 +284,8 @@ __all__ = [
     "PBP_PLAYER_REQUIRED_COLUMNS",
     "PBP_OPPONENT_REQUIRED_COLUMNS",
     "PBP_REQUIRED_COLUMNS",
+    "PBP_PLAYER_DIET_COLUMNS",
+    "PBP_PLAYER_DIET_IDENTITY_COLUMNS",
+    "PBP_PLAYER_DIET_VOLUME_COLUMNS",
     "PBPTotalsAdapter",
 ]

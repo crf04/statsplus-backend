@@ -38,7 +38,10 @@ from app.providers.nba_stats import (
     normalize_season_player_game_logs,
 )
 from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
-from app.services.nba_stats_adapter import parse_recorded_game_logs
+from app.services.nba_stats_adapter import (
+    parse_recorded_game_logs,
+    parse_recorded_player_diet,
+)
 from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
@@ -47,6 +50,9 @@ PLAYOFF_FIXTURE_PATH = (
     / "fixtures"
     / "nba_stats"
     / "player_game_logs.playoffs.json"
+)
+PLAYER_SHOT_ZONE_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "player_diets" / "shot_zones.json"
 )
 
 
@@ -840,6 +846,233 @@ def test_synergy_play_types_uses_the_installed_endpoint_league_id_keyword(
             "timeout": adapter.timeout,
         }
     ]
+
+
+def test_player_diet_synergy_uses_pinned_offensive_season_contract(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{
+                        "PLAYER_ID": 2544,
+                        "PLAYER_NAME": "LeBron James",
+                        "TEAM_ABBREVIATION": "LAL",
+                        "PLAY_TYPE": "Isolation",
+                        "TYPE_GROUPING": "Offensive",
+                        "GP": 40,
+                        "POSS_PCT": 0.2,
+                        "POSS": 120,
+                        "PTS": 100,
+                    }]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "SynergyPlayTypes", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    frame = adapter.fetch_synergy_play_types(
+        "Isolation",
+        player_or_team_abbreviation="P",
+        type_grouping="Offensive",
+        season="2025-26",
+        season_type="Regular Season",
+        per_mode_simple="Totals",
+    )
+
+    assert frame.loc[0, "PLAYER_ID"] == 2544
+    assert calls == [
+        {
+            "play_type_nullable": "Isolation",
+            "player_or_team_abbreviation": "P",
+            "type_grouping_nullable": "Offensive",
+            "league_id": "00",
+            "season": "2025-26",
+            "season_type_all_star": "Regular Season",
+            "per_mode_simple": "Totals",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_player_diet_shot_type_uses_pinned_league_dash_player_contract(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{
+                        "PLAYER_ID": 2544,
+                        "PLAYER_NAME": "LeBron James",
+                        "GP": 40,
+                        "FGA_FREQUENCY": 0.25,
+                        "FGA": 100,
+                    }]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerPtShot", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    frame = adapter.fetch_player_shot_type(
+        "Catch and Shoot",
+        season="2025-26",
+        season_type="Regular Season",
+        per_mode_simple="Totals",
+    )
+
+    assert frame.loc[0, "PLAYER_ID"] == 2544
+    assert calls == [
+        {
+            "general_range_nullable": "Catch and Shoot",
+            "season": "2025-26",
+            "season_type_all_star": "Regular Season",
+            "per_mode_simple": "Totals",
+            "league_id": "00",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_player_synergy_contract_requires_canonical_identity_share_volume_and_games(
+    monkeypatch,
+):
+    from app.utils.telemetry import ProviderResponseError
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{
+                        "PLAYER_NAME": "LeBron James",
+                        "TEAM_ABBREVIATION": "LAL",
+                        "PTS": 100,
+                    }]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "SynergyPlayTypes", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    with pytest.raises(ProviderResponseError):
+        adapter.fetch_synergy_play_types(
+            "Isolation",
+            player_or_team_abbreviation="P",
+            type_grouping="Offensive",
+            season="2025-26",
+            per_mode_simple="Totals",
+        )
+
+
+def test_player_synergy_contract_keeps_legacy_team_and_points_requirements(
+    monkeypatch,
+):
+    from app.utils.telemetry import ProviderResponseError
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{
+                        "PLAYER_ID": 2544,
+                        "PLAYER_NAME": "LeBron James",
+                        "PLAY_TYPE": "Isolation",
+                        "TYPE_GROUPING": "Offensive",
+                        "GP": 40,
+                        "POSS_PCT": 0.2,
+                        "POSS": 120,
+                    }]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "SynergyPlayTypes", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    with pytest.raises(ProviderResponseError):
+        adapter.fetch_synergy_play_types(
+            "Isolation",
+            player_or_team_abbreviation="P",
+            type_grouping="Offensive",
+            season="2025-26",
+            per_mode_simple="Totals",
+        )
+
+
+def test_player_diet_shot_zones_use_one_pinned_league_wide_season_call(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{
+                        "PLAYER_ID": 2544,
+                        "PLAYER_NAME": "LeBron James",
+                        "TEAM_ID": 1610612747,
+                    }]
+                )
+            ]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerShotLocations", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_player_shooting_zone(
+        season="2025-26",
+        season_type="Regular Season",
+        per_mode_detailed="Totals",
+    )
+
+    assert calls == [
+        {
+            "distance_range": "By Zone",
+            "per_mode_detailed": "Totals",
+            "date_from_nullable": None,
+            "season": "2025-26",
+            "season_type_all_star": "Regular Season",
+            "timeout": adapter.timeout,
+        }
+    ]
+
+
+def test_player_shot_zones_accept_the_recorded_multilevel_provider_schema(monkeypatch):
+    payload = json.loads(PLAYER_SHOT_ZONE_FIXTURE_PATH.read_text(encoding="utf-8"))
+    recorded_frame = parse_recorded_player_diet(payload, kind="shot_zones")
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [recorded_frame]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerShotLocations", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    frame = adapter.fetch_player_shooting_zone(
+        season="2025-26",
+        season_type="Regular Season",
+        per_mode_detailed="Totals",
+    )
+
+    assert frame.loc[0, ("", "PLAYER_ID")] == 1630639
+    assert frame.loc[0, ("Corner 3", "FGA")] == 32
 
 
 def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):

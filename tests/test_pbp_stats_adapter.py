@@ -200,6 +200,78 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
     ]
 
 
+def test_player_diet_totals_project_sparse_rows_through_a_strict_identity_contract():
+    payload = {
+        "multi_row_table_data": [
+            {
+                "EntityId": "2544",
+                "Name": "LeBron James",
+                "GamesPlayed": 40,
+                "Assists": 100,
+                "Arc3Assists": 20,
+                "Corner3Assists": 10,
+                "AtRimAssists": 30,
+                "ShortMidRangeAssists": 25,
+                "LongMidRangeAssists": 15,
+                "OnlyOnThisRow": 1,
+            },
+            {
+                "EntityId": "201939",
+                "Name": "Stephen Curry",
+                "GamesPlayed": 39,
+                "Assists": 80,
+                "Arc3Assists": 16,
+                "Corner3Assists": 8,
+                "AtRimAssists": 24,
+                "ShortMidRangeAssists": 20,
+                "DifferentSparseExtra": 1,
+            },
+        ]
+    }
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload=payload)
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    frame = adapter.fetch_player_diet_totals(season="2025-26")
+
+    assert list(frame.columns) == [
+        "EntityId",
+        "Name",
+        "GamesPlayed",
+        "Assists",
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    ]
+    assert frame["EntityId"].tolist() == ["2544", "201939"]
+    assert frame.loc[0, "LongMidRangeAssists"] == 15
+    assert pd.isna(frame.loc[1, "LongMidRangeAssists"])
+    assert calls == [
+        (
+            (adapter.base_url,),
+            {
+                "params": {
+                    "Season": "2025-26",
+                    "SeasonType": "Regular+Season",
+                    "Type": "Player",
+                },
+                "timeout": (1.0, 2.0),
+            },
+        )
+    ]
+    assert telemetry.get_recorded_provider_events()[-1]["operation"] == (
+        "get_totals_player_diet"
+    )
+
+
 def test_health_probe_uses_the_same_canonical_season_type_as_totals():
     fake_session = requests.Session()
     calls = []

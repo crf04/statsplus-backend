@@ -152,9 +152,9 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The process runs five named current-season steps in this exact order: stats
-tables, Event Catalog schedule, Athlete Catalog, durable player game logs, then
-internal Season/exact-team-Last-15 matchup facts.
+The process runs six named current-season steps in this exact order: stats
+tables, Event Catalog schedule, Athlete Catalog, durable player game logs,
+Season player Diet facts, then internal Season/exact-team-Last-15 matchup facts.
 If a step fails, later steps in that attempt do not run and the whole unit
 starts over once. A failed Athlete Catalog therefore never suppresses the
 required schedule refresh that precedes it, while player logs remain untouched.
@@ -164,6 +164,10 @@ atomically.
 Recorded Regular Season and Playoffs payloads under
 `tests/fixtures/nba_stats/` exercise both phase calls through the production
 parser without network access.
+The player-Diet step makes exactly 16 league-wide Season calls: 11 offensive
+player Synergy play types, three `LeagueDashPlayerPtShot` GeneralRange calls,
+one `LeagueDashPlayerShotLocations` call, and one PBP player-totals call. It
+never fans out by player and has no request-time provider fallback.
 After the single retry the process exits nonzero and names the failed step;
 success exits zero. Each owning service preserves its prior publication on
 failure. The two matchup windows publish together. Matchup reads distinguish

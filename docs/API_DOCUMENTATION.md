@@ -552,7 +552,8 @@ this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
 endpoint. It refreshes the stats tables, current-season Event Catalog,
-current-season Athlete Catalog, and then durable current-season player game logs,
+current-season Athlete Catalog, durable current-season player game logs,
+Season player Diet facts, and then team matchup facts,
 retrying that ordered unit once. The player-log step uses exactly two
 season-wide provider reads—one `Regular Season`, one `Playoffs`—and publishes
 their normalized player/game facts plus the season sidecar as one transaction.
@@ -627,6 +628,21 @@ requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns
 Regular Season rates and oldest-to-newest combined-phase last tens for multiple
 canonical player IDs with one player-log rows query.
+
+The internal `PlayerDietService` is not an HTTP endpoint. Its
+`refresh(season)` operation joins only through the fresh Season Athlete
+Catalog and publishes raw shares plus raw volumes for `play_types`,
+`shot_zones`, `shot_types`, and `assist_locations`. Its bulk read,
+`get_for_players(season, player_ids)`, returns stored facts without display
+thresholds, together with the latest per-Base `available | unavailable |
+missing` observations and timezone-aware retrieval times. Player Diets are
+Season-only: they have no Last-15 values and no traditional Base. Degraded
+Bases remain explicit and never synthesize zero facts; request-time reads call
+no provider. Invalid provider domains or duplicate fact identities are
+`unavailable/provider_invalid_response` for only the affected Base. Because
+shot zones carry no `GP`, a valid zone response becomes
+`unavailable/missing_games_played_evidence` when the shot-type Base supplying
+that evidence is unavailable.
 
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),

@@ -31,6 +31,14 @@ is not a cross-process lock, so the maximum simultaneous calls the whole
 application can make is
 `workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
 
+Season player Diet collection uses the same NBA Stats timeout/concurrency and
+PBP Stats transport settings as the other Nightly provider calls. It has no
+display-threshold setting: the durable bulk seam always returns raw shares and
+volumes, and the frontend owns chip thresholds. It also has no Last-15 or
+request-time fallback setting; `NBASeasonSettings.current_season` selects the
+explicit Nightly Season and each stored Base carries its own timezone-aware
+retrieval time and availability observation.
+
 The internal DFS collector receives an explicit injected provider registry. In
 development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
 adapters. Tests and local experiments may explicitly configure the recorded
