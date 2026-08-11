@@ -582,6 +582,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
             if market in {"TOV", "STL", "BLK", "STKS"}:
                 assert "blend" not in window
             else:
+                assert window["components"]
                 assert set(window["blend"]) == {"value", "thin"}
                 assert isinstance(window["blend"]["value"], float)
                 assert isinstance(window["blend"]["thin"], bool)

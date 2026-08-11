@@ -672,16 +672,71 @@ def test_complete_provider_rounded_diet_partitions_score_without_normalization()
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
     assert player["scores"]["PTS"]["season"] == {
-        "components": {"play_types": {"value": 0.0978, "thin": False}},
-        "blend": {"value": 0.0978, "thin": False},
+        "components": {"play_types": {"value": 0.0998, "thin": False}},
+        "blend": {"value": 0.0998, "thin": False},
     }
     assert player["scores"]["FGA"]["season"] == {
-        "components": {"shot_types": {"value": 0.0989, "thin": False}},
-        "blend": {"value": 0.0989, "thin": False},
+        "components": {"shot_types": {"value": 0.0999, "thin": False}},
+        "blend": {"value": 0.0999, "thin": False},
     }
 
 
-def test_missing_diet_slices_fail_closed_even_when_remaining_shares_sum_to_one():
+def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos():
+    assist_slices = (
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    )
+    shot_type_slices = (
+        ("Catch and Shoot", "catch_and_shoot", 0.4, 40),
+        ("Pullups", "pullups", 0.3, 30),
+        ("Less Than 10 ft", "less_than_10_ft", 0.2, 20),
+    )
+    player = _service(
+        markets=("PTS", "PA"),
+        facts=(
+            *(
+                _fact("shot_types", stored_key, share, volume)
+                for stored_key, _metric_key, share, volume in shot_type_slices
+            ),
+            *(
+                _fact("assist_locations", slice_key, 0.2, 8)
+                for slice_key in assist_slices
+            ),
+        ),
+        season_metrics=(
+            *(
+                metric
+                for _stored_key, metric_key, _share, _volume in shot_type_slices
+                for metric in (
+                    ("shot_types", metric_key, "FG2M", 2.0, 2.0),
+                    ("shot_types", metric_key, "FG3M", 2.0, 2.0),
+                )
+            ),
+            *(
+                ("assist_locations", slice_key, slice_key, 5.0, 6.0)
+                for slice_key in assist_slices
+            ),
+        ),
+        per_game={"PTS": 30.0, "AST": 10.0},
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["scores"]["PTS"]["season"] == {
+        "components": {"shot_types": {"value": 0.0, "thin": False}},
+        "blend": {"value": 0.0, "thin": False},
+    }
+    assert player["scores"]["PA"]["season"] == {
+        "components": {
+            "shot_types": {"value": 0.0, "thin": False},
+            "assist_locations": {"value": 0.2, "thin": False},
+        },
+        "blend": {"value": 0.05, "thin": False},
+    }
+
+
+def test_missing_diet_slices_fail_closed_with_empty_components_and_null_blend():
     player = _service(
         markets=("PTS", "FGA"),
         facts=(
@@ -799,6 +854,7 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
             if market in {"TOV", "STL", "BLK", "STKS"}:
                 assert "blend" not in window
             else:
+                assert window["components"]
                 assert window["blend"] == {"value": 0.1, "thin": False}
 
 

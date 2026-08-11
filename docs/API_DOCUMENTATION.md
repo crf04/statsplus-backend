@@ -480,11 +480,16 @@ matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's
 slices of:
 
 ```text
-player Season Diet Share × opponent allowed-per-48 / league average allowed-per-48
+player Season Diet Share ×
+  (opponent allowed-per-48 / league average allowed-per-48 - 1)
 ```
 
-The score subtracts `1` after the sum. It does not normalize a materially
-partial Diet or make a request-time estimate. Provider shares are rounded, so
+Equivalently, the score subtracts the actual applied Diet `weight_total`, not a
+hard-coded `1`. Any unobserved residual in an admitted provider-rounded
+partition is neutral: it contributes zero matchup difference. The backend
+preserves the raw shares, does not normalize a materially partial Diet, does not
+fabricate concession evidence for that residual, and makes no request-time
+estimate. Provider shares are rounded, so
 Base-specific completeness bounds admit the observed complete partitions:
 play types `0.995..1.005`, shot types `0.900..1.010`, and derived shot-zone and
 assist-location shares within `0.000001` of one. Unknown/duplicate slices and
@@ -492,6 +497,11 @@ missing governed slices or shares outside those bounds fail closed. A non-defens
 mean of its computable Base components. An unavailable Base is omitted, not
 emitted as a null cell. Thus provider-unsupported play-types Last-15 never
 receives the Season component, while other available Last-15 Bases still score.
+
+For every blendable offensive window, `components: {}` and `blend: null`
+truthfully mean that zero components were computable. Whenever at least one
+offensive component is present, `blend` is a score cell with `value` and
+`thin`; the backend never fabricates a numeric Blend merely to avoid `null`.
 
 The stored Diet/sheet intersection supports PTS through play types, shot zones,
 and shot types; FGA through shot zones and shot types; AST through assist

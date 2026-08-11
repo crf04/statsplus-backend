@@ -739,11 +739,17 @@ inputs it serializes; it has no provider boundary and performs no request-time
 fallback. Request-local indexes traverse each stored window's league/team
 metrics once, and a per-player/window memo shares primitive scores across a
 posted primitive row and every combo that consumes it. Components unavailable
-from the stored Diet/sheet taxonomy are omitted instead of estimated. The
-traditional surface includes `OPP_REB` for REB and rebound-containing combos,
-in addition to the three defensive score columns. Injury reconciliation can
-remove a canonical Out player or attach a badge reference; it does not change
-Matchup Scores, Diet Shares, scoring history, or projected roles.
+from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
+score applies each raw observed share to the slice's fractional matchup
+difference, so the unobserved residual in an admitted rounded partition has a
+neutral baseline without share normalization or fabricated evidence. A
+blendable offensive window emits a score-cell Blend exactly when at least one
+component computes; zero computable components remain `components: {}` with
+`blend: null`. The traditional surface includes `OPP_REB` for REB and
+rebound-containing combos, in addition to the three defensive score columns.
+Injury reconciliation can remove a canonical Out player or attach a badge
+reference; it does not change Matchup Scores, Diet Shares, scoring history, or
+projected roles.
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event

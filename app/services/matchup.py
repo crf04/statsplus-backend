@@ -940,6 +940,7 @@ class MatchupService:
         if not weighted_facts:
             return None
         total = 0.0
+        weight_total = 0.0
         for fact, share in weighted_facts:
             league_value = 0.0
             team_value = 0.0
@@ -960,11 +961,12 @@ class MatchupService:
             if league_value <= 0:
                 return None
             total += share * (team_value / league_value)
+            weight_total += share
         volume_per_game = sum(
             fact.volume / fact.games_played for fact in selected_facts
         )
         return {
-            "value": self._number(total - 1),
+            "value": self._number(total - weight_total),
             "thin": (
                 any(
                     fact.games_played < self.settings.matchup_scores.min_games
