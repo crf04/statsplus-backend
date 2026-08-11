@@ -222,6 +222,176 @@ def test_production_requires_database_and_firebase(monkeypatch):
     assert "Firebase" in message
 
 
+def test_production_uses_valid_json_when_legacy_credential_path_is_stale():
+    load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://example/db",
+            "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+            "DFS_ENABLED_PROVIDERS": "prizepicks",
+            "FIREBASE_SERVICE_ACCOUNT_PATH": "/missing/legacy-service-account.json",
+            "FIREBASE_SERVICE_ACCOUNT_JSON": (
+                '{"project_id":"courtai-test","private_key":"test-key",'
+                '"client_email":"firebase@example.com"}'
+            ),
+        }
+    )
+
+
+def test_production_uses_individual_fields_when_legacy_credential_path_is_stale():
+    load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://example/db",
+            "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+            "DFS_ENABLED_PROVIDERS": "prizepicks",
+            "FIREBASE_SERVICE_ACCOUNT_PATH": "/missing/legacy-service-account.json",
+            "FIREBASE_PROJECT_ID": "courtai-test",
+            "FIREBASE_PRIVATE_KEY": "test-key",
+            "FIREBASE_CLIENT_EMAIL": "firebase@example.com",
+        }
+    )
+
+
+def test_production_rejects_stale_credential_path_without_an_alternative():
+    with pytest.raises(ConfigurationError, match="must point to an existing file"):
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": "/missing/service-account.json",
+            }
+        )
+
+
+def test_production_names_missing_individual_field_with_stale_credential_path():
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": "/missing/service-account.json",
+                "FIREBASE_PROJECT_ID": "courtai-test",
+                "FIREBASE_CLIENT_EMAIL": "firebase@example.com",
+            }
+        )
+
+    message = str(error.value)
+    assert "FIREBASE_PRIVATE_KEY" in message
+    assert "FIREBASE_SERVICE_ACCOUNT_PATH" in message
+
+
+def test_production_names_missing_individual_field_without_credential_path():
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_PROJECT_ID": "courtai-test",
+                "FIREBASE_CLIENT_EMAIL": "firebase@example.com",
+            }
+        )
+
+    assert "FIREBASE_PRIVATE_KEY" in str(error.value)
+
+
+def test_production_rejects_directory_credential_path_before_json(tmp_path):
+    with pytest.raises(ConfigurationError, match="must point to a regular file"):
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": str(tmp_path),
+                "FIREBASE_SERVICE_ACCOUNT_JSON": (
+                    '{"project_id":"courtai-test","private_key":"test-key",'
+                    '"client_email":"firebase@example.com"}'
+                ),
+            }
+        )
+
+
+def test_production_rejects_corrupt_file_as_the_only_credential_source(tmp_path):
+    credential_path = tmp_path / "service-account.json"
+    credential_path.write_text("not valid JSON", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="readable, valid JSON"):
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": str(credential_path),
+            }
+        )
+
+
+def test_production_accepts_valid_file_as_the_only_credential_source(tmp_path):
+    credential_path = tmp_path / "service-account.json"
+    credential_path.write_text(
+        '{"project_id":"courtai-test","private_key":"test-key",'
+        '"client_email":"firebase@example.com"}',
+        encoding="utf-8",
+    )
+
+    load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://example/db",
+            "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+            "DFS_ENABLED_PROVIDERS": "prizepicks",
+            "FIREBASE_SERVICE_ACCOUNT_PATH": str(credential_path),
+        }
+    )
+
+
+def test_production_rejects_non_object_credential_file(tmp_path):
+    credential_path = tmp_path / "service-account.json"
+    credential_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="must contain a JSON object"):
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": str(credential_path),
+            }
+        )
+
+
+def test_production_names_missing_credential_file_field(tmp_path):
+    credential_path = tmp_path / "service-account.json"
+    credential_path.write_text(
+        '{"project_id":"courtai-test","client_email":"firebase@example.com"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(
+            environ={
+                "FLASK_ENV": "production",
+                "DATABASE_URL": "postgresql://example/db",
+                "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+                "DFS_ENABLED_PROVIDERS": "prizepicks",
+                "FIREBASE_SERVICE_ACCOUNT_PATH": str(credential_path),
+            }
+        )
+
+    message = str(error.value)
+    assert "FIREBASE_SERVICE_ACCOUNT_PATH is missing required fields" in message
+    assert "private_key" in message
+
+
 def test_settings_parse_env_values(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")

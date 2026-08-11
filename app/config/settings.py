@@ -84,19 +84,16 @@ class AuthenticationSettings(BaseModel):
     firebase_client_email: str | None = None
 
     @property
-    def has_credentials(self) -> bool:
-        """Whether one supported Firebase credential source is configured."""
+    def has_individual_credentials(self) -> bool:
+        """Whether all three individual Firebase fields are configured."""
 
-        has_file = bool(self.firebase_service_account_path)
-        has_json = bool(self.firebase_service_account_json)
-        has_parts = all(
+        return all(
             (
                 self.firebase_project_id,
                 self.firebase_private_key,
                 self.firebase_client_email,
             )
         )
-        return has_file or has_json or has_parts
 
 
 def _provider_window(
@@ -848,20 +845,76 @@ def _validate_environment_requirements(
         if settings.database.url == DEFAULT_SQLITE_URL:
             errors.append("DATABASE_URL must be set to a production database URL")
 
+        individual_fields = {
+            "FIREBASE_PROJECT_ID": settings.auth.firebase_project_id,
+            "FIREBASE_PRIVATE_KEY": settings.auth.firebase_private_key,
+            "FIREBASE_CLIENT_EMAIL": settings.auth.firebase_client_email,
+        }
+        credential_path = (
+            Path(settings.auth.firebase_service_account_path)
+            if settings.auth.firebase_service_account_path
+            else None
+        )
+        path_exists = credential_path is not None and credential_path.exists()
+        path_is_file = credential_path is not None and credential_path.is_file()
+
         if settings.auth.firebase_admin_disabled:
             errors.append("FIREBASE_ADMIN_DISABLED must be false in production")
-        elif not settings.auth.has_credentials:
+        # Reject directory and device paths as likely deployment mount mistakes;
+        # only regular files are valid service-account documents.
+        elif path_exists and not path_is_file:
             errors.append(
-                "Firebase credentials are required in production "
-                "(FIREBASE_SERVICE_ACCOUNT_JSON/PATH or the three individual fields)"
+                "FIREBASE_SERVICE_ACCOUNT_PATH must point to a regular file in production"
             )
-        elif (
-            settings.auth.firebase_service_account_path
-            and not Path(settings.auth.firebase_service_account_path).is_file()
+        elif not (
+            path_is_file
+            or settings.auth.firebase_service_account_json
+            or settings.auth.has_individual_credentials
         ):
-            errors.append(
-                "FIREBASE_SERVICE_ACCOUNT_PATH must point to an existing file in production"
-            )
+            if any(individual_fields.values()):
+                missing = sorted(
+                    name for name, value in individual_fields.items() if not value
+                )
+                errors.append(
+                    "Individual Firebase credentials are missing required fields: "
+                    + ", ".join(missing)
+                )
+            if credential_path is not None:
+                errors.append(
+                    "FIREBASE_SERVICE_ACCOUNT_PATH must point to an existing file in production"
+                )
+            elif not any(individual_fields.values()):
+                errors.append(
+                    "Firebase credentials are required in production "
+                    "(FIREBASE_SERVICE_ACCOUNT_JSON/PATH or the three individual fields)"
+                )
+
+        if (
+            credential_path is not None
+            and path_is_file
+            and not settings.auth.firebase_service_account_json
+            and not settings.auth.has_individual_credentials
+        ):
+            try:
+                file_credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+                if not isinstance(file_credentials, dict):
+                    errors.append(
+                        "FIREBASE_SERVICE_ACCOUNT_PATH must contain a JSON object"
+                    )
+                else:
+                    missing = sorted(
+                        {"project_id", "private_key", "client_email"}
+                        - file_credentials.keys()
+                    )
+                    if missing:
+                        errors.append(
+                            "FIREBASE_SERVICE_ACCOUNT_PATH is missing required fields: "
+                            + ", ".join(missing)
+                        )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                errors.append(
+                    "FIREBASE_SERVICE_ACCOUNT_PATH must contain readable, valid JSON"
+                )
 
         if settings.auth.firebase_service_account_json:
             try:
