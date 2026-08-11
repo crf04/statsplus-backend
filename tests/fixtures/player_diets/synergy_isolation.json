@@ -1,0 +1,9 @@
+{
+  "resultSets": [
+    {
+      "name": "SynergyPlayType",
+      "headers": ["SEASON_ID", "PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "TEAM_NAME", "PLAY_TYPE", "TYPE_GROUPING", "PERCENTILE", "GP", "POSS_PCT", "PPP", "FG_PCT", "FT_POSS_PCT", "TOV_POSS_PCT", "SF_POSS_PCT", "PLUSONE_POSS_PCT", "SCORE_POSS_PCT", "EFG_PCT", "POSS", "PTS", "FGM", "FGA", "FGMX"],
+      "rowSet": [["22025", 1628983, "Shai Gilgeous-Alexander", 1610612760, "OKC", "Oklahoma City Thunder", "Isolation", "Offensive", 0.926, 63, 0.28, 1.163, 0.51, 0.18, 0.078, 0.169, 0.022, 0.548, 0.564, 449, 522, 175, 343, 168]]
+    }
+  ]
+}

@@ -89,6 +89,15 @@ def test_provider_call_uses_explicit_request_id_and_closed_dfs_catalog():
         )
 
 
+def test_provider_operation_catalog_names_player_diet_calls():
+    assert {
+        "synergy_player_play_types",
+        "league_player_shot_type",
+        "player_shooting_zone",
+    }.issubset(telemetry.NBA_STATS_OPERATIONS)
+    assert "get_totals_player_diet" in telemetry.PBP_STATS_OPERATIONS
+
+
 def test_event_outcome_distinguishes_timeout_http_and_malformed():
     with pytest.raises(requests.exceptions.ReadTimeout):
         with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"):

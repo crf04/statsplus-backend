@@ -53,11 +53,13 @@ NBA_STATS_OPERATIONS = frozenset(
         "player_game_logs",
         "player_game_logs_season",
         "player_game_logs_recorded",
+        "player_diets_recorded",
         "player_roster",
         "player_roster_recorded",
         "league_opponent_team_stats",
         "league_opponent_shot_chart",
         "league_opponent_shooting_zone",
+        "league_player_shot_type",
         "synergy_team_play_types",
         "synergy_player_play_types",
         "player_per36_stats",
@@ -68,7 +70,12 @@ NBA_STATS_OPERATIONS = frozenset(
     }
 )
 PBP_STATS_OPERATIONS = frozenset(
-    {"get_totals_player", "get_totals_opponent", "health_probe"}
+    {
+        "get_totals_player",
+        "get_totals_player_diet",
+        "get_totals_opponent",
+        "health_probe",
+    }
 )
 DABBLE_OPERATIONS = frozenset(
     {

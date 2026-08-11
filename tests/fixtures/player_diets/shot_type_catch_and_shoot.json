@@ -1,0 +1,9 @@
+{
+  "resultSets": [
+    {
+      "name": "LeagueDashPTShots",
+      "headers": ["PLAYER_ID", "PLAYER_NAME", "PLAYER_LAST_TEAM_ID", "PLAYER_LAST_TEAM_ABBREVIATION", "AGE", "GP", "G", "FGA_FREQUENCY", "FGM", "FGA", "FG_PCT", "EFG_PCT", "FG2A_FREQUENCY", "FG2M", "FG2A", "FG2_PCT", "FG3A_FREQUENCY", "FG3M", "FG3A", "FG3_PCT"],
+      "rowSet": [[1642851, "Kon Knueppel", 1610612766, "CHA", 20.0, 81, 81, 0.475, 222, 515, 0.431, 0.634, 0.02, 13, 22, 0.591, 0.455, 209, 493, 0.424]]
+    }
+  ]
+}

@@ -26,6 +26,7 @@ from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
 from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
 from app.services.player_game_log_service import PlayerGameLogService  # noqa: E402
+from app.services.player_diet import PlayerDietService  # noqa: E402
 from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
     StatsFreshnessRepository,
@@ -41,6 +42,7 @@ def run_nightly_refresh(
     refresh_schedule: Callable[[], Any],
     refresh_athlete_catalog: Callable[[], Any],
     refresh_player_game_logs: Callable[[], Any],
+    refresh_player_diets: Callable[[], Any],
     refresh_team_matchups: Callable[[], Any],
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
@@ -52,6 +54,7 @@ def run_nightly_refresh(
             ("schedule", refresh_schedule),
             ("athlete catalog", refresh_athlete_catalog),
             ("player game logs", refresh_player_game_logs),
+            ("player diets", refresh_player_diets),
             ("team matchups", refresh_team_matchups),
         ):
             failed_step = step
@@ -122,6 +125,12 @@ def _run(database_url: str) -> int:
                 settings.catalog.player_game_log_min_active_players_per_team_game
             ),
         )
+        player_diet_service = PlayerDietService(
+            engine,
+            athlete_catalog=athlete_service,
+            nba_stats_provider=provider,
+            pbp_stats_provider=pbp_provider,
+        )
         team_matchup_service = TeamMatchupRefreshService(
             repository=TeamMatchupRepository(engine),
             event_catalog=event_service,
@@ -138,6 +147,9 @@ def _run(database_url: str) -> int:
             ).status
             == "succeeded",
             refresh_player_game_logs=lambda: player_game_log_service.refresh(
+                settings.nba.current_season
+            ),
+            refresh_player_diets=lambda: player_diet_service.refresh(
                 settings.nba.current_season
             ),
             refresh_team_matchups=lambda: team_matchup_service.refresh(

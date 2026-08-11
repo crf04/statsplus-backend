@@ -1,0 +1,10 @@
+{
+  "resultSets": {
+    "name": "ShotLocations",
+    "headers": [
+      {"name": "SHOT_CATEGORY", "columnsToSkip": 6, "columnSpan": 3, "columnNames": ["Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Left Corner 3", "Right Corner 3", "Above the Break 3", "Backcourt", "Corner 3"]},
+      {"name": "columns", "columnSpan": 1, "columnNames": ["PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "AGE", "NICKNAME", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT", "FGM", "FGA", "FG_PCT"]}
+    ],
+    "rowSet": [[1630639, "A.J. Lawson", 1610612761, "TOR", 25.0, "A.J.", 14, 27, 0.519, 1, 6, 0.167, 0, 0, 0.0, 10, 21, 0.476, 4, 11, 0.364, 5, 13, 0.385, 0, 0, 0.0, 14, 32, 0.438]]
+  }
+}

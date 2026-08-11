@@ -538,6 +538,72 @@ def parse_recorded_player_roster(
             ) from error
 
 
+def parse_recorded_player_diet(
+    payload: dict[str, Any], *, kind: str
+) -> pd.DataFrame:
+    """Parse one pinned raw player-Diet fixture through ``nba_api`` offline."""
+
+    from nba_api.stats.library.http import NBAStatsResponse
+
+    contracts = {
+        "synergy": (
+            endpoints.SynergyPlayTypes,
+            (
+                "PLAYER_ID",
+                "PLAYER_NAME",
+                "PLAY_TYPE",
+                "TYPE_GROUPING",
+                "GP",
+                "POSS_PCT",
+                "POSS",
+            ),
+        ),
+        "shot_type": (
+            endpoints.LeagueDashPlayerPtShot,
+            ("PLAYER_ID", "PLAYER_NAME", "GP", "FGA_FREQUENCY", "FGA"),
+        ),
+        "shot_zones": (
+            endpoints.LeagueDashPlayerShotLocations,
+            (
+                ("", "PLAYER_ID"),
+                ("", "PLAYER_NAME"),
+                ("Restricted Area", "FGA"),
+                ("In The Paint (Non-RA)", "FGA"),
+                ("Mid-Range", "FGA"),
+                ("Corner 3", "FGA"),
+                ("Above the Break 3", "FGA"),
+            ),
+        ),
+    }
+    if kind not in contracts:
+        raise ValueError("unknown recorded player Diet fixture kind")
+    endpoint_class, required_columns = contracts[kind]
+    with provider_call(
+        PROVIDER_NBA_STATS,
+        "player_diets_recorded",
+        cache_status=CACHE_DISABLED,
+    ):
+        try:
+            response = NBAStatsResponse(
+                response=json.dumps(payload),
+                status_code=200,
+                url=f"https://stats.nba.com/stats/player-diets-{kind}",
+            )
+            endpoint = endpoint_class(get_request=False)
+            endpoint.nba_response = response
+            endpoint.load_response()
+            return _validate_frame(
+                endpoint.get_data_frames()[0],
+                required_columns=required_columns,
+            )
+        except ProviderResponseError:
+            raise
+        except (AttributeError, ValueError, TypeError, KeyError, IndexError) as error:
+            raise ProviderResponseError(
+                "The recorded NBA Stats player Diet response could not be parsed."
+            ) from error
+
+
 def _response_status(endpoint: object) -> int | None:
     """Extract the upstream HTTP status ``nba_api`` recorded, if any.
 
@@ -932,6 +998,7 @@ class NBAStatsAdapter:
         player_or_team_abbreviation: str,
         type_grouping: str,
         season: str | None = None,
+        season_type: str | None = None,
         per_mode_simple: str | None = None,
         league_id: str = "00",
     ) -> pd.DataFrame:
@@ -955,6 +1022,8 @@ class NBAStatsAdapter:
             }
             if season is not None:
                 parameters["season"] = season
+            if season_type is not None:
+                parameters["season_type_all_star"] = season_type
             if per_mode_simple is not None:
                 parameters["per_mode_simple"] = per_mode_simple
             return endpoints.SynergyPlayTypes(**parameters)
@@ -962,7 +1031,15 @@ class NBAStatsAdapter:
         required_columns = (
             ("TEAM_NAME", "GP", "PTS")
             if player_or_team_abbreviation == "T"
-            else ("PLAYER_NAME", "TEAM_ABBREVIATION", "PTS")
+            else (
+                "PLAYER_ID",
+                "PLAYER_NAME",
+                "PLAY_TYPE",
+                "TYPE_GROUPING",
+                "GP",
+                "POSS_PCT",
+                "POSS",
+            )
         )
         return self.run_endpoint(
             operation,
@@ -983,22 +1060,62 @@ class NBAStatsAdapter:
             required_columns=("PLAYER_ID",),
         )
 
+    def fetch_player_shot_type(
+        self,
+        general_range: str,
+        *,
+        season: str,
+        season_type: str = "Regular Season",
+        per_mode_simple: str = "Totals",
+        league_id: str = "00",
+    ) -> pd.DataFrame:
+        """Fetch one league-wide Season player shot-type observation."""
+
+        return self.run_endpoint(
+            "league_player_shot_type",
+            lambda timeout: endpoints.LeagueDashPlayerPtShot(
+                general_range_nullable=general_range,
+                season=season,
+                season_type_all_star=season_type,
+                per_mode_simple=per_mode_simple,
+                league_id=league_id,
+                timeout=timeout,
+            ),
+            required_columns=(
+                "PLAYER_ID",
+                "PLAYER_NAME",
+                "GP",
+                "FGA_FREQUENCY",
+                "FGA",
+            ),
+        )
+
     def fetch_player_shooting_zone(
         self,
         date_from: str | None = None,
         *,
         per_mode_detailed: str = "PerGame",
+        season: str | None = None,
+        season_type: str | None = None,
     ) -> pd.DataFrame:
         """Fetch player shooting-zone data for the refresh/profile tables."""
 
+        def build(timeout: float) -> object:
+            parameters = {
+                "distance_range": "By Zone",
+                "per_mode_detailed": per_mode_detailed,
+                "date_from_nullable": date_from,
+                "timeout": timeout,
+            }
+            if season is not None:
+                parameters["season"] = season
+            if season_type is not None:
+                parameters["season_type_all_star"] = season_type
+            return endpoints.LeagueDashPlayerShotLocations(**parameters)
+
         return self.run_endpoint(
             "player_shooting_zone",
-            lambda timeout: endpoints.LeagueDashPlayerShotLocations(
-                distance_range="By Zone",
-                per_mode_detailed=per_mode_detailed,
-                date_from_nullable=date_from,
-                timeout=timeout,
-            ),
+            build,
             required_columns=("PLAYER_ID", "PLAYER_NAME", "TEAM_ID"),
         )
 
@@ -1127,6 +1244,7 @@ __all__ = [
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
     "parse_recorded_player_roster",
+    "parse_recorded_player_diet",
     "parse_recorded_game_logs",
     "validate_canonical_season",
 ]

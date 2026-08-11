@@ -45,6 +45,7 @@ class ApplicationDependencies:
     event_catalog_service: Any | None = None
     event_mapping_repository: Any | None = None
     event_resolver: Any | None = None
+    player_diet_service: Any | None = None
 
 
 def build_dependencies(
@@ -74,6 +75,7 @@ def build_dependencies(
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
+    from app.services.player_diet import PlayerDietService
     from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -181,6 +183,7 @@ def build_dependencies(
     event_catalog_service = None
     event_mapping_repository = None
     event_resolver = None
+    player_diet_service = None
     from app.utils.db import is_demo_database_url
 
     if not is_demo_database_url(settings.database.url):
@@ -213,6 +216,12 @@ def build_dependencies(
             event_catalog_service,
             mapping_repository=event_mapping_repository,
             settings=settings,
+        )
+        player_diet_service = PlayerDietService(
+            engine,
+            athlete_catalog=athlete_catalog_service,
+            nba_stats_provider=nba_stats_provider,
+            pbp_stats_provider=pbp_stats_provider,
         )
 
     dfs_board_service = DFSBoardService(
@@ -305,6 +314,7 @@ def build_dependencies(
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,
         dfs_board_response_service=dfs_board_response_service,
+        player_diet_service=player_diet_service,
     )
 
 
