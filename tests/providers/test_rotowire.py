@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+import pytest
 
 from app.config.settings import ProviderSettings, RuntimeSettings
 from app.providers.rotowire import RotoWireInjuryProvider
@@ -100,3 +101,76 @@ def test_transport_failure_is_a_sanitized_provider_failure():
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["provider"] == "rotowire"
     assert event["outcome"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    "player_url",
+    [
+        "javascript:alert(1)",
+        "http://www.rotowire.com/basketball/player/example-1",
+        "https://evil.example/basketball/player/example-1",
+        "//evil.example/basketball/player/example-1",
+        "https://rotowire.com.evil.example/basketball/player/example-1",
+        "https://user@www.rotowire.com/basketball/player/example-1",
+        "https://www.rotowire.com:8443/basketball/player/example-1",
+    ],
+)
+def test_provider_controlled_player_urls_cannot_escape_rotowire(player_url):
+    snapshot = RotoWireInjuryProvider(
+        session=FakeSession(
+            FakeResponse(
+                [
+                    {
+                        "ID": "1",
+                        "player": "Example Player",
+                        "team": "BOS",
+                        "status": "Out",
+                        "playerURL": player_url,
+                    }
+                ]
+            )
+        ),
+        clock=lambda: NOW,
+    ).get_snapshot()
+
+    assert snapshot.entries[0].source_url == RotoWireInjuryProvider.SOURCE_URL
+
+
+@pytest.mark.parametrize(
+    ("player_url", "expected"),
+    [
+        (
+            "/basketball/player/example-player-1",
+            "https://www.rotowire.com/basketball/player/example-player-1",
+        ),
+        (
+            "https://rotowire.com/basketball/player/example-player-1",
+            "https://rotowire.com/basketball/player/example-player-1",
+        ),
+        (
+            "https://news.rotowire.com/basketball/player/example-player-1",
+            "https://news.rotowire.com/basketball/player/example-player-1",
+        ),
+    ],
+)
+def test_rotowire_player_urls_are_preserved_only_on_the_https_origin_family(
+    player_url, expected
+):
+    snapshot = RotoWireInjuryProvider(
+        session=FakeSession(
+            FakeResponse(
+                [
+                    {
+                        "ID": "1",
+                        "player": "Example Player",
+                        "team": "BOS",
+                        "status": "Out",
+                        "playerURL": player_url,
+                    }
+                ]
+            )
+        ),
+        clock=lambda: NOW,
+    ).get_snapshot()
+
+    assert snapshot.entries[0].source_url == expected

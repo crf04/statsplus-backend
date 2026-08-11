@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -77,6 +78,7 @@ class MatchupInjuryService:
         self.permission_granted = permission_granted
         self.telemetry_recorder = telemetry_recorder or BoundedInjuryTelemetryRecorder()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._refresh_lock = Lock()
 
     def get_injuries(
         self,
@@ -123,65 +125,89 @@ class MatchupInjuryService:
                 unresolved_team_entries=stored.unresolved_team_entry_count,
             )
 
-        try:
-            source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
-            if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS):
+        # This single-flight is intentionally scoped to one service instance
+        # (one process worker). Durable source reuse handles later workers.
+        with self._refresh_lock:
+            now = assume_utc(self.clock())
+            try:
+                current = self.snapshot_repository.get(scope)
+            except (SQLAlchemyError, TypeError, ValueError):
+                current = None
+            if current is not None:
+                stored = current
+            if self._within_age(current, now, INJURY_REFRESH_SECONDS):
+                return self._result(
+                    current.normalized_entries,
+                    event=event,
+                    status="fresh",
+                    retrieved_at=current.retrieved_at,
+                    pool_players=pool_players,
+                    unresolved_team_entries=current.unresolved_team_entry_count,
+                )
+
+            try:
+                source_snapshot = self.snapshot_repository.get_latest_source(
+                    INJURY_SOURCE
+                )
+                if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS):
+                    entries, unresolved_team_entries = self._reconcile(
+                        tuple(
+                            InjuryEntryEvidence.from_document(entry)
+                            for entry in source_snapshot.normalized_entries
+                        ),
+                        event=event,
+                        season=season,
+                    )
+                    self.snapshot_repository.replace_from_source(
+                        scope,
+                        source_snapshot=source_snapshot,
+                        normalized_entries=entries,
+                        unresolved_team_entry_count=unresolved_team_entries,
+                    )
+                    return self._result(
+                        entries,
+                        event=event,
+                        status="fresh",
+                        retrieved_at=source_snapshot.retrieved_at,
+                        pool_players=pool_players,
+                        unresolved_team_entries=unresolved_team_entries,
+                    )
+                snapshot = self.provider.get_snapshot()
                 entries, unresolved_team_entries = self._reconcile(
-                    tuple(
-                        InjuryEntryEvidence.from_document(entry)
-                        for entry in source_snapshot.normalized_entries
-                    ),
+                    snapshot.entries,
                     event=event,
                     season=season,
                 )
-                self.snapshot_repository.replace_from_source(
+                self.snapshot_repository.publish(
                     scope,
-                    source_snapshot=source_snapshot,
+                    source=INJURY_SOURCE,
+                    raw_payload=snapshot.raw_payload,
+                    source_entries=tuple(
+                        entry.to_document() for entry in snapshot.entries
+                    ),
                     normalized_entries=entries,
+                    retrieved_at=snapshot.retrieved_at,
                     unresolved_team_entry_count=unresolved_team_entries,
                 )
-                return self._result(
-                    entries,
-                    event=event,
-                    status="fresh",
-                    retrieved_at=source_snapshot.retrieved_at,
-                    pool_players=pool_players,
-                    unresolved_team_entries=unresolved_team_entries,
-                )
-            snapshot = self.provider.get_snapshot()
-            entries, unresolved_team_entries = self._reconcile(
-                snapshot.entries,
+            except (ProviderUnavailableError, SQLAlchemyError, TypeError, ValueError):
+                if self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
+                    return self._result(
+                        stored.normalized_entries,
+                        event=event,
+                        status="stale",
+                        retrieved_at=stored.retrieved_at,
+                        pool_players=pool_players,
+                        unresolved_team_entries=stored.unresolved_team_entry_count,
+                    )
+                return unavailable_injury_result("fetch_failed")
+            return self._result(
+                entries,
                 event=event,
-                season=season,
+                status="fresh",
+                retrieved_at=assume_utc(snapshot.retrieved_at),
+                pool_players=pool_players,
+                unresolved_team_entries=unresolved_team_entries,
             )
-            self.snapshot_repository.publish(
-                scope,
-                source=INJURY_SOURCE,
-                raw_payload=snapshot.raw_payload,
-                source_entries=tuple(entry.to_document() for entry in snapshot.entries),
-                normalized_entries=entries,
-                retrieved_at=snapshot.retrieved_at,
-                unresolved_team_entry_count=unresolved_team_entries,
-            )
-        except (ProviderUnavailableError, SQLAlchemyError, TypeError, ValueError):
-            if self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
-                return self._result(
-                    stored.normalized_entries,
-                    event=event,
-                    status="stale",
-                    retrieved_at=stored.retrieved_at,
-                    pool_players=pool_players,
-                    unresolved_team_entries=stored.unresolved_team_entry_count,
-                )
-            return unavailable_injury_result("fetch_failed")
-        return self._result(
-            entries,
-            event=event,
-            status="fresh",
-            retrieved_at=assume_utc(snapshot.retrieved_at),
-            pool_players=pool_players,
-            unresolved_team_entries=unresolved_team_entries,
-        )
 
     def get_stored_injuries(
         self,

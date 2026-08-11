@@ -485,6 +485,14 @@ shared by every game read inside its five-minute reuse window; each game stores
 only its reconciled entries plus a reference to that source observation. This
 prevents another full-table fetch and raw-payload copy for each matchup while
 preserving the exact evidence referenced by a game's retained snapshot.
+Concurrent refresh suppression is local to one application worker; waiters
+recheck the shared durable observation, and no cross-worker single-flight is
+claimed. Referenced observations are retained indefinitely as game evidence.
+Of observations no game references, only the newest 12 per provider are kept.
+
+An entry's `source_url` is either an HTTPS URL on `rotowire.com` or one of its
+subdomains, or the fixed RotoWire injury-report URL used when the provider value
+is absent or fails that origin policy.
 
 A usable report has exactly the away and home teams, in that order:
 

@@ -1,6 +1,8 @@
 """Injury freshness, reconciliation, and pool-override service contract."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event, Lock
 
 import pytest
 from sqlalchemy import create_engine
@@ -149,7 +151,6 @@ def _pool_players():
 
 def _stored(retrieved_at):
     return StoredInjurySnapshot(
-        raw_payload=[{"ID": "6504"}],
         normalized_entries=(
             {
                 "entry_id": "rotowire:6504",
@@ -480,3 +481,67 @@ def test_two_games_reuse_one_recent_league_feed_without_a_second_fetch(tmp_path)
     assert first.block["status"] == "fresh"
     assert second.block["status"] == "fresh"
     assert second.out_player_ids == frozenset({2544})
+
+
+def test_concurrent_pretip_reads_share_one_refresh_per_service_worker(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'single-flight.sqlite3'}")
+    run_migrations(engine)
+    entered = Event()
+    both_initial_reads_finished = Event()
+    release = Event()
+
+    class ObservedRepository(InjurySnapshotRepository):
+        def __init__(self, database_engine):
+            super().__init__(database_engine)
+            self.reads = 0
+            self.read_lock = Lock()
+
+        def get(self, scope):
+            stored = super().get(scope)
+            with self.read_lock:
+                self.reads += 1
+                if self.reads == 2:
+                    both_initial_reads_finished.set()
+            return stored
+
+    class BlockingProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def get_snapshot(self):
+            self.calls += 1
+            entered.set()
+            assert release.wait(timeout=5)
+            return _provider_snapshot()
+
+    provider = BlockingProvider()
+    service = MatchupInjuryService(
+        provider=provider,
+        snapshot_repository=ObservedRepository(engine),
+        athlete_catalog=Catalog(),
+        enabled=True,
+        permission_granted=True,
+        clock=lambda: NOW,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owner = executor.submit(
+            service.get_injuries,
+            event=_event(),
+            season=SEASON,
+            pool_players=_pool_players(),
+        )
+        assert entered.wait(timeout=5)
+        follower = executor.submit(
+            service.get_injuries,
+            event=_event(),
+            season=SEASON,
+            pool_players=_pool_players(),
+        )
+        assert both_initial_reads_finished.wait(timeout=5)
+        release.set()
+        results = (owner.result(timeout=5), follower.result(timeout=5))
+
+    assert provider.calls == 1
+    assert [result.block["status"] for result in results] == ["fresh", "fresh"]
+    assert all(result.out_player_ids == frozenset({2544}) for result in results)

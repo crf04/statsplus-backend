@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -94,6 +94,7 @@ class RotoWireInjuryProvider:
         "https://www.rotowire.com/basketball/tables/injury-report.php"
     )
     SOURCE_URL = "https://www.rotowire.com/basketball/injury-report.php"
+
     def __init__(
         self,
         *,
@@ -186,14 +187,33 @@ class RotoWireInjuryProvider:
                     ),
                     raw_status=raw_status,
                     reason=cls._optional_text(row, "injury", "reason") or "",
-                    source_url=(
-                        urljoin("https://www.rotowire.com", player_url)
-                        if player_url
-                        else cls.SOURCE_URL
-                    ),
+                    source_url=cls._safe_source_url(player_url),
                 )
             )
         return InjuryProviderSnapshot(raw_rows, tuple(entries), retrieved_at)
+
+    @classmethod
+    def _safe_source_url(cls, player_url: str | None) -> str:
+        if player_url is None:
+            return cls.SOURCE_URL
+        candidate = urljoin("https://www.rotowire.com", player_url)
+        try:
+            parsed = urlsplit(candidate)
+            port = parsed.port
+        except ValueError:
+            return cls.SOURCE_URL
+        hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if (
+            parsed.scheme.casefold() != "https"
+            or not (
+                hostname == "rotowire.com" or hostname.endswith(".rotowire.com")
+            )
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+        ):
+            return cls.SOURCE_URL
+        return candidate
 
     @staticmethod
     def _required_text(row: Mapping[str, Any], *keys: str) -> str:

@@ -588,6 +588,9 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
 
     assert upgraded.applied == ("015_share_injury_source_snapshots",)
     assert stored is not None
-    assert stored.raw_payload == [{"ID": "1"}]
-    assert stored.source_entries == ()
     assert stored.unresolved_team_entry_count == 0
+    evidence = InjurySnapshotRepository(engine).get_evidence(
+        InjurySnapshotScope("2025-26", "legacy")
+    )
+    assert evidence.raw_payload == [{"ID": "1"}]
+    assert evidence.source_entries == ()

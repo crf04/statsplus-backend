@@ -326,7 +326,11 @@ snapshot.
 `MatchupInjuryService` owns injury collection and Player Pool overrides. The
 route and DFS collector do not call RotoWire directly. Before tip, a stored
 game snapshot through five minutes old is reused; the first later matchup read
-reuses a league observation from the same window or refreshes lazily. A failed refresh may serve the prior snapshot through an
+reuses a league observation from the same window or refreshes lazily. Concurrent
+lazy refreshes are single-flight within one application worker: a waiter
+rechecks durable game and league evidence after acquiring the worker-local
+lock. This does not claim cross-worker suppression; another worker relies on
+the same durable source recheck. A failed refresh may serve the prior snapshot through an
 inclusive 30-minute maximum with `status: stale`. At tip or when the Event
 Catalog marks the game final, refreshing stops and the last snapshot is retained.
 Its status continues to age: after 30 minutes it is unavailable and cannot
@@ -336,7 +340,14 @@ apply badges or overrides, while no post-tip fetch occurs.
 `injury_source_snapshots`; per-game rows store matchup-filtered entries and a
 source-snapshot reference. All game reads inside five minutes reuse that
 durable source, avoiding N feed requests and N raw copies while each game still
-retains the exact evidence it observed at stop time. Normalization retains
+retains the exact evidence it observed at stop time. Ordinary matchup and Slate
+reads select only the per-game normalized entries, retrieval time, and unresolved
+team count; raw league evidence is loaded only through the repository's explicit
+evidence seam. After every transactional reference update, the repository keeps
+the 12 newest unreferenced source observations per provider and prunes older
+unreferenced rows in that same transaction. A source referenced by any game is
+never pruned, so stopped-game historical evidence is retained without allowing
+an unused full-feed tail to grow without bound. Normalization retains
 RotoWire identity, name, status, reason, and URL.
 Reconciliation uses exact normalized athlete name plus canonical team and
 season against the active Athlete Catalog; ambiguous or unmatched players stay
@@ -348,6 +359,9 @@ or permitted-stale snapshot removes a stored pool
 player. Other statuses only supply `injury_badge_ref`; no score, Diet Share, or
 role input is modified. Scalar-only injury telemetry counts unmatched entries,
 unresolved teams, and board/Out conflicts without retaining player or game identities.
+Provider-controlled player links are exposed only when they resolve to HTTPS on
+`rotowire.com` or one of its subdomains; every other value falls back to the
+fixed injury-report source URL.
 
 `SlateService` uses the injury service's stored-only read to apply the same Out
 override to targetable counts. It never refreshes injuries; opening a Slate

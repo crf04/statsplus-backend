@@ -8,7 +8,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, delete, exists, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc
@@ -32,11 +32,20 @@ class InjurySnapshotScope:
 
 @dataclass(frozen=True, slots=True)
 class StoredInjurySnapshot:
-    raw_payload: list[Mapping[str, Any]]
     normalized_entries: tuple[Mapping[str, Any], ...]
     retrieved_at: datetime
-    source_entries: tuple[Mapping[str, Any], ...] = ()
     unresolved_team_entry_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StoredInjuryEvidence:
+    """Raw provider evidence loaded only through the explicit audit seam."""
+
+    source_snapshot_id: int | None
+    source: str | None
+    raw_payload: list[Mapping[str, Any]]
+    source_entries: tuple[Mapping[str, Any], ...]
+    retrieved_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +59,10 @@ class StoredInjurySourceSnapshot:
 
 class InjurySnapshotRepository:
     """Store shared source evidence and per-game reconciled documents."""
+
+    # Keep a small recovery/audit tail per provider after game rows stop
+    # referencing a source. Referenced historical evidence is never pruned.
+    UNREFERENCED_SOURCE_RETENTION_COUNT = 12
 
     def __init__(self, engine: Engine) -> None:
         if is_demo_database_url(str(engine.url)):
@@ -69,8 +82,6 @@ class InjurySnapshotRepository:
         with self.engine.connect() as connection:
             row = connection.execute(
                 select(
-                    table.c.source_snapshot_id,
-                    table.c.raw_payload,
                     table.c.normalized_entries,
                     table.c.retrieved_at,
                     table.c.unresolved_team_entry_count,
@@ -78,30 +89,57 @@ class InjurySnapshotRepository:
             ).mappings().one_or_none()
             if row is None:
                 return None
-            source_snapshot_id = row["source_snapshot_id"]
-            source_entries: tuple[Mapping[str, Any], ...] = ()
-            raw = self._decode_objects(row["raw_payload"], "raw injury snapshot")
-            retrieved_at = assume_utc(row["retrieved_at"])
-            if source_snapshot_id is not None:
-                source_row = self._get_source_row(connection, int(source_snapshot_id))
-                if source_row is None:
-                    raise ValueError("stored injury source snapshot is missing")
-                raw = self._decode_objects(source_row["raw_payload"], "raw injury snapshot")
-                source_entries = tuple(
-                    self._decode_objects(
-                        source_row["normalized_entries"], "source injuries"
-                    )
-                )
-                retrieved_at = assume_utc(source_row["retrieved_at"])
         normalized = self._decode_objects(
             row["normalized_entries"], "normalized injuries"
         )
         return StoredInjurySnapshot(
-            raw_payload=raw,
-            source_entries=source_entries,
             normalized_entries=tuple(normalized),
-            retrieved_at=retrieved_at,
+            retrieved_at=assume_utc(row["retrieved_at"]),
             unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
+        )
+
+    def get_evidence(
+        self, scope: InjurySnapshotScope
+    ) -> StoredInjuryEvidence | None:
+        """Load the durable raw evidence for an explicit audit request."""
+
+        game = InjurySnapshot.__table__
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(
+                    game.c.source_snapshot_id,
+                    game.c.raw_payload,
+                    game.c.retrieved_at,
+                ).where(self._identity(scope))
+            ).mappings().one_or_none()
+            if row is None:
+                return None
+            source_snapshot_id = row["source_snapshot_id"]
+            if source_snapshot_id is None:
+                return StoredInjuryEvidence(
+                    source_snapshot_id=None,
+                    source=None,
+                    raw_payload=self._decode_objects(
+                        row["raw_payload"], "raw injury snapshot"
+                    ),
+                    source_entries=(),
+                    retrieved_at=assume_utc(row["retrieved_at"]),
+                )
+            source_row = self._get_source_row(connection, int(source_snapshot_id))
+            if source_row is None:
+                raise ValueError("stored injury source snapshot is missing")
+        return StoredInjuryEvidence(
+            source_snapshot_id=int(source_row["id"]),
+            source=str(source_row["source"]),
+            raw_payload=self._decode_objects(
+                source_row["raw_payload"], "raw injury snapshot"
+            ),
+            source_entries=tuple(
+                self._decode_objects(
+                    source_row["normalized_entries"], "source injuries"
+                )
+            ),
+            retrieved_at=assume_utc(source_row["retrieved_at"]),
         )
 
     def publish(
@@ -136,6 +174,7 @@ class InjurySnapshotRepository:
                 retrieved_at=observed_at,
                 unresolved_team_entry_count=unresolved_team_entry_count,
             )
+            self._prune_unreferenced_sources(connection, source)
         return StoredInjurySourceSnapshot(
             source_snapshot_id,
             source,
@@ -160,6 +199,9 @@ class InjurySnapshotRepository:
                 normalized_entries=normalized_entries,
                 retrieved_at=source_snapshot.retrieved_at,
                 unresolved_team_entry_count=unresolved_team_entry_count,
+            )
+            self._prune_unreferenced_sources(
+                connection, source_snapshot.source
             )
 
     def get_latest_source(self, source: str) -> StoredInjurySourceSnapshot | None:
@@ -190,6 +232,27 @@ class InjurySnapshotRepository:
             cls._decode_objects(row["raw_payload"], "raw injury snapshot"),
             tuple(cls._decode_objects(row["normalized_entries"], "source injuries")),
             assume_utc(row["retrieved_at"]),
+        )
+
+    @classmethod
+    def _prune_unreferenced_sources(
+        cls, connection: Connection, source: str
+    ) -> None:
+        source_table = InjurySourceSnapshot.__table__
+        game_table = InjurySnapshot.__table__
+        is_referenced = exists(
+            select(1).where(
+                game_table.c.source_snapshot_id == source_table.c.id
+            )
+        )
+        prunable_ids = (
+            select(source_table.c.id)
+            .where(source_table.c.source == source, ~is_referenced)
+            .order_by(source_table.c.retrieved_at.desc(), source_table.c.id.desc())
+            .offset(cls.UNREFERENCED_SOURCE_RETENTION_COUNT)
+        )
+        connection.execute(
+            delete(source_table).where(source_table.c.id.in_(prunable_ids))
         )
 
     @classmethod
@@ -253,6 +316,7 @@ class InjurySnapshotRepository:
 __all__ = [
     "InjurySnapshotRepository",
     "InjurySnapshotScope",
+    "StoredInjuryEvidence",
     "StoredInjurySnapshot",
     "StoredInjurySourceSnapshot",
 ]
