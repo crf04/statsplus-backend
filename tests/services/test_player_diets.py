@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, event
 
 from app.migrations import run_migrations
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
-from app.services.player_diet import PlayerDietService
+from app.services.player_diet import PlayerDietRepository, PlayerDietService
 
 
 NOW = datetime(2026, 1, 6, 10, 0, tzinfo=timezone.utc)
@@ -41,12 +41,16 @@ class RecordedNBAPlayerDiets:
         self.shot_type_games = {}
         self.restricted_area_attempts = 40
         self.zero_zone_player_id = None
+        self.uncovered_positive_zone_player_id = None
         self.missing_play_type = None
+        self.malformed_play_type = None
         self.fail_shot_zones = False
         self.duplicate_play_rows = False
 
     def fetch_synergy_play_types(self, play_type, **kwargs):
         self.calls.append(("play_type", play_type, kwargs))
+        if play_type == self.malformed_play_type:
+            return pd.DataFrame([{"PLAYER_ID": self.player_id}])
         if play_type == self.missing_play_type:
             return pd.DataFrame(
                 columns=[
@@ -120,6 +124,19 @@ class RecordedNBAPlayerDiets:
                 4,
                 0,
             ])
+        if self.uncovered_positive_zone_player_id is not None:
+            rows.append([
+                self.uncovered_positive_zone_player_id,
+                "Positive Attempts Without GP",
+                10,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ])
         return pd.DataFrame(rows, columns=columns)
 
 
@@ -127,21 +144,28 @@ class RecordedPBPPlayerDiets:
     def __init__(self):
         self.calls = []
         self.arc_assists = 20
+        self.extra_rows = []
+        self.no_location_observations = False
 
     def fetch_player_diet_totals(self, *, season):
         self.calls.append(season)
+        location_values = {
+            "Arc3Assists": self.arc_assists,
+            "Corner3Assists": 10,
+            "AtRimAssists": 30,
+            "ShortMidRangeAssists": 25,
+            "LongMidRangeAssists": 15,
+        }
+        if self.no_location_observations:
+            location_values = {key: None for key in location_values}
         return pd.DataFrame(
             [{
                 "EntityId": "2544",
                 "Name": "LeBron James",
                 "GamesPlayed": 40,
                 "Assists": 100,
-                "Arc3Assists": self.arc_assists,
-                "Corner3Assists": 10,
-                "AtRimAssists": 30,
-                "ShortMidRangeAssists": 25,
-                "LongMidRangeAssists": 15,
-            }]
+                **location_values,
+            }, *self.extra_rows]
         )
 
 
@@ -161,6 +185,11 @@ def _service(tmp_path, *, player_ids=(2544,)):
         nba,
         pbp,
     )
+
+
+def test_repository_refuses_the_read_only_demo_database():
+    with pytest.raises(ValueError, match="demo database"):
+        PlayerDietRepository(create_engine("sqlite:///nba_play_types.db"))
 
 
 def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
@@ -339,6 +368,62 @@ def test_assist_counter_above_total_degrades_only_assist_locations(tmp_path):
     ) == 0.3
 
 
+def test_nan_assist_location_is_absent_without_synthetic_zero_fact(tmp_path):
+    service, _, pbp = _service(tmp_path)
+    pbp.arc_assists = float("nan")
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observation = {item.base: item for item in result.observations}[
+        "assist_locations"
+    ]
+    assert (observation.status, observation.unavailable_reason) == (
+        "available",
+        None,
+    )
+    assert {
+        fact.slice_key
+        for fact in result.players[2544]
+        if fact.base == "assist_locations"
+    } == {
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    }
+
+
+def test_zero_assist_player_is_skipped_while_other_players_publish(tmp_path):
+    service, _, pbp = _service(tmp_path, player_ids=(2544, 201939))
+    pbp.extra_rows = [{
+        "EntityId": "201939",
+        "Name": "Stephen Curry",
+        "GamesPlayed": 40,
+        "Assists": 0,
+        "Arc3Assists": 0,
+        "Corner3Assists": 0,
+        "AtRimAssists": 0,
+        "ShortMidRangeAssists": 0,
+        "LongMidRangeAssists": 0,
+    }]
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 201939])
+
+    observation = {item.base: item for item in result.observations}[
+        "assist_locations"
+    ]
+    assert (observation.status, observation.unavailable_reason) == (
+        "available",
+        None,
+    )
+    assert len(
+        [fact for fact in result.players[2544] if fact.base == "assist_locations"]
+    ) == 5
+    assert 201939 not in result.players
+
+
 def test_shot_zones_report_missing_games_evidence_when_shot_types_degrade(tmp_path):
     service, nba, _ = _service(tmp_path)
     service.refresh("2025-26")
@@ -408,6 +493,31 @@ def test_zero_included_zone_attempts_do_not_disable_other_player_facts(tmp_path)
     assert 201939 not in result.players
 
 
+def test_positive_zone_player_without_gp_coverage_degrades_and_preserves_base(
+    tmp_path,
+):
+    service, nba, _ = _service(tmp_path, player_ids=(2544, 201939))
+    service.refresh("2025-26")
+    nba.restricted_area_attempts = 50
+    nba.uncovered_positive_zone_player_id = 201939
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 201939])
+
+    observations = {item.base: item for item in result.observations}
+    assert observations["shot_types"].status == "available"
+    assert (
+        observations["shot_zones"].status,
+        observations["shot_zones"].unavailable_reason,
+    ) == ("unavailable", "missing_games_played_evidence")
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+    ) == 40
+    assert 201939 not in result.players
+
+
 @pytest.mark.parametrize("attempts", [-1, float("nan")])
 def test_negative_or_nonfinite_zone_attempts_still_degrade_the_base(
     tmp_path, attempts
@@ -454,6 +564,58 @@ def test_positive_zone_attempts_keep_the_gp_dependency_after_inconsistent_gp(tmp
         for fact in result.players[2544]
         if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
     ) == 40
+
+
+def test_no_assist_location_observations_publish_missing_and_preserve_facts(tmp_path):
+    service, nba, pbp = _service(tmp_path)
+    service.refresh("2025-26")
+    pbp.no_location_observations = True
+    nba.shot_share = 0.3
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observation = {item.base: item for item in result.observations}[
+        "assist_locations"
+    ]
+    assert (observation.status, observation.unavailable_reason) == (
+        "missing",
+        "provider_no_observation",
+    )
+    assert len(
+        [fact for fact in result.players[2544] if fact.base == "assist_locations"]
+    ) == 5
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.3
+
+
+def test_malformed_provider_schema_degrades_only_its_base_and_preserves_facts(
+    tmp_path,
+):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.malformed_play_type = "Isolation"
+    nba.shot_share = 0.3
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observation = {item.base: item for item in result.observations}["play_types"]
+    assert (observation.status, observation.unavailable_reason) == (
+        "unavailable",
+        "provider_malformed_response",
+    )
+    assert len(
+        [fact for fact in result.players[2544] if fact.base == "play_types"]
+    ) == 11
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.3
 
 
 def test_missing_base_is_explicit_and_keeps_its_older_raw_facts(tmp_path):
