@@ -27,6 +27,10 @@ from app.services.player_game_log_repository import (
     PlayerSeasonLogSummary,
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.matchup_injuries import (
+    MatchupInjuryResult,
+    unavailable_injury_result,
+)
 from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.team_matchup_query import (
@@ -53,7 +57,6 @@ _SCORES_UNAVAILABLE = {
     "status": "unavailable",
     "unavailable_reason": "not_in_scope",
 }
-_INJURY_SOURCE_URL = "https://www.rotowire.com/basketball/injury-report.php"
 _TWO_POINT_SHOT_ZONES = frozenset(
     {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
 )
@@ -134,8 +137,18 @@ class StatsFreshnessReader(Protocol):
     def get(self) -> StatsFreshness: ...
 
 
+class MatchupInjuryReader(Protocol):
+    def get_injuries(
+        self,
+        *,
+        event: Mapping[str, Any],
+        season: str,
+        pool_players: Sequence[PoolPlayer],
+    ) -> MatchupInjuryResult: ...
+
+
 class MatchupService:
-    """Build one response without provider calls or lazy pool refreshes."""
+    """Build one response without NBA/DFS calls or lazy pool refreshes."""
 
     def __init__(
         self,
@@ -147,6 +160,7 @@ class MatchupService:
         team_matchups: TeamMatchupReader | None,
         stats_freshness: StatsFreshnessReader,
         settings: RuntimeSettings,
+        injuries: MatchupInjuryReader | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.event_catalog = event_catalog
@@ -156,6 +170,7 @@ class MatchupService:
         self.team_matchups = team_matchups
         self.stats_freshness = stats_freshness
         self.settings = settings
+        self.injuries = injuries
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
@@ -177,7 +192,15 @@ class MatchupService:
         if pool is None:
             pool = PlayerPool((), {}, PlayerPool.unavailable_freshness())
         team_ids = (int(event["away_team_id"]), int(event["home_team_id"]))
-        players = tuple(player for player in pool.players if player.team_id in team_ids)
+        pool_players = tuple(
+            player for player in pool.players if player.team_id in team_ids
+        )
+        injury_result = self._injuries(event, season, pool_players)
+        players = tuple(
+            player
+            for player in pool_players
+            if player.canonical_player_id not in injury_result.out_player_ids
+        )
         summaries = self.player_logs.get_player_summaries(
             season, tuple(player.canonical_player_id for player in players)
         )
@@ -205,20 +228,18 @@ class MatchupService:
                 game[side]["team_id"]
             ]
 
-        injury_freshness = {"status": "unavailable", "retrieved_at": None}
+        injury_freshness = {
+            "status": injury_result.block["status"],
+            "retrieved_at": injury_result.block["retrieved_at"],
+        }
         return {
             "game": game,
             "league": league,
             "teams": teams,
-            "players": self._players(players, summaries, diets, event),
-            "injuries": {
-                "status": "unavailable",
-                "unavailable_reason": "disabled",
-                "retrieved_at": None,
-                "source": "rotowire",
-                "source_url": _INJURY_SOURCE_URL,
-                "teams": [],
-            },
+            "players": self._players(
+                players, summaries, diets, event, injury_result.badge_refs
+            ),
+            "injuries": dict(injury_result.block),
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
@@ -238,6 +259,20 @@ class MatchupService:
                 "injuries": injury_freshness,
             },
         }
+
+    def _injuries(
+        self,
+        event: Mapping[str, Any],
+        season: str,
+        pool_players: Sequence[PoolPlayer],
+    ) -> MatchupInjuryResult:
+        if self.injuries is not None:
+            return self.injuries.get_injuries(
+                event=event,
+                season=season,
+                pool_players=pool_players,
+            )
+        return unavailable_injury_result("disabled")
 
     def _event(
         self, season: str, game_id: str
@@ -388,6 +423,7 @@ class MatchupService:
         summaries: Mapping[int, PlayerSeasonLogSummary],
         diets: PlayerDietResult,
         event: Mapping[str, Any],
+        injury_badges: Mapping[int, str],
     ) -> list[dict[str, Any]]:
         rows = []
         for player in players:
@@ -432,7 +468,9 @@ class MatchupService:
                     ),
                     "diet_shares": diet_by_base,
                     "scores": dict(_SCORES_UNAVAILABLE),
-                    "injury_badge_ref": None,
+                    "injury_badge_ref": injury_badges.get(
+                        player.canonical_player_id
+                    ),
                 }
             )
         rows.sort(

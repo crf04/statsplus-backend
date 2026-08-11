@@ -205,6 +205,78 @@ def test_dependency_assembly_validates_catalog_before_provider_construction(monk
     constructor.assert_not_called()
 
 
+def test_rotowire_provider_is_constructed_only_after_both_runtime_gates(
+    monkeypatch, tmp_path
+):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    constructor = Mock(return_value=Mock(name="rotowire_provider"))
+    monkeypatch.setattr("app.providers.rotowire.RotoWireInjuryProvider", constructor)
+    database = {"url": f"sqlite:///{tmp_path / 'application.sqlite3'}"}
+
+    disabled = build_dependencies(
+        RuntimeSettings(environment="testing", database=database)
+    )
+    permission_missing = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            database=database,
+            features={"injury_report_enabled": True},
+        )
+    )
+
+    assert disabled.matchup_service.injuries.provider is None
+    assert permission_missing.matchup_service.injuries.provider is None
+    constructor.assert_not_called()
+
+    permitted = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            database=database,
+            features={"injury_report_enabled": True},
+            providers={"rotowire_permission_granted": True},
+        )
+    )
+
+    constructor.assert_called_once_with(settings=permitted.settings)
+    assert permitted.matchup_service.injuries.provider is constructor.return_value
+    assert permitted.slate_service.injuries is permitted.matchup_service.injuries
+
+
+def test_demo_database_never_constructs_rotowire_and_degrades_with_closed_reason(
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    constructor = Mock(side_effect=AssertionError("demo database constructed provider"))
+    monkeypatch.setattr("app.providers.rotowire.RotoWireInjuryProvider", constructor)
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            features={"injury_report_enabled": True},
+            providers={"rotowire_permission_granted": True},
+        )
+    )
+
+    result = dependencies.matchup_service.injuries.get_injuries(
+        event={"nba_game_id": "1"}, season="2025-26", pool_players=()
+    )
+
+    constructor.assert_not_called()
+    assert result.block["status"] == "unavailable"
+    assert result.block["unavailable_reason"] == "fetch_failed"
+
+
 def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, tmp_path):
     from app.dependencies import build_dependencies
     from app.services.statistic_catalog import StatisticCatalogError

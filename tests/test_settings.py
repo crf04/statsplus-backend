@@ -116,6 +116,41 @@ def test_local_settings_have_typed_safe_defaults(monkeypatch):
     assert settings.cors.allowed_origins == ("http://localhost:3000",)
     assert settings.nba.current_season == current_nba_season()
     assert isinstance(settings.providers.nba_stats_timeout_seconds, float)
+    assert settings.features.injury_report_enabled is False
+    assert settings.providers.rotowire_permission_granted is False
+    assert settings.providers.rotowire_connect_timeout_seconds == 3.0
+    assert settings.providers.rotowire_read_timeout_seconds == 8.0
+
+
+def test_injury_collection_requires_two_explicit_runtime_gates():
+    enabled_without_permission = load_settings(
+        environ={"FLASK_ENV": "testing", "INJURY_REPORT_ENABLED": "true"}
+    )
+    permitted = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "INJURY_REPORT_ENABLED": "true",
+            "ROTOWIRE_PERMISSION_GRANTED": "true",
+        }
+    )
+
+    assert enabled_without_permission.features.injury_report_enabled is True
+    assert enabled_without_permission.providers.rotowire_permission_granted is False
+    assert permitted.features.injury_report_enabled is True
+    assert permitted.providers.rotowire_permission_granted is True
+
+
+def test_rotowire_transport_timeouts_are_typed_named_settings():
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "ROTOWIRE_CONNECT_TIMEOUT_SECONDS": "1.25",
+            "ROTOWIRE_READ_TIMEOUT_SECONDS": "4.5",
+        }
+    )
+
+    assert settings.providers.rotowire_connect_timeout_seconds == 1.25
+    assert settings.providers.rotowire_read_timeout_seconds == 4.5
 
 
 def test_testing_settings_allow_credential_free_bypass(monkeypatch):

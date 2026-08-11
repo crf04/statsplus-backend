@@ -62,6 +62,7 @@ def build_dependencies(
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.prizepicks import PrizePicksAdapter
     from app.providers.underdog import UnderdogAdapter
+    from app.providers.rotowire import RotoWireInjuryProvider
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
@@ -82,6 +83,8 @@ def build_dependencies(
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.matchup import MatchupService
+    from app.services.matchup_injuries import MatchupInjuryService
+    from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
@@ -91,7 +94,7 @@ def build_dependencies(
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
-    from app.utils.db import get_engine
+    from app.utils.db import get_engine, is_demo_database_url
 
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
@@ -108,9 +111,20 @@ def build_dependencies(
         raise TypeError("statistic catalog loader must return a StatisticCatalog")
 
     engine = get_engine(settings)
+    demo_database = is_demo_database_url(settings.database.url)
+    injury_snapshot_repository = (
+        None if demo_database else InjurySnapshotRepository(engine)
+    )
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
+    injury_provider = (
+        RotoWireInjuryProvider(settings=settings)
+        if settings.features.injury_report_enabled
+        and settings.providers.rotowire_permission_granted
+        and injury_snapshot_repository is not None
+        else None
+    )
 
     dfs_providers: dict[str, Any] = {}
     cached_dfs_providers: dict[str, Any] = {}
@@ -189,9 +203,7 @@ def build_dependencies(
     event_resolver = None
     player_diet_service = None
     team_matchup_query_service = None
-    from app.utils.db import is_demo_database_url
-
-    if not is_demo_database_url(settings.database.url):
+    if not demo_database:
         athlete_catalog_service = AthleteCatalogService(
             engine,
             settings=settings,
@@ -256,8 +268,15 @@ def build_dependencies(
         settings=settings,
     )
     player_pool_snapshot_repository = (
-        None if is_demo_database_url(settings.database.url)
+        None if demo_database
         else PlayerPoolSnapshotRepository(engine)
+    )
+    matchup_injury_service = MatchupInjuryService(
+        provider=injury_provider,
+        snapshot_repository=injury_snapshot_repository,
+        athlete_catalog=athlete_catalog_service,
+        enabled=settings.features.injury_report_enabled,
+        permission_granted=settings.providers.rotowire_permission_granted,
     )
     player_pool_service = PlayerPoolService(
         dfs_board_service,
@@ -268,6 +287,7 @@ def build_dependencies(
         event_catalog_service,
         settings=settings,
         player_pool=player_pool_service,
+        injuries=matchup_injury_service,
     )
     from app.domain.freshness import time_window_timedelta
 
@@ -302,6 +322,7 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         stats_freshness=stats_freshness_repository,
         settings=settings,
+        injuries=matchup_injury_service,
     )
 
     return ApplicationDependencies(

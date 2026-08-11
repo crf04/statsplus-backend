@@ -52,6 +52,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
+        "015_share_injury_source_snapshots",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -83,6 +85,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "team_matchup_surface_observations",
             "player_diet_facts",
             "player_diet_surface_observations",
+            "injury_snapshots",
+            "injury_source_snapshots",
         ]
     )
     assert {
@@ -220,6 +224,22 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "ck_player_diet_volume",
         "ck_player_diet_volume_unit",
     }
+    assert {
+        column["name"] for column in inspect(engine).get_columns("injury_snapshots")
+    } == {
+        "season",
+        "game_id",
+        "source_snapshot_id",
+        "raw_payload",
+        "normalized_entries",
+        "unresolved_team_entry_count",
+        "retrieved_at",
+        "updated_at",
+    }
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("injury_source_snapshots")
+    } == {"id", "source", "raw_payload", "normalized_entries", "retrieved_at"}
 
     with engine.connect() as connection:
         assert connection.execute(
@@ -238,6 +258,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (11, "011_create_player_game_logs"),
             (12, "012_create_team_matchup_facts"),
             (13, "013_create_player_diet_facts"),
+            (14, "014_create_injury_snapshots"),
+            (15, "015_share_injury_source_snapshots"),
         ]
 
 
@@ -265,6 +287,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
+        "015_share_injury_source_snapshots",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -276,6 +300,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
     assert inspect(engine).has_table("player_diet_surface_observations")
+    assert inspect(engine).has_table("injury_snapshots")
+    assert inspect(engine).has_table("injury_source_snapshots")
 
 
 def test_demo_database_validation_is_read_only():
@@ -360,6 +386,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "team_matchup_surface_observations",
             "player_diet_facts",
             "player_diet_surface_observations",
+            "injury_snapshots",
+            "injury_source_snapshots",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -474,6 +502,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
+        "015_share_injury_source_snapshots",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -508,12 +538,59 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
+        "015_share_injury_source_snapshots",
     )
-    assert upgraded.current_version == 13
+    assert upgraded.current_version == 15
     assert repeated.applied == ()
-    assert repeated.current_version == 13
+    assert repeated.current_version == 15
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
+    assert inspect(engine).has_table("injury_snapshots")
+    assert inspect(engine).has_table("injury_source_snapshots")
+
+
+def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
+    from app.migrations import MIGRATIONS
+    from app.services.injury_snapshot_repository import (
+        InjurySnapshotRepository,
+        InjurySnapshotScope,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-014.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 14),
+        )
+        run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE injury_snapshots DROP COLUMN source_snapshot_id"))
+        connection.execute(
+            text("ALTER TABLE injury_snapshots DROP COLUMN unresolved_team_entry_count")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO injury_snapshots "
+                "(season, game_id, raw_payload, normalized_entries, retrieved_at, updated_at) "
+                "VALUES ('2025-26', 'legacy', '[{\"ID\":\"1\"}]', '[]', "
+                "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+            )
+        )
+
+    upgraded = run_migrations(engine)
+    stored = InjurySnapshotRepository(engine).get(
+        InjurySnapshotScope("2025-26", "legacy")
+    )
+
+    assert upgraded.applied == ("015_share_injury_source_snapshots",)
+    assert stored is not None
+    assert stored.unresolved_team_entry_count == 0
+    evidence = InjurySnapshotRepository(engine).get_evidence(
+        InjurySnapshotScope("2025-26", "legacy")
+    )
+    assert evidence.raw_payload == [{"ID": "1"}]
+    assert evidence.source_entries == ()

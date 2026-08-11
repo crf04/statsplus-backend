@@ -6,8 +6,9 @@ import pytest
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.slate_service import SlateService
-from app.services.player_pool import PlayerPool
+from app.services.player_pool import PlayerPool, PoolPlayer
 
 
 class RecordedCatalog:
@@ -50,7 +51,15 @@ def _event(game_id, scheduled_at, *, classification="Regular Season", **override
     return event
 
 
-def _service(events, *, freshness=None, now=None, schedule_max_age=None, player_pool=None):
+def _service(
+    events,
+    *,
+    freshness=None,
+    now=None,
+    schedule_max_age=None,
+    player_pool=None,
+    injuries=None,
+):
     settings = RuntimeSettings(
         environment="testing",
         nba=NBASeasonSettings(current_season="2025-26"),
@@ -70,6 +79,7 @@ def _service(events, *, freshness=None, now=None, schedule_max_age=None, player_
         clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=timezone.utc),
         schedule_max_age=schedule_max_age,
         player_pool=player_pool,
+        injuries=injuries,
     )
 
 
@@ -81,6 +91,16 @@ class RecordedPlayerPool:
     def get_pool(self, *, season, game_ids):
         self.calls.append((season, game_ids))
         return self.pool
+
+
+class RecordedStoredInjuries:
+    def __init__(self, out_player_ids):
+        self.out_player_ids = frozenset(out_player_ids)
+        self.calls = []
+
+    def get_stored_injuries(self, *, event, season, pool_players):
+        self.calls.append((event["nba_game_id"], season, tuple(pool_players)))
+        return MatchupInjuryResult({}, self.out_player_ids, {})
 
 
 def test_slate_orders_tip_then_game_id_independently_of_repository_order():
@@ -316,6 +336,29 @@ def test_slate_uses_live_pool_counts_and_provider_freshness():
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 3
     assert payload["freshness"]["pool"] == expected.freshness
     assert pool.calls == [("2025-26", {"0022500001"})]
+
+
+def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup():
+    players = (
+        PoolPlayer(10, "Out Away", 1, ("PTS",), {"dabble": ("PTS",)}),
+        PoolPlayer(11, "Active Away", 1, ("REB",), {"dabble": ("REB",)}),
+        PoolPlayer(20, "Active Home", 2, ("PTS",), {"dabble": ("PTS",)}),
+    )
+    pool = RecordedPlayerPool(
+        PlayerPool(players, {1: 2, 2: 1}, {"status": "fresh"})
+    )
+    injuries = RecordedStoredInjuries({10})
+    service = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        player_pool=pool,
+        injuries=injuries,
+    )
+
+    payload = service.get_slate("2026-01-02")
+
+    assert payload["games"][0]["away_team"]["targetable_player_count"] == 1
+    assert payload["games"][0]["home_team"]["targetable_player_count"] == 1
+    assert injuries.calls[0][0:2] == ("0022500001", "2025-26")
 
 
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():

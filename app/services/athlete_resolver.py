@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.nba_teams import canonical_nba_team_abbreviation
 from app.providers.dfs import (
     AthleteEvidence,
     PlayerProjectionMarket,
@@ -82,12 +83,6 @@ _NON_DECOMPOSING_LATIN_LETTERS = {
     "ı": "i",
 }
 _NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
-_TEAM_ABBREVIATION_DIALECTS = {
-    "PHO": "PHX",
-    "NO": "NOP",
-}
-
-
 @dataclass(frozen=True, slots=True)
 class CanonicalAthlete:
     """Typed view of one season-scoped canonical athlete row."""
@@ -232,10 +227,9 @@ def normalize_athlete_name(value: str | None) -> str:
 
 
 def normalize_team_abbreviation(value: str | None) -> str:
-    """Normalize the two reviewed provider/NBA tricode dialects."""
+    """Normalize reviewed provider/NBA tricode dialects."""
 
-    normalized = value.strip().upper() if isinstance(value, str) else ""
-    return _TEAM_ABBREVIATION_DIALECTS.get(normalized, normalized)
+    return canonical_nba_team_abbreviation(value)
 
 
 def _provider_name(value: str | None) -> str:

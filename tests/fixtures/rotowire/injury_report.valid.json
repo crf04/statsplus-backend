@@ -1,0 +1,32 @@
+[
+  {
+    "ID": "6504",
+    "player": "LeBron James",
+    "team": "LAL",
+    "position": "SF",
+    "injury": "Left ankle soreness",
+    "status": "Questionable",
+    "rDate": "Subscribers Only",
+    "playerURL": "/basketball/player/lebron-james-2344"
+  },
+  {
+    "ID": "9999",
+    "player": "Mystery Reserve",
+    "team": "BOS",
+    "position": "G",
+    "injury": "Illness",
+    "status": "Game Time Decision",
+    "rDate": "Subscribers Only",
+    "playerURL": "/basketball/player/mystery-reserve-9999"
+  },
+  {
+    "ID": "2037",
+    "player": "Available Player",
+    "team": "NYK",
+    "position": "C",
+    "injury": "Cleared",
+    "status": "Available",
+    "rDate": "Subscribers Only",
+    "playerURL": "/basketball/player/available-player-2037"
+  }
+]
