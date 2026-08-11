@@ -428,7 +428,7 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
             assert {row["key"] for row in team["defense_sheet"][base]} <= league_keys
 
 
-def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_unscored():
+def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_degraded():
     player = _service().get_matchup(game_id=GAME_ID)["players"][0]
 
     assert player == {
@@ -470,8 +470,14 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_unscored
             "assist_locations": [],
         },
         "scores": {
-            "status": "unavailable",
-            "unavailable_reason": "not_in_scope",
+            "PTS": {
+                "season": {"components": {}, "blend": None},
+                "last_15": {"components": {}, "blend": None},
+            },
+            "FGA": {
+                "season": {"components": {}, "blend": None},
+                "last_15": {"components": {}, "blend": None},
+            },
         },
         "injury_badge_ref": None,
     }
@@ -638,6 +644,176 @@ def test_missing_required_defensive_column_degrades_traditional_without_503():
         for window_name in ("season", "last_15")
     )
     assert payload["league"]["defense_sheet"]["shot_zones"][0]["season"] is not None
+
+
+@pytest.mark.parametrize("extra_metric_window", ("season", "last_15"))
+def test_non_rebound_traditional_identity_divergence_degrades_only_missing_window(
+    extra_metric_window,
+):
+    complete_traditional = (
+        ("traditional", "OPP_REB", "OPP_REB", 10.0),
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+    )
+    traditional_with_pf = (
+        *complete_traditional,
+        ("traditional", "OPP_PF", "OPP_PF", 18.0),
+    )
+    missing_window = "last_15" if extra_metric_window == "season" else "season"
+
+    payload = _service(
+        season_window=_window(
+            traditional_metrics=(
+                traditional_with_pf
+                if extra_metric_window == "season"
+                else complete_traditional
+            )
+        ),
+        last_15_window=_window(
+            last_15=True,
+            traditional_metrics=(
+                traditional_with_pf
+                if extra_metric_window == "last_15"
+                else complete_traditional
+            ),
+        ),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        extra_metric_window: {
+            "status": "available",
+            "unavailable_reason": None,
+        },
+        missing_window: {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    league_rows = payload["league"]["defense_sheet"]["traditional"]
+    assert {row["key"] for row in league_rows} == {
+        "OPP_BLK",
+        "OPP_PF",
+        "OPP_REB",
+        "OPP_STL",
+        "OPP_TOV",
+    }
+    assert all(row[extra_metric_window] is not None for row in league_rows)
+    assert all(row[missing_window] is None for row in league_rows)
+    assert all(
+        row[extra_metric_window] is not None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row[missing_window] is None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row["season"] is not None and row["last_15"] is not None
+        for row in payload["league"]["defense_sheet"]["shot_zones"]
+    )
+
+
+@pytest.mark.parametrize("missing_rebound_window", ("season", "last_15"))
+def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
+    missing_rebound_window,
+):
+    markets = ("TOV", "STL", "BLK", "REB")
+    pool = PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                markets,
+                {"prizepicks": markets},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+            "providers": {},
+        },
+    )
+
+    complete_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        ("traditional", "OPP_REB", "OPP_REB", 10.0),
+    )
+    season_window = _window(
+        traditional_metrics=(
+            None if missing_rebound_window == "season" else complete_traditional
+        )
+    )
+    last_15_window = _window(
+        last_15=True,
+        traditional_metrics=(
+            None if missing_rebound_window == "last_15" else complete_traditional
+        ),
+    )
+
+    payload = _service(
+        pool=pool,
+        season_window=season_window,
+        last_15_window=last_15_window,
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        "season": {"status": "available", "unavailable_reason": None},
+        "last_15": {"status": "available", "unavailable_reason": None},
+    }
+    for column in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+        assert payload["league"]["defensive_columns"][column]["season"] is not None
+        assert payload["league"]["defensive_columns"][column]["last_15"] is not None
+
+    league_rows = {
+        row["key"]: row
+        for row in payload["league"]["defense_sheet"]["traditional"]
+    }
+    assert league_rows["OPP_REB"][missing_rebound_window] is None
+    present_rebound_window = (
+        "last_15" if missing_rebound_window == "season" else "season"
+    )
+    assert league_rows["OPP_REB"][present_rebound_window] is not None
+    for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+        assert league_rows[key]["season"] is not None
+        assert league_rows[key]["last_15"] is not None
+    for team in payload["teams"]:
+        team_rows = {row["key"]: row for row in team["defense_sheet"]["traditional"]}
+        assert team_rows["OPP_REB"][missing_rebound_window] is None
+        assert team_rows["OPP_REB"][present_rebound_window] is not None
+        for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+            assert team_rows[key]["season"] is not None
+            assert team_rows[key]["last_15"] is not None
+
+    scores = payload["players"][0]["scores"]
+    expected = {
+        "TOV": -0.076923,
+        "STL": -0.142857,
+        "BLK": -0.2,
+    }
+    for market, value in expected.items():
+        for window_name in ("season", "last_15"):
+            assert scores[market][window_name] == {
+                "components": {
+                    "traditional": {"value": value, "thin": False}
+                }
+            }
+    assert scores["REB"][missing_rebound_window] == {
+        "components": {},
+        "blend": None,
+    }
+    assert scores["REB"][present_rebound_window] == {
+        "components": {
+            "traditional": {"value": -0.1, "thin": False}
+        },
+        "blend": {"value": -0.1, "thin": False},
+    }
 
 
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():

@@ -92,6 +92,7 @@ class _FakeMatchupNBA:
                     "TEAM_NAME": f"Team {team_id}",
                     "GP": games,
                     "MIN": games * 48,
+                    "OPP_REB": 200 + index,
                     "OPP_TOV": 100 + index,
                     "OPP_STL": 50 + index,
                     "OPP_BLK": 25 + index,
@@ -841,6 +842,7 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
                         "TEAM_NAME": f"Team {team_id}",
                         "GP": games,
                         "MIN": games * 48,
+                        "OPP_REB": 200 + index,
                         "OPP_TOV": 100 + index,
                         "OPP_STL": 50 + index,
                         "OPP_BLK": 25 + index,
@@ -990,6 +992,16 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     )
     assert season_bos_assists.raw_value == 1968
     assert last_15_bos_assists.raw_value == 300
+    assert {
+        fact.stat_key
+        for fact in season.facts
+        if fact.base == "traditional"
+    } == {"OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK"}
+    assert {
+        fact.stat_key
+        for fact in last_15.facts
+        if fact.base == "traditional"
+    } == {"OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK"}
     bos_transition = {
         fact.stat_key: fact.raw_value
         for fact in season.facts

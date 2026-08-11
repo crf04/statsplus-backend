@@ -732,10 +732,42 @@ null row window even if an older fact-bearing scope remains stored. This is
 especially important for provider-unsupported play-types Last-15: Season is
 never relabeled as rolling data. League and team row identities are constructed
 from the same `(Base, slice, stat)` taxonomy, so every team key has an exact
-league denominator. Player Diets remain raw and Season-only. Injury
-reconciliation can remove a canonical Out player or attach a badge reference;
-it does not change Matchup Scores, Diet Shares, scoring history, or projected
-roles.
+league denominator. Player Diets remain raw and Season-only, while Matchup
+Scores cross that Season evidence with each independently stored team window.
+The score implementation remains inside `MatchupService`, beside the stored
+inputs it serializes; it has no provider boundary and performs no request-time
+fallback. Request-local indexes traverse each stored window's league/team
+metrics once, and a per-player/window memo shares primitive scores across a
+posted primitive row and every combo that consumes it. Components unavailable
+from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
+score applies each raw observed share to the slice's fractional matchup
+difference, so the unobserved residual in an admitted rounded partition has a
+neutral baseline without share normalization or fabricated evidence. A slice
+with exact league/opponent `0/0` is likewise a neutral structural zero; nonzero
+opponent evidence against a non-positive league denominator fails closed, and
+an all-structural-zero component remains absent. A
+blendable offensive window emits a score-cell Blend exactly when at least one
+component computes; zero computable components remain `components: {}` with
+`blend: null`. Newly collected traditional surfaces include `OPP_REB` for REB
+and rebound-containing combos in addition to the three defensive score columns;
+legacy windows missing only OPP_REB retain the defensive surface and degrade
+REB locally. When the other window supplies the OPP_REB row identity, its
+league/team value is null only in the legacy window even though traditional
+availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and defensive
+scores remain populated. OPP_REB is the sole row-level exception: every other
+metric identity divergence marks the affected Base/window
+`unavailable/legacy_surface_incomplete` and nulls all of its rows. Normalization
+therefore validates the cross-window traditional identity union plus the three
+required defensive columns, excluding only OPP_REB for that carveout. The REB
+primitive's implicit-share-one traditional cell consumes no Player Diet or
+player Season sample evidence, so player game count alone never makes it thin;
+combo-level thinness remains unchanged. Combo components and Blends divide
+their available weighted
+numerators by the fixed total positive Season volume of every required part, so
+an unavailable part is neutral zero rather than a reason to renormalize.
+Injury reconciliation can remove a canonical Out player or attach a badge
+reference; it does not change Matchup Scores, Diet Shares, scoring history, or
+projected roles.
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
@@ -907,6 +939,8 @@ bounds, so its fact-free Last-15 play-type observation is
 `unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
 Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
 each governed slice; `GP` is provider evidence rather than a display metric.
+The traditional NBA surface persists `OPP_REB`, `OPP_TOV`, `OPP_STL`, and
+`OPP_BLK` with the same authoritative minutes denominator for both windows.
 
 Before every team has 15 governed completions, the same transaction publishes
 the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces

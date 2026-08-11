@@ -135,7 +135,7 @@ class TeamWindowBoundaryResolver:
         return cls._scheduled_at(event).astimezone(EASTERN).date() <= as_of
 
 
-_TRADITIONAL_STATS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
+_TRADITIONAL_STATS = ("OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK")
 _SHOT_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
 _ASSIST_STATS = (
     "Assists",

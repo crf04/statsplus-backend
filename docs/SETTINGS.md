@@ -19,6 +19,7 @@ The model is intentionally grouped by responsibility:
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
 | `CatalogSettings` | Catalog/read thresholds: athlete freshness, player-log coverage and age, event matching/schedule age, and matchup-selection H2H/archetype thin sample minimums | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` (default `5`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`), `SLATE_SCHEDULE_MAX_AGE_HOURS` (default `30`), `PLAYER_GAME_LOG_MAX_AGE_HOURS` (default `30`), `MATCHUP_SELECTION_H2H_MIN_GAMES` (default `1`), `MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` (default `5`) |
+| `MatchupScoreSettings` | Season player-evidence floors for backend-owned score thin flags | `MATCHUP_SCORE_MIN_GAMES` (default `5`), `MATCHUP_SCORE_PLAY_TYPES_MIN_VOLUME_PER_GAME` (default `1`), `MATCHUP_SCORE_SHOT_ZONES_MIN_VOLUME_PER_GAME` (default `1`), `MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME` (default `4`), `MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME` (default `1`) |
 
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
@@ -38,6 +39,14 @@ volumes, and the frontend owns chip thresholds. It also has no Last-15 or
 request-time fallback setting; `NBASeasonSettings.current_season` selects the
 explicit Nightly Season and each stored Base carries its own timezone-aware
 retrieval time and availability observation.
+
+Matchup Score thin thresholds are independent from the frontend's Diet-chip
+display gates. A component is thin when its Season player Diet has fewer than
+`MATCHUP_SCORE_MIN_GAMES` games or its total Base volume per game is below that
+Base's configured floor. The same Season evidence governs the Season and
+Last-15 score cells because Player Diet facts are Season-only. A combo Blend
+also becomes thin when any contributing component is thin or the Season rate
+used for part weights has fewer than the configured minimum games.
 
 The internal DFS collector receives an explicit injected provider registry. In
 development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS

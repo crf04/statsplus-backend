@@ -388,6 +388,20 @@ governed franchise fact set makes otherwise available Base/windows
 `missing/team_not_in_governed_roster`, while the known game header and other
 stored response sections still return.
 
+There is exactly one row-level exception while a Base/window remains
+`available`: a pre-OPP_REB traditional Season or Last-15 snapshot may omit only
+`OPP_REB`. If the other window supplies that identity, the league and team
+`OPP_REB` row windows are `null` only for the legacy scope, while traditional
+availability and the `OPP_TOV`, `OPP_STL`, and `OPP_BLK` rows and defensive
+columns stay available. The matching REB score window is
+`components: {}` / `blend: null`; the other REB window remains computable.
+Every other missing or divergent metric identity still downgrades the entire
+affected Base/window to `unavailable/legacy_surface_incomplete` and nulls all
+of its row windows. The expected traditional identity set is the union across
+the independently stored windows (plus the required defensive columns), with
+only `OPP_REB` excluded for the compatibility carveout; for example, an
+`OPP_PF` row present in only one window downgrades the other window locally.
+
 Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
 and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
@@ -435,8 +449,35 @@ Each stored pool player has this shape:
     "assist_locations": []
   },
   "scores": {
-    "status": "unavailable",
-    "unavailable_reason": "not_in_scope"
+    "PTS": {
+      "season": {
+        "components": {
+          "play_types": { "value": 0.08, "thin": false },
+          "shot_zones": { "value": 0.12, "thin": false }
+        },
+        "blend": { "value": 0.10, "thin": false }
+      },
+      "last_15": {
+        "components": {
+          "shot_zones": { "value": -0.03, "thin": true }
+        },
+        "blend": { "value": -0.03, "thin": true }
+      }
+    },
+    "FGA": {
+      "season": {
+        "components": {
+          "shot_zones": { "value": 0.04, "thin": false }
+        },
+        "blend": { "value": 0.04, "thin": false }
+      },
+      "last_15": {
+        "components": {
+          "shot_zones": { "value": -0.02, "thin": false }
+        },
+        "blend": { "value": -0.02, "thin": false }
+      }
+    }
   },
   "injury_badge_ref": null
 }
@@ -445,8 +486,82 @@ Each stored pool player has this shape:
 Player Diet facts are unthresholded raw Season shares and volumes. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
-Matchup Score computation is not part of this endpoint slice, so `scores` is a
-present, explicit unavailable placeholder.
+
+`scores` has exactly one row for every `posted_markets` value and no unposted
+row. Each row always carries independent `season` and `last_15` windows. A
+component cell's `value` is the fractional difference from a league-average
+matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's
+slices of:
+
+```text
+player Season Diet Share ×
+  (opponent allowed-per-48 / league average allowed-per-48 - 1)
+```
+
+Equivalently, the score subtracts the actual applied Diet `weight_total`, not a
+hard-coded `1`. Any unobserved residual in an admitted provider-rounded
+partition is neutral: it contributes zero matchup difference. The backend
+preserves the raw shares, does not normalize a materially partial Diet, does not
+fabricate concession evidence for that residual, and makes no request-time
+estimate. Provider shares are rounded, so
+Base-specific completeness bounds admit the observed complete partitions:
+play types `0.995..1.005`, shot types `0.900..1.010`, and derived shot-zone and
+assist-location shares within `0.000001` of one. Unknown/duplicate slices and
+missing governed slices or shares outside those bounds fail closed. A non-defensive Blend is the simple
+mean of its computable Base components. An unavailable Base is omitted, not
+emitted as a null cell. Thus provider-unsupported play-types Last-15 never
+receives the Season component, while other available Last-15 Bases still score.
+Within an otherwise complete Base, a slice whose league and opponent values are
+both exactly zero is a structural zero and contributes a neutral zero matchup
+difference; supported slices still score at their raw shares. A non-positive
+league value paired with nonzero opponent evidence fails the component closed,
+and a component with only structural-zero slices remains unavailable rather
+than fabricating numeric zero.
+
+For every blendable offensive window, `components: {}` and `blend: null`
+truthfully mean that zero components were computable. Whenever at least one
+offensive component is present, `blend` is a score cell with `value` and
+`thin`; the backend never fabricates a numeric Blend merely to avoid `null`.
+
+The stored Diet/sheet intersection supports PTS through play types, shot zones,
+and shot types; FGA through shot zones and shot types; AST through assist
+locations; and 3PM, FG2A, and FG3A through shot zones and shot types. PTS
+shot-type concessions derive stored points as `2 × FG2M + 3 × FG3M`, and FGA
+derives `FG2A + FG3A`. The attempt markets use their matching stored shot stat;
+3PM uses stored `FGM` in the two three-point zones and `FG3M` by shot type.
+For zone-specific attempt/make markets, the player's stored FGA volumes derive
+the exact conditional Diet across the applicable two- or three-point zones;
+this is not normalization of missing evidence. REB uses the stored traditional
+`OPP_REB` aggregate with implicit share one. Its required offensive Blend is
+the same numeric cell as its single `traditional` component. Legacy traditional
+windows without `OPP_REB` keep their valid OPP_TOV/OPP_STL/OPP_BLK surface and
+defensive scores; only REB and rebound-containing combos degrade locally. This
+is the sole available-Base row-level null exception described above. Because
+the REB primitive consumes neither Player Diet nor player Season sample
+evidence, its component and Blend are not thin merely because the player has
+fewer than `MATCHUP_SCORE_MIN_GAMES`; combos that consume REB still apply the
+combo-level Season game minimum described below.
+
+PRA, PA, PR, and RA combine PTS/REB/AST part scores using the player's stored
+Season per-game volumes. Every component and Blend uses the fixed denominator
+of all required parts with positive Season volume. An unavailable part supplies
+a neutral zero-delta numerator without renormalizing the surviving parts; if
+some parts remain computable, the truthful partial numeric result is retained
+and every delivered combo component and Blend is thin. `blend` remains null
+when no part contributes. TOV, STL, and BLK
+have only a `traditional` component against their matching `OPP_*` column.
+STKS Season-volume-weights the stored OPP_STL and OPP_BLK comparisons into one
+`traditional` component. These defensive windows omit `blend` (a JSON `null`
+is also contract-equivalent) so the response never pretends a one-Base result
+is a Blend.
+
+Every numeric cell carries `thin`. The backend marks a Diet component thin when
+the player's Season sample is below `MATCHUP_SCORE_MIN_GAMES` (default `5`) or
+its total Base volume per game is below the matching named floor: play types
+`1`, shot zones `1`, shot types `4`, and assist locations `1` by default. A
+Blend is thin when any contributor is thin; every combo component and Blend
+also uses the Season-rate game minimum. Thin cells retain their numeric values. Team
+window unavailability omits a component rather than mislabeling it thin.
 
 Injury collection is disabled by default. Disabled and enabled-without-
 permission states remain present-but-unavailable and make no provider request:

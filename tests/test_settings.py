@@ -79,6 +79,47 @@ def test_matchup_selection_thin_thresholds_are_named_configuration():
     assert configured.catalog.matchup_selection_archetype_min_games == 8
 
 
+def test_matchup_score_thin_thresholds_are_named_configuration():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "MATCHUP_SCORE_MIN_GAMES": "8",
+            "MATCHUP_SCORE_PLAY_TYPES_MIN_VOLUME_PER_GAME": "2.5",
+            "MATCHUP_SCORE_SHOT_ZONES_MIN_VOLUME_PER_GAME": "3.5",
+            "MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME": "5.5",
+            "MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME": "1.5",
+        }
+    )
+
+    assert defaults.matchup_scores.min_games == 5
+    assert defaults.matchup_scores.play_types_min_volume_per_game == 1
+    assert defaults.matchup_scores.shot_zones_min_volume_per_game == 1
+    assert defaults.matchup_scores.shot_types_min_volume_per_game == 4
+    assert defaults.matchup_scores.assist_locations_min_volume_per_game == 1
+    assert configured.matchup_scores.min_games == 8
+    assert configured.matchup_scores.play_types_min_volume_per_game == 2.5
+    assert configured.matchup_scores.shot_zones_min_volume_per_game == 3.5
+    assert configured.matchup_scores.shot_types_min_volume_per_game == 5.5
+    assert configured.matchup_scores.assist_locations_min_volume_per_game == 1.5
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MATCHUP_SCORE_MIN_GAMES", "0"),
+        ("MATCHUP_SCORE_MIN_GAMES", "not-an-integer"),
+        ("MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "-1"),
+        ("MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "not-a-number"),
+        ("MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "nan"),
+        ("MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "inf"),
+    ],
+)
+def test_matchup_score_thin_thresholds_reject_invalid_values(name, value):
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing", name: value})
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
 def test_matchup_selection_thin_thresholds_must_be_positive_integers(value):
     with pytest.raises(ConfigurationError):
