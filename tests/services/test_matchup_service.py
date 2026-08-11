@@ -646,6 +646,78 @@ def test_missing_required_defensive_column_degrades_traditional_without_503():
     assert payload["league"]["defense_sheet"]["shot_zones"][0]["season"] is not None
 
 
+@pytest.mark.parametrize("current_season_has_rebounds", (False, True))
+def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
+    current_season_has_rebounds,
+):
+    markets = ("TOV", "STL", "BLK", "REB")
+    pool = PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                markets,
+                {"prizepicks": markets},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+            "providers": {},
+        },
+    )
+
+    season_window = None
+    if current_season_has_rebounds:
+        season_window = _window(
+            traditional_metrics=(
+                ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+                ("traditional", "OPP_STL", "OPP_STL", 7.0),
+                ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+                ("traditional", "OPP_REB", "OPP_REB", 10.0),
+            )
+        )
+
+    payload = _service(pool=pool, season_window=season_window).get_matchup(
+        game_id=GAME_ID
+    )
+
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        "season": {"status": "available", "unavailable_reason": None},
+        "last_15": {"status": "available", "unavailable_reason": None},
+    }
+    for column in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+        assert payload["league"]["defensive_columns"][column]["season"] is not None
+        assert payload["league"]["defensive_columns"][column]["last_15"] is not None
+
+    scores = payload["players"][0]["scores"]
+    expected = {
+        "TOV": -0.076923,
+        "STL": -0.142857,
+        "BLK": -0.2,
+    }
+    for market, value in expected.items():
+        for window_name in ("season", "last_15"):
+            assert scores[market][window_name] == {
+                "components": {
+                    "traditional": {"value": value, "thin": False}
+                }
+            }
+    assert scores["REB"]["season"] == (
+        {
+            "components": {
+                "traditional": {"value": -0.1, "thin": False}
+            },
+            "blend": {"value": -0.1, "thin": False},
+        }
+        if current_season_has_rebounds
+        else {"components": {}, "blend": None}
+    )
+    assert scores["REB"]["last_15"] == {"components": {}, "blend": None}
+
+
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
     payload = _service().get_matchup(game_id=GAME_ID)
 

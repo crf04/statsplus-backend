@@ -161,7 +161,13 @@ def _team_matchups(engine, *, asymmetric_shot_zones=False):
                 base,
                 slice_key,
                 stat_key,
-                float(row["allowed"]),
+                (
+                    0.0
+                    if base == "shot_types"
+                    and slice_key == "less_than_10_ft"
+                    and stat_key in {"FG3M", "FG3A"}
+                    else float(row["allowed"])
+                ),
                 48.0,
                 "minutes",
                 "recorded",
@@ -586,6 +592,13 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
                 assert set(window["blend"]) == {"value", "thin"}
                 assert isinstance(window["blend"]["value"], float)
                 assert isinstance(window["blend"]["thin"], bool)
+    for market in ("3PM", "FG3A"):
+        for window_name in ("season", "last_15"):
+            assert scores[market][window_name]["components"]["shot_types"] == {
+                "value": -0.609677,
+                "thin": True,
+            }
+    assert "shot_types" in scores["PA"]["season"]["components"]
     assert {
         row["key"]: row["markets"]
         for row in payload["teams"][0]["defense_sheet"]["shot_zones"]

@@ -3,6 +3,8 @@
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.models.catalogs import PLAY_TYPES
 from app.services.matchup import DEFENSE_BASES, MatchupService
@@ -213,7 +215,7 @@ def _window(metrics, *, last_15=False, unsupported=(), metric_trackers=None):
                 slice_key,
                 stat,
                 opponent,
-                (opponent / average - 1) * 100,
+                (opponent / average - 1) * 100 if average else 0.0,
                 opponent - average,
                 16,
             )
@@ -399,6 +401,105 @@ def test_shot_type_score_derives_fga_from_stored_two_and_three_attempts():
     }
 
 
+def test_structural_zero_shot_types_do_not_poison_supported_3pm_and_fg3a_slices():
+    assist_slices = (
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    )
+    player = _service(
+        markets=("3PM", "FG3A", "PA"),
+        facts=(
+            _fact("shot_types", "Catch and Shoot", 0.4, 40),
+            _fact("shot_types", "Pullups", 0.3, 30),
+            _fact("shot_types", "Less Than 10 ft", 0.3, 30),
+            *(
+                _fact("assist_locations", slice_key, 0.2, 8)
+                for slice_key in assist_slices
+            ),
+        ),
+        season_metrics=(
+            ("shot_types", "catch_and_shoot", "FG2M", 2.0, 2.0),
+            ("shot_types", "catch_and_shoot", "FG3M", 4.0, 5.0),
+            ("shot_types", "catch_and_shoot", "FG3A", 8.0, 10.0),
+            ("shot_types", "pullups", "FG2M", 2.0, 2.0),
+            ("shot_types", "pullups", "FG3M", 2.0, 1.0),
+            ("shot_types", "pullups", "FG3A", 4.0, 2.0),
+            ("shot_types", "less_than_10_ft", "FG2M", 6.0, 6.0),
+            ("shot_types", "less_than_10_ft", "FG3M", 0.0, 0.0),
+            ("shot_types", "less_than_10_ft", "FG3A", 0.0, 0.0),
+            *(
+                ("assist_locations", slice_key, slice_key, 5.0, 5.0)
+                for slice_key in assist_slices
+            ),
+        ),
+        per_game={"PTS": 30.0, "AST": 10.0},
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["scores"]["3PM"]["season"] == {
+        "components": {"shot_types": {"value": -0.05, "thin": False}},
+        "blend": {"value": -0.05, "thin": False},
+    }
+    assert player["scores"]["FG3A"]["season"] == {
+        "components": {"shot_types": {"value": -0.05, "thin": False}},
+        "blend": {"value": -0.05, "thin": False},
+    }
+    assert player["scores"]["PA"]["season"] == {
+        "components": {
+            "shot_types": {"value": -0.01125, "thin": False},
+            "assist_locations": {"value": 0.0, "thin": False},
+        },
+        "blend": {"value": -0.01125, "thin": False},
+    }
+
+
+def test_all_structural_zero_slices_emit_no_component_or_blend():
+    player = _service(
+        markets=("3PM",),
+        facts=(
+            _fact("shot_types", "Catch and Shoot", 0.4, 40),
+            _fact("shot_types", "Pullups", 0.3, 30),
+            _fact("shot_types", "Less Than 10 ft", 0.3, 30),
+        ),
+        season_metrics=tuple(
+            ("shot_types", slice_key, "FG3M", 0.0, 0.0)
+            for slice_key in (
+                "catch_and_shoot",
+                "pullups",
+                "less_than_10_ft",
+            )
+        ),
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["scores"]["3PM"]["season"] == {
+        "components": {},
+        "blend": None,
+    }
+
+
+def test_zero_league_with_positive_team_evidence_fails_closed():
+    player = _service(
+        markets=("FG3A",),
+        facts=(
+            _fact("shot_types", "Catch and Shoot", 0.4, 40),
+            _fact("shot_types", "Pullups", 0.3, 30),
+            _fact("shot_types", "Less Than 10 ft", 0.3, 30),
+        ),
+        season_metrics=(
+            ("shot_types", "catch_and_shoot", "FG3A", 8.0, 10.0),
+            ("shot_types", "pullups", "FG3A", 4.0, 2.0),
+            ("shot_types", "less_than_10_ft", "FG3A", 0.0, 1.0),
+        ),
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["scores"]["FG3A"]["season"] == {
+        "components": {},
+        "blend": None,
+    }
+
+
 def test_assist_location_score_uses_the_player_assist_diet():
     slices = (
         "Arc3Assists",
@@ -468,16 +569,16 @@ def test_combo_score_weights_component_markets_by_season_volumes():
     assert player["scores"]["PA"] == {
         "season": {
             "components": {
-                "play_types": {"value": 0.2, "thin": False},
-                "assist_locations": {"value": -0.1, "thin": False},
+                "play_types": {"value": 0.15, "thin": False},
+                "assist_locations": {"value": -0.025, "thin": False},
             },
             "blend": {"value": 0.125, "thin": False},
         },
         "last_15": {
             "components": {
-                "assist_locations": {"value": -0.1, "thin": True}
+                "assist_locations": {"value": -0.025, "thin": True}
             },
-            "blend": {"value": -0.1, "thin": True},
+            "blend": {"value": -0.025, "thin": True},
         },
     }
 
@@ -634,8 +735,8 @@ def test_combo_components_and_blend_share_the_season_rate_game_floor():
 
     assert player["scores"]["PA"]["season"] == {
         "components": {
-            "play_types": {"value": 0.2, "thin": True},
-            "assist_locations": {"value": -0.5, "thin": True},
+            "play_types": {"value": 0.15, "thin": True},
+            "assist_locations": {"value": -0.125, "thin": True},
         },
         "blend": {"value": 0.025, "thin": True},
     }
@@ -730,7 +831,7 @@ def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos()
     assert player["scores"]["PA"]["season"] == {
         "components": {
             "shot_types": {"value": 0.0, "thin": False},
-            "assist_locations": {"value": 0.2, "thin": False},
+            "assist_locations": {"value": 0.05, "thin": False},
         },
         "blend": {"value": 0.05, "thin": False},
     }
@@ -858,21 +959,66 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
                 assert window["blend"] == {"value": 0.1, "thin": False}
 
 
-def test_combo_with_an_unavailable_positive_volume_part_retains_value_but_is_thin():
+@pytest.mark.parametrize(
+    ("market", "missing_part", "expected"),
+    (
+        (
+            "PRA",
+            "AST",
+            {
+                "play_types": 0.114286,
+                "traditional": 0.057143,
+                "blend": 0.171429,
+            },
+        ),
+        ("PA", "AST", {"play_types": 0.16, "blend": 0.16}),
+        ("PR", "REB", {"play_types": 0.133333, "blend": 0.133333}),
+        ("RA", "AST", {"traditional": 0.133333, "blend": 0.133333}),
+    ),
+)
+def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(
+    market, missing_part, expected
+):
+    assist_slices = (
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    )
+    metrics = [
+        ("play_types", "Transition", "PTS", 10.0, 12.0),
+        ("traditional", "OPP_TOV", "OPP_TOV", 10.0, 10.0),
+        ("traditional", "OPP_STL", "OPP_STL", 10.0, 10.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 10.0, 10.0),
+    ]
+    if missing_part != "REB":
+        metrics.append(("traditional", "OPP_REB", "OPP_REB", 10.0, 12.0))
+    if missing_part != "AST":
+        metrics.extend(
+            ("assist_locations", slice_key, slice_key, 5.0, 6.0)
+            for slice_key in assist_slices
+        )
     player = _service(
-        markets=("PA",),
+        markets=(market,),
         facts=_complete_play_facts(
-            _fact("play_types", "Transition", 1.0, 100)
+            _fact("play_types", "Transition", 1.0, 100),
+            *(
+                _fact("assist_locations", slice_key, 0.2, 8)
+                for slice_key in assist_slices
+            ),
         ),
-        season_metrics=(
-            ("play_types", "Transition", "PTS", 10.0, 12.0),
-        ),
-        per_game={"PTS": 30.0, "AST": 10.0},
+        season_metrics=tuple(metrics),
+        per_game={"PTS": 20.0, "REB": 10.0, "AST": 5.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PA"]["season"] == {
-        "components": {"play_types": {"value": 0.2, "thin": True}},
-        "blend": {"value": 0.2, "thin": True},
+    assert player["scores"][market]["season"] == {
+        "components": {
+            base: {"value": value, "thin": True}
+            for base, value in expected.items()
+            if base != "blend"
+        },
+        "blend": {"value": expected["blend"], "thin": True},
     }
 
 

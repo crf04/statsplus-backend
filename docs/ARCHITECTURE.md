@@ -742,11 +742,18 @@ posted primitive row and every combo that consumes it. Components unavailable
 from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
 score applies each raw observed share to the slice's fractional matchup
 difference, so the unobserved residual in an admitted rounded partition has a
-neutral baseline without share normalization or fabricated evidence. A
+neutral baseline without share normalization or fabricated evidence. A slice
+with exact league/opponent `0/0` is likewise a neutral structural zero; nonzero
+opponent evidence against a non-positive league denominator fails closed, and
+an all-structural-zero component remains absent. A
 blendable offensive window emits a score-cell Blend exactly when at least one
 component computes; zero computable components remain `components: {}` with
-`blend: null`. The traditional surface includes `OPP_REB` for REB and
-rebound-containing combos, in addition to the three defensive score columns.
+`blend: null`. Newly collected traditional surfaces include `OPP_REB` for REB
+and rebound-containing combos in addition to the three defensive score columns;
+legacy windows missing only OPP_REB retain the defensive surface and degrade
+REB locally. Combo components and Blends divide their available weighted
+numerators by the fixed total positive Season volume of every required part, so
+an unavailable part is neutral zero rather than a reason to renormalize.
 Injury reconciliation can remove a canonical Out player or attach a badge
 reference; it does not change Matchup Scores, Diet Shares, scoring history, or
 projected roles.

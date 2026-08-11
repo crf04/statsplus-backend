@@ -56,7 +56,7 @@ DEFENSE_BASES = (
 )
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
 _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
-    (key, key) for key in ("OPP_REB", *DEFENSIVE_COLUMNS)
+    (key, key) for key in DEFENSIVE_COLUMNS
 )
 _WIRE_PRECISION = 6
 _TWO_POINT_SHOT_ZONES = frozenset(
@@ -834,6 +834,9 @@ class MatchupService:
             part: summary.season_rate.per_game.get(part, 0.0)
             for part in _COMBO_PARTS[market]
         }
+        total_positive_weight = sum(
+            weight for weight in weights.values() if weight > 0
+        )
         part_scores = {
             part: self._score_window(
                 part,
@@ -861,11 +864,10 @@ class MatchupService:
             ]
             if not contributors:
                 continue
-            total_weight = sum(weight for weight, _cell in contributors)
             components[base] = {
                 "value": self._number(
                     sum(weight * cell["value"] for weight, cell in contributors)
-                    / total_weight
+                    / total_positive_weight
                 ),
                 "thin": (
                     degraded
@@ -881,11 +883,10 @@ class MatchupService:
         ]
         if not blend_contributors:
             return {"components": components, "blend": None}
-        total_weight = sum(weight for weight, _cell in blend_contributors)
         blend = {
             "value": self._number(
                 sum(weight * cell["value"] for weight, cell in blend_contributors)
-                / total_weight
+                / total_positive_weight
             ),
             "thin": (
                 summary.season_rate.game_count
@@ -958,10 +959,14 @@ class MatchupService:
                     return None
                 league_value += weight * league.average_allowed_per_48
                 team_value += weight * team.allowed_per_48
+            if league_value == 0 and team_value == 0:
+                continue
             if league_value <= 0:
                 return None
             total += share * (team_value / league_value)
             weight_total += share
+        if weight_total == 0:
+            return None
         volume_per_game = sum(
             fact.volume / fact.games_played for fact in selected_facts
         )
@@ -1027,7 +1032,11 @@ class MatchupService:
         result: dict[str, dict[str, dict[str, Any]]] = {}
         for base in DEFENSE_BASES:
             result[base] = {}
-            expected = expected_by_base[base]
+            expected = (
+                _REQUIRED_TRADITIONAL_IDENTITIES
+                if base == "traditional"
+                else expected_by_base[base]
+            )
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
@@ -1142,6 +1151,8 @@ class MatchupService:
             return None
         metric = metric_index.league.get((base, slice_key, stat_key))
         if metric is None:
+            if base == "traditional" and slice_key == stat_key == "OPP_REB":
+                return None
             raise ProviderUnavailableError(
                 "Stored matchup league facts are incomplete."
             )
@@ -1164,6 +1175,8 @@ class MatchupService:
             return None
         metric = metric_index.teams.get(team_id, {}).get((base, slice_key, stat_key))
         if metric is None:
+            if base == "traditional" and slice_key == stat_key == "OPP_REB":
+                return None
             raise ProviderUnavailableError("Stored matchup team facts are incomplete.")
         return {
             "allowed_per_48": cls._number(metric.allowed_per_48),

@@ -497,6 +497,12 @@ missing governed slices or shares outside those bounds fail closed. A non-defens
 mean of its computable Base components. An unavailable Base is omitted, not
 emitted as a null cell. Thus provider-unsupported play-types Last-15 never
 receives the Season component, while other available Last-15 Bases still score.
+Within an otherwise complete Base, a slice whose league and opponent values are
+both exactly zero is a structural zero and contributes a neutral zero matchup
+difference; supported slices still score at their raw shares. A non-positive
+league value paired with nonzero opponent evidence fails the component closed,
+and a component with only structural-zero slices remains unavailable rather
+than fabricating numeric zero.
 
 For every blendable offensive window, `components: {}` and `blend: null`
 truthfully mean that zero components were computable. Whenever at least one
@@ -513,14 +519,17 @@ For zone-specific attempt/make markets, the player's stored FGA volumes derive
 the exact conditional Diet across the applicable two- or three-point zones;
 this is not normalization of missing evidence. REB uses the stored traditional
 `OPP_REB` aggregate with implicit share one. Its required offensive Blend is
-the same numeric cell as its single `traditional` component.
+the same numeric cell as its single `traditional` component. Legacy traditional
+windows without `OPP_REB` keep their valid OPP_TOV/OPP_STL/OPP_BLK surface and
+defensive scores; only REB and rebound-containing combos degrade locally.
 
-PRA, PA, PR, and RA combine their computable PTS/REB/AST part scores using the
-player's stored Season per-game volumes. Each combo component weights the parts
-that compute that Base, and its Blend weights the available primitive Blends;
-an unavailable positive-volume part is not replaced by another statistic. If
-some parts remain computable, their best available numeric result is retained
-but every delivered combo component and Blend is thin. TOV, STL, and BLK
+PRA, PA, PR, and RA combine PTS/REB/AST part scores using the player's stored
+Season per-game volumes. Every component and Blend uses the fixed denominator
+of all required parts with positive Season volume. An unavailable part supplies
+a neutral zero-delta numerator without renormalizing the surviving parts; if
+some parts remain computable, the truthful partial numeric result is retained
+and every delivered combo component and Blend is thin. `blend` remains null
+when no part contributes. TOV, STL, and BLK
 have only a `traditional` component against their matching `OPP_*` column.
 STKS Season-volume-weights the stored OPP_STL and OPP_BLK comparisons into one
 `traditional` component. These defensive windows omit `blend` (a JSON `null`
