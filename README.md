@@ -77,6 +77,8 @@ the most important variables:
 | `SLATE_SCHEDULE_MAX_AGE_HOURS` | No | `30`; freshness window for the nightly slate schedule surface |
 | `PLAYER_GAME_LOG_MAX_AGE_HOURS` | No | `30`; maximum age for configured-current-season durable player-log reads |
 | `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` | No | `5`; required positive-minute players for each team in a completed game |
+| `MATCHUP_SCORE_MIN_GAMES` | No | `5`; Season player sample below this marks affected score cells thin |
+| `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME` | No | `1` for play types, shot zones, and assist locations; `4` for shot types |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |

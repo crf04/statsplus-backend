@@ -466,6 +466,37 @@ class CatalogSettings(BaseModel):
         return quantity
 
 
+class MatchupScoreSettings(BaseModel):
+    """Season player-evidence floors that mark delivered score cells thin."""
+
+    model_config = ConfigDict(frozen=True)
+
+    min_games: int = Field(default=5, strict=True, ge=1)
+    play_types_min_volume_per_game: float = Field(
+        default=1.0, ge=0, allow_inf_nan=False
+    )
+    shot_zones_min_volume_per_game: float = Field(
+        default=1.0, ge=0, allow_inf_nan=False
+    )
+    shot_types_min_volume_per_game: float = Field(
+        default=4.0, ge=0, allow_inf_nan=False
+    )
+    assist_locations_min_volume_per_game: float = Field(
+        default=1.0, ge=0, allow_inf_nan=False
+    )
+
+    def minimum_volume_per_game(self, base: str) -> float:
+        try:
+            return {
+                "play_types": self.play_types_min_volume_per_game,
+                "shot_zones": self.shot_zones_min_volume_per_game,
+                "shot_types": self.shot_types_min_volume_per_game,
+                "assist_locations": self.assist_locations_min_volume_per_game,
+            }[base]
+        except KeyError as error:
+            raise ValueError(f"unsupported matchup score Base: {base}") from error
+
+
 class RuntimeSettings(BaseModel):
     """Complete, typed settings object created during application startup."""
 
@@ -480,6 +511,7 @@ class RuntimeSettings(BaseModel):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
+    matchup_scores: MatchupScoreSettings = Field(default_factory=MatchupScoreSettings)
     # Event-catalog freshness is intentionally independent from athlete
     # catalog state.  Operators may lengthen/shorten the read-age window
     # without changing the provider timeout or a worker schedule.
@@ -708,6 +740,22 @@ def _build_settings(
             llm=llm,
             cors=cors,
             nba=_validated_model(NBASeasonSettings),
+            matchup_scores=_validated_model(
+                MatchupScoreSettings,
+                min_games=reader.integer("MATCHUP_SCORE_MIN_GAMES", 5),
+                play_types_min_volume_per_game=reader.decimal(
+                    "MATCHUP_SCORE_PLAY_TYPES_MIN_VOLUME_PER_GAME", 1.0
+                ),
+                shot_zones_min_volume_per_game=reader.decimal(
+                    "MATCHUP_SCORE_SHOT_ZONES_MIN_VOLUME_PER_GAME", 1.0
+                ),
+                shot_types_min_volume_per_game=reader.decimal(
+                    "MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME", 4.0
+                ),
+                assist_locations_min_volume_per_game=reader.decimal(
+                    "MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME", 1.0
+                ),
+            ),
             # Every catalog window is read as written and bounded by the one
             # time-window authority, so none of them is ever rounded through a
             # float on the way to the duration a service compares against.
@@ -912,6 +960,7 @@ __all__ = [
     "DatabaseSettings",
     "FeatureSettings",
     "LLMSettings",
+    "MatchupScoreSettings",
     "NBASeasonSettings",
     "ProviderSettings",
     "RuntimeSettings",

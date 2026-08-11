@@ -435,8 +435,25 @@ Each stored pool player has this shape:
     "assist_locations": []
   },
   "scores": {
-    "status": "unavailable",
-    "unavailable_reason": "not_in_scope"
+    "PTS": {
+      "season": {
+        "components": {
+          "play_types": { "value": 0.08, "thin": false },
+          "shot_zones": { "value": 0.12, "thin": false }
+        },
+        "blend": { "value": 0.10, "thin": false }
+      },
+      "last_15": {
+        "components": {
+          "shot_zones": { "value": -0.03, "thin": true }
+        },
+        "blend": { "value": -0.03, "thin": true }
+      }
+    },
+    "FGA": {
+      "season": { "components": {}, "blend": null },
+      "last_15": { "components": {}, "blend": null }
+    }
   },
   "injury_badge_ref": null
 }
@@ -445,8 +462,49 @@ Each stored pool player has this shape:
 Player Diet facts are unthresholded raw Season shares and volumes. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
-Matchup Score computation is not part of this endpoint slice, so `scores` is a
-present, explicit unavailable placeholder.
+
+`scores` has exactly one row for every `posted_markets` value and no unposted
+row. Each row always carries independent `season` and `last_15` windows. A
+component cell's `value` is the fractional difference from a league-average
+matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's
+slices of:
+
+```text
+player Season Diet Share × opponent allowed-per-48 / league average allowed-per-48
+```
+
+The score subtracts `1` after the sum. It does not normalize a partial Diet or
+make a request-time estimate. A non-defensive Blend is the simple mean of its
+computable Base components. If a market/window has no computable component,
+`components` is empty and `blend` is `null`; an unavailable Base is omitted,
+not emitted as a null cell. Thus provider-unsupported play-types Last-15 never
+receives the Season component, while other available Last-15 Bases still score.
+
+The current stored Diet/sheet intersection supports PTS through play types,
+shot zones, and shot types; FGA through shot zones and shot types; and AST
+through assist locations. PTS shot-type concessions derive stored points as
+`2 × FG2M + 3 × FG3M`, and FGA derives `FG2A + FG3A`. REB, 3PM, FG2A, and FG3A
+rows remain present when posted but have no component until an exact stored
+Diet decomposition exists; they are never approximated from total FGA shares
+or another team metric.
+
+PRA, PA, PR, and RA combine their computable PTS/REB/AST part scores using the
+player's stored Season per-game volumes. Each combo component weights the parts
+that compute that Base, and its Blend weights the available primitive Blends;
+an unavailable part is not replaced by another statistic. TOV, STL, and BLK
+have only a `traditional` component against their matching `OPP_*` column.
+STKS Season-volume-weights the stored OPP_STL and OPP_BLK comparisons into one
+`traditional` component. These defensive windows omit `blend` (a JSON `null`
+is also contract-equivalent) so the response never pretends a one-Base result
+is a Blend.
+
+Every numeric cell carries `thin`. The backend marks a Diet component thin when
+the player's Season sample is below `MATCHUP_SCORE_MIN_GAMES` (default `5`) or
+its total Base volume per game is below the matching named floor: play types
+`1`, shot zones `1`, shot types `4`, and assist locations `1` by default. A
+Blend is thin when any contributor is thin; a volume-weighted combo also uses
+the Season-rate game minimum. Thin cells retain their numeric values. Team
+window unavailability omits a component rather than mislabeling it thin.
 
 Injury collection is disabled by default. Disabled and enabled-without-
 permission states remain present-but-unavailable and make no provider request:

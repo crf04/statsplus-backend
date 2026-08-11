@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
+from math import isclose
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,11 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
-from app.services.player_diet import PLAYER_DIET_BASES, PlayerDietResult
+from app.services.player_diet import (
+    PLAYER_DIET_BASES,
+    PlayerDietResult,
+    StoredPlayerDietFact,
+)
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
     PlayerSeasonLogSummary,
@@ -53,10 +58,6 @@ _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
     (key, key) for key in DEFENSIVE_COLUMNS
 )
 _WIRE_PRECISION = 6
-_SCORES_UNAVAILABLE = {
-    "status": "unavailable",
-    "unavailable_reason": "not_in_scope",
-}
 _TWO_POINT_SHOT_ZONES = frozenset(
     {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
 )
@@ -74,6 +75,9 @@ _SHOT_TYPE_DISPLAY_SLICES = {
     "catch_and_shoot": "Catch and Shoot",
     "pullups": "Pullups",
     "less_than_10_ft": "Less Than 10 ft",
+}
+_SHOT_TYPE_STORED_SLICES = {
+    display: stored for stored, display in _SHOT_TYPE_DISPLAY_SLICES.items()
 }
 _GOVERNED_SHOT_TYPES = frozenset(_SHOT_TYPE_DISPLAY_SLICES)
 _STAT_MARKETS = {
@@ -94,6 +98,29 @@ _STAT_MARKETS = {
     "OPP_TOV": ("TOV",),
     "OPP_STL": ("STL", "STKS"),
     "OPP_BLK": ("BLK", "STKS"),
+}
+_COMBO_PARTS = {
+    "PRA": ("PTS", "REB", "AST"),
+    "PA": ("PTS", "AST"),
+    "PR": ("PTS", "REB"),
+    "RA": ("REB", "AST"),
+}
+_DEFENSIVE_MARKET_COLUMNS = {
+    "TOV": "OPP_TOV",
+    "STL": "OPP_STL",
+    "BLK": "OPP_BLK",
+}
+_PRIMITIVE_SCORE_INPUTS = {
+    "PTS": (
+        ("play_types", {"PTS": 1.0}),
+        ("shot_zones", {"FGM": 1.0}),
+        ("shot_types", {"FG2M": 2.0, "FG3M": 3.0}),
+    ),
+    "FGA": (
+        ("shot_zones", {"FGA": 1.0}),
+        ("shot_types", {"FG2A": 1.0, "FG3A": 1.0}),
+    ),
+    "AST": (("assist_locations", None),),
 }
 
 
@@ -237,7 +264,13 @@ class MatchupService:
             "league": league,
             "teams": teams,
             "players": self._players(
-                players, summaries, diets, event, injury_result.badge_refs
+                players,
+                summaries,
+                diets,
+                event,
+                windows,
+                availability,
+                injury_result.badge_refs,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -416,13 +449,14 @@ class MatchupService:
             },
         }
 
-    @classmethod
     def _players(
-        cls,
+        self,
         players: Sequence[PoolPlayer],
         summaries: Mapping[int, PlayerSeasonLogSummary],
         diets: PlayerDietResult,
         event: Mapping[str, Any],
+        windows: Mapping[str, TeamMatchupWindow | None],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
     ) -> list[dict[str, Any]]:
         rows = []
@@ -439,14 +473,14 @@ class MatchupService:
                     {
                         "key": fact.slice_key,
                         "season": {
-                            "share": cls._number(fact.share),
-                            "volume": cls._number(fact.volume),
+                            "share": self._number(fact.share),
+                            "volume": self._number(fact.volume),
                             "games_played": fact.games_played,
                             "volume_unit": fact.volume_unit,
                         },
                     }
                 )
-            team = cls._event_team(event, player.team_id)
+            team = self._event_team(event, player.team_id)
             rows.append(
                 {
                     "canonical_id": int(player.canonical_player_id),
@@ -459,15 +493,22 @@ class MatchupService:
                         for provider, categories in sorted(player.provenance.items())
                     },
                     "season_scoring": (
-                        None if scoring is None else cls._number(scoring)
+                        None if scoring is None else self._number(scoring)
                     ),
                     "last_10_minutes": (
                         []
                         if summary is None
-                        else [cls._number(value) for value in summary.last_ten_minutes]
+                        else [self._number(value) for value in summary.last_ten_minutes]
                     ),
                     "diet_shares": diet_by_base,
-                    "scores": dict(_SCORES_UNAVAILABLE),
+                    "scores": self._scores(
+                        player,
+                        summary,
+                        diets.players.get(player.canonical_player_id, ()),
+                        event,
+                        windows,
+                        availability,
+                    ),
                     "injury_badge_ref": injury_badges.get(
                         player.canonical_player_id
                     ),
@@ -481,6 +522,272 @@ class MatchupService:
             )
         )
         return rows
+
+    def _scores(
+        self,
+        player: PoolPlayer,
+        summary: PlayerSeasonLogSummary | None,
+        diet_facts: Sequence[StoredPlayerDietFact],
+        event: Mapping[str, Any],
+        windows: Mapping[str, TeamMatchupWindow | None],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        opponent_id = next(
+            team_id
+            for team_id in (int(event["away_team_id"]), int(event["home_team_id"]))
+            if team_id != player.team_id
+        )
+        return {
+            market: {
+                window_name: self._score_window(
+                    market,
+                    window_name,
+                    window,
+                    opponent_id,
+                    summary,
+                    diet_facts,
+                    availability,
+                )
+                for window_name, window in windows.items()
+            }
+            for market in player.market_categories
+        }
+
+    def _score_window(
+        self,
+        market: str,
+        window_name: str,
+        window: TeamMatchupWindow | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        diet_facts: Sequence[StoredPlayerDietFact],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        if market in {*_DEFENSIVE_MARKET_COLUMNS, "STKS"}:
+            return self._defensive_score_window(
+                market,
+                window_name,
+                window,
+                opponent_id,
+                summary,
+                availability,
+            )
+        if market in _COMBO_PARTS:
+            return self._combo_score_window(
+                market,
+                window_name,
+                window,
+                opponent_id,
+                summary,
+                diet_facts,
+                availability,
+            )
+        components: dict[str, dict[str, Any]] = {}
+        for base, stat_weights in _PRIMITIVE_SCORE_INPUTS.get(market, ()):
+            component = self._diet_component(
+                base=base,
+                stat_weights=stat_weights,
+                window_name=window_name,
+                window=window,
+                opponent_id=opponent_id,
+                diet_facts=diet_facts,
+                availability=availability,
+            )
+            if component is not None:
+                components[base] = component
+        blend = None
+        if components:
+            blend = {
+                "value": self._number(
+                    sum(cell["value"] for cell in components.values())
+                    / len(components)
+                ),
+                "thin": any(cell["thin"] for cell in components.values()),
+            }
+        return {"components": components, "blend": blend}
+
+    def _defensive_score_window(
+        self,
+        market: str,
+        window_name: str,
+        window: TeamMatchupWindow | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        if (
+            window is None
+            or availability["traditional"][window_name]["status"] != "available"
+        ):
+            return {"components": {}}
+
+        def column_score(column: str) -> float | None:
+            league = self._league_metric(window, "traditional", column, column)
+            team = self._team_metric(
+                window, opponent_id, "traditional", column, column
+            )
+            if league is None or team is None or league.average_allowed_per_48 <= 0:
+                return None
+            return team.allowed_per_48 / league.average_allowed_per_48 - 1
+
+        if market in _DEFENSIVE_MARKET_COLUMNS:
+            value = column_score(_DEFENSIVE_MARKET_COLUMNS[market])
+            if value is None:
+                return {"components": {}}
+            return {
+                "components": {
+                    "traditional": {"value": self._number(value), "thin": False}
+                }
+            }
+
+        if summary is None or summary.season_rate is None:
+            return {"components": {}}
+        contributors = []
+        for part in ("STL", "BLK"):
+            weight = summary.season_rate.per_game.get(part, 0.0)
+            value = column_score(_DEFENSIVE_MARKET_COLUMNS[part])
+            if weight > 0 and value is not None:
+                contributors.append((weight, value))
+        if not contributors:
+            return {"components": {}}
+        total_weight = sum(weight for weight, _value in contributors)
+        return {
+            "components": {
+                "traditional": {
+                    "value": self._number(
+                        sum(weight * value for weight, value in contributors)
+                        / total_weight
+                    ),
+                    "thin": (
+                        summary.season_rate.game_count
+                        < self.settings.matchup_scores.min_games
+                    ),
+                }
+            }
+        }
+
+    def _combo_score_window(
+        self,
+        market: str,
+        window_name: str,
+        window: TeamMatchupWindow | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        diet_facts: Sequence[StoredPlayerDietFact],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        if summary is None or summary.season_rate is None:
+            return {"components": {}, "blend": None}
+        weights = {
+            part: summary.season_rate.per_game.get(part, 0.0)
+            for part in _COMBO_PARTS[market]
+        }
+        part_scores = {
+            part: self._score_window(
+                part,
+                window_name,
+                window,
+                opponent_id,
+                summary,
+                diet_facts,
+                availability,
+            )
+            for part, weight in weights.items()
+            if weight > 0
+        }
+        components = {}
+        for base in DEFENSE_BASES:
+            contributors = [
+                (weights[part], score["components"][base])
+                for part, score in part_scores.items()
+                if base in score["components"]
+            ]
+            if not contributors:
+                continue
+            total_weight = sum(weight for weight, _cell in contributors)
+            components[base] = {
+                "value": self._number(
+                    sum(weight * cell["value"] for weight, cell in contributors)
+                    / total_weight
+                ),
+                "thin": any(cell["thin"] for _weight, cell in contributors),
+            }
+        blend_contributors = [
+            (weights[part], score["blend"])
+            for part, score in part_scores.items()
+            if score["blend"] is not None
+        ]
+        if not blend_contributors:
+            return {"components": components, "blend": None}
+        total_weight = sum(weight for weight, _cell in blend_contributors)
+        blend = {
+            "value": self._number(
+                sum(weight * cell["value"] for weight, cell in blend_contributors)
+                / total_weight
+            ),
+            "thin": (
+                summary.season_rate.game_count
+                < self.settings.matchup_scores.min_games
+                or any(cell["thin"] for _weight, cell in blend_contributors)
+            ),
+        }
+        return {"components": components, "blend": blend}
+
+    def _diet_component(
+        self,
+        *,
+        base: str,
+        stat_weights: Mapping[str, float] | None,
+        window_name: str,
+        window: TeamMatchupWindow | None,
+        opponent_id: int,
+        diet_facts: Sequence[StoredPlayerDietFact],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any] | None:
+        if (
+            window is None
+            or availability[base][window_name]["status"] != "available"
+        ):
+            return None
+        facts = tuple(fact for fact in diet_facts if fact.base == base)
+        if not facts or not isclose(
+            sum(fact.share for fact in facts), 1.0, rel_tol=0.0, abs_tol=1e-6
+        ):
+            return None
+        total = 0.0
+        for fact in facts:
+            league_value = 0.0
+            team_value = 0.0
+            slice_key = (
+                _SHOT_TYPE_STORED_SLICES.get(fact.slice_key, fact.slice_key)
+                if base == "shot_types"
+                else fact.slice_key
+            )
+            resolved_weights = stat_weights or {fact.slice_key: 1.0}
+            for stat_key, weight in resolved_weights.items():
+                league = self._league_metric(window, base, slice_key, stat_key)
+                team = self._team_metric(
+                    window, opponent_id, base, slice_key, stat_key
+                )
+                if league is None or team is None:
+                    return None
+                league_value += weight * league.average_allowed_per_48
+                team_value += weight * team.allowed_per_48
+            if league_value <= 0:
+                return None
+            total += fact.share * (team_value / league_value)
+        volume_per_game = sum(fact.volume / fact.games_played for fact in facts)
+        return {
+            "value": self._number(total - 1),
+            "thin": (
+                any(
+                    fact.games_played < self.settings.matchup_scores.min_games
+                    for fact in facts
+                )
+                or volume_per_game
+                < self.settings.matchup_scores.minimum_volume_per_game(base)
+            ),
+        }
 
     @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:

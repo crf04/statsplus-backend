@@ -473,13 +473,22 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
             },
         }
     ]
-    assert payload["players"][0]["scores"]["status"] == "unavailable"
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
     assert payload["injuries"]["status"] == "fresh"
     assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
     assert payload["injuries"]["teams"][0]["entries"][0][
         "canonical_player_id"
     ] == 2544
+    assert payload["players"][0]["scores"] == {
+        "PTS": {
+            "season": {"components": {}, "blend": None},
+            "last_15": {"components": {}, "blend": None},
+        },
+        "FGA": {
+            "season": {"components": {}, "blend": None},
+            "last_15": {"components": {}, "blend": None},
+        },
+    }
     assert {
         row["key"]: row["markets"]
         for row in payload["teams"][0]["defense_sheet"]["shot_zones"]

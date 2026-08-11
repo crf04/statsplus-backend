@@ -428,7 +428,7 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
             assert {row["key"] for row in team["defense_sheet"][base]} <= league_keys
 
 
-def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_unscored():
+def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_degraded():
     player = _service().get_matchup(game_id=GAME_ID)["players"][0]
 
     assert player == {
@@ -470,8 +470,14 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_unscored
             "assist_locations": [],
         },
         "scores": {
-            "status": "unavailable",
-            "unavailable_reason": "not_in_scope",
+            "PTS": {
+                "season": {"components": {}, "blend": None},
+                "last_15": {"components": {}, "blend": None},
+            },
+            "FGA": {
+                "season": {"components": {}, "blend": None},
+                "last_15": {"components": {}, "blend": None},
+            },
         },
         "injury_badge_ref": None,
     }

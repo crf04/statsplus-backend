@@ -732,10 +732,14 @@ null row window even if an older fact-bearing scope remains stored. This is
 especially important for provider-unsupported play-types Last-15: Season is
 never relabeled as rolling data. League and team row identities are constructed
 from the same `(Base, slice, stat)` taxonomy, so every team key has an exact
-league denominator. Player Diets remain raw and Season-only. Injury
-reconciliation can remove a canonical Out player or attach a badge reference;
-it does not change Matchup Scores, Diet Shares, scoring history, or projected
-roles.
+league denominator. Player Diets remain raw and Season-only, while Matchup
+Scores cross that Season evidence with each independently stored team window.
+The score implementation remains inside `MatchupService`, beside the stored
+inputs it serializes; it has no provider boundary and performs no request-time
+fallback. Components unavailable from the stored Diet/sheet taxonomy are
+omitted instead of estimated. Injury reconciliation can remove a canonical Out
+player or attach a badge reference; it does not change Matchup Scores, Diet
+Shares, scoring history, or projected roles.
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
