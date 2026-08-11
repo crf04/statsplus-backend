@@ -1,0 +1,4 @@
+archetypes_data/
+archetypes_outputs/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,4 @@
+wnba_archetypes_data/
+wnba_archetypes_outputs/
+__pycache__/
+*.py[cod]
