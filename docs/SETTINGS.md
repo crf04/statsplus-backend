@@ -163,6 +163,13 @@ when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
 credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
 `DFS_ENABLED_PROVIDERS` names no provider, or the local bypass is enabled. This prevents the process from starting with a
 configuration that cannot enforce its security contract.
+Firebase may use a service-account file, hosted JSON, or the complete
+three-field credential set. A configured file path must exist when it is the
+only credential source; valid JSON or all three fields take precedence when a
+legacy path remains configured but is unavailable or unreadable. A configured
+path that exists but is not a regular file is always rejected at startup. A
+file used as the only source must contain readable service-account JSON with
+the required fields.
 
 For example, a deployment should set:
 

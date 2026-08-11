@@ -31,34 +31,48 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
         logger.warning("Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only")
         return None
 
-    try:
-        # Method 1: Try to load from service account JSON file
-        service_account_path = auth_settings.firebase_service_account_path
-        if service_account_path and os.path.exists(service_account_path):
+    # Method 1: Try to load from service account JSON file
+    service_account_path = auth_settings.firebase_service_account_path
+    if service_account_path and os.path.exists(service_account_path):
+        try:
             cred = credentials.Certificate(service_account_path)
             _firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin initialized with service account file")
             return _firebase_app
-        
-        # Method 2: Try to load from environment variables (for deployment)
-        service_account_json = auth_settings.firebase_service_account_json
-        if service_account_json:
+        except Exception as error:
+            logger.warning(
+                "Firebase Admin initialization with service account file failed: %s; "
+                "trying the next credential source",
+                error,
+            )
+
+    # Method 2: Try to load from environment variables (for deployment)
+    service_account_json = auth_settings.firebase_service_account_json
+    if service_account_json:
+        try:
             # Parse JSON string to dict
             service_account_dict = json.loads(service_account_json)
             cred = credentials.Certificate(service_account_dict)
             _firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin initialized with service account JSON")
             return _firebase_app
-        
-        # Method 3: Try individual environment variables
-        private_key = auth_settings.firebase_private_key
-        client_email = auth_settings.firebase_client_email
-        project_id = auth_settings.firebase_project_id
-        
-        if private_key and client_email and project_id:
+        except Exception as error:
+            logger.warning(
+                "Firebase Admin initialization with service account JSON failed: %s; "
+                "trying the next credential source",
+                error,
+            )
+
+    # Method 3: Try individual environment variables
+    private_key = auth_settings.firebase_private_key
+    client_email = auth_settings.firebase_client_email
+    project_id = auth_settings.firebase_project_id
+
+    if private_key and client_email and project_id:
+        try:
             # Replace escaped newlines in private key
             private_key = private_key.replace('\\n', '\n')
-            
+
             service_account_dict = {
                 "type": "service_account",
                 "project_id": project_id,
@@ -73,23 +87,32 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
             _firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin initialized with individual environment variables")
             return _firebase_app
-        
-        # Method 4: Try default application credentials (for local development)
-        if os.path.exists(os.path.expanduser('~/.config/gcloud/application_default_credentials.json')):
+        except Exception as error:
+            logger.warning(
+                "Firebase Admin initialization with individual environment variables "
+                "failed: %s; trying application default credentials",
+                error,
+            )
+
+    # Method 4: Try default application credentials (for local development)
+    if os.path.exists(os.path.expanduser('~/.config/gcloud/application_default_credentials.json')):
+        try:
             cred = credentials.ApplicationDefault()
             _firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin initialized with application default credentials")
             return _firebase_app
-        
-        logger.warning(
-            "Firebase Admin not initialized; set FIREBASE_SERVICE_ACCOUNT_PATH, "
-            "FIREBASE_SERVICE_ACCOUNT_JSON, or individual Firebase env vars"
-        )
-        return None
-        
-    except Exception as e:
-        logger.error("Firebase Admin initialization failed: %s", e)
-        return None
+        except Exception as error:
+            logger.warning(
+                "Firebase Admin initialization with application default credentials "
+                "failed: %s",
+                error,
+            )
+
+    logger.warning(
+        "Firebase Admin not initialized; set FIREBASE_SERVICE_ACCOUNT_PATH, "
+        "FIREBASE_SERVICE_ACCOUNT_JSON, or individual Firebase env vars"
+    )
+    return None
 
 def get_firebase_app(settings: RuntimeSettings | None = None):
     """Get the initialized Firebase app"""
