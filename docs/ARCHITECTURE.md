@@ -683,6 +683,14 @@ never relabeled as rolling data. League and team row identities are constructed
 from the same `(Base, slice, stat)` taxonomy, so every team key has an exact
 league denominator. Player Diets remain raw and Season-only, while Matchup
 Scores and injuries are explicit unavailable placeholders in this slice.
+If independently published windows have asymmetric identities, response-local
+availability normalization marks only the incomplete Base/window
+`unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
+team absent from the governed franchise facts similarly becomes
+`missing/team_not_in_governed_roster`. Neither condition starts collection or
+turns a known game into a whole-request error. Shot-zone market membership is
+derived from `(Base, slice, stat)`, keeping two-point zones out of FG3A and
+three-point zones out of FG2A.
 
 The response freshness document does not collapse independent publication
 clocks. It retains schedule and stored-pool freshness, the legacy stats-table
@@ -690,7 +698,11 @@ completion, player-log read freshness, each Player Diet observation, each team
 Base/window observation, and injuries. This preserves the landed modules'
 truth instead of presenting one Nightly timestamp as if every source succeeded
 together. The stats-table status is stale when its successful completion
-predates the newest completed, non-postponed Event Catalog game.
+predates the newest completed, non-postponed Event Catalog game. The already
+resolved Event Catalog collection supplies that comparison, so the full
+catalog is loaded once per request. Started and past games bound both team
+windows to their Eastern Slate Date; future tips query the current latest
+stored scopes with no future `as_of` value.
 
 ### Durable refresh jobs
 

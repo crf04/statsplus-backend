@@ -373,7 +373,18 @@ status authority:
 When the status is not `available`, every metric value for that Base/window is
 `null`. In particular, exact Synergy play types Last-15 is always `null` with
 `status: "unavailable"` and `unavailable_reason: "provider_unsupported"`;
-Season values are never substituted.
+Season values are never substituted. Independently published Season and
+Last-15 scopes can contain different metric identities; the affected
+Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
+the request fail or inventing the absent metric. An event team outside the
+governed franchise fact set makes otherwise available Base/windows
+`missing/team_not_in_governed_roster`, while the known game header and other
+stored response sections still return.
+
+Shot-zone row markets are constrained by the slice as well as the statistic.
+Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
+and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
+Two-point-zone FGM targets PTS, while three-point-zone FGM targets PTS and 3PM.
 
 Each stored pool player has this shape:
 
@@ -441,7 +452,9 @@ timezone-aware `retrieved_at`; missing observations carry null. Pool freshness
 and per-provider status are passed through from the selected stored snapshot.
 The stats-table surface is `stale` when its last successful publication
 predates the newest completed, non-postponed stored game; it is `missing` when
-no successful publication exists.
+no successful publication exists. Team facts for a started or past game are
+bounded by its Eastern Slate Date; a future tip requests the latest current
+stored team scopes without passing a future cutoff.
 
 ### Get Matchup Selection
 

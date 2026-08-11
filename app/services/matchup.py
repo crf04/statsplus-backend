@@ -51,6 +51,10 @@ _SCORES_UNAVAILABLE = {
     "unavailable_reason": "not_in_scope",
 }
 _INJURY_SOURCE_URL = "https://www.rotowire.com/basketball/injury-report.php"
+_TWO_POINT_SHOT_ZONES = frozenset(
+    {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
+)
+_THREE_POINT_SHOT_ZONES = frozenset({"Corner 3", "Above the Break 3"})
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -144,7 +148,7 @@ class MatchupService:
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
-        event = self._event(season, game_id)
+        event, events = self._event(season, game_id)
         schedule_freshness = self._schedule_freshness(season, observed_at=observed_at)
 
         pool = (
@@ -163,18 +167,12 @@ class MatchupService:
         diets = self._diets(season, players)
 
         slate_date = self._event_date(event)
-        current_date = observed_at.astimezone(EASTERN).date()
-        team_as_of = slate_date if slate_date <= current_date else None
+        scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
+        team_as_of = slate_date if scheduled_at <= observed_at else None
         season_window = self._team_window(season, window_games=None, as_of=team_as_of)
         last_15_window = self._team_window(season, window_games=15, as_of=team_as_of)
         windows = {"season": season_window, "last_15": last_15_window}
-        availability = {
-            base: {
-                window_name: self._availability(window, base)
-                for window_name, window in windows.items()
-            }
-            for base in DEFENSE_BASES
-        }
+        availability = self._surface_availability(windows, team_ids)
         league = self._league(windows, availability)
         teams = [
             self._team(event, team_id, windows, availability) for team_id in team_ids
@@ -206,9 +204,15 @@ class MatchupService:
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
-                "stats": self._stats_freshness(season),
+                "stats": self._stats_freshness(events),
                 "team_matchups": {
-                    name: self._team_window_freshness(window)
+                    name: self._team_window_freshness(
+                        window,
+                        {
+                            base: availability[base][name]
+                            for base in DEFENSE_BASES
+                        },
+                    )
                     for name, window in windows.items()
                 },
                 "player_diets": self._diet_freshness(diets),
@@ -217,14 +221,17 @@ class MatchupService:
             },
         }
 
-    def _event(self, season: str, game_id: str) -> Mapping[str, Any]:
+    def _event(
+        self, season: str, game_id: str
+    ) -> tuple[Mapping[str, Any], Sequence[Mapping[str, Any]]]:
         if self.event_catalog is None or self.event_catalog.count_events(season) == 0:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        for event in self.event_catalog.get_events(season):
+        events = self.event_catalog.get_events(season)
+        for event in events:
             if str(event.get("nba_game_id")) == game_id:
-                return event
+                return event, events
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     def _schedule_freshness(
@@ -322,7 +329,7 @@ class MatchupService:
                 {
                     "key": cls._metric_key(slice_key, stat_key),
                     "label": cls._metric_label(slice_key, stat_key),
-                    "markets": list(_STAT_MARKETS.get(stat_key, ())),
+                    "markets": list(cls._markets(base, slice_key, stat_key)),
                     **{
                         window_name: cls._team_window_value(
                             window,
@@ -432,6 +439,61 @@ class MatchupService:
             "status": observation.status,
             "unavailable_reason": observation.unavailable_reason,
         }
+
+    @classmethod
+    def _surface_availability(
+        cls,
+        windows: Mapping[str, TeamMatchupWindow | None],
+        team_ids: Sequence[int],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        identities = cls._metric_identities(windows, league=True)
+        expected_by_base = {
+            base: {
+                (slice_key, stat_key)
+                for metric_base, slice_key, stat_key in identities
+                if metric_base == base
+            }
+            for base in DEFENSE_BASES
+        }
+        result: dict[str, dict[str, dict[str, Any]]] = {}
+        for base in DEFENSE_BASES:
+            result[base] = {}
+            expected = expected_by_base[base]
+            for window_name, window in windows.items():
+                state = cls._availability(window, base)
+                if state["status"] != "available" or window is None:
+                    result[base][window_name] = state
+                    continue
+                if any(team_id not in window.team_metrics for team_id in team_ids):
+                    result[base][window_name] = {
+                        "status": "missing",
+                        "unavailable_reason": "team_not_in_governed_roster",
+                    }
+                    continue
+                league_identities = {
+                    (metric.slice_key, metric.stat_key)
+                    for metric in window.league_metrics
+                    if metric.base == base
+                }
+                team_identities = {
+                    team_id: {
+                        (metric.slice_key, metric.stat_key)
+                        for metric in window.team_metrics[team_id]
+                        if metric.base == base
+                    }
+                    for team_id in team_ids
+                }
+                if not expected.issubset(league_identities) or any(
+                    not expected.issubset(team_identities[team_id])
+                    for team_id in team_ids
+                ):
+                    result[base][window_name] = {
+                        "status": "unavailable",
+                        "unavailable_reason": "legacy_surface_incomplete",
+                    }
+                    continue
+                result[base][window_name] = state
+        return result
 
     @staticmethod
     def _metric_identities(
@@ -574,6 +636,21 @@ class MatchupService:
         return f"{label} {stat_key}"
 
     @staticmethod
+    def _markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
+        if base == "shot_zones":
+            if slice_key in _TWO_POINT_SHOT_ZONES:
+                if stat_key == "FGA":
+                    return ("FGA", "FG2A")
+                if stat_key == "FGM":
+                    return ("PTS",)
+            if slice_key in _THREE_POINT_SHOT_ZONES:
+                if stat_key == "FGA":
+                    return ("FGA", "FG3A")
+                if stat_key == "FGM":
+                    return ("PTS", "3PM")
+        return _STAT_MARKETS.get(stat_key, ())
+
+    @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:
         for side in ("away_team", "home_team"):
             team = event.get(side)
@@ -597,7 +674,9 @@ class MatchupService:
             canonical_kind=classification.kind,
         )
 
-    def _stats_freshness(self, season: str) -> dict[str, Any]:
+    def _stats_freshness(
+        self, events: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
         completed = self.stats_freshness.get().last_successful_completion
         status = "missing"
         if completed is not None:
@@ -605,11 +684,7 @@ class MatchupService:
             latest_completed_game = max(
                 (
                     parse_utc_iso(str(event["scheduled_at"]))
-                    for event in (
-                        self.event_catalog.get_events(season)
-                        if self.event_catalog is not None
-                        else ()
-                    )
+                    for event in events
                     if is_final_event(event) and not is_postponed_event(event)
                 ),
                 default=None,
@@ -628,10 +703,14 @@ class MatchupService:
         }
 
     @classmethod
-    def _team_window_freshness(cls, window: TeamMatchupWindow | None) -> dict[str, Any]:
+    def _team_window_freshness(
+        cls,
+        window: TeamMatchupWindow | None,
+        availability: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
         surfaces = {
             base: {
-                **cls._availability(window, base),
+                **availability[base],
                 "retrieved_at": cls._observation_time(window, base),
             }
             for base in DEFENSE_BASES

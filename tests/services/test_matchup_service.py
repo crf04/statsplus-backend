@@ -51,6 +51,7 @@ class RecordedEvents:
         self.events = events if events is not None else [_event()]
         self.count = count
         self.retrieved_at = retrieved_at
+        self.get_events_calls = 0
 
     def count_events(self, season):
         assert season == SEASON
@@ -58,6 +59,7 @@ class RecordedEvents:
 
     def get_events(self, season):
         assert season == SEASON
+        self.get_events_calls += 1
         return self.events
 
     def get_freshness(self, season, *, now):
@@ -186,15 +188,19 @@ def _event():
     }
 
 
-def _window(*, last_15=False):
-    metrics = (
+def _window(*, last_15=False, shot_zone_metrics=None):
+    metrics = [
         ("play_types", "Transition", "PTS", 16.0),
-        ("shot_zones", "Restricted Area", "FGA", 20.0),
         ("shot_types", "catch_and_shoot", "FG3A", 7.0),
         ("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),
         ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
         ("traditional", "OPP_STL", "OPP_STL", 7.0),
         ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+    ]
+    metrics.extend(
+        shot_zone_metrics
+        if shot_zone_metrics is not None
+        else (("shot_zones", "Restricted Area", "FGA", 20.0),)
     )
     if last_15:
         metrics = tuple(metric for metric in metrics if metric[0] != "play_types")
@@ -384,6 +390,44 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_unscored
     )
 
 
+def test_shot_zone_rows_expose_only_governed_compatible_markets():
+    shot_zone_metrics = tuple(
+        ("shot_zones", slice_key, stat_key, 20.0)
+        for slice_key in (
+            "Restricted Area",
+            "In The Paint (Non-RA)",
+            "Mid-Range",
+            "Corner 3",
+            "Above the Break 3",
+        )
+        for stat_key in ("FGA", "FGM")
+    )
+    payload = _service(
+        season_window=_window(shot_zone_metrics=shot_zone_metrics),
+        last_15_window=_window(
+            last_15=True,
+            shot_zone_metrics=shot_zone_metrics,
+        ),
+    ).get_matchup(game_id=GAME_ID)
+
+    rows = {
+        row["key"]: row["markets"]
+        for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
+    }
+    assert rows == {
+        "Above the Break 3:FGA": ["FGA", "FG3A"],
+        "Above the Break 3:FGM": ["PTS", "3PM"],
+        "Corner 3:FGA": ["FGA", "FG3A"],
+        "Corner 3:FGM": ["PTS", "3PM"],
+        "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
+        "In The Paint (Non-RA):FGM": ["PTS"],
+        "Mid-Range:FGA": ["FGA", "FG2A"],
+        "Mid-Range:FGM": ["PTS"],
+        "Restricted Area:FGA": ["FGA", "FG2A"],
+        "Restricted Area:FGM": ["PTS"],
+    }
+
+
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
     payload = _service().get_matchup(game_id=GAME_ID)
 
@@ -437,6 +481,39 @@ def test_stats_freshness_is_stale_when_it_predates_the_latest_completed_game():
     }
 
 
+def test_matchup_reuses_the_resolved_event_catalog_read_for_stats_freshness():
+    events = RecordedEvents()
+
+    _service(events=events).get_matchup(game_id=GAME_ID)
+
+    assert events.get_events_calls == 1
+
+
+def test_past_matchup_queries_both_team_windows_at_the_slate_date():
+    past_event = {**_event(), "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    service = _service(events=RecordedEvents(events=[past_event]))
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    assert payload["game"]["game_id"] == GAME_ID
+    assert service.team_matchups.calls == [
+        (SEASON, None, date(2026, 1, 13)),
+        (SEASON, 15, date(2026, 1, 13)),
+    ]
+
+
+def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
+    service = _service()
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    assert payload["game"]["game_id"] == GAME_ID
+    assert service.team_matchups.calls == [
+        (SEASON, None, None),
+        (SEASON, 15, None),
+    ]
+
+
 def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
     payload = _service(
         pool=False,
@@ -456,6 +533,64 @@ def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
         for window in ("season", "last_15")
     )
     assert all(not rows for rows in payload["league"]["defense_sheet"].values())
+
+
+def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():
+    exhibition_team_id = 1610619999
+    exhibition = {
+        **_event(),
+        "home_team_id": exhibition_team_id,
+        "home_team_name": "International Select",
+        "home_team_tricode": "INT",
+        "home_team": {
+            "id": exhibition_team_id,
+            "name": "International Select",
+            "tricode": "INT",
+        },
+    }
+
+    payload = _service(events=RecordedEvents(events=[exhibition])).get_matchup(
+        game_id=GAME_ID
+    )
+
+    assert payload["game"]["home_team"] == {
+        "team_id": exhibition_team_id,
+        "name": "International Select",
+        "tricode": "INT",
+        "targetable_player_count": 0,
+    }
+    for base, windows in payload["league"]["surface_availability"].items():
+        for window_name, state in windows.items():
+            if base == "play_types" and window_name == "last_15":
+                assert state == {
+                    "status": "unavailable",
+                    "unavailable_reason": "provider_unsupported",
+                }
+            else:
+                assert state == {
+                    "status": "missing",
+                    "unavailable_reason": "team_not_in_governed_roster",
+                }
+    assert payload["players"][0]["canonical_id"] == 2544
+    assert all(
+        row[window_name] is None
+        for team in payload["teams"]
+        for rows in team["defense_sheet"].values()
+        for row in rows
+        for window_name in ("season", "last_15")
+    )
+    assert all(
+        row[window_name] is None
+        for rows in payload["league"]["defense_sheet"].values()
+        for row in rows
+        for window_name in ("season", "last_15")
+    )
+    assert all(
+        column[window_name] is None
+        for team in payload["teams"]
+        for column in team["defensive_columns"].values()
+        for window_name in ("season", "last_15")
+    )
 
 
 def test_unknown_game_is_404_while_an_empty_schedule_surface_is_503():

@@ -90,12 +90,21 @@ def _event_catalog(engine, settings):
     return service
 
 
-def _team_matchups(engine):
+def _team_matchups(engine, *, asymmetric_shot_zones=False):
     repository = TeamMatchupRepository(engine)
     teams = json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
     metrics = (
         ("play_types", "Transition", "PTS"),
         ("shot_zones", "Restricted Area", "FGA"),
+        ("shot_zones", "Restricted Area", "FGM"),
+        ("shot_zones", "In The Paint (Non-RA)", "FGA"),
+        ("shot_zones", "In The Paint (Non-RA)", "FGM"),
+        ("shot_zones", "Mid-Range", "FGA"),
+        ("shot_zones", "Mid-Range", "FGM"),
+        ("shot_zones", "Corner 3", "FGA"),
+        ("shot_zones", "Corner 3", "FGM"),
+        ("shot_zones", "Above the Break 3", "FGA"),
+        ("shot_zones", "Above the Break 3", "FGM"),
         ("shot_types", "catch_and_shoot", "FG3A"),
         ("assist_locations", "AtRimAssists", "AtRimAssists"),
         ("traditional", "OPP_TOV", "OPP_TOV"),
@@ -103,7 +112,7 @@ def _team_matchups(engine):
         ("traditional", "OPP_BLK", "OPP_BLK"),
     )
 
-    def facts(*, omit_play_types=False):
+    def facts(*, omit_play_types=False, omit_paint=False):
         return tuple(
             TeamMatchupFact(
                 row["team_id"],
@@ -118,6 +127,12 @@ def _team_matchups(engine):
             for row in teams
             for base, slice_key, stat_key in metrics
             if not (omit_play_types and base == "play_types")
+            and not (
+                omit_paint
+                and base == "shot_zones"
+                and slice_key == "In The Paint (Non-RA)"
+                and stat_key == "FGA"
+            )
         )
 
     season_scope = TeamMatchupSnapshotScope(SEASON, date(2026, 1, 15))
@@ -138,7 +153,7 @@ def _team_matchups(engine):
             ),
             (
                 last_scope,
-                facts(omit_play_types=True),
+                facts(omit_play_types=True, omit_paint=asymmetric_shot_zones),
                 tuple(
                     TeamMatchupObservation(
                         base,
@@ -371,3 +386,90 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         }
     ]
     assert payload["players"][0]["scores"]["status"] == "unavailable"
+    assert {
+        row["key"]: row["markets"]
+        for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
+    } == {
+        "Above the Break 3:FGA": ["FGA", "FG3A"],
+        "Above the Break 3:FGM": ["PTS", "3PM"],
+        "Corner 3:FGA": ["FGA", "FG3A"],
+        "Corner 3:FGM": ["PTS", "3PM"],
+        "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
+        "In The Paint (Non-RA):FGM": ["PTS"],
+        "Mid-Range:FGA": ["FGA", "FG2A"],
+        "Mid-Range:FGM": ["PTS"],
+        "Restricted Area:FGA": ["FGA", "FG2A"],
+        "Restricted Area:FGM": ["PTS"],
+    }
+
+
+def test_persisted_matchup_degrades_only_an_asymmetric_available_surface(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'asymmetric-matchup.sqlite3'}")
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    service = MatchupService(
+        event_catalog=_event_catalog(engine, settings),
+        player_pool=_player_pool(engine),
+        player_logs=_player_logs(engine, catalog),
+        player_diets=_player_diets(engine),
+        team_matchups=_team_matchups(engine, asymmetric_shot_zones=True),
+        stats_freshness=stats_freshness,
+        settings=settings,
+        clock=lambda: NOW,
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                matchup_service=service,
+                user_service=SimpleNamespace(
+                    create_or_update_user=lambda _user: None
+                ),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    response = app.test_client().get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["league"]["surface_availability"]["shot_zones"] == {
+        "season": {"status": "available", "unavailable_reason": None},
+        "last_15": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    assert payload["freshness"]["team_matchups"]["last_15"]["surfaces"][
+        "shot_zones"
+    ] == {
+        "status": "unavailable",
+        "unavailable_reason": "legacy_surface_incomplete",
+        "retrieved_at": NOW.isoformat(),
+    }
+    league_rows = payload["league"]["defense_sheet"]["shot_zones"]
+    assert {
+        "In The Paint (Non-RA):FGA",
+        "In The Paint (Non-RA):FGM",
+    } <= {row["key"] for row in league_rows}
+    assert all(row["season"] is not None for row in league_rows)
+    assert all(row["last_15"] is None for row in league_rows)
+    for team in payload["teams"]:
+        assert [row["key"] for row in team["defense_sheet"]["shot_zones"]] == [
+            row["key"] for row in league_rows
+        ]
+        assert all(row["season"] is not None for row in team["defense_sheet"]["shot_zones"])
+        assert all(row["last_15"] is None for row in team["defense_sheet"]["shot_zones"])
+    assert payload["league"]["defense_sheet"]["shot_types"][0]["last_15"] is not None
