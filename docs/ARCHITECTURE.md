@@ -690,7 +690,13 @@ team absent from the governed franchise facts similarly becomes
 `missing/team_not_in_governed_roster`. Neither condition starts collection or
 turns a known game into a whole-request error. Shot-zone market membership is
 derived from `(Base, slice, stat)`, keeping two-point zones out of FG3A and
-three-point zones out of FG2A.
+three-point zones out of FG2A. Response composition also projects stored
+shot-zone facts onto the same five nonoverlapping slices as Player Diets,
+excluding Left/Right Corner 3, Backcourt, and unknown duplicates without
+aggregation. Missing governed slices degrade only that Base/window. Stored
+shot-type lookup keys remain unchanged, while response keys use the exact
+Player Diet vocabulary `Catch and Shoot`, `Pullups`, and `Less Than 10 ft`;
+missing or unknown shot types likewise degrade locally.
 
 The response freshness document does not collapse independent publication
 clocks. It retains schedule and stored-pool freshness, the legacy stats-table

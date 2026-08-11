@@ -55,6 +55,21 @@ _TWO_POINT_SHOT_ZONES = frozenset(
     {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
 )
 _THREE_POINT_SHOT_ZONES = frozenset({"Corner 3", "Above the Break 3"})
+_GOVERNED_SHOT_ZONES = frozenset(
+    {
+        "Restricted Area",
+        "In The Paint (Non-RA)",
+        "Mid-Range",
+        "Corner 3",
+        "Above the Break 3",
+    }
+)
+_SHOT_TYPE_DISPLAY_SLICES = {
+    "catch_and_shoot": "Catch and Shoot",
+    "pullups": "Pullups",
+    "less_than_10_ft": "Less Than 10 ft",
+}
+_GOVERNED_SHOT_TYPES = frozenset(_SHOT_TYPE_DISPLAY_SLICES)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -282,7 +297,7 @@ class MatchupService:
         for base, slice_key, stat_key in identities:
             sheets[base].append(
                 {
-                    "key": cls._metric_key(slice_key, stat_key),
+                    "key": cls._metric_key(base, slice_key, stat_key),
                     **{
                         window_name: cls._league_window_value(
                             window,
@@ -327,8 +342,8 @@ class MatchupService:
         for base, slice_key, stat_key in identities:
             sheets[base].append(
                 {
-                    "key": cls._metric_key(slice_key, stat_key),
-                    "label": cls._metric_label(slice_key, stat_key),
+                    "key": cls._metric_key(base, slice_key, stat_key),
+                    "label": cls._metric_label(base, slice_key, stat_key),
                     "markets": list(cls._markets(base, slice_key, stat_key)),
                     **{
                         window_name: cls._team_window_value(
@@ -483,7 +498,31 @@ class MatchupService:
                     }
                     for team_id in team_ids
                 }
-                if not expected.issubset(league_identities) or any(
+                slice_sets = (
+                    {
+                        metric.slice_key
+                        for metric in window.league_metrics
+                        if metric.base == base
+                    },
+                    *(
+                        {
+                            metric.slice_key
+                            for metric in window.team_metrics[team_id]
+                            if metric.base == base
+                        }
+                        for team_id in team_ids
+                    ),
+                )
+                missing_governed_slice = base == "shot_zones" and any(
+                    not _GOVERNED_SHOT_ZONES.issubset(slice_set)
+                    for slice_set in slice_sets
+                )
+                invalid_shot_types = base == "shot_types" and any(
+                    slice_set != _GOVERNED_SHOT_TYPES for slice_set in slice_sets
+                )
+                if missing_governed_slice or invalid_shot_types or not expected.issubset(
+                    league_identities
+                ) or any(
                     not expected.issubset(team_identities[team_id])
                     for team_id in team_ids
                 ):
@@ -504,6 +543,10 @@ class MatchupService:
             for window in windows.values()
             if window
             for metric in (window.league_metrics if league else ())
+            if metric.base != "shot_zones"
+            or metric.slice_key in _GOVERNED_SHOT_ZONES
+            if metric.base != "shot_types"
+            or metric.slice_key in _SHOT_TYPE_DISPLAY_SLICES
         }
         return tuple(
             sorted(
@@ -625,15 +668,27 @@ class MatchupService:
         )
 
     @staticmethod
-    def _metric_key(slice_key: str, stat_key: str) -> str:
-        return slice_key if slice_key == stat_key else f"{slice_key}:{stat_key}"
+    def _metric_key(base: str, slice_key: str, stat_key: str) -> str:
+        display_slice = MatchupService._display_slice(base, slice_key)
+        return (
+            display_slice
+            if display_slice == stat_key
+            else f"{display_slice}:{stat_key}"
+        )
 
     @staticmethod
-    def _metric_label(slice_key: str, stat_key: str) -> str:
-        label = slice_key.replace("_", " ").replace("-", " ")
-        if slice_key == stat_key:
+    def _metric_label(base: str, slice_key: str, stat_key: str) -> str:
+        display_slice = MatchupService._display_slice(base, slice_key)
+        label = display_slice.replace("_", " ").replace("-", " ")
+        if display_slice == stat_key:
             return label
         return f"{label} {stat_key}"
+
+    @staticmethod
+    def _display_slice(base: str, slice_key: str) -> str:
+        if base == "shot_types":
+            return _SHOT_TYPE_DISPLAY_SLICES[slice_key]
+        return slice_key
 
     @staticmethod
     def _markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:

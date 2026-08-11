@@ -188,10 +188,9 @@ def _event():
     }
 
 
-def _window(*, last_15=False, shot_zone_metrics=None):
+def _window(*, last_15=False, shot_zone_metrics=None, shot_type_metrics=None):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
-        ("shot_types", "catch_and_shoot", "FG3A", 7.0),
         ("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),
         ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
         ("traditional", "OPP_STL", "OPP_STL", 7.0),
@@ -200,7 +199,25 @@ def _window(*, last_15=False, shot_zone_metrics=None):
     metrics.extend(
         shot_zone_metrics
         if shot_zone_metrics is not None
-        else (("shot_zones", "Restricted Area", "FGA", 20.0),)
+        else tuple(
+            ("shot_zones", slice_key, "FGA", 20.0)
+            for slice_key in (
+                "Restricted Area",
+                "In The Paint (Non-RA)",
+                "Mid-Range",
+                "Corner 3",
+                "Above the Break 3",
+            )
+        )
+    )
+    metrics.extend(
+        shot_type_metrics
+        if shot_type_metrics is not None
+        else (
+            ("shot_types", "catch_and_shoot", "FG3A", 7.0),
+            ("shot_types", "pullups", "FG3A", 7.0),
+            ("shot_types", "less_than_10_ft", "FG3A", 7.0),
+        )
     )
     if last_15:
         metrics = tuple(metric for metric in metrics if metric[0] != "play_types")
@@ -426,6 +443,79 @@ def test_shot_zone_rows_expose_only_governed_compatible_markets():
         "Restricted Area:FGA": ["FGA", "FG2A"],
         "Restricted Area:FGM": ["PTS"],
     }
+
+
+def test_missing_governed_shot_zone_degrades_only_that_surface():
+    incomplete_zones = tuple(
+        ("shot_zones", slice_key, "FGA", 20.0)
+        for slice_key in (
+            "Restricted Area",
+            "In The Paint (Non-RA)",
+            "Mid-Range",
+            "Above the Break 3",
+        )
+    )
+
+    payload = _service(
+        season_window=_window(shot_zone_metrics=incomplete_zones),
+        last_15_window=_window(
+            last_15=True,
+            shot_zone_metrics=incomplete_zones,
+        ),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["shot_zones"] == {
+        "season": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+        "last_15": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    assert all(
+        row[window_name] is None
+        for row in payload["league"]["defense_sheet"]["shot_zones"]
+        for window_name in ("season", "last_15")
+    )
+    assert payload["league"]["defense_sheet"]["assist_locations"][0][
+        "season"
+    ] is not None
+
+
+def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
+    shot_types = (
+        ("shot_types", "catch_and_shoot", "FG3A", 7.0),
+        ("shot_types", "pullups", "FG3A", 7.0),
+        ("shot_types", "less_than_10_ft", "FG3A", 7.0),
+        ("shot_types", "running_jumpers", "FG3A", 7.0),
+    )
+
+    payload = _service(
+        season_window=_window(shot_type_metrics=shot_types),
+        last_15_window=_window(last_15=True, shot_type_metrics=shot_types),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["shot_types"] == {
+        "season": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+        "last_15": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    assert {
+        row["key"].rsplit(":", 1)[0]
+        for row in payload["league"]["defense_sheet"]["shot_types"]
+    } == {"Catch and Shoot", "Pullups", "Less Than 10 ft"}
+    assert all(
+        row[window_name] is None
+        for row in payload["league"]["defense_sheet"]["shot_types"]
+        for window_name in ("season", "last_15")
+    )
 
 
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():

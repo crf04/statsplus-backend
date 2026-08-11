@@ -385,6 +385,16 @@ Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
 and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
 Two-point-zone FGM targets PTS, while three-point-zone FGM targets PTS and 3PM.
+Those five slices are the complete nonoverlapping shot-zone response vocabulary;
+stored Left/Right Corner 3 children, Backcourt, and unknown duplicate slices are
+not emitted or aggregated. If any of the five aggregate slices is absent, the
+affected Base/window is `unavailable/legacy_surface_incomplete`.
+
+Shot-type response keys canonicalize the stored lookup vocabulary to the same
+three slice names used by Player Diets: `Catch and Shoot`, `Pullups`, and
+`Less Than 10 ft`. Team and league keys retain their stat suffix after that
+canonical slice. A missing or unknown stored shot type makes only that
+Base/window `unavailable/legacy_surface_incomplete`; divergent keys never leak.
 
 Each stored pool player has this shape:
 

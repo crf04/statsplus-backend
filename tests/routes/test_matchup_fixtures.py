@@ -105,7 +105,24 @@ def _team_matchups(engine, *, asymmetric_shot_zones=False):
         ("shot_zones", "Corner 3", "FGM"),
         ("shot_zones", "Above the Break 3", "FGA"),
         ("shot_zones", "Above the Break 3", "FGM"),
+        ("shot_zones", "Left Corner 3", "FGA"),
+        ("shot_zones", "Left Corner 3", "FGM"),
+        ("shot_zones", "Right Corner 3", "FGA"),
+        ("shot_zones", "Right Corner 3", "FGM"),
+        ("shot_zones", "Backcourt", "FGA"),
+        ("shot_zones", "Backcourt", "FGM"),
+        ("shot_types", "catch_and_shoot", "FG2M"),
+        ("shot_types", "catch_and_shoot", "FG2A"),
+        ("shot_types", "catch_and_shoot", "FG3M"),
         ("shot_types", "catch_and_shoot", "FG3A"),
+        ("shot_types", "pullups", "FG2M"),
+        ("shot_types", "pullups", "FG2A"),
+        ("shot_types", "pullups", "FG3M"),
+        ("shot_types", "pullups", "FG3A"),
+        ("shot_types", "less_than_10_ft", "FG2M"),
+        ("shot_types", "less_than_10_ft", "FG2A"),
+        ("shot_types", "less_than_10_ft", "FG3M"),
+        ("shot_types", "less_than_10_ft", "FG3A"),
         ("assist_locations", "AtRimAssists", "AtRimAssists"),
         ("traditional", "OPP_TOV", "OPP_TOV"),
         ("traditional", "OPP_STL", "OPP_STL"),
@@ -295,6 +312,26 @@ def _player_diets(engine):
             ),
             PlayerDietFact(
                 2544,
+                "shot_types",
+                "Pullups",
+                0.21,
+                42.0,
+                20,
+                "field_goal_attempts",
+                "nba_stats",
+            ),
+            PlayerDietFact(
+                2544,
+                "shot_types",
+                "Less Than 10 ft",
+                0.12,
+                24.0,
+                20,
+                "field_goal_attempts",
+                "nba_stats",
+            ),
+            PlayerDietFact(
+                2544,
                 "assist_locations",
                 "AtRimAssists",
                 0.31,
@@ -401,6 +438,23 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         "Restricted Area:FGA": ["FGA", "FG2A"],
         "Restricted Area:FGM": ["PTS"],
     }
+    player_shot_types = {
+        row["key"] for row in payload["players"][0]["diet_shares"]["shot_types"]
+    }
+    assert player_shot_types == {
+        "Catch and Shoot",
+        "Pullups",
+        "Less Than 10 ft",
+    }
+    assert {
+        row["key"].rsplit(":", 1)[0]
+        for row in payload["league"]["defense_sheet"]["shot_types"]
+    } == player_shot_types
+    for team in payload["teams"]:
+        assert {
+            row["key"].rsplit(":", 1)[0]
+            for row in team["defense_sheet"]["shot_types"]
+        } == player_shot_types
 
 
 def test_persisted_matchup_degrades_only_an_asymmetric_available_surface(tmp_path):
