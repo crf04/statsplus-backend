@@ -751,7 +751,13 @@ component computes; zero computable components remain `components: {}` with
 `blend: null`. Newly collected traditional surfaces include `OPP_REB` for REB
 and rebound-containing combos in addition to the three defensive score columns;
 legacy windows missing only OPP_REB retain the defensive surface and degrade
-REB locally. Combo components and Blends divide their available weighted
+REB locally. When the other window supplies the OPP_REB row identity, its
+league/team value is null only in the legacy window even though traditional
+availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and defensive
+scores remain populated. OPP_REB is the sole row-level exception: every other
+metric identity divergence marks the affected Base/window
+`unavailable/legacy_surface_incomplete` and nulls all of its rows. Combo
+components and Blends divide their available weighted
 numerators by the fixed total positive Season volume of every required part, so
 an unavailable part is neutral zero rather than a reason to renormalize.
 Injury reconciliation can remove a canonical Out player or attach a badge

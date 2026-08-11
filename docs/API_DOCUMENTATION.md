@@ -388,6 +388,17 @@ governed franchise fact set makes otherwise available Base/windows
 `missing/team_not_in_governed_roster`, while the known game header and other
 stored response sections still return.
 
+There is exactly one row-level exception while a Base/window remains
+`available`: a pre-OPP_REB traditional Season or Last-15 snapshot may omit only
+`OPP_REB`. If the other window supplies that identity, the league and team
+`OPP_REB` row windows are `null` only for the legacy scope, while traditional
+availability and the `OPP_TOV`, `OPP_STL`, and `OPP_BLK` rows and defensive
+columns stay available. The matching REB score window is
+`components: {}` / `blend: null`; the other REB window remains computable.
+Every other missing or divergent metric identity still downgrades the entire
+affected Base/window to `unavailable/legacy_surface_incomplete` and nulls all
+of its row windows.
+
 Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
 and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
@@ -521,7 +532,8 @@ this is not normalization of missing evidence. REB uses the stored traditional
 `OPP_REB` aggregate with implicit share one. Its required offensive Blend is
 the same numeric cell as its single `traditional` component. Legacy traditional
 windows without `OPP_REB` keep their valid OPP_TOV/OPP_STL/OPP_BLK surface and
-defensive scores; only REB and rebound-containing combos degrade locally.
+defensive scores; only REB and rebound-containing combos degrade locally. This
+is the sole available-Base row-level null exception described above.
 
 PRA, PA, PR, and RA combine PTS/REB/AST part scores using the player's stored
 Season per-game volumes. Every component and Blend uses the fixed denominator

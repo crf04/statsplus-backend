@@ -646,9 +646,9 @@ def test_missing_required_defensive_column_degrades_traditional_without_503():
     assert payload["league"]["defense_sheet"]["shot_zones"][0]["season"] is not None
 
 
-@pytest.mark.parametrize("current_season_has_rebounds", (False, True))
+@pytest.mark.parametrize("missing_rebound_window", ("season", "last_15"))
 def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
-    current_season_has_rebounds,
+    missing_rebound_window,
 ):
     markets = ("TOV", "STL", "BLK", "REB")
     pool = PlayerPool(
@@ -669,20 +669,29 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         },
     )
 
-    season_window = None
-    if current_season_has_rebounds:
-        season_window = _window(
-            traditional_metrics=(
-                ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
-                ("traditional", "OPP_STL", "OPP_STL", 7.0),
-                ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
-                ("traditional", "OPP_REB", "OPP_REB", 10.0),
-            )
-        )
-
-    payload = _service(pool=pool, season_window=season_window).get_matchup(
-        game_id=GAME_ID
+    complete_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        ("traditional", "OPP_REB", "OPP_REB", 10.0),
     )
+    season_window = _window(
+        traditional_metrics=(
+            None if missing_rebound_window == "season" else complete_traditional
+        )
+    )
+    last_15_window = _window(
+        last_15=True,
+        traditional_metrics=(
+            None if missing_rebound_window == "last_15" else complete_traditional
+        ),
+    )
+
+    payload = _service(
+        pool=pool,
+        season_window=season_window,
+        last_15_window=last_15_window,
+    ).get_matchup(game_id=GAME_ID)
 
     assert payload["league"]["surface_availability"]["traditional"] == {
         "season": {"status": "available", "unavailable_reason": None},
@@ -691,6 +700,26 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
     for column in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
         assert payload["league"]["defensive_columns"][column]["season"] is not None
         assert payload["league"]["defensive_columns"][column]["last_15"] is not None
+
+    league_rows = {
+        row["key"]: row
+        for row in payload["league"]["defense_sheet"]["traditional"]
+    }
+    assert league_rows["OPP_REB"][missing_rebound_window] is None
+    present_rebound_window = (
+        "last_15" if missing_rebound_window == "season" else "season"
+    )
+    assert league_rows["OPP_REB"][present_rebound_window] is not None
+    for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+        assert league_rows[key]["season"] is not None
+        assert league_rows[key]["last_15"] is not None
+    for team in payload["teams"]:
+        team_rows = {row["key"]: row for row in team["defense_sheet"]["traditional"]}
+        assert team_rows["OPP_REB"][missing_rebound_window] is None
+        assert team_rows["OPP_REB"][present_rebound_window] is not None
+        for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
+            assert team_rows[key]["season"] is not None
+            assert team_rows[key]["last_15"] is not None
 
     scores = payload["players"][0]["scores"]
     expected = {
@@ -705,17 +734,16 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
                     "traditional": {"value": value, "thin": False}
                 }
             }
-    assert scores["REB"]["season"] == (
-        {
-            "components": {
-                "traditional": {"value": -0.1, "thin": False}
-            },
-            "blend": {"value": -0.1, "thin": False},
-        }
-        if current_season_has_rebounds
-        else {"components": {}, "blend": None}
-    )
-    assert scores["REB"]["last_15"] == {"components": {}, "blend": None}
+    assert scores["REB"][missing_rebound_window] == {
+        "components": {},
+        "blend": None,
+    }
+    assert scores["REB"][present_rebound_window] == {
+        "components": {
+            "traditional": {"value": -0.1, "thin": False}
+        },
+        "blend": {"value": -0.1, "thin": False},
+    }
 
 
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
