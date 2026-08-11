@@ -638,7 +638,11 @@ thresholds, together with the latest per-Base `available | unavailable |
 missing` observations and timezone-aware retrieval times. Player Diets are
 Season-only: they have no Last-15 values and no traditional Base. Degraded
 Bases remain explicit and never synthesize zero facts; request-time reads call
-no provider.
+no provider. Invalid provider domains or duplicate fact identities are
+`unavailable/provider_invalid_response` for only the affected Base. Because
+shot zones carry no `GP`, a valid zone response becomes
+`unavailable/missing_games_played_evidence` when the shot-type Base supplying
+that evidence is unavailable.
 
 The `../api/data/jobs/<job_id>` endpoint returns the current durable state of
 one job, including `status` (`queued`, `running`, `succeeded`, `failed`),

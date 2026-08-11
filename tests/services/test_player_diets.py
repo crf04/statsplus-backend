@@ -31,6 +31,9 @@ class RecordedNBAPlayerDiets:
         self.calls = []
         self.player_id = 2544
         self.play_share = 0.2
+        self.shot_share = 0.25
+        self.shot_type_player_id = None
+        self.restricted_area_attempts = 40
         self.missing_play_type = None
         self.fail_shot_zones = False
         self.duplicate_play_rows = False
@@ -45,24 +48,24 @@ class RecordedNBAPlayerDiets:
                 ]
             )
         row = {
-                "PLAYER_ID": self.player_id,
-                "PLAYER_NAME": "LeBron James",
-                "PLAY_TYPE": play_type,
-                "TYPE_GROUPING": "Offensive",
-                "GP": 40,
-                "POSS_PCT": self.play_share,
-                "POSS": 120,
-            }
+            "PLAYER_ID": self.player_id,
+            "PLAYER_NAME": "LeBron James",
+            "PLAY_TYPE": play_type,
+            "TYPE_GROUPING": "Offensive",
+            "GP": 40,
+            "POSS_PCT": self.play_share,
+            "POSS": 120,
+        }
         return pd.DataFrame([row, row] if self.duplicate_play_rows else [row])
 
     def fetch_player_shot_type(self, general_range, **kwargs):
         self.calls.append(("shot_type", general_range, kwargs))
         return pd.DataFrame(
             [{
-                "PLAYER_ID": self.player_id,
+                "PLAYER_ID": self.shot_type_player_id or self.player_id,
                 "PLAYER_NAME": "LeBron James",
                 "GP": 40,
-                "FGA_FREQUENCY": 0.25,
+                "FGA_FREQUENCY": self.shot_share,
                 "FGA": 100,
             }]
         )
@@ -86,7 +89,18 @@ class RecordedNBAPlayerDiets:
             ]
         )
         return pd.DataFrame(
-            [[self.player_id, "LeBron James", 40, 20, 10, 5, 5, 20, 1, 10]],
+            [[
+                self.player_id,
+                "LeBron James",
+                self.restricted_area_attempts,
+                20,
+                10,
+                5,
+                5,
+                20,
+                1,
+                10,
+            ]],
             columns=columns,
         )
 
@@ -94,6 +108,7 @@ class RecordedNBAPlayerDiets:
 class RecordedPBPPlayerDiets:
     def __init__(self):
         self.calls = []
+        self.arc_assists = 20
 
     def fetch_player_diet_totals(self, *, season):
         self.calls.append(season)
@@ -103,7 +118,7 @@ class RecordedPBPPlayerDiets:
                 "Name": "LeBron James",
                 "GamesPlayed": 40,
                 "Assists": 100,
-                "Arc3Assists": 20,
+                "Arc3Assists": self.arc_assists,
                 "Corner3Assists": 10,
                 "AtRimAssists": 30,
                 "ShortMidRangeAssists": 25,
@@ -203,17 +218,13 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
     assert restricted.retrieved_at == NOW
 
 
-def test_invalid_candidate_preserves_the_complete_prior_publication(tmp_path):
+def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):
     service, nba, _ = _service(tmp_path)
     service.refresh("2025-26")
     nba.duplicate_play_rows = True
+    nba.shot_share = 0.3
 
-    try:
-        service.refresh("2025-26")
-    except ValueError as error:
-        assert "unique" in str(error)
-    else:
-        raise AssertionError("a nonfinite candidate must fail closed")
+    service.refresh("2025-26")
 
     result = service.get_for_players("2025-26", [2544])
     isolation = next(
@@ -222,9 +233,16 @@ def test_invalid_candidate_preserves_the_complete_prior_publication(tmp_path):
         if fact.base == "play_types" and fact.slice_key == "Isolation"
     )
     assert isolation.share == 0.2
-    assert {item.base: item.status for item in result.observations}[
-        "play_types"
-    ] == "available"
+    observation = {item.base: item for item in result.observations}["play_types"]
+    assert (observation.status, observation.unavailable_reason) == (
+        "unavailable",
+        "provider_invalid_response",
+    )
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.3
 
 
 def test_nonfinite_base_is_explicit_and_preserves_prior_facts(tmp_path):
@@ -247,6 +265,111 @@ def test_nonfinite_base_is_explicit_and_preserves_prior_facts(tmp_path):
         for fact in result.players[2544]
         if fact.base == "play_types" and fact.slice_key == "Isolation"
     ) == 0.2
+
+
+def test_finite_out_of_domain_share_degrades_only_its_provider_base(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.play_share = 1.5
+    nba.shot_share = 0.3
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observations = {item.base: item for item in result.observations}
+    assert (
+        observations["play_types"].status,
+        observations["play_types"].unavailable_reason,
+    ) == ("unavailable", "provider_invalid_response")
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "play_types" and fact.slice_key == "Isolation"
+    ) == 0.2
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.3
+
+
+def test_assist_counter_above_total_degrades_only_assist_locations(tmp_path):
+    service, nba, pbp = _service(tmp_path)
+    service.refresh("2025-26")
+    pbp.arc_assists = 101
+    nba.shot_share = 0.3
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observation = {item.base: item for item in result.observations}[
+        "assist_locations"
+    ]
+    assert (observation.status, observation.unavailable_reason) == (
+        "unavailable",
+        "provider_invalid_response",
+    )
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "assist_locations" and fact.slice_key == "Arc3Assists"
+    ) == 20
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.3
+
+
+def test_shot_zones_report_missing_games_evidence_when_shot_types_degrade(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.shot_share = 1.5
+    nba.restricted_area_attempts = 50
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observations = {item.base: item for item in result.observations}
+    assert (
+        observations["shot_types"].status,
+        observations["shot_types"].unavailable_reason,
+    ) == ("unavailable", "provider_invalid_response")
+    assert (
+        observations["shot_zones"].status,
+        observations["shot_zones"].unavailable_reason,
+    ) == ("unavailable", "missing_games_played_evidence")
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+    ) == 40
+
+
+def test_shot_zone_dependency_reason_survives_a_shot_type_join_failure(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.shot_type_player_id = 999999
+    nba.restricted_area_attempts = 50
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 999999])
+
+    observations = {item.base: item for item in result.observations}
+    assert (
+        observations["shot_types"].status,
+        observations["shot_types"].unavailable_reason,
+    ) == ("unavailable", "athlete_catalog_join_incomplete")
+    assert (
+        observations["shot_zones"].status,
+        observations["shot_zones"].unavailable_reason,
+    ) == ("unavailable", "missing_games_played_evidence")
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+    ) == 40
+    assert 999999 not in result.players
 
 
 def test_missing_base_is_explicit_and_keeps_its_older_raw_facts(tmp_path):

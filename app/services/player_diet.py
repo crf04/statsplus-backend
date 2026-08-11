@@ -98,6 +98,10 @@ class _AthleteJoinIncomplete(ValueError):
     pass
 
 
+class _ProviderDependencyUnavailable(ValueError):
+    pass
+
+
 class PlayerDietRepository:
     """Persist available Bases while retaining prior facts for degraded Bases."""
 
@@ -357,7 +361,12 @@ class PlayerDietService:
         shot_zone_facts, shot_zone_observation = self._collect_base(
             "shot_zones",
             lambda: self._collect_shot_zones(
-                season, canonical_ids, games_by_player=games_by_player
+                season,
+                canonical_ids,
+                games_by_player=games_by_player,
+                games_played_evidence_available=(
+                    shot_type_observation.status == "available"
+                ),
             ),
         )
         facts.extend(shot_zone_facts)
@@ -383,9 +392,14 @@ class PlayerDietService:
     ) -> tuple[list[PlayerDietFact], PlayerDietObservation]:
         try:
             facts = collect()
+            PlayerDietService._validate_collected_base(base, facts)
         except _AthleteJoinIncomplete:
             return [], PlayerDietObservation(
                 base, "unavailable", "athlete_catalog_join_incomplete"
+            )
+        except _ProviderDependencyUnavailable:
+            return [], PlayerDietObservation(
+                base, "unavailable", "missing_games_played_evidence"
             )
         except ProviderResponseError:
             return [], PlayerDietObservation(
@@ -398,6 +412,20 @@ class PlayerDietService:
         if not facts:
             return [], PlayerDietObservation(base, "missing", "provider_no_observation")
         return facts, PlayerDietObservation(base, "available")
+
+    @staticmethod
+    def _validate_collected_base(
+        base: str, facts: Sequence[PlayerDietFact]
+    ) -> None:
+        identities = set()
+        for fact in facts:
+            if fact.base != base:
+                raise ValueError("player Diet fact belongs to another Base")
+            identity = (fact.player_id, fact.slice_key)
+            if identity in identities:
+                raise ValueError("provider returned duplicate player Diet facts")
+            identities.add(identity)
+            PlayerDietRepository._validate_fact(fact)
 
     def _collect_play_types(
         self, season: str, canonical_ids: set[int]
@@ -476,6 +504,7 @@ class PlayerDietService:
         canonical_ids: set[int],
         *,
         games_by_player: Mapping[int, int],
+        games_played_evidence_available: bool,
     ) -> list[PlayerDietFact]:
         frame = self.nba_stats.fetch_player_shooting_zone(
             season=season,
@@ -484,17 +513,26 @@ class PlayerDietService:
         )
         if frame.empty:
             return []
-        facts = []
+        zone_rows = []
         for row in self._flat_frame(frame).to_dict(orient="records"):
             self._require_fields(row, "PLAYER_ID", *[f"{name}_FGA" for name in _SHOT_ZONE_SLICES])
             player_id = self._joined_player_id(row["PLAYER_ID"], canonical_ids)
-            games = games_by_player.get(player_id)
-            if games is None:
-                raise ValueError("shot-zone games played evidence is missing")
             volumes = {name: self._number(row[f"{name}_FGA"]) for name in _SHOT_ZONE_SLICES}
             total = sum(volumes.values())
             if not isfinite(total) or total <= 0:
                 raise ValueError("shot-zone total attempts must be positive")
+            zone_rows.append((player_id, volumes, total))
+        if not games_played_evidence_available:
+            raise _ProviderDependencyUnavailable(
+                "shot-type games played evidence is unavailable"
+            )
+        facts = []
+        for player_id, volumes, total in zone_rows:
+            games = games_by_player.get(player_id)
+            if games is None:
+                raise _ProviderDependencyUnavailable(
+                    "shot-zone player has no games played evidence"
+                )
             for slice_key, volume in volumes.items():
                 facts.append(
                     PlayerDietFact(

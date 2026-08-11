@@ -447,7 +447,7 @@ def _validate_frame(
             "NBA Stats returned an invalid data frame."
         )
     required = tuple(required_columns)
-    if frame.empty and not required:
+    if frame.empty and not required and validator is None:
         raise ProviderResponseError(
             "NBA Stats returned an empty data frame without a declared schema."
         )
@@ -470,6 +470,16 @@ def _validate_frame(
                 "NBA Stats returned a data frame with an invalid schema."
             )
     return frame
+
+
+def _has_player_shot_zone_identity(frame: pd.DataFrame) -> bool:
+    """Accept the live MultiIndex identity and the legacy flat test/profile shape."""
+
+    flat_identity = ("PLAYER_ID", "PLAYER_NAME", "TEAM_ID")
+    multilevel_identity = tuple(("", column) for column in flat_identity)
+    return all(column in frame.columns for column in flat_identity) or all(
+        column in frame.columns for column in multilevel_identity
+    )
 
 
 def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
@@ -551,11 +561,13 @@ def parse_recorded_player_diet(
             (
                 "PLAYER_ID",
                 "PLAYER_NAME",
+                "TEAM_ABBREVIATION",
                 "PLAY_TYPE",
                 "TYPE_GROUPING",
                 "GP",
                 "POSS_PCT",
                 "POSS",
+                "PTS",
             ),
         ),
         "shot_type": (
@@ -1034,11 +1046,13 @@ class NBAStatsAdapter:
             else (
                 "PLAYER_ID",
                 "PLAYER_NAME",
+                "TEAM_ABBREVIATION",
                 "PLAY_TYPE",
                 "TYPE_GROUPING",
                 "GP",
                 "POSS_PCT",
                 "POSS",
+                "PTS",
             )
         )
         return self.run_endpoint(
@@ -1116,7 +1130,7 @@ class NBAStatsAdapter:
         return self.run_endpoint(
             "player_shooting_zone",
             build,
-            required_columns=("PLAYER_ID", "PLAYER_NAME", "TEAM_ID"),
+            validator=_has_player_shot_zone_identity,
         )
 
     def fetch_player_shot_chart(self, player_id: int, team_id: int) -> pd.DataFrame:

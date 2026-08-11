@@ -709,6 +709,12 @@ through league-wide `LeagueDashPlayerPtShot` GeneralRange calls with
 `LeagueDashPlayerShotLocations` call; and one PBP player-totals call. Shot-zone
 games played come from the three fixed player-shot observations; the joined
 union must cover every shot-location player and may not disagree on `GP`.
+When the shot-type Base is malformed or cannot join, the shot-zone response is
+still validated independently but cannot become a fact without authoritative
+games played. Prior valid zone facts remain stored, and the newer shot-zone
+observation is therefore
+`unavailable/missing_games_played_evidence`, not
+`unavailable/provider_invalid_response`.
 There are no per-player shot calls and no request-time fallback.
 
 Canonical player identity comes only from the fresh, nonempty Season Athlete
@@ -717,8 +723,12 @@ evidence only and are never a join. An unjoined provider identity makes its
 whole Base unavailable rather than publishing a partial canonical Base.
 Available facts require unique `(season, player, Base, slice)` identities,
 finite shares in `[0,1]`, finite nonnegative volumes, and positive whole-number
-games played. Play types store provider possession share and possession volume
-directly; they never reuse the legacy percentage-of-points transform. Shot
+games played. Provider-origin finite domain violations and duplicate fact
+identities degrade only their Base as
+`unavailable/provider_invalid_response`; validation is repeated at repository
+publication as a direct-caller guard. Play types store provider possession
+share and possession volume directly; they never reuse the legacy
+percentage-of-points transform. Shot
 types store provider FGA frequency and FGA. Shot zones store five nonoverlapping
 display slices, using the provider's aggregate `Corner 3` and excluding its
 duplicating left/right children and Backcourt. Assist-location volume uses the
