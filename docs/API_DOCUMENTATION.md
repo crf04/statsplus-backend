@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/slate`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -308,6 +308,163 @@ Empty and error behavior:
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
+
+### Get Matchup
+
+```http
+GET /api/games/matchup?game_id=<nba_game_id>
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns one complete stored matchup document. `game_id` is one nonempty NBA
+string. Missing, empty, repeated, whitespace-padded, or extra parameters return
+`400 invalid_input`; an unknown game in a populated current-season Event
+Catalog returns `404 resource_not_found`. If no schedule is stored at all, the
+route returns `503 provider_unavailable`.
+
+The request makes no NBA Stats, PBP Stats, DFS Board, or injury-provider call.
+It composes the Event Catalog, newest reusable stored Player Pool containing the
+game, durable player-log summaries, Season Player Diet facts, and the newest
+stored team Season and exact team Last-15 windows no later than the Slate Date.
+A missing/degraded pool or stats surface remains a truthful `200` with empty or
+nullable data and explicit freshness/availability; no request-time provider
+fallback, fabricated zero, Season-for-Last-15 substitution, or estimate is
+used. This rule also governs past games: only a Player Pool snapshot still
+servable under its landed stored-pool rules may populate `players`.
+
+Top-level fields are required:
+
+```text
+game, league, teams, players, injuries, freshness
+```
+
+`game` is the same header as a Slate card. `teams` is ordered away then home,
+and its targetable counts reflect the returned stored pool players. Canonical
+NBA player IDs are JSON integers; NBA game IDs remain strings.
+
+`league.defense_sheet` and every `teams[].defense_sheet` contain exactly these
+five Bases:
+
+```text
+play_types, shot_zones, shot_types, assist_locations, traditional
+```
+
+Each league row is `{ key, season, last_15 }`; an available window is
+`{ average_allowed_per_48, sigma }`. Each team row is
+`{ key, label, markets, season, last_15 }`; an available window is
+`{ allowed_per_48, percent_vs_league_average, sigma_deviation, rank }`.
+Keys match exactly between team and league rows. Values, population sigma,
+sigma deviation, and rank are backend-derived from the stored 30-team raw fact
+set. `league.defensive_columns` and `teams[].defensive_columns` contain exactly
+`OPP_TOV`, `OPP_STL`, and `OPP_BLK`; their league windows use
+`{ average_per_48, sigma }` and their team windows use
+`{ per_48, percent_vs_league_average }`.
+
+`league.surface_availability[base][season|last_15]` is the sole team-window
+status authority:
+
+```json
+{
+  "status": "available | unavailable | missing",
+  "unavailable_reason": null
+}
+```
+
+When the status is not `available`, every metric value for that Base/window is
+`null`. In particular, exact Synergy play types Last-15 is always `null` with
+`status: "unavailable"` and `unavailable_reason: "provider_unsupported"`;
+Season values are never substituted. Independently published Season and
+Last-15 scopes can contain different metric identities; the affected
+Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
+the request fail or inventing the absent metric. An event team outside the
+governed franchise fact set makes otherwise available Base/windows
+`missing/team_not_in_governed_roster`, while the known game header and other
+stored response sections still return.
+
+Shot-zone row markets are constrained by the slice as well as the statistic.
+Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
+and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
+Two-point-zone FGM targets PTS, while three-point-zone FGM targets PTS and 3PM.
+Those five slices are the complete nonoverlapping shot-zone response vocabulary;
+stored Left/Right Corner 3 children, Backcourt, and unknown duplicate slices are
+not emitted or aggregated. If any of the five aggregate slices is absent, the
+affected Base/window is `unavailable/legacy_surface_incomplete`.
+
+Shot-type response keys canonicalize the stored lookup vocabulary to the same
+three slice names used by Player Diets: `Catch and Shoot`, `Pullups`, and
+`Less Than 10 ft`. Team and league keys retain their stat suffix after that
+canonical slice. A missing or unknown stored shot type makes only that
+Base/window `unavailable/legacy_surface_incomplete`; divergent keys never leak.
+
+Each stored pool player has this shape:
+
+```json
+{
+  "canonical_id": 2544,
+  "name": "LeBron James",
+  "team_id": 1610612747,
+  "tricode": "LAL",
+  "posted_markets": ["FGA", "PTS"],
+  "provenance": {
+    "prizepicks": ["FGA", "PTS"],
+    "underdog": ["PTS"]
+  },
+  "season_scoring": 25.4,
+  "last_10_minutes": [35.0, 36.0],
+  "diet_shares": {
+    "play_types": [
+      {
+        "key": "Transition",
+        "season": {
+          "share": 0.19,
+          "volume": 95.0,
+          "games_played": 20,
+          "volume_unit": "possessions"
+        }
+      }
+    ],
+    "shot_zones": [],
+    "shot_types": [],
+    "assist_locations": []
+  },
+  "scores": {
+    "status": "unavailable",
+    "unavailable_reason": "not_in_scope"
+  },
+  "injury_badge_ref": null
+}
+```
+
+Player Diet facts are unthresholded raw Season shares and volumes. There is no
+player Last-15 field and no manufactured traditional Diet Base. Missing player
+logs yield `season_scoring: null` and an empty minutes series rather than zero.
+Matchup Score computation is not part of this endpoint slice, so `scores` is a
+present, explicit unavailable placeholder.
+
+Until an approved injury seam is enabled, `injuries` is present as:
+
+```json
+{
+  "status": "unavailable",
+  "unavailable_reason": "disabled",
+  "retrieved_at": null,
+  "source": "rotowire",
+  "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+  "teams": []
+}
+```
+
+`freshness` retains the existing `schedule`, `pool`, `stats`, and `injuries`
+surfaces and additionally reports `player_game_logs`, per-Base
+`player_diets.surfaces`, and Season/Last-15
+`team_matchups[window].surfaces`. Every stored observation carries its actual
+timezone-aware `retrieved_at`; missing observations carry null. Pool freshness
+and per-provider status are passed through from the selected stored snapshot.
+The stats-table surface is `stale` when its last successful publication
+predates the newest completed, non-postponed stored game; it is `missing` when
+no successful publication exists. Team facts for a started or past game are
+bounded by its Eastern Slate Date; a future tip requests the latest current
+stored team scopes without passing a future cutoff.
 
 ### Get Matchup Selection
 

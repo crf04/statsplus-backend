@@ -660,6 +660,56 @@ validated component-value authority, so catalog-sanctioned derived components
 cannot diverge between the two paths. A stored category removed from the
 current catalog fails explicitly as `503` before row calculation.
 
+Authenticated full-matchup reads likewise compose stored seams only:
+
+```text
+GET /api/games/matchup?game_id
+  → strict query parsing + Firebase auth
+  → current-season Event Catalog game identity and schedule freshness
+  → newest reusable persisted Slate Player Pool containing the game
+  → PlayerGameLogRepository bulk Season rates + combined-phase last ten
+  → PlayerDietService bulk Season facts
+  → TeamMatchupQueryService newest Season + exact team Last-15 windows
+  → backend-shaped league/team metrics, availability, and freshness
+```
+
+`MatchupService` has no provider or live Player Pool dependency. Missing stored
+pool, player, Diet, or team-window facts degrade the response without starting
+collection. The team query's latest observation is the sole window-availability
+authority; when a Base/window is unavailable or missing, the response emits a
+null row window even if an older fact-bearing scope remains stored. This is
+especially important for provider-unsupported play-types Last-15: Season is
+never relabeled as rolling data. League and team row identities are constructed
+from the same `(Base, slice, stat)` taxonomy, so every team key has an exact
+league denominator. Player Diets remain raw and Season-only, while Matchup
+Scores and injuries are explicit unavailable placeholders in this slice.
+If independently published windows have asymmetric identities, response-local
+availability normalization marks only the incomplete Base/window
+`unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
+team absent from the governed franchise facts similarly becomes
+`missing/team_not_in_governed_roster`. Neither condition starts collection or
+turns a known game into a whole-request error. Shot-zone market membership is
+derived from `(Base, slice, stat)`, keeping two-point zones out of FG3A and
+three-point zones out of FG2A. Response composition also projects stored
+shot-zone facts onto the same five nonoverlapping slices as Player Diets,
+excluding Left/Right Corner 3, Backcourt, and unknown duplicates without
+aggregation. Missing governed slices degrade only that Base/window. Stored
+shot-type lookup keys remain unchanged, while response keys use the exact
+Player Diet vocabulary `Catch and Shoot`, `Pullups`, and `Less Than 10 ft`;
+missing or unknown shot types likewise degrade locally.
+
+The response freshness document does not collapse independent publication
+clocks. It retains schedule and stored-pool freshness, the legacy stats-table
+completion, player-log read freshness, each Player Diet observation, each team
+Base/window observation, and injuries. This preserves the landed modules'
+truth instead of presenting one Nightly timestamp as if every source succeeded
+together. The stats-table status is stale when its successful completion
+predates the newest completed, non-postponed Event Catalog game. The already
+resolved Event Catalog collection supplies that comparison, so the full
+catalog is loaded once per request. Started and past games bound both team
+windows to their Eastern Slate Date; future tips query the current latest
+stored scopes with no future `as_of` value.
+
 ### Durable refresh jobs
 
 `DataRefreshJobService` writes queued/running/succeeded/failed transitions and

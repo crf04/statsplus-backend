@@ -135,6 +135,21 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert (
         dependencies.matchup_selection_service.player_logs.engine is dependencies.engine
     )
+    assert (
+        dependencies.matchup_service.event_catalog is dependencies.event_catalog_service
+    )
+    assert (
+        dependencies.matchup_service.player_pool.snapshot_repository
+        is dependencies.matchup_selection_service.player_pool.snapshot_repository
+    )
+    assert dependencies.matchup_service.player_diets is dependencies.player_diet_service
+    assert dependencies.matchup_service.player_logs.engine is dependencies.engine
+    assert (
+        dependencies.matchup_service.team_matchups.repository.engine
+        is dependencies.engine
+    )
+    assert not hasattr(dependencies.matchup_service, "nba_stats_provider")
+    assert not hasattr(dependencies.matchup_service, "dfs_board_service")
     assert not hasattr(dependencies.matchup_selection_service, "nba_stats_provider")
     assert dependencies.event_resolver.match_window == time_window_timedelta(
         settings.catalog.event_match_window_hours,

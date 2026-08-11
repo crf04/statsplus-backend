@@ -30,8 +30,10 @@ game_bp = Blueprint('games', __name__)
 
 game_service = CurrentAppService("game")
 slate_service = CurrentAppService("slate")
+matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
 
+_MATCHUP_PARAMETERS = frozenset({"game_id"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
 _CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
 _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
@@ -42,6 +44,21 @@ _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
     return jsonify(slate_service.get_slate(request.args.get("date")))
+
+
+@game_bp.route("/matchup", methods=["GET"])
+@require_auth
+def get_matchup():
+    """Return one stored matchup document for a canonical NBA game."""
+    game_ids = request.args.getlist("game_id")
+    if (
+        set(request.args) != _MATCHUP_PARAMETERS
+        or len(game_ids) != 1
+        or not game_ids[0]
+        or game_ids[0] != game_ids[0].strip()
+    ):
+        raise InvalidInputError("The matchup parameters are invalid.")
+    return jsonify(matchup_service.get_matchup(game_id=game_ids[0]))
 
 
 @game_bp.route("/matchup/selection", methods=["GET"])
