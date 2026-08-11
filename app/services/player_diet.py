@@ -518,9 +518,13 @@ class PlayerDietService:
             self._require_fields(row, "PLAYER_ID", *[f"{name}_FGA" for name in _SHOT_ZONE_SLICES])
             player_id = self._joined_player_id(row["PLAYER_ID"], canonical_ids)
             volumes = {name: self._number(row[f"{name}_FGA"]) for name in _SHOT_ZONE_SLICES}
+            if any(volume < 0 for volume in volumes.values()):
+                raise ValueError("shot-zone attempts must be nonnegative")
             total = sum(volumes.values())
-            if not isfinite(total) or total <= 0:
-                raise ValueError("shot-zone total attempts must be positive")
+            if not isfinite(total):
+                raise ValueError("shot-zone total attempts must be finite")
+            if total == 0:
+                continue
             zone_rows.append((player_id, volumes, total))
         if not games_played_evidence_available:
             raise _ProviderDependencyUnavailable(

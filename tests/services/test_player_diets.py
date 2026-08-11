@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 from sqlalchemy import create_engine, event
 
 from app.migrations import run_migrations
@@ -16,14 +17,18 @@ NOW = datetime(2026, 1, 6, 10, 0, tzinfo=timezone.utc)
 
 
 class FreshAthleteCatalog:
-    def __init__(self, *, is_fresh=True):
+    def __init__(self, *, is_fresh=True, player_ids=(2544,)):
         self.is_fresh = is_fresh
+        self.player_ids = player_ids
 
     def get_freshness(self, season, *, now=None):
-        return {"is_fresh": self.is_fresh, "row_count": 1}
+        return {"is_fresh": self.is_fresh, "row_count": len(self.player_ids)}
 
     def get_catalog(self, season, *, active_only=False):
-        return [{"player_id": 2544, "display_name": "LeBron James"}]
+        return [
+            {"player_id": player_id, "display_name": f"Player {player_id}"}
+            for player_id in self.player_ids
+        ]
 
 
 class RecordedNBAPlayerDiets:
@@ -33,7 +38,9 @@ class RecordedNBAPlayerDiets:
         self.play_share = 0.2
         self.shot_share = 0.25
         self.shot_type_player_id = None
+        self.shot_type_games = {}
         self.restricted_area_attempts = 40
+        self.zero_zone_player_id = None
         self.missing_play_type = None
         self.fail_shot_zones = False
         self.duplicate_play_rows = False
@@ -64,7 +71,7 @@ class RecordedNBAPlayerDiets:
             [{
                 "PLAYER_ID": self.shot_type_player_id or self.player_id,
                 "PLAYER_NAME": "LeBron James",
-                "GP": 40,
+                "GP": self.shot_type_games.get(general_range, 40),
                 "FGA_FREQUENCY": self.shot_share,
                 "FGA": 100,
             }]
@@ -88,8 +95,7 @@ class RecordedNBAPlayerDiets:
                 ("Corner 3", "FGA"),
             ]
         )
-        return pd.DataFrame(
-            [[
+        rows = [[
                 self.player_id,
                 "LeBron James",
                 self.restricted_area_attempts,
@@ -100,9 +106,21 @@ class RecordedNBAPlayerDiets:
                 20,
                 1,
                 10,
-            ]],
-            columns=columns,
-        )
+            ]]
+        if self.zero_zone_player_id is not None:
+            rows.append([
+                self.zero_zone_player_id,
+                "Zero Included Attempts",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                0,
+            ])
+        return pd.DataFrame(rows, columns=columns)
 
 
 class RecordedPBPPlayerDiets:
@@ -127,7 +145,7 @@ class RecordedPBPPlayerDiets:
         )
 
 
-def _service(tmp_path):
+def _service(tmp_path, *, player_ids=(2544,)):
     engine = create_engine(f"sqlite:///{tmp_path / 'player-diets.sqlite3'}")
     run_migrations(engine)
     nba = RecordedNBAPlayerDiets()
@@ -135,7 +153,7 @@ def _service(tmp_path):
     return (
         PlayerDietService(
             engine,
-            athlete_catalog=FreshAthleteCatalog(),
+            athlete_catalog=FreshAthleteCatalog(player_ids=player_ids),
             nba_stats_provider=nba,
             pbp_stats_provider=pbp,
             clock=lambda: NOW,
@@ -370,6 +388,72 @@ def test_shot_zone_dependency_reason_survives_a_shot_type_join_failure(tmp_path)
         if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
     ) == 40
     assert 999999 not in result.players
+
+
+def test_zero_included_zone_attempts_do_not_disable_other_player_facts(tmp_path):
+    service, nba, _ = _service(tmp_path, player_ids=(2544, 201939))
+    nba.zero_zone_player_id = 201939
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 201939])
+
+    observation = {item.base: item for item in result.observations}["shot_zones"]
+    assert (observation.status, observation.unavailable_reason) == (
+        "available",
+        None,
+    )
+    assert len(
+        [fact for fact in result.players[2544] if fact.base == "shot_zones"]
+    ) == 5
+    assert 201939 not in result.players
+
+
+@pytest.mark.parametrize("attempts", [-1, float("nan")])
+def test_negative_or_nonfinite_zone_attempts_still_degrade_the_base(
+    tmp_path, attempts
+):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.restricted_area_attempts = attempts
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observation = {item.base: item for item in result.observations}["shot_zones"]
+    assert (observation.status, observation.unavailable_reason) == (
+        "unavailable",
+        "provider_invalid_response",
+    )
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+    ) == 40
+
+
+def test_positive_zone_attempts_keep_the_gp_dependency_after_inconsistent_gp(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.shot_type_games["Pullups"] = 39
+    nba.restricted_area_attempts = 50
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    observations = {item.base: item for item in result.observations}
+    assert (
+        observations["shot_types"].status,
+        observations["shot_types"].unavailable_reason,
+    ) == ("unavailable", "provider_invalid_response")
+    assert (
+        observations["shot_zones"].status,
+        observations["shot_zones"].unavailable_reason,
+    ) == ("unavailable", "missing_games_played_evidence")
+    assert next(
+        fact.volume
+        for fact in result.players[2544]
+        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+    ) == 40
 
 
 def test_missing_base_is_explicit_and_keeps_its_older_raw_facts(tmp_path):
