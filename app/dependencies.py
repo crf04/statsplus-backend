@@ -27,6 +27,7 @@ class ApplicationDependencies:
     dfs_board_service: Any
     game_service: Any
     slate_service: Any
+    matchup_service: Any
     matchup_selection_service: Any
     player_service: Any
     team_service: Any
@@ -80,11 +81,14 @@ def build_dependencies(
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.matchup import MatchupService
     from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
     from app.services.statistic_catalog import StatisticCatalog
     from app.services.team_service import TeamService
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine
@@ -184,6 +188,7 @@ def build_dependencies(
     event_mapping_repository = None
     event_resolver = None
     player_diet_service = None
+    team_matchup_query_service = None
     from app.utils.db import is_demo_database_url
 
     if not is_demo_database_url(settings.database.url):
@@ -222,6 +227,9 @@ def build_dependencies(
             athlete_catalog=athlete_catalog_service,
             nba_stats_provider=nba_stats_provider,
             pbp_stats_provider=pbp_stats_provider,
+        )
+        team_matchup_query_service = TeamMatchupQueryService(
+            TeamMatchupRepository(engine)
         )
 
     dfs_board_service = DFSBoardService(
@@ -273,16 +281,26 @@ def build_dependencies(
             field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
         ),
     )
+    stored_player_pool_reader = (
+        StoredPlayerPoolReader(player_pool_snapshot_repository)
+        if player_pool_snapshot_repository is not None
+        else None
+    )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
-        player_pool=(
-            StoredPlayerPoolReader(player_pool_snapshot_repository)
-            if player_pool_snapshot_repository is not None
-            else None
-        ),
+        player_pool=stored_player_pool_reader,
         player_logs=player_game_log_repository,
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,
+        settings=settings,
+    )
+    matchup_service = MatchupService(
+        event_catalog=event_catalog_service,
+        player_pool=stored_player_pool_reader,
+        player_logs=player_game_log_repository,
+        player_diets=player_diet_service,
+        team_matchups=team_matchup_query_service,
+        stats_freshness=stats_freshness_repository,
         settings=settings,
     )
 
@@ -296,6 +314,7 @@ def build_dependencies(
         dfs_board_service=dfs_board_service,
         game_service=game_service,
         slate_service=slate_service,
+        matchup_service=matchup_service,
         matchup_selection_service=matchup_selection_service,
         player_service=player_service,
         team_service=team_service,

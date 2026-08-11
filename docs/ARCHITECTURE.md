@@ -660,6 +660,38 @@ validated component-value authority, so catalog-sanctioned derived components
 cannot diverge between the two paths. A stored category removed from the
 current catalog fails explicitly as `503` before row calculation.
 
+Authenticated full-matchup reads likewise compose stored seams only:
+
+```text
+GET /api/games/matchup?game_id
+  → strict query parsing + Firebase auth
+  → current-season Event Catalog game identity and schedule freshness
+  → newest reusable persisted Slate Player Pool containing the game
+  → PlayerGameLogRepository bulk Season rates + combined-phase last ten
+  → PlayerDietService bulk Season facts
+  → TeamMatchupQueryService newest Season + exact team Last-15 windows
+  → backend-shaped league/team metrics, availability, and freshness
+```
+
+`MatchupService` has no provider or live Player Pool dependency. Missing stored
+pool, player, Diet, or team-window facts degrade the response without starting
+collection. The team query's latest observation is the sole window-availability
+authority; when a Base/window is unavailable or missing, the response emits a
+null row window even if an older fact-bearing scope remains stored. This is
+especially important for provider-unsupported play-types Last-15: Season is
+never relabeled as rolling data. League and team row identities are constructed
+from the same `(Base, slice, stat)` taxonomy, so every team key has an exact
+league denominator. Player Diets remain raw and Season-only, while Matchup
+Scores and injuries are explicit unavailable placeholders in this slice.
+
+The response freshness document does not collapse independent publication
+clocks. It retains schedule and stored-pool freshness, the legacy stats-table
+completion, player-log read freshness, each Player Diet observation, each team
+Base/window observation, and injuries. This preserves the landed modules'
+truth instead of presenting one Nightly timestamp as if every source succeeded
+together. The stats-table status is stale when its successful completion
+predates the newest completed, non-postponed Event Catalog game.
+
 ### Durable refresh jobs
 
 `DataRefreshJobService` writes queued/running/succeeded/failed transitions and
