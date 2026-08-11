@@ -687,7 +687,6 @@ class MatchupService:
                 window_name,
                 metric_index,
                 opponent_id,
-                summary,
                 availability,
             )
         if market in _COMBO_PARTS:
@@ -732,7 +731,6 @@ class MatchupService:
         window_name: str,
         metric_index: _WindowMetricIndex | None,
         opponent_id: int,
-        summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
         if (
@@ -749,12 +747,7 @@ class MatchupService:
             "value": self._number(
                 team.allowed_per_48 / league.average_allowed_per_48 - 1
             ),
-            "thin": (
-                summary is None
-                or summary.season_rate is None
-                or summary.season_rate.game_count
-                < self.settings.matchup_scores.min_games
-            ),
+            "thin": False,
         }
         return {"components": {"traditional": cell}, "blend": dict(cell)}
 
@@ -1032,11 +1025,11 @@ class MatchupService:
         result: dict[str, dict[str, dict[str, Any]]] = {}
         for base in DEFENSE_BASES:
             result[base] = {}
-            expected = (
-                _REQUIRED_TRADITIONAL_IDENTITIES
-                if base == "traditional"
-                else expected_by_base[base]
-            )
+            expected = expected_by_base[base]
+            if base == "traditional":
+                expected = (
+                    expected | _REQUIRED_TRADITIONAL_IDENTITIES
+                ) - {("OPP_REB", "OPP_REB")}
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
@@ -1088,21 +1081,9 @@ class MatchupService:
                 invalid_shot_types = base == "shot_types" and any(
                     slice_set != _GOVERNED_SHOT_TYPES for slice_set in slice_sets
                 )
-                missing_traditional = base == "traditional" and (
-                    not _REQUIRED_TRADITIONAL_IDENTITIES.issubset(
-                        league_identities
-                    )
-                    or any(
-                        not _REQUIRED_TRADITIONAL_IDENTITIES.issubset(
-                            team_identities[team_id]
-                        )
-                        for team_id in team_ids
-                    )
-                )
                 if (
                     missing_governed_slice
                     or invalid_shot_types
-                    or missing_traditional
                     or not expected.issubset(league_identities)
                     or any(
                         not expected.issubset(team_identities[team_id])

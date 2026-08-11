@@ -646,6 +646,76 @@ def test_missing_required_defensive_column_degrades_traditional_without_503():
     assert payload["league"]["defense_sheet"]["shot_zones"][0]["season"] is not None
 
 
+@pytest.mark.parametrize("extra_metric_window", ("season", "last_15"))
+def test_non_rebound_traditional_identity_divergence_degrades_only_missing_window(
+    extra_metric_window,
+):
+    complete_traditional = (
+        ("traditional", "OPP_REB", "OPP_REB", 10.0),
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+    )
+    traditional_with_pf = (
+        *complete_traditional,
+        ("traditional", "OPP_PF", "OPP_PF", 18.0),
+    )
+    missing_window = "last_15" if extra_metric_window == "season" else "season"
+
+    payload = _service(
+        season_window=_window(
+            traditional_metrics=(
+                traditional_with_pf
+                if extra_metric_window == "season"
+                else complete_traditional
+            )
+        ),
+        last_15_window=_window(
+            last_15=True,
+            traditional_metrics=(
+                traditional_with_pf
+                if extra_metric_window == "last_15"
+                else complete_traditional
+            ),
+        ),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        extra_metric_window: {
+            "status": "available",
+            "unavailable_reason": None,
+        },
+        missing_window: {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    league_rows = payload["league"]["defense_sheet"]["traditional"]
+    assert {row["key"] for row in league_rows} == {
+        "OPP_BLK",
+        "OPP_PF",
+        "OPP_REB",
+        "OPP_STL",
+        "OPP_TOV",
+    }
+    assert all(row[extra_metric_window] is not None for row in league_rows)
+    assert all(row[missing_window] is None for row in league_rows)
+    assert all(
+        row[extra_metric_window] is not None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row[missing_window] is None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row["season"] is not None and row["last_15"] is not None
+        for row in payload["league"]["defense_sheet"]["shot_zones"]
+    )
+
+
 @pytest.mark.parametrize("missing_rebound_window", ("season", "last_15"))
 def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
     missing_rebound_window,

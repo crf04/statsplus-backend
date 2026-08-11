@@ -397,7 +397,10 @@ columns stay available. The matching REB score window is
 `components: {}` / `blend: null`; the other REB window remains computable.
 Every other missing or divergent metric identity still downgrades the entire
 affected Base/window to `unavailable/legacy_surface_incomplete` and nulls all
-of its row windows.
+of its row windows. The expected traditional identity set is the union across
+the independently stored windows (plus the required defensive columns), with
+only `OPP_REB` excluded for the compatibility carveout; for example, an
+`OPP_PF` row present in only one window downgrades the other window locally.
 
 Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
@@ -533,7 +536,11 @@ this is not normalization of missing evidence. REB uses the stored traditional
 the same numeric cell as its single `traditional` component. Legacy traditional
 windows without `OPP_REB` keep their valid OPP_TOV/OPP_STL/OPP_BLK surface and
 defensive scores; only REB and rebound-containing combos degrade locally. This
-is the sole available-Base row-level null exception described above.
+is the sole available-Base row-level null exception described above. Because
+the REB primitive consumes neither Player Diet nor player Season sample
+evidence, its component and Blend are not thin merely because the player has
+fewer than `MATCHUP_SCORE_MIN_GAMES`; combos that consume REB still apply the
+combo-level Season game minimum described below.
 
 PRA, PA, PR, and RA combine PTS/REB/AST part scores using the player's stored
 Season per-game volumes. Every component and Blend uses the fixed denominator

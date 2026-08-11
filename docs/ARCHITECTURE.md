@@ -756,8 +756,13 @@ league/team value is null only in the legacy window even though traditional
 availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and defensive
 scores remain populated. OPP_REB is the sole row-level exception: every other
 metric identity divergence marks the affected Base/window
-`unavailable/legacy_surface_incomplete` and nulls all of its rows. Combo
-components and Blends divide their available weighted
+`unavailable/legacy_surface_incomplete` and nulls all of its rows. Normalization
+therefore validates the cross-window traditional identity union plus the three
+required defensive columns, excluding only OPP_REB for that carveout. The REB
+primitive's implicit-share-one traditional cell consumes no Player Diet or
+player Season sample evidence, so player game count alone never makes it thin;
+combo-level thinness remains unchanged. Combo components and Blends divide
+their available weighted
 numerators by the fixed total positive Season volume of every required part, so
 an unavailable part is neutral zero rather than a reason to renormalize.
 Injury reconciliation can remove a canonical Out player or attach a badge

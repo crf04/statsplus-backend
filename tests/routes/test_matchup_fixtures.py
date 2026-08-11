@@ -116,6 +116,7 @@ def _team_matchups(
     *,
     asymmetric_shot_zones=False,
     missing_rebound_window=None,
+    extra_traditional_window=None,
 ):
     repository = TeamMatchupRepository(engine)
     teams = json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
@@ -160,7 +161,21 @@ def _team_matchups(
         ("traditional", "OPP_BLK", "OPP_BLK"),
     )
 
-    def facts(*, omit_play_types=False, omit_paint=False, omit_rebounds=False):
+    def facts(
+        *,
+        omit_play_types=False,
+        omit_paint=False,
+        omit_rebounds=False,
+        include_opponent_pf=False,
+    ):
+        stored_metrics = (
+            *metrics,
+            *(
+                (("traditional", "OPP_PF", "OPP_PF"),)
+                if include_opponent_pf
+                else ()
+            ),
+        )
         return tuple(
             TeamMatchupFact(
                 row["team_id"],
@@ -179,7 +194,7 @@ def _team_matchups(
                 "recorded",
             )
             for row in teams
-            for base, slice_key, stat_key in metrics
+            for base, slice_key, stat_key in stored_metrics
             if not (omit_play_types and base == "play_types")
             and not (
                 omit_rebounds
@@ -207,7 +222,10 @@ def _team_matchups(
         (
             (
                 season_scope,
-                facts(omit_rebounds=missing_rebound_window == "season"),
+                facts(
+                    omit_rebounds=missing_rebound_window == "season",
+                    include_opponent_pf=extra_traditional_window == "season",
+                ),
                 tuple(TeamMatchupObservation(base, "available") for base in bases),
             ),
             (
@@ -216,6 +234,7 @@ def _team_matchups(
                     omit_play_types=True,
                     omit_paint=asymmetric_shot_zones,
                     omit_rebounds=missing_rebound_window == "last_15",
+                    include_opponent_pf=extra_traditional_window == "last_15",
                 ),
                 tuple(
                     TeamMatchupObservation(
@@ -810,5 +829,98 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
     for market in ("TOV", "STL", "BLK"):
         assert scores[market]["season"]["components"]["traditional"] is not None
         assert scores[market]["last_15"]["components"]["traditional"] is not None
+    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["injuries"]["status"] == "fresh"
+
+
+@pytest.mark.parametrize("extra_traditional_window", ("season", "last_15"))
+def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
+    tmp_path,
+    extra_traditional_window,
+):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / f'traditional-divergence-{extra_traditional_window}.sqlite3'}"
+    )
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    service = MatchupService(
+        event_catalog=_event_catalog(engine, settings),
+        player_pool=_player_pool(engine),
+        player_logs=_player_logs(engine, catalog),
+        player_diets=_player_diets(engine),
+        team_matchups=_team_matchups(
+            engine,
+            extra_traditional_window=extra_traditional_window,
+        ),
+        stats_freshness=stats_freshness,
+        settings=settings,
+        injuries=_injuries(engine),
+        clock=lambda: NOW,
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                matchup_service=service,
+                user_service=SimpleNamespace(
+                    create_or_update_user=lambda _user: None
+                ),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    response = app.test_client().get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    missing_window = (
+        "last_15" if extra_traditional_window == "season" else "season"
+    )
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        extra_traditional_window: {
+            "status": "available",
+            "unavailable_reason": None,
+        },
+        missing_window: {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    league_rows = payload["league"]["defense_sheet"]["traditional"]
+    assert {row["key"] for row in league_rows} == {
+        "OPP_BLK",
+        "OPP_PF",
+        "OPP_REB",
+        "OPP_STL",
+        "OPP_TOV",
+    }
+    assert all(row[extra_traditional_window] is not None for row in league_rows)
+    assert all(row[missing_window] is None for row in league_rows)
+    assert all(
+        row[extra_traditional_window] is not None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row[missing_window] is None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+    )
+    assert all(
+        row["season"] is not None and row["last_15"] is not None
+        for row in payload["league"]["defense_sheet"]["shot_zones"]
+    )
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
     assert payload["injuries"]["status"] == "fresh"

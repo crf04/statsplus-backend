@@ -705,6 +705,29 @@ def test_thin_flag_marks_a_low_player_game_sample():
     }
 
 
+def test_rebound_score_does_not_use_the_player_season_game_floor():
+    traditional_metrics = (
+        ("traditional", "OPP_REB", "OPP_REB", 10.0, 11.0),
+        ("traditional", "OPP_TOV", "OPP_TOV", 10.0, 10.0),
+        ("traditional", "OPP_STL", "OPP_STL", 10.0, 10.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 10.0, 10.0),
+    )
+    player = _service(
+        markets=("REB",),
+        facts=(),
+        season_metrics=traditional_metrics,
+        per_game={"REB": 8.0},
+        game_count=1,
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    expected = {
+        "components": {"traditional": {"value": 0.1, "thin": False}},
+        "blend": {"value": 0.1, "thin": False},
+    }
+    assert player["scores"]["REB"]["season"] == expected
+    assert player["scores"]["REB"]["last_15"] == expected
+
+
 def test_combo_components_and_blend_share_the_season_rate_game_floor():
     assist_slices = (
         "Arc3Assists",
