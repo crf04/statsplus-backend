@@ -45,6 +45,9 @@ DEFENSE_BASES = (
     "traditional",
 )
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
+_REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
+    (key, key) for key in DEFENSIVE_COLUMNS
+)
 _WIRE_PRECISION = 6
 _SCORES_UNAVAILABLE = {
     "status": "unavailable",
@@ -520,11 +523,26 @@ class MatchupService:
                 invalid_shot_types = base == "shot_types" and any(
                     slice_set != _GOVERNED_SHOT_TYPES for slice_set in slice_sets
                 )
-                if missing_governed_slice or invalid_shot_types or not expected.issubset(
-                    league_identities
-                ) or any(
-                    not expected.issubset(team_identities[team_id])
-                    for team_id in team_ids
+                missing_traditional = base == "traditional" and (
+                    not _REQUIRED_TRADITIONAL_IDENTITIES.issubset(
+                        league_identities
+                    )
+                    or any(
+                        not _REQUIRED_TRADITIONAL_IDENTITIES.issubset(
+                            team_identities[team_id]
+                        )
+                        for team_id in team_ids
+                    )
+                )
+                if (
+                    missing_governed_slice
+                    or invalid_shot_types
+                    or missing_traditional
+                    or not expected.issubset(league_identities)
+                    or any(
+                        not expected.issubset(team_identities[team_id])
+                        for team_id in team_ids
+                    )
                 ):
                     result[base][window_name] = {
                         "status": "unavailable",

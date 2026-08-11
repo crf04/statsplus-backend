@@ -188,14 +188,26 @@ def _event():
     }
 
 
-def _window(*, last_15=False, shot_zone_metrics=None, shot_type_metrics=None):
+def _window(
+    *,
+    last_15=False,
+    shot_zone_metrics=None,
+    shot_type_metrics=None,
+    traditional_metrics=None,
+):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
         ("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),
-        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
-        ("traditional", "OPP_STL", "OPP_STL", 7.0),
-        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
     ]
+    metrics.extend(
+        traditional_metrics
+        if traditional_metrics is not None
+        else (
+            ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+            ("traditional", "OPP_STL", "OPP_STL", 7.0),
+            ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        )
+    )
     metrics.extend(
         shot_zone_metrics
         if shot_zone_metrics is not None
@@ -516,6 +528,55 @@ def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
         for row in payload["league"]["defense_sheet"]["shot_types"]
         for window_name in ("season", "last_15")
     )
+
+
+def test_missing_required_defensive_column_degrades_traditional_without_503():
+    incomplete_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+    )
+
+    payload = _service(
+        season_window=_window(traditional_metrics=incomplete_traditional),
+        last_15_window=_window(
+            last_15=True,
+            traditional_metrics=incomplete_traditional,
+        ),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["traditional"] == {
+        "season": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+        "last_15": {
+            "status": "unavailable",
+            "unavailable_reason": "legacy_surface_incomplete",
+        },
+    }
+    assert all(
+        row[window_name] is None
+        for row in payload["league"]["defense_sheet"]["traditional"]
+        for window_name in ("season", "last_15")
+    )
+    assert all(
+        row[window_name] is None
+        for team in payload["teams"]
+        for row in team["defense_sheet"]["traditional"]
+        for window_name in ("season", "last_15")
+    )
+    assert all(
+        column[window_name] is None
+        for column in payload["league"]["defensive_columns"].values()
+        for window_name in ("season", "last_15")
+    )
+    assert all(
+        column[window_name] is None
+        for team in payload["teams"]
+        for column in team["defensive_columns"].values()
+        for window_name in ("season", "last_15")
+    )
+    assert payload["league"]["defense_sheet"]["shot_zones"][0]["season"] is not None
 
 
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
