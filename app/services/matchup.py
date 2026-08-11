@@ -28,8 +28,8 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.matchup_injuries import (
-    INJURY_SOURCE_URL,
     MatchupInjuryResult,
+    unavailable_injury_result,
 )
 from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
@@ -272,18 +272,7 @@ class MatchupService:
                 season=season,
                 pool_players=pool_players,
             )
-        return MatchupInjuryResult(
-            {
-                "status": "unavailable",
-                "unavailable_reason": "disabled",
-                "retrieved_at": None,
-                "source": "rotowire",
-                "source_url": INJURY_SOURCE_URL,
-                "teams": [],
-            },
-            frozenset(),
-            {},
-        )
+        return unavailable_injury_result("disabled")
 
     def _event(
         self, season: str, game_id: str

@@ -9,9 +9,14 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.nba_teams import (
+    NBA_TEAM_TRICODES,
+    canonical_nba_team_abbreviation,
+)
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.nba_events import is_final_event
 from app.errors import ProviderUnavailableError
+from app.providers.rotowire import InjuryEntryEvidence
 from app.services.athlete_resolver import normalize_athlete_name
 from app.services.injury_snapshot_repository import InjurySnapshotScope
 from app.utils.telemetry import (
@@ -32,6 +37,23 @@ class MatchupInjuryResult:
     block: Mapping[str, Any]
     out_player_ids: frozenset[int]
     badge_refs: Mapping[int, str]
+
+
+def unavailable_injury_result(reason: str) -> MatchupInjuryResult:
+    """Build the one closed present-but-unavailable injury payload."""
+
+    return MatchupInjuryResult(
+        block={
+            "status": "unavailable",
+            "unavailable_reason": reason,
+            "retrieved_at": None,
+            "source": INJURY_SOURCE,
+            "source_url": INJURY_SOURCE_URL,
+            "teams": [],
+        },
+        out_player_ids=frozenset(),
+        badge_refs={},
+    )
 
 
 class MatchupInjuryService:
@@ -64,15 +86,15 @@ class MatchupInjuryService:
         pool_players: Sequence[Any],
     ) -> MatchupInjuryResult:
         if not self.enabled:
-            return self._unavailable("disabled")
+            return unavailable_injury_result("disabled")
         if not self.permission_granted:
-            return self._unavailable("permission_required")
+            return unavailable_injury_result("permission_required")
         if (
             self.provider is None
             or self.snapshot_repository is None
             or self.athlete_catalog is None
         ):
-            return self._unavailable("fetch_failed")
+            return unavailable_injury_result("fetch_failed")
 
         scope = InjurySnapshotScope(season, str(event["nba_game_id"]))
         now = assume_utc(self.clock())
@@ -84,13 +106,10 @@ class MatchupInjuryService:
         tip = parse_utc_iso(str(event["scheduled_at"]))
         stopped = tip <= now or is_final_event(event)
         if stopped:
-            if stored is None:
-                return self._unavailable("fetch_failed")
-            return self._result(
-                stored.normalized_entries,
+            return self._stored_result(
+                stored,
+                now=now,
                 event=event,
-                status="fresh",
-                retrieved_at=stored.retrieved_at,
                 pool_players=pool_players,
             )
 
@@ -101,20 +120,48 @@ class MatchupInjuryService:
                 status="fresh",
                 retrieved_at=stored.retrieved_at,
                 pool_players=pool_players,
+                unresolved_team_entries=stored.unresolved_team_entry_count,
             )
 
         try:
+            source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
+            if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS):
+                entries, unresolved_team_entries = self._reconcile(
+                    tuple(
+                        InjuryEntryEvidence.from_document(entry)
+                        for entry in source_snapshot.normalized_entries
+                    ),
+                    event=event,
+                    season=season,
+                )
+                self.snapshot_repository.replace_from_source(
+                    scope,
+                    source_snapshot=source_snapshot,
+                    normalized_entries=entries,
+                    unresolved_team_entry_count=unresolved_team_entries,
+                )
+                return self._result(
+                    entries,
+                    event=event,
+                    status="fresh",
+                    retrieved_at=source_snapshot.retrieved_at,
+                    pool_players=pool_players,
+                    unresolved_team_entries=unresolved_team_entries,
+                )
             snapshot = self.provider.get_snapshot()
-            entries = self._reconcile(
+            entries, unresolved_team_entries = self._reconcile(
                 snapshot.entries,
                 event=event,
                 season=season,
             )
-            self.snapshot_repository.replace(
+            self.snapshot_repository.publish(
                 scope,
+                source=INJURY_SOURCE,
                 raw_payload=snapshot.raw_payload,
+                source_entries=tuple(entry.to_document() for entry in snapshot.entries),
                 normalized_entries=entries,
                 retrieved_at=snapshot.retrieved_at,
+                unresolved_team_entry_count=unresolved_team_entries,
             )
         except (ProviderUnavailableError, SQLAlchemyError, TypeError, ValueError):
             if self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
@@ -124,14 +171,67 @@ class MatchupInjuryService:
                     status="stale",
                     retrieved_at=stored.retrieved_at,
                     pool_players=pool_players,
+                    unresolved_team_entries=stored.unresolved_team_entry_count,
                 )
-            return self._unavailable("fetch_failed")
+            return unavailable_injury_result("fetch_failed")
         return self._result(
             entries,
             event=event,
             status="fresh",
             retrieved_at=assume_utc(snapshot.retrieved_at),
             pool_players=pool_players,
+            unresolved_team_entries=unresolved_team_entries,
+        )
+
+    def get_stored_injuries(
+        self,
+        *,
+        event: Mapping[str, Any],
+        season: str,
+        pool_players: Sequence[Any],
+    ) -> MatchupInjuryResult:
+        """Read a usable override without ever starting provider collection."""
+
+        if not self.enabled:
+            return unavailable_injury_result("disabled")
+        if not self.permission_granted:
+            return unavailable_injury_result("permission_required")
+        if self.snapshot_repository is None:
+            return unavailable_injury_result("fetch_failed")
+        try:
+            stored = self.snapshot_repository.get(
+                InjurySnapshotScope(season, str(event["nba_game_id"]))
+            )
+        except (SQLAlchemyError, TypeError, ValueError):
+            stored = None
+        return self._stored_result(
+            stored,
+            now=assume_utc(self.clock()),
+            event=event,
+            pool_players=pool_players,
+        )
+
+    def _stored_result(
+        self,
+        stored: Any | None,
+        *,
+        now: datetime,
+        event: Mapping[str, Any],
+        pool_players: Sequence[Any],
+    ) -> MatchupInjuryResult:
+        if self._within_age(stored, now, INJURY_REFRESH_SECONDS):
+            status = "fresh"
+        elif self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
+            status = "stale"
+        else:
+            return unavailable_injury_result("fetch_failed")
+        return self._result(
+            stored.normalized_entries,
+            event=event,
+            status=status,
+            retrieved_at=stored.retrieved_at,
+            pool_players=pool_players,
+            unresolved_team_entries=stored.unresolved_team_entry_count,
         )
 
     @staticmethod
@@ -148,7 +248,7 @@ class MatchupInjuryService:
         *,
         event: Mapping[str, Any],
         season: str,
-    ) -> tuple[dict[str, Any], ...]:
+    ) -> tuple[tuple[dict[str, Any], ...], int]:
         team_by_tricode = self._event_teams(event)
         catalog = self.athlete_catalog.get_catalog(season, active_only=True)
         catalog_index: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
@@ -160,8 +260,12 @@ class MatchupInjuryService:
             catalog_index.setdefault(key, []).append(row)
 
         rows: list[dict[str, Any]] = []
+        unresolved_team_entries = 0
         for entry in evidence:
             tricode = self._team_abbreviation(entry.source_team_tricode)
+            if tricode not in NBA_TEAM_TRICODES:
+                unresolved_team_entries += 1
+                continue
             team = team_by_tricode.get(tricode)
             if team is None:
                 continue
@@ -185,7 +289,7 @@ class MatchupInjuryService:
                     "source_url": entry.source_url,
                 }
             )
-        return tuple(rows)
+        return tuple(rows), unresolved_team_entries
 
     def _result(
         self,
@@ -195,6 +299,7 @@ class MatchupInjuryService:
         status: str,
         retrieved_at: datetime,
         pool_players: Sequence[Any],
+        unresolved_team_entries: int = 0,
     ) -> MatchupInjuryResult:
         teams = self._event_teams(event)
         grouped = {team["team_id"]: [] for team in teams.values()}
@@ -214,7 +319,9 @@ class MatchupInjuryService:
                 out_player_ids.add(canonical_id)
         pool_ids = {int(player.canonical_player_id) for player in pool_players}
         conflicts = len(out_player_ids.intersection(pool_ids))
-        self.telemetry_recorder.record(InjuryTelemetryEvent(unmatched, conflicts))
+        self.telemetry_recorder.record(
+            InjuryTelemetryEvent(unmatched, unresolved_team_entries, conflicts)
+        )
         ordered_teams = []
         for side in ("away", "home"):
             team = next(value for value in teams.values() if value["side"] == side)
@@ -261,24 +368,7 @@ class MatchupInjuryService:
 
     @staticmethod
     def _team_abbreviation(value: Any) -> str:
-        text = str(value or "").strip().upper()
-        return {"PHO": "PHX", "NO": "NOP"}.get(text, text)
-
-    @staticmethod
-    def _unavailable(reason: str) -> MatchupInjuryResult:
-        return MatchupInjuryResult(
-            block={
-                "status": "unavailable",
-                "unavailable_reason": reason,
-                "retrieved_at": None,
-                "source": INJURY_SOURCE,
-                "source_url": INJURY_SOURCE_URL,
-                "teams": [],
-            },
-            out_player_ids=frozenset(),
-            badge_refs={},
-        )
-
+        return canonical_nba_team_abbreviation(value)
 
 __all__ = [
     "INJURY_SOURCE",
@@ -287,4 +377,5 @@ __all__ = [
     "INJURY_STALE_SERVE_SECONDS",
     "MatchupInjuryResult",
     "MatchupInjuryService",
+    "unavailable_injury_result",
 ]

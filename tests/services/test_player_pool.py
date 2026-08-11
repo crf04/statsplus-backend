@@ -32,6 +32,7 @@ from app.services.player_pool import (
     PoolPlayer,
     StoredPlayerPoolReader,
 )
+from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotRepository,
@@ -1366,6 +1367,13 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
                 "home_team": {"id": 2, "name": "Home", "tricode": "HME"},
             }]
 
+    class StoredInjuries:
+        def get_stored_injuries(self, *, event, season, pool_players):
+            assert event["nba_game_id"] == "0022500001"
+            assert season == "2025-26"
+            assert [player.canonical_player_id for player in pool_players] == [101]
+            return MatchupInjuryResult({}, frozenset({101}), {})
+
     dependencies.slate_service = SlateService(
         Catalog(),
         settings=RuntimeSettings(
@@ -1374,9 +1382,10 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
         ),
         clock=lambda: NOW,
         player_pool=PlayerPoolService(RecordedBoardService(board), CATALOG),
+        injuries=StoredInjuries(),
     )
 
     response = client.get("/api/games/slate?date=2026-01-02")
 
     assert response.status_code == 200
-    assert response.get_json()["games"][0]["away_team"]["targetable_player_count"] == 1
+    assert response.get_json()["games"][0]["away_team"]["targetable_player_count"] == 0

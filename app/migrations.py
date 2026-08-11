@@ -254,6 +254,30 @@ def _create_injury_snapshot_table(connection: Connection) -> None:
     InjurySnapshot.__table__.create(connection, checkfirst=True)
 
 
+def _share_injury_source_snapshots(connection: Connection) -> None:
+    """Add append-only league evidence and references from per-game snapshots."""
+    from app.models.injury_snapshot import InjurySourceSnapshot
+
+    InjurySourceSnapshot.__table__.create(connection, checkfirst=True)
+    existing = {
+        column["name"]
+        for column in inspect(connection).get_columns("injury_snapshots")
+    }
+    preparer = connection.dialect.identifier_preparer
+    table = preparer.quote("injury_snapshots")
+    if "source_snapshot_id" not in existing:
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN source_snapshot_id INTEGER")
+        )
+    if "unresolved_team_entry_count" not in existing:
+        connection.execute(
+            text(
+                f"ALTER TABLE {table} ADD COLUMN unresolved_team_entry_count "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -273,6 +297,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(12, "012_create_team_matchup_facts", _create_team_matchup_fact_tables),
     Migration(13, "013_create_player_diet_facts", _create_player_diet_fact_tables),
     Migration(14, "014_create_injury_snapshots", _create_injury_snapshot_table),
+    Migration(15, "015_share_injury_source_snapshots", _share_injury_source_snapshots),
 )
 
 

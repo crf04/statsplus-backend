@@ -265,6 +265,10 @@ full-game, and explicitly mapped to PTS, REB, AST, 3PM, TOV, STL, BLK, PRA, PA,
 PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
 period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
+When a prior Matchup read has stored a still-fresh or permitted-stale injury
+snapshot, a matched Out player is also removed from the corresponding Slate
+count. This is a stored-only read: Slate never calls the injury provider, and
+an expired or unavailable injury snapshot cannot change counts.
 
 `freshness.pool.providers` uses the closed vocabulary `fresh | stale-served |
 missing` and retains each usable provider snapshot's actual retrieval time. A
@@ -326,8 +330,8 @@ The request makes no NBA Stats, PBP Stats, or DFS Board call. It composes the
 Event Catalog, newest reusable stored Player Pool containing the game, durable
 player-log summaries, Season Player Diet facts, and the newest stored team
 Season and exact team Last-15 windows no later than the Slate Date. Before tip,
-the separately gated injury service may make one RotoWire request when its
-stored game snapshot is older than five minutes. At or after tip it makes no
+the separately gated injury service reuses a league observation through five
+minutes and otherwise may make one RotoWire request. At or after tip it makes no
 injury-provider call and retains the final stored observation.
 A missing/degraded pool or stats surface remains a truthful `200` with empty or
 nullable data and explicit freshness/availability; no request-time provider
@@ -470,8 +474,17 @@ the preceding snapshot is served through an inclusive 30 minutes with
 `status: "stale"`; past that it becomes
 `unavailable/fetch_failed` and cannot change Player Pool membership. At tip or
 when the game is final, collection stops and the last snapshot is retained as
-the frozen historical report. If none was collected, the historical block is
-`unavailable/fetch_failed` and no post-tip request is attempted.
+historical evidence, but wall-clock freshness still applies: it is `fresh`
+through five minutes, `stale` through 30 minutes, and then
+`unavailable/fetch_failed`. An expired historical snapshot remains stored but
+cannot apply an Out override or badge. If none was collected, the historical
+block is `unavailable/fetch_failed` and no post-tip request is attempted.
+
+The RotoWire table is league-wide. One append-only raw source observation is
+shared by every game read inside its five-minute reuse window; each game stores
+only its reconciled entries plus a reference to that source observation. This
+prevents another full-table fetch and raw-payload copy for each matchup while
+preserving the exact evidence referenced by a game's retained snapshot.
 
 A usable report has exactly the away and home teams, in that order:
 
@@ -522,6 +535,16 @@ team's targetable count; other
 canonical statuses retain the player and set `injury_badge_ref` to the entry
 ID. Neither path changes scores, Diet Shares, scoring history, or projected
 roles.
+
+Slate targetable counts use the same stored-snapshot reader and freshness
+rules. Slate never starts injury collection: it subtracts matched Out players
+only when a prior matchup read left a still-usable snapshot, so Slate and
+Matchup agree without turning one Slate request into per-game provider calls.
+RotoWire team dialects `GS`, `NY`, `SA`, `PHO`, and `NO` normalize to the NBA
+tricodes `GSW`, `NYK`, `SAS`, `PHX`, and `NOP`. A source row whose team cannot
+be resolved cannot truthfully be assigned to either matchup team; it remains
+in durable raw evidence, is excluded from overrides, and increments bounded
+unresolved-team telemetry instead of disappearing silently.
 
 `freshness` retains the existing `schedule`, `pool`, `stats`, and `injuries`
 surfaces and additionally reports `player_game_logs`, per-Base
@@ -909,8 +932,8 @@ shrink-recovery row counts;
 player, game, team, and provider identities are never telemetry dimensions.
 
 The injury event stream and its `injury_events_total` /
-`injury_buffered_events` metrics contain only `unmatched_entry_count` and
-`board_conflict_count`. The RotoWire provider invocation itself remains in the
+`injury_buffered_events` metrics contain only `unmatched_entry_count`,
+`unresolved_team_entry_count`, and `board_conflict_count`. The RotoWire provider invocation itself remains in the
 ordinary provider event stream as provider `rotowire`, operation
 `get_injuries`; raw report rows, names, IDs, URLs, statuses, and reasons never
 enter telemetry.

@@ -309,12 +309,17 @@ class InjuryTelemetryEvent:
     """Bounded reconciliation and board-conflict counts for one report read."""
 
     unmatched_entry_count: int
+    unresolved_team_entry_count: int
     board_conflict_count: int
 
     def __post_init__(self) -> None:
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in (self.unmatched_entry_count, self.board_conflict_count)
+            for value in (
+                self.unmatched_entry_count,
+                self.unresolved_team_entry_count,
+                self.board_conflict_count,
+            )
         ):
             raise ValueError("injury telemetry counts must be non-negative integers")
 
@@ -593,8 +598,10 @@ class BoundedInjuryTelemetryRecorder(InjuryTelemetryRecorder):
     def record(self, event: InjuryTelemetryEvent) -> None:
         payload = asdict(event)
         logger.info(
-            "injury_event unmatched_entry_count=%d board_conflict_count=%d",
+            "injury_event unmatched_entry_count=%d "
+            "unresolved_team_entry_count=%d board_conflict_count=%d",
             event.unmatched_entry_count,
+            event.unresolved_team_entry_count,
             event.board_conflict_count,
         )
         with _buffer_lock:

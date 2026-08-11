@@ -187,6 +187,8 @@ class ProviderSettings(BaseModel):
     # This is a deployment assertion, not a discovered capability. Collection
     # remains absent unless the operator also enables the injury surface.
     rotowire_permission_granted: bool = False
+    rotowire_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30.0)
+    rotowire_read_timeout_seconds: float = Field(default=8.0, gt=0, le=60.0)
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -665,6 +667,12 @@ def _build_settings(
         ),
         rotowire_permission_granted=reader.boolean(
             "ROTOWIRE_PERMISSION_GRANTED", False
+        ),
+        rotowire_connect_timeout_seconds=reader.decimal(
+            "ROTOWIRE_CONNECT_TIMEOUT_SECONDS", 3.0
+        ),
+        rotowire_read_timeout_seconds=reader.decimal(
+            "ROTOWIRE_READ_TIMEOUT_SECONDS", 8.0
         ),
     )
 

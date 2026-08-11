@@ -15,6 +15,7 @@ from urllib.parse import urljoin
 
 import requests
 
+from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import ProviderUnavailableError
 from app.utils.telemetry import (
     PROVIDER_ROTOWIRE,
@@ -44,6 +45,38 @@ class InjuryEntryEvidence:
     reason: str
     source_url: str
 
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "entry_id": self.entry_id,
+            "source_player_id": self.source_player_id,
+            "source_player_name": self.source_player_name,
+            "source_team_tricode": self.source_team_tricode,
+            "canonical_status": self.canonical_status,
+            "raw_status": self.raw_status,
+            "reason": self.reason,
+            "source_url": self.source_url,
+        }
+
+    @classmethod
+    def from_document(cls, value: Mapping[str, Any]) -> "InjuryEntryEvidence":
+        canonical_status = (
+            None
+            if value.get("canonical_status") is None
+            else str(value["canonical_status"])
+        )
+        if canonical_status not in {None, *CANONICAL_INJURY_STATUSES.values()}:
+            raise ValueError("stored RotoWire injury status is not canonical")
+        return cls(
+            entry_id=str(value["entry_id"]),
+            source_player_id=str(value["source_player_id"]),
+            source_player_name=str(value["source_player_name"]),
+            source_team_tricode=str(value["source_team_tricode"]),
+            canonical_status=canonical_status,
+            raw_status=str(value["raw_status"]),
+            reason=str(value.get("reason") or ""),
+            source_url=str(value["source_url"]),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class InjuryProviderSnapshot:
@@ -61,17 +94,15 @@ class RotoWireInjuryProvider:
         "https://www.rotowire.com/basketball/tables/injury-report.php"
     )
     SOURCE_URL = "https://www.rotowire.com/basketball/injury-report.php"
-    DEFAULT_TIMEOUT = (3.0, 8.0)
-
     def __init__(
         self,
         *,
         session: requests.Session | Any | None = None,
-        timeout: tuple[float, float] = DEFAULT_TIMEOUT,
+        settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        self.settings = settings or get_runtime_settings()
         self.session = session or requests.Session()
-        self.timeout = timeout
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.session.headers.update(
             {
@@ -88,7 +119,10 @@ class RotoWireInjuryProvider:
                 response = self.session.get(
                     self.ENDPOINT_URL,
                     params={"team": "ALL", "pos": "ALL"},
-                    timeout=self.timeout,
+                    timeout=(
+                        self.settings.providers.rotowire_connect_timeout_seconds,
+                        self.settings.providers.rotowire_read_timeout_seconds,
+                    ),
                 )
                 tracker.status_code = getattr(response, "status_code", None)
                 response.raise_for_status()

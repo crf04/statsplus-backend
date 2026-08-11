@@ -8,6 +8,7 @@ from pathlib import Path
 
 import requests
 
+from app.config.settings import ProviderSettings, RuntimeSettings
 from app.providers.rotowire import RotoWireInjuryProvider
 from app.utils import telemetry
 
@@ -48,6 +49,13 @@ def test_recorded_snapshot_preserves_raw_evidence_and_strict_statuses():
 
     snapshot = RotoWireInjuryProvider(
         session=session,
+        settings=RuntimeSettings(
+            environment="testing",
+            providers=ProviderSettings(
+                rotowire_connect_timeout_seconds=1.25,
+                rotowire_read_timeout_seconds=4.5,
+            ),
+        ),
         clock=lambda: NOW,
     ).get_snapshot()
 
@@ -68,7 +76,7 @@ def test_recorded_snapshot_preserves_raw_evidence_and_strict_statuses():
         (
             RotoWireInjuryProvider.ENDPOINT_URL,
             {"team": "ALL", "pos": "ALL"},
-            (3.0, 8.0),
+            (1.25, 4.5),
         )
     ]
 

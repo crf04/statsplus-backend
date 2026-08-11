@@ -326,22 +326,32 @@ snapshot.
 `MatchupInjuryService` owns injury collection and Player Pool overrides. The
 route and DFS collector do not call RotoWire directly. Before tip, a stored
 game snapshot through five minutes old is reused; the first later matchup read
-refreshes lazily. A failed refresh may serve the prior snapshot through an
+reuses a league observation from the same window or refreshes lazily. A failed refresh may serve the prior snapshot through an
 inclusive 30-minute maximum with `status: stale`. At tip or when the Event
-Catalog marks the game final, refreshing stops and the last snapshot becomes a
-frozen historical observation. Missing historical evidence remains honestly
-unavailable and never triggers a post-tip fetch.
+Catalog marks the game final, refreshing stops and the last snapshot is retained.
+Its status continues to age: after 30 minutes it is unavailable and cannot
+apply badges or overrides, while no post-tip fetch occurs.
 
-`InjurySnapshotRepository` persists the full raw provider list and the
-normalized, matchup-filtered entries atomically by season and game ID.
-Normalization retains RotoWire identity, name, status, reason, and URL.
+`InjurySnapshotRepository` appends each league-wide raw provider list once in
+`injury_source_snapshots`; per-game rows store matchup-filtered entries and a
+source-snapshot reference. All game reads inside five minutes reuse that
+durable source, avoiding N feed requests and N raw copies while each game still
+retains the exact evidence it observed at stop time. Normalization retains
+RotoWire identity, name, status, reason, and URL.
 Reconciliation uses exact normalized athlete name plus canonical team and
 season against the active Athlete Catalog; ambiguous or unmatched players stay
-visible with a null canonical player ID. Only a canonical `Out` entry from a
-usable fresh, permitted-stale, or frozen final snapshot removes a stored pool
+visible with a null canonical player ID. The centrally governed RotoWire team
+dialects are `GS→GSW`, `NY→NYK`, `SA→SAS`, `PHO→PHX`, and `NO→NOP`; an unknown
+team row stays in raw evidence, never receives a guessed matchup team, and is
+counted in scalar telemetry. Only a canonical `Out` entry from a usable fresh
+or permitted-stale snapshot removes a stored pool
 player. Other statuses only supply `injury_badge_ref`; no score, Diet Share, or
-role input is modified. Scalar-only injury telemetry counts unmatched entries
-and board/Out conflicts without retaining player or game identities.
+role input is modified. Scalar-only injury telemetry counts unmatched entries,
+unresolved teams, and board/Out conflicts without retaining player or game identities.
+
+`SlateService` uses the injury service's stored-only read to apply the same Out
+override to targetable counts. It never refreshes injuries; opening a Slate
+cannot fan out league-feed requests across its games.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a

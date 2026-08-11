@@ -507,14 +507,18 @@ def test_player_game_log_recorder_counts_and_bounds_scalar_join_events():
 
 def test_injury_recorder_counts_only_reconciliation_and_conflict_totals():
     recorder = telemetry.BoundedInjuryTelemetryRecorder()
-    recorder.record(telemetry.InjuryTelemetryEvent(2, 1))
+    recorder.record(telemetry.InjuryTelemetryEvent(2, 3, 1))
 
     metrics = telemetry.snapshot_metrics()
 
     assert metrics["injury_events_total"] == 1
     assert metrics["injury_buffered_events"] == 1
     assert telemetry.snapshot_recent_injury_events() == [
-        {"unmatched_entry_count": 2, "board_conflict_count": 1}
+        {
+            "unmatched_entry_count": 2,
+            "unresolved_team_entry_count": 3,
+            "board_conflict_count": 1,
+        }
     ]
 
 

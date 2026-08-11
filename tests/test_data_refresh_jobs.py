@@ -510,7 +510,7 @@ def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(
         def json(self):
             return {"multi_row_table_data": [{"Name": "bad"}]}
 
-    service.pbp = PBPTotalsAdapter(
+    service.pbp_provider = PBPTotalsAdapter(
         settings=service.settings,
         session=type(
             "MalformedSession",

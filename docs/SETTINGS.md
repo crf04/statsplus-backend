@@ -14,7 +14,7 @@ The model is intentionally grouped by responsibility:
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `FeatureSettings` | `dfs_board_enabled` and `injury_report_enabled` exposure gates | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED` (both default `false`) |
-| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and the explicit RotoWire permission assertion | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, and `ROTOWIRE_PERMISSION_GRANTED` (default `false`) |
+| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -50,9 +50,13 @@ The RotoWire injury adapter has two independent, false-by-default gates.
 `INJURY_REPORT_ENABLED=true` opts the deployment into the surface;
 `ROTOWIRE_PERMISSION_GRANTED=true` asserts that written permission or explicit
 legal approval covers automated collection and display. The adapter is not
-constructed unless both are true. Enabled without permission returns the
+constructed unless both are true and the deployment has a writable application
+database for durable evidence. Enabled without permission returns the
 matchup injury block as `unavailable/permission_required`; disabled returns
 `unavailable/disabled`. There is no fallback injury provider.
+The read-only demo database cannot satisfy the durable snapshot prerequisite,
+so even a locally forced pair of gates makes no request and reports the only
+applicable closed reason, `unavailable/fetch_failed`.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

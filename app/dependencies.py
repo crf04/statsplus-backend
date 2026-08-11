@@ -37,9 +37,6 @@ class ApplicationDependencies:
     provider_health_service: Any
     nl_service: Any
     user_service: Any
-    injury_provider: Any | None
-    injury_snapshot_repository: Any | None
-    matchup_injury_service: Any
     dfs_snapshot_cache: Any | None = None
     statistic_catalog: Any | None = None
     comparison_board_service: Any | None = None
@@ -97,7 +94,7 @@ def build_dependencies(
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
-    from app.utils.db import get_engine
+    from app.utils.db import get_engine, is_demo_database_url
 
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
@@ -114,13 +111,18 @@ def build_dependencies(
         raise TypeError("statistic catalog loader must return a StatisticCatalog")
 
     engine = get_engine(settings)
+    demo_database = is_demo_database_url(settings.database.url)
+    injury_snapshot_repository = (
+        None if demo_database else InjurySnapshotRepository(engine)
+    )
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
     injury_provider = (
-        RotoWireInjuryProvider()
+        RotoWireInjuryProvider(settings=settings)
         if settings.features.injury_report_enabled
         and settings.providers.rotowire_permission_granted
+        and injury_snapshot_repository is not None
         else None
     )
 
@@ -201,9 +203,7 @@ def build_dependencies(
     event_resolver = None
     player_diet_service = None
     team_matchup_query_service = None
-    from app.utils.db import is_demo_database_url
-
-    if not is_demo_database_url(settings.database.url):
+    if not demo_database:
         athlete_catalog_service = AthleteCatalogService(
             engine,
             settings=settings,
@@ -268,12 +268,8 @@ def build_dependencies(
         settings=settings,
     )
     player_pool_snapshot_repository = (
-        None if is_demo_database_url(settings.database.url)
+        None if demo_database
         else PlayerPoolSnapshotRepository(engine)
-    )
-    injury_snapshot_repository = (
-        None if is_demo_database_url(settings.database.url)
-        else InjurySnapshotRepository(engine)
     )
     matchup_injury_service = MatchupInjuryService(
         provider=injury_provider,
@@ -291,6 +287,7 @@ def build_dependencies(
         event_catalog_service,
         settings=settings,
         player_pool=player_pool_service,
+        injuries=matchup_injury_service,
     )
     from app.domain.freshness import time_window_timedelta
 
@@ -353,9 +350,6 @@ def build_dependencies(
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
-        injury_provider=injury_provider,
-        injury_snapshot_repository=injury_snapshot_repository,
-        matchup_injury_service=matchup_injury_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,

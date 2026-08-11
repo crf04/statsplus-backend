@@ -9,10 +9,10 @@ import json
 from typing import Any
 
 from sqlalchemy import and_, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc
-from app.models.injury_snapshot import InjurySnapshot
+from app.models.injury_snapshot import InjurySnapshot, InjurySourceSnapshot
 from app.providers.nba_stats import validate_canonical_season
 from app.utils.db import is_demo_database_url
 
@@ -35,10 +35,21 @@ class StoredInjurySnapshot:
     raw_payload: list[Mapping[str, Any]]
     normalized_entries: tuple[Mapping[str, Any], ...]
     retrieved_at: datetime
+    source_entries: tuple[Mapping[str, Any], ...] = ()
+    unresolved_team_entry_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StoredInjurySourceSnapshot:
+    source_snapshot_id: int
+    source: str
+    raw_payload: list[Mapping[str, Any]]
+    normalized_entries: tuple[Mapping[str, Any], ...]
+    retrieved_at: datetime
 
 
 class InjurySnapshotRepository:
-    """Store the evidence and reconciled document in one database row."""
+    """Store shared source evidence and per-game reconciled documents."""
 
     def __init__(self, engine: Engine) -> None:
         if is_demo_database_url(str(engine.url)):
@@ -58,69 +69,190 @@ class InjurySnapshotRepository:
         with self.engine.connect() as connection:
             row = connection.execute(
                 select(
+                    table.c.source_snapshot_id,
                     table.c.raw_payload,
                     table.c.normalized_entries,
                     table.c.retrieved_at,
+                    table.c.unresolved_team_entry_count,
                 ).where(self._identity(scope))
             ).mappings().one_or_none()
-        if row is None:
-            return None
-        try:
-            raw = json.loads(row["raw_payload"])
-            normalized = json.loads(row["normalized_entries"])
-        except (json.JSONDecodeError, TypeError) as error:
-            raise ValueError("stored injury snapshot JSON is invalid") from error
-        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
-            raise ValueError("stored raw injury snapshot must be a list of objects")
-        if not isinstance(normalized, list) or not all(
-            isinstance(item, dict) for item in normalized
-        ):
-            raise ValueError("stored normalized injuries must be a list of objects")
+            if row is None:
+                return None
+            source_snapshot_id = row["source_snapshot_id"]
+            source_entries: tuple[Mapping[str, Any], ...] = ()
+            raw = self._decode_objects(row["raw_payload"], "raw injury snapshot")
+            retrieved_at = assume_utc(row["retrieved_at"])
+            if source_snapshot_id is not None:
+                source_row = self._get_source_row(connection, int(source_snapshot_id))
+                if source_row is None:
+                    raise ValueError("stored injury source snapshot is missing")
+                raw = self._decode_objects(source_row["raw_payload"], "raw injury snapshot")
+                source_entries = tuple(
+                    self._decode_objects(
+                        source_row["normalized_entries"], "source injuries"
+                    )
+                )
+                retrieved_at = assume_utc(source_row["retrieved_at"])
+        normalized = self._decode_objects(
+            row["normalized_entries"], "normalized injuries"
+        )
         return StoredInjurySnapshot(
             raw_payload=raw,
+            source_entries=source_entries,
             normalized_entries=tuple(normalized),
-            retrieved_at=assume_utc(row["retrieved_at"]),
+            retrieved_at=retrieved_at,
+            unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
         )
 
-    def replace(
+    def publish(
         self,
         scope: InjurySnapshotScope,
         *,
+        source: str,
         raw_payload: Sequence[Mapping[str, Any]],
+        source_entries: Sequence[Mapping[str, Any]],
         normalized_entries: Sequence[Mapping[str, Any]],
         retrieved_at: datetime,
-    ) -> None:
-        table = InjurySnapshot.__table__
+        unresolved_team_entry_count: int,
+    ) -> StoredInjurySourceSnapshot:
         observed_at = assume_utc(retrieved_at)
-        values = {
-            "raw_payload": json.dumps(
-                list(raw_payload), sort_keys=True, separators=(",", ":"), allow_nan=False
-            ),
-            "normalized_entries": json.dumps(
-                list(normalized_entries),
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ),
-            "retrieved_at": observed_at,
-            "updated_at": observed_at,
-        }
+        raw_document = self._encode_objects(raw_payload)
+        source_document = self._encode_objects(source_entries)
         with self.engine.begin() as connection:
             result = connection.execute(
-                update(table).where(self._identity(scope)).values(**values)
-            )
-            if result.rowcount == 0:
-                connection.execute(
-                    insert(table).values(
-                        season=scope.season,
-                        game_id=scope.game_id,
-                        **values,
-                    )
+                insert(InjurySourceSnapshot.__table__).values(
+                    source=source,
+                    raw_payload=raw_document,
+                    normalized_entries=source_document,
+                    retrieved_at=observed_at,
                 )
+            )
+            source_snapshot_id = int(result.inserted_primary_key[0])
+            self._replace_game(
+                connection,
+                scope,
+                source_snapshot_id=source_snapshot_id,
+                normalized_entries=normalized_entries,
+                retrieved_at=observed_at,
+                unresolved_team_entry_count=unresolved_team_entry_count,
+            )
+        return StoredInjurySourceSnapshot(
+            source_snapshot_id,
+            source,
+            list(raw_payload),
+            tuple(source_entries),
+            observed_at,
+        )
+
+    def replace_from_source(
+        self,
+        scope: InjurySnapshotScope,
+        *,
+        source_snapshot: StoredInjurySourceSnapshot,
+        normalized_entries: Sequence[Mapping[str, Any]],
+        unresolved_team_entry_count: int,
+    ) -> None:
+        with self.engine.begin() as connection:
+            self._replace_game(
+                connection,
+                scope,
+                source_snapshot_id=source_snapshot.source_snapshot_id,
+                normalized_entries=normalized_entries,
+                retrieved_at=source_snapshot.retrieved_at,
+                unresolved_team_entry_count=unresolved_team_entry_count,
+            )
+
+    def get_latest_source(self, source: str) -> StoredInjurySourceSnapshot | None:
+        table = InjurySourceSnapshot.__table__
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table)
+                .where(table.c.source == source)
+                .order_by(table.c.retrieved_at.desc(), table.c.id.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        return self._source_from_row(row)
+
+    @staticmethod
+    def _get_source_row(connection: Connection, source_snapshot_id: int):
+        table = InjurySourceSnapshot.__table__
+        return connection.execute(
+            select(table).where(table.c.id == source_snapshot_id)
+        ).mappings().one_or_none()
+
+    @classmethod
+    def _source_from_row(cls, row: Mapping[str, Any]) -> StoredInjurySourceSnapshot:
+        return StoredInjurySourceSnapshot(
+            int(row["id"]),
+            str(row["source"]),
+            cls._decode_objects(row["raw_payload"], "raw injury snapshot"),
+            tuple(cls._decode_objects(row["normalized_entries"], "source injuries")),
+            assume_utc(row["retrieved_at"]),
+        )
+
+    @classmethod
+    def _replace_game(
+        cls,
+        connection: Connection,
+        scope: InjurySnapshotScope,
+        *,
+        source_snapshot_id: int,
+        normalized_entries: Sequence[Mapping[str, Any]],
+        retrieved_at: datetime,
+        unresolved_team_entry_count: int,
+    ) -> None:
+        table = InjurySnapshot.__table__
+        values = {
+            "source_snapshot_id": source_snapshot_id,
+            "raw_payload": "[]",
+            "normalized_entries": cls._encode_objects(normalized_entries),
+            "unresolved_team_entry_count": unresolved_team_entry_count,
+            "retrieved_at": retrieved_at,
+            "updated_at": retrieved_at,
+        }
+        result = connection.execute(
+            update(table)
+            .where(
+                and_(
+                    table.c.season == scope.season,
+                    table.c.game_id == scope.game_id,
+                )
+            )
+            .values(**values)
+        )
+        if result.rowcount == 0:
+            connection.execute(
+                insert(table).values(
+                    season=scope.season,
+                    game_id=scope.game_id,
+                    **values,
+                )
+            )
+
+    @staticmethod
+    def _encode_objects(values: Sequence[Mapping[str, Any]]) -> str:
+        return json.dumps(
+            list(values), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+
+    @staticmethod
+    def _decode_objects(value: Any, label: str) -> list[Mapping[str, Any]]:
+        try:
+            document = json.loads(value)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(f"stored {label} JSON is invalid") from error
+        if not isinstance(document, list) or not all(
+            isinstance(item, dict) for item in document
+        ):
+            raise ValueError(f"stored {label} must be a list of objects")
+        return document
 
 
 __all__ = [
     "InjurySnapshotRepository",
     "InjurySnapshotScope",
     "StoredInjurySnapshot",
+    "StoredInjurySourceSnapshot",
 ]

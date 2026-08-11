@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
@@ -25,10 +25,21 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
-from app.services.player_pool import PlayerPool, PlayerPoolReader
+from app.services.matchup_injuries import MatchupInjuryResult
+from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+
+class StoredInjuryOverrideReader(Protocol):
+    def get_stored_injuries(
+        self,
+        *,
+        event: Mapping[str, Any],
+        season: str,
+        pool_players: Sequence[PoolPlayer],
+    ) -> MatchupInjuryResult: ...
 
 
 class SlateService:
@@ -42,11 +53,13 @@ class SlateService:
         clock: Callable[[], datetime] | None = None,
         schedule_max_age: timedelta | None = None,
         player_pool: PlayerPoolReader | None = None,
+        injuries: StoredInjuryOverrideReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.player_pool = player_pool
+        self.injuries = injuries
         field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
         if schedule_max_age is None:
             self.schedule_max_age = time_window_timedelta(
@@ -84,6 +97,7 @@ class SlateService:
             local_end.astimezone(timezone.utc),
         )
         games = []
+        selected_events = []
         for event in events:
             game_id = str(event.get("nba_game_id", ""))
             classification = resolve_stored_event_classification(
@@ -91,6 +105,7 @@ class SlateService:
             )
             if is_all_star_kind(classification.kind):
                 continue
+            selected_events.append(event)
             games.append(
                 self._game(
                     event,
@@ -108,10 +123,33 @@ class SlateService:
                 game_ids={game["game_id"] for game in games},
             )
             pool_freshness = dict(pool.freshness)
+            removed_player_ids: set[int] = set()
+            if self.injuries is not None:
+                for event in selected_events:
+                    team_ids = {
+                        int(event[f"{side}_team"]["id"])
+                        for side in ("away", "home")
+                    }
+                    event_players = tuple(
+                        player for player in pool.players if player.team_id in team_ids
+                    )
+                    result = self.injuries.get_stored_injuries(
+                        event=event,
+                        season=season,
+                        pool_players=event_players,
+                    )
+                    removed_player_ids.update(result.out_player_ids)
+            targetable_counts = dict(pool.team_counts)
+            for player in pool.players:
+                if player.canonical_player_id in removed_player_ids:
+                    targetable_counts[player.team_id] = max(
+                        targetable_counts.get(player.team_id, 0) - 1,
+                        0,
+                    )
             for game in games:
                 for side in ("away_team", "home_team"):
                     team = game[side]
-                    team["targetable_player_count"] = pool.team_counts.get(
+                    team["targetable_player_count"] = targetable_counts.get(
                         team["team_id"], 0
                     )
 
