@@ -11,6 +11,7 @@ from .nba_stats import (
 from .pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from .prizepicks import PrizePicksAdapter
 from .underdog import UnderdogAdapter
+from .rotowire import RotoWireInjuryProvider
 
 __all__ = [
     "DabbleAdapter",
@@ -20,6 +21,7 @@ __all__ = [
     "PBPStatsProvider",
     "PrizePicksAdapter",
     "UnderdogAdapter",
+    "RotoWireInjuryProvider",
     "normalize_archetype_game_logs",
     "normalize_player_roster",
     "normalize_player_game_logs",

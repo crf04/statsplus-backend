@@ -247,6 +247,13 @@ def _create_player_diet_fact_tables(connection: Connection) -> None:
     PlayerDietSurfaceObservationRow.__table__.create(connection, checkfirst=True)
 
 
+def _create_injury_snapshot_table(connection: Connection) -> None:
+    """Create raw and normalized matchup injury snapshots."""
+    from app.models.injury_snapshot import InjurySnapshot
+
+    InjurySnapshot.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -265,6 +272,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(11, "011_create_player_game_logs", _create_player_game_log_tables),
     Migration(12, "012_create_team_matchup_facts", _create_team_matchup_fact_tables),
     Migration(13, "013_create_player_diet_facts", _create_player_diet_fact_tables),
+    Migration(14, "014_create_injury_snapshots", _create_injury_snapshot_table),
 )
 
 

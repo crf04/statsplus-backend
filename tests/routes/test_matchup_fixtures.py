@@ -16,8 +16,11 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.migrations import run_migrations
+from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.event_catalog_service import EventCatalogService
 from app.services.matchup import MatchupService
+from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.matchup_injuries import MatchupInjuryService
 from app.services.player_diet import (
     PlayerDietFact,
     PlayerDietObservation,
@@ -355,6 +358,53 @@ def _player_diets(engine):
     return service
 
 
+def _injuries(engine):
+    class RecordedProvider:
+        def get_snapshot(self):
+            return InjuryProviderSnapshot(
+                raw_payload=[
+                    {
+                        "ID": "6504",
+                        "player": "LeBron James",
+                        "team": "LAL",
+                        "status": "Questionable",
+                    }
+                ],
+                entries=(
+                    InjuryEntryEvidence(
+                        "rotowire:6504",
+                        "6504",
+                        "LeBron James",
+                        "LAL",
+                        "Questionable",
+                        "Questionable",
+                        "Left ankle soreness",
+                        "https://www.rotowire.com/basketball/player/lebron-james-2344",
+                    ),
+                ),
+                retrieved_at=NOW,
+            )
+
+    return MatchupInjuryService(
+        provider=RecordedProvider(),
+        snapshot_repository=InjurySnapshotRepository(engine),
+        athlete_catalog=SimpleNamespace(
+            get_catalog=lambda season, active_only=False: [
+                {
+                    "season": season,
+                    "player_id": 2544,
+                    "display_name": "LeBron James",
+                    "team_id": LAL,
+                    "team_abbreviation": "LAL",
+                }
+            ]
+        ),
+        enabled=True,
+        permission_granted=True,
+        clock=lambda: NOW,
+    )
+
+
 def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'matchup.sqlite3'}")
     run_migrations(engine)
@@ -375,6 +425,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         team_matchups=_team_matchups(engine),
         stats_freshness=stats_freshness,
         settings=settings,
+        injuries=_injuries(engine),
         clock=lambda: NOW,
     )
     dependencies = SimpleNamespace(
@@ -423,6 +474,12 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         }
     ]
     assert payload["players"][0]["scores"]["status"] == "unavailable"
+    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["injuries"]["status"] == "fresh"
+    assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
+    assert payload["injuries"]["teams"][0]["entries"][0][
+        "canonical_player_id"
+    ] == 2544
     assert {
         row["key"]: row["markets"]
         for row in payload["teams"][0]["defense_sheet"]["shot_zones"]

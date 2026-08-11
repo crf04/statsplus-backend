@@ -77,6 +77,7 @@ from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
+from .injury_snapshot import InjurySnapshot  # noqa: E402
 
 __all__ = [
     'Base',
@@ -106,4 +107,5 @@ __all__ = [
     'PlayerGameLogRefresh',
     'TeamMatchupFactRow',
     'TeamMatchupSurfaceObservationRow',
+    'InjurySnapshot',
 ]

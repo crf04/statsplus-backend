@@ -82,6 +82,7 @@ the most important variables:
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
 | `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
+| `INJURY_REPORT_ENABLED` / `ROTOWIRE_PERMISSION_GRANTED` | No | Both `false`; RotoWire collection exists only when both explicit gates are true |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |

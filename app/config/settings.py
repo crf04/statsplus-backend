@@ -153,6 +153,7 @@ class FeatureSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     dfs_board_enabled: bool = False
+    injury_report_enabled: bool = False
 
 
 class ProviderSettings(BaseModel):
@@ -183,6 +184,9 @@ class ProviderSettings(BaseModel):
     dfs_cache_stale_if_error_seconds: Decimal | dict[str, Decimal] = Field(
         default=Decimal(1800)
     )
+    # This is a deployment assertion, not a discovered capability. Collection
+    # remains absent unless the operator also enables the injury surface.
+    rotowire_permission_granted: bool = False
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -622,6 +626,7 @@ def _build_settings(
     features = _validated_model(
         FeatureSettings,
         dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
+        injury_report_enabled=reader.boolean("INJURY_REPORT_ENABLED", False),
     )
     providers = _validated_model(
         ProviderSettings,
@@ -657,6 +662,9 @@ def _build_settings(
             {"*": dfs_cache_stale, **stale_overrides}
             if stale_overrides
             else dfs_cache_stale
+        ),
+        rotowire_permission_granted=reader.boolean(
+            "ROTOWIRE_PERMISSION_GRANTED", False
         ),
     )
 

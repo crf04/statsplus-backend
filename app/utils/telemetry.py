@@ -41,6 +41,7 @@ PROVIDER_PBP_STATS = "pbp_stats"
 PROVIDER_DABBLE = "dabble"
 PROVIDER_PRIZEPICKS = "prizepicks"
 PROVIDER_UNDERDOG = "underdog"
+PROVIDER_ROTOWIRE = "rotowire"
 
 # Keep provider operation names in one place.  These names are part of the
 # telemetry contract: adapter methods, provider health checks, and the admin
@@ -91,12 +92,14 @@ DABBLE_UPSTREAM_OPERATIONS = frozenset(
 DABBLE_NORMALIZATION_OPERATIONS = frozenset({"snapshot_normalization"})
 PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
+ROTOWIRE_OPERATIONS = frozenset({"get_injuries"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
     PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
     PROVIDER_DABBLE: DABBLE_OPERATIONS,
     PROVIDER_PRIZEPICKS: PRIZEPICKS_OPERATIONS,
     PROVIDER_UNDERDOG: UNDERDOG_OPERATIONS,
+    PROVIDER_ROTOWIRE: ROTOWIRE_OPERATIONS,
 }
 
 OUTCOME_SUCCESS = "success"
@@ -123,6 +126,7 @@ _player_pool_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAP
 _player_game_log_event_buffer: deque[dict[str, Any]] = deque(
     maxlen=EVENT_BUFFER_CAPACITY
 )
+_injury_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _buffer_lock = threading.Lock()
 
 _provider_events_total = 0
@@ -130,6 +134,7 @@ _board_events_total = 0
 _board_request_events_total = 0
 _player_pool_events_total = 0
 _player_game_log_events_total = 0
+_injury_events_total = 0
 _provider_failures: dict[tuple[str, str], int] = {}
 _application_failures: dict[str, int] = {}
 _cache_counts: dict[str, dict[str, int]] = {}
@@ -297,6 +302,21 @@ class PlayerGameLogTelemetryEvent:
             raise ValueError(
                 "player game log telemetry counts must be non-negative integers"
             )
+
+
+@dataclass(frozen=True)
+class InjuryTelemetryEvent:
+    """Bounded reconciliation and board-conflict counts for one report read."""
+
+    unmatched_entry_count: int
+    board_conflict_count: int
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.unmatched_entry_count, self.board_conflict_count)
+        ):
+            raise ValueError("injury telemetry counts must be non-negative integers")
 
 
 #: Closed label vocabularies for one published board read.  Everything an
@@ -560,6 +580,36 @@ class BoundedPlayerGameLogTelemetryRecorder(PlayerGameLogTelemetryRecorder):
             _player_game_log_events_total += 1
 
 
+class InjuryTelemetryRecorder:
+    """Typed recorder seam for injury reconciliation aggregates."""
+
+    def record(self, event: InjuryTelemetryEvent) -> None:
+        raise NotImplementedError
+
+
+class BoundedInjuryTelemetryRecorder(InjuryTelemetryRecorder):
+    """Record injury counts without retaining player or game identities."""
+
+    def record(self, event: InjuryTelemetryEvent) -> None:
+        payload = asdict(event)
+        logger.info(
+            "injury_event unmatched_entry_count=%d board_conflict_count=%d",
+            event.unmatched_entry_count,
+            event.board_conflict_count,
+        )
+        with _buffer_lock:
+            global _injury_events_total
+            _injury_event_buffer.append(payload)
+            _injury_events_total += 1
+
+
+def snapshot_recent_injury_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Return recent scalar-only injury reconciliation aggregates."""
+
+    with _buffer_lock:
+        return list(_injury_event_buffer)[-limit:]
+
+
 def snapshot_recent_player_game_log_events(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
@@ -814,6 +864,8 @@ def snapshot_metrics() -> dict[str, Any]:
             "player_pool_buffered_events": len(_player_pool_event_buffer),
             "player_game_log_events_total": _player_game_log_events_total,
             "player_game_log_buffered_events": len(_player_game_log_event_buffer),
+            "injury_events_total": _injury_events_total,
+            "injury_buffered_events": len(_injury_event_buffer),
             "board_request_buffered_events": len(_board_request_event_buffer),
             "board_buffered_events": len(_board_event_buffer),
             "board_buffered_capacity": EVENT_BUFFER_CAPACITY,
@@ -838,7 +890,7 @@ def clear_recorded_provider_events() -> None:
     deterministic between isolated test cases.
     """
     global _provider_events_total, _board_events_total, _board_request_events_total
-    global _player_pool_events_total, _player_game_log_events_total
+    global _player_pool_events_total, _player_game_log_events_total, _injury_events_total
     global _provider_failures, _application_failures, _cache_counts
     with _buffer_lock:
         _event_buffer.clear()
@@ -846,11 +898,13 @@ def clear_recorded_provider_events() -> None:
         _board_request_event_buffer.clear()
         _player_pool_event_buffer.clear()
         _player_game_log_event_buffer.clear()
+        _injury_event_buffer.clear()
         _provider_events_total = 0
         _board_events_total = 0
         _board_request_events_total = 0
         _player_pool_events_total = 0
         _player_game_log_events_total = 0
+        _injury_events_total = 0
         _provider_failures = {}
         _application_failures = {}
         _cache_counts = {}
@@ -987,10 +1041,12 @@ __all__ = [
     "DABBLE_NORMALIZATION_OPERATIONS",
     "PROVIDER_PRIZEPICKS",
     "PROVIDER_UNDERDOG",
+    "PROVIDER_ROTOWIRE",
     "NBA_STATS_OPERATIONS",
     "PBP_STATS_OPERATIONS",
     "PRIZEPICKS_OPERATIONS",
     "UNDERDOG_OPERATIONS",
+    "ROTOWIRE_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "BOARD_AVAILABILITY_STATES",
@@ -1018,6 +1074,10 @@ __all__ = [
     "PlayerGameLogTelemetryRecorder",
     "BoundedPlayerGameLogTelemetryRecorder",
     "snapshot_recent_player_game_log_events",
+    "InjuryTelemetryEvent",
+    "InjuryTelemetryRecorder",
+    "BoundedInjuryTelemetryRecorder",
+    "snapshot_recent_injury_events",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",

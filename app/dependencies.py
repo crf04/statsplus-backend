@@ -37,6 +37,9 @@ class ApplicationDependencies:
     provider_health_service: Any
     nl_service: Any
     user_service: Any
+    injury_provider: Any | None
+    injury_snapshot_repository: Any | None
+    matchup_injury_service: Any
     dfs_snapshot_cache: Any | None = None
     statistic_catalog: Any | None = None
     comparison_board_service: Any | None = None
@@ -62,6 +65,7 @@ def build_dependencies(
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.prizepicks import PrizePicksAdapter
     from app.providers.underdog import UnderdogAdapter
+    from app.providers.rotowire import RotoWireInjuryProvider
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
@@ -82,6 +86,8 @@ def build_dependencies(
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.matchup import MatchupService
+    from app.services.matchup_injuries import MatchupInjuryService
+    from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
@@ -111,6 +117,12 @@ def build_dependencies(
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
+    injury_provider = (
+        RotoWireInjuryProvider()
+        if settings.features.injury_report_enabled
+        and settings.providers.rotowire_permission_granted
+        else None
+    )
 
     dfs_providers: dict[str, Any] = {}
     cached_dfs_providers: dict[str, Any] = {}
@@ -259,6 +271,17 @@ def build_dependencies(
         None if is_demo_database_url(settings.database.url)
         else PlayerPoolSnapshotRepository(engine)
     )
+    injury_snapshot_repository = (
+        None if is_demo_database_url(settings.database.url)
+        else InjurySnapshotRepository(engine)
+    )
+    matchup_injury_service = MatchupInjuryService(
+        provider=injury_provider,
+        snapshot_repository=injury_snapshot_repository,
+        athlete_catalog=athlete_catalog_service,
+        enabled=settings.features.injury_report_enabled,
+        permission_granted=settings.providers.rotowire_permission_granted,
+    )
     player_pool_service = PlayerPoolService(
         dfs_board_service,
         statistic_catalog,
@@ -302,6 +325,7 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         stats_freshness=stats_freshness_repository,
         settings=settings,
+        injuries=matchup_injury_service,
     )
 
     return ApplicationDependencies(
@@ -329,6 +353,9 @@ def build_dependencies(
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
         user_service=UserService(engine, settings=settings),
+        injury_provider=injury_provider,
+        injury_snapshot_repository=injury_snapshot_repository,
+        matchup_injury_service=matchup_injury_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,

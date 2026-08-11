@@ -52,6 +52,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -83,6 +84,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "team_matchup_surface_observations",
             "player_diet_facts",
             "player_diet_surface_observations",
+            "injury_snapshots",
         ]
     )
     assert {
@@ -220,6 +222,16 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "ck_player_diet_volume",
         "ck_player_diet_volume_unit",
     }
+    assert {
+        column["name"] for column in inspect(engine).get_columns("injury_snapshots")
+    } == {
+        "season",
+        "game_id",
+        "raw_payload",
+        "normalized_entries",
+        "retrieved_at",
+        "updated_at",
+    }
 
     with engine.connect() as connection:
         assert connection.execute(
@@ -238,6 +250,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (11, "011_create_player_game_logs"),
             (12, "012_create_team_matchup_facts"),
             (13, "013_create_player_diet_facts"),
+            (14, "014_create_injury_snapshots"),
         ]
 
 
@@ -265,6 +278,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -276,6 +290,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
     assert inspect(engine).has_table("player_diet_surface_observations")
+    assert inspect(engine).has_table("injury_snapshots")
 
 
 def test_demo_database_validation_is_read_only():
@@ -360,6 +375,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "team_matchup_surface_observations",
             "player_diet_facts",
             "player_diet_surface_observations",
+            "injury_snapshots",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -474,6 +490,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -508,12 +525,14 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "011_create_player_game_logs",
         "012_create_team_matchup_facts",
         "013_create_player_diet_facts",
+        "014_create_injury_snapshots",
     )
-    assert upgraded.current_version == 13
+    assert upgraded.current_version == 14
     assert repeated.applied == ()
-    assert repeated.current_version == 13
+    assert repeated.current_version == 14
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
+    assert inspect(engine).has_table("injury_snapshots")

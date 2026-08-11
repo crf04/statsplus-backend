@@ -205,6 +205,43 @@ def test_dependency_assembly_validates_catalog_before_provider_construction(monk
     constructor.assert_not_called()
 
 
+def test_rotowire_provider_is_constructed_only_after_both_runtime_gates(monkeypatch):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    constructor = Mock(return_value=Mock(name="rotowire_provider"))
+    monkeypatch.setattr("app.providers.rotowire.RotoWireInjuryProvider", constructor)
+
+    disabled = build_dependencies(RuntimeSettings(environment="testing"))
+    permission_missing = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            features={"injury_report_enabled": True},
+        )
+    )
+
+    assert disabled.injury_provider is None
+    assert permission_missing.injury_provider is None
+    constructor.assert_not_called()
+
+    permitted = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            features={"injury_report_enabled": True},
+            providers={"rotowire_permission_granted": True},
+        )
+    )
+
+    constructor.assert_called_once_with()
+    assert permitted.injury_provider is constructor.return_value
+    assert permitted.matchup_injury_service.provider is constructor.return_value
+    assert permitted.matchup_service.injuries is permitted.matchup_injury_service
+
+
 def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, tmp_path):
     from app.dependencies import build_dependencies
     from app.services.statistic_catalog import StatisticCatalogError

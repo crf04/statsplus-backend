@@ -8,6 +8,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup import MatchupService
+from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietResult,
     StoredPlayerDietFact,
@@ -163,6 +164,16 @@ class RecordedTeamWindows:
         return self.season_window if window_games is None else self.last_15_window
 
 
+class RecordedInjuries:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def get_injuries(self, *, event, season, pool_players):
+        self.calls.append((event["nba_game_id"], season, tuple(pool_players)))
+        return self.result
+
+
 def _event():
     return {
         "nba_game_id": GAME_ID,
@@ -285,6 +296,7 @@ def _service(
     season_window=None,
     last_15_window=None,
     stats_at=RETRIEVED_AT,
+    injuries=None,
 ):
     if pool is None:
         pool = PlayerPool(
@@ -319,12 +331,61 @@ def _service(
             last_15_window if last_15_window is not None else _window(last_15=True),
         ),
         stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(stats_at)),
+        injuries=injuries,
         settings=RuntimeSettings(
             environment="testing",
             nba=NBASeasonSettings(current_season=SEASON),
         ),
         clock=lambda: NOW,
     )
+
+
+def test_usable_out_injury_removes_pool_player_and_updates_matchup_counts():
+    injury_block = {
+        "status": "fresh",
+        "unavailable_reason": None,
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+        "source": "rotowire",
+        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "teams": [],
+    }
+    injuries = RecordedInjuries(
+        MatchupInjuryResult(injury_block, frozenset({2544}), {2544: "rotowire:6504"})
+    )
+
+    payload = _service(injuries=injuries).get_matchup(game_id=GAME_ID)
+
+    assert payload["players"] == []
+    assert payload["game"]["away_team"]["targetable_player_count"] == 0
+    assert payload["injuries"] == injury_block
+    assert payload["freshness"]["injuries"] == {
+        "status": "fresh",
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+    }
+    assert injuries.calls[0][0:2] == (GAME_ID, SEASON)
+
+
+def test_non_out_badge_does_not_change_scores_diets_or_pool_membership():
+    baseline = _service().get_matchup(game_id=GAME_ID)
+    injury_block = {
+        "status": "fresh",
+        "unavailable_reason": None,
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+        "source": "rotowire",
+        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "teams": [],
+    }
+    injuries = RecordedInjuries(
+        MatchupInjuryResult(injury_block, frozenset(), {2544: "rotowire:6504"})
+    )
+
+    payload = _service(injuries=injuries).get_matchup(game_id=GAME_ID)
+
+    assert payload["game"]["away_team"]["targetable_player_count"] == 1
+    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["players"][0]["scores"] == baseline["players"][0]["scores"]
+    assert payload["players"][0]["diet_shares"] == baseline["players"][0]["diet_shares"]
+    assert payload["players"][0]["season_scoring"] == baseline["players"][0]["season_scoring"]
 
 
 def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
