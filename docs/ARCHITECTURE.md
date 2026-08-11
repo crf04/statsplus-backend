@@ -736,10 +736,14 @@ league denominator. Player Diets remain raw and Season-only, while Matchup
 Scores cross that Season evidence with each independently stored team window.
 The score implementation remains inside `MatchupService`, beside the stored
 inputs it serializes; it has no provider boundary and performs no request-time
-fallback. Components unavailable from the stored Diet/sheet taxonomy are
-omitted instead of estimated. Injury reconciliation can remove a canonical Out
-player or attach a badge reference; it does not change Matchup Scores, Diet
-Shares, scoring history, or projected roles.
+fallback. Request-local indexes traverse each stored window's league/team
+metrics once, and a per-player/window memo shares primitive scores across a
+posted primitive row and every combo that consumes it. Components unavailable
+from the stored Diet/sheet taxonomy are omitted instead of estimated. The
+traditional surface includes `OPP_REB` for REB and rebound-containing combos,
+in addition to the three defensive score columns. Injury reconciliation can
+remove a canonical Out player or attach a badge reference; it does not change
+Matchup Scores, Diet Shares, scoring history, or projected roles.
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
@@ -911,6 +915,8 @@ bounds, so its fact-free Last-15 play-type observation is
 `unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
 Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
 each governed slice; `GP` is provider evidence rather than a display metric.
+The traditional NBA surface persists `OPP_REB`, `OPP_TOV`, `OPP_STL`, and
+`OPP_BLK` with the same authoritative minutes denominator for both windows.
 
 Before every team has 15 governed completions, the same transaction publishes
 the usable Season snapshot plus a fact-free Last-15 snapshot whose surfaces

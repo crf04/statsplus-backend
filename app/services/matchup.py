@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from math import isclose
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,7 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.models.catalogs import PLAY_TYPES
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PlayerDietResult,
@@ -55,7 +56,7 @@ DEFENSE_BASES = (
 )
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
 _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
-    (key, key) for key in DEFENSIVE_COLUMNS
+    (key, key) for key in ("OPP_REB", *DEFENSIVE_COLUMNS)
 )
 _WIRE_PRECISION = 6
 _TWO_POINT_SHOT_ZONES = frozenset(
@@ -96,6 +97,7 @@ _STAT_MARKETS = {
     "ShortMidRangeAssists": ("AST", "PA", "RA", "PRA"),
     "LongMidRangeAssists": ("AST", "PA", "RA", "PRA"),
     "OPP_TOV": ("TOV",),
+    "OPP_REB": ("REB", "PR", "RA", "PRA"),
     "OPP_STL": ("STL", "STKS"),
     "OPP_BLK": ("BLK", "STKS"),
 }
@@ -112,15 +114,51 @@ _DEFENSIVE_MARKET_COLUMNS = {
 }
 _PRIMITIVE_SCORE_INPUTS = {
     "PTS": (
-        ("play_types", {"PTS": 1.0}),
-        ("shot_zones", {"FGM": 1.0}),
-        ("shot_types", {"FG2M": 2.0, "FG3M": 3.0}),
+        ("play_types", {"PTS": 1.0}, None),
+        ("shot_zones", {"FGM": 1.0}, None),
+        ("shot_types", {"FG2M": 2.0, "FG3M": 3.0}, None),
     ),
     "FGA": (
-        ("shot_zones", {"FGA": 1.0}),
-        ("shot_types", {"FG2A": 1.0, "FG3A": 1.0}),
+        ("shot_zones", {"FGA": 1.0}, None),
+        ("shot_types", {"FG2A": 1.0, "FG3A": 1.0}, None),
     ),
-    "AST": (("assist_locations", None),),
+    "3PM": (
+        ("shot_zones", {"FGM": 1.0}, _THREE_POINT_SHOT_ZONES),
+        ("shot_types", {"FG3M": 1.0}, None),
+    ),
+    "FG2A": (
+        ("shot_zones", {"FGA": 1.0}, _TWO_POINT_SHOT_ZONES),
+        ("shot_types", {"FG2A": 1.0}, None),
+    ),
+    "FG3A": (
+        ("shot_zones", {"FGA": 1.0}, _THREE_POINT_SHOT_ZONES),
+        ("shot_types", {"FG3A": 1.0}, None),
+    ),
+    "AST": (("assist_locations", None, None),),
+}
+_ASSIST_LOCATION_SLICES = frozenset(
+    {
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    }
+)
+_DIET_SLICE_KEYS = {
+    "play_types": frozenset(PLAY_TYPES),
+    "shot_zones": _GOVERNED_SHOT_ZONES,
+    "shot_types": frozenset(_SHOT_TYPE_STORED_SLICES),
+    "assist_locations": _ASSIST_LOCATION_SLICES,
+}
+# Provider shares are rounded rather than derived from the persisted volumes.
+# Recorded/live 2025-26 observations span 0.998-1.002 for a full play-type
+# partition and 0.900-1.001 for the three governed shot-type rows.
+_DIET_SHARE_BOUNDS = {
+    "play_types": (0.995, 1.005),
+    "shot_zones": (1.0 - 1e-6, 1.0 + 1e-6),
+    "shot_types": (0.9, 1.01),
+    "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
 }
 
 
@@ -172,6 +210,31 @@ class MatchupInjuryReader(Protocol):
         season: str,
         pool_players: Sequence[PoolPlayer],
     ) -> MatchupInjuryResult: ...
+
+
+_MetricIdentity = tuple[str, str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowMetricIndex:
+    league: Mapping[_MetricIdentity, LeagueMatchupMetric]
+    teams: Mapping[int, Mapping[_MetricIdentity, TeamMatchupMetric]]
+
+    @classmethod
+    def build(cls, window: TeamMatchupWindow) -> _WindowMetricIndex:
+        return cls(
+            league={
+                (metric.base, metric.slice_key, metric.stat_key): metric
+                for metric in window.league_metrics
+            },
+            teams={
+                team_id: {
+                    (metric.base, metric.slice_key, metric.stat_key): metric
+                    for metric in metrics
+                }
+                for team_id, metrics in window.team_metrics.items()
+            },
+        )
 
 
 class MatchupService:
@@ -240,10 +303,23 @@ class MatchupService:
         season_window = self._team_window(season, window_games=None, as_of=team_as_of)
         last_15_window = self._team_window(season, window_games=15, as_of=team_as_of)
         windows = {"season": season_window, "last_15": last_15_window}
-        availability = self._surface_availability(windows, team_ids)
-        league = self._league(windows, availability)
+        metric_indexes = {
+            name: None if not window else _WindowMetricIndex.build(window)
+            for name, window in windows.items()
+        }
+        availability = self._surface_availability(
+            windows, metric_indexes, team_ids
+        )
+        league = self._league(windows, metric_indexes, availability)
         teams = [
-            self._team(event, team_id, windows, availability) for team_id in team_ids
+            self._team(
+                event,
+                team_id,
+                windows,
+                metric_indexes,
+                availability,
+            )
+            for team_id in team_ids
         ]
         returned_counts = {
             team_id: sum(player.team_id == team_id for player in players)
@@ -269,6 +345,7 @@ class MatchupService:
                 diets,
                 event,
                 windows,
+                metric_indexes,
                 availability,
                 injury_result.badge_refs,
             ),
@@ -361,9 +438,10 @@ class MatchupService:
     def _league(
         cls,
         windows: Mapping[str, TeamMatchupWindow | None],
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        identities = cls._metric_identities(windows, league=True)
+        identities = cls._metric_identities(metric_indexes)
         sheets = {base: [] for base in DEFENSE_BASES}
         for base, slice_key, stat_key in identities:
             sheets[base].append(
@@ -371,7 +449,7 @@ class MatchupService:
                     "key": cls._metric_key(base, slice_key, stat_key),
                     **{
                         window_name: cls._league_window_value(
-                            window,
+                            metric_indexes[window_name],
                             base,
                             slice_key,
                             stat_key,
@@ -390,7 +468,7 @@ class MatchupService:
             "defensive_columns": {
                 key: {
                     window_name: cls._league_column_value(
-                        window,
+                        metric_indexes[window_name],
                         key,
                         availability["traditional"][window_name],
                     )
@@ -406,9 +484,10 @@ class MatchupService:
         event: Mapping[str, Any],
         team_id: int,
         windows: Mapping[str, TeamMatchupWindow | None],
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        identities = cls._metric_identities(windows, league=True)
+        identities = cls._metric_identities(metric_indexes)
         sheets = {base: [] for base in DEFENSE_BASES}
         for base, slice_key, stat_key in identities:
             sheets[base].append(
@@ -418,7 +497,7 @@ class MatchupService:
                     "markets": list(cls._markets(base, slice_key, stat_key)),
                     **{
                         window_name: cls._team_window_value(
-                            window,
+                            metric_indexes[window_name],
                             team_id,
                             base,
                             slice_key,
@@ -438,7 +517,7 @@ class MatchupService:
             "defensive_columns": {
                 key: {
                     window_name: cls._team_column_value(
-                        window,
+                        metric_indexes[window_name],
                         team_id,
                         key,
                         availability["traditional"][window_name],
@@ -456,6 +535,7 @@ class MatchupService:
         diets: PlayerDietResult,
         event: Mapping[str, Any],
         windows: Mapping[str, TeamMatchupWindow | None],
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
     ) -> list[dict[str, Any]]:
@@ -507,6 +587,7 @@ class MatchupService:
                         diets.players.get(player.canonical_player_id, ()),
                         event,
                         windows,
+                        metric_indexes,
                         availability,
                     ),
                     "injury_badge_ref": injury_badges.get(
@@ -530,6 +611,7 @@ class MatchupService:
         diet_facts: Sequence[StoredPlayerDietFact],
         event: Mapping[str, Any],
         windows: Mapping[str, TeamMatchupWindow | None],
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
         opponent_id = next(
@@ -537,16 +619,18 @@ class MatchupService:
             for team_id in (int(event["away_team_id"]), int(event["home_team_id"]))
             if team_id != player.team_id
         )
+        memo: dict[tuple[str, str], dict[str, Any]] = {}
         return {
             market: {
                 window_name: self._score_window(
                     market,
                     window_name,
-                    window,
+                    metric_indexes[window_name],
                     opponent_id,
                     summary,
                     diet_facts,
                     availability,
+                    memo,
                 )
                 for window_name, window in windows.items()
             }
@@ -557,17 +641,51 @@ class MatchupService:
         self,
         market: str,
         window_name: str,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         opponent_id: int,
         summary: PlayerSeasonLogSummary | None,
         diet_facts: Sequence[StoredPlayerDietFact],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        memo: dict[tuple[str, str], dict[str, Any]],
+    ) -> dict[str, Any]:
+        key = (market, window_name)
+        if key not in memo:
+            memo[key] = self._compute_score_window(
+                market,
+                window_name,
+                metric_index,
+                opponent_id,
+                summary,
+                diet_facts,
+                availability,
+                memo,
+            )
+        return memo[key]
+
+    def _compute_score_window(
+        self,
+        market: str,
+        window_name: str,
+        metric_index: _WindowMetricIndex | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        diet_facts: Sequence[StoredPlayerDietFact],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        memo: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
         if market in {*_DEFENSIVE_MARKET_COLUMNS, "STKS"}:
             return self._defensive_score_window(
                 market,
                 window_name,
-                window,
+                metric_index,
+                opponent_id,
+                summary,
+                availability,
+            )
+        if market == "REB":
+            return self._aggregate_offensive_score_window(
+                window_name,
+                metric_index,
                 opponent_id,
                 summary,
                 availability,
@@ -576,20 +694,23 @@ class MatchupService:
             return self._combo_score_window(
                 market,
                 window_name,
-                window,
+                metric_index,
                 opponent_id,
                 summary,
                 diet_facts,
                 availability,
+                memo,
             )
         components: dict[str, dict[str, Any]] = {}
-        for base, stat_weights in _PRIMITIVE_SCORE_INPUTS.get(market, ()):
+        for base, stat_weights, slice_keys in _PRIMITIVE_SCORE_INPUTS.get(market, ()):
             component = self._diet_component(
                 base=base,
                 stat_weights=stat_weights,
+                slice_keys=slice_keys,
                 window_name=window_name,
-                window=window,
+                metric_index=metric_index,
                 opponent_id=opponent_id,
+                summary=summary,
                 diet_facts=diet_facts,
                 availability=availability,
             )
@@ -606,26 +727,56 @@ class MatchupService:
             }
         return {"components": components, "blend": blend}
 
-    def _defensive_score_window(
+    def _aggregate_offensive_score_window(
         self,
-        market: str,
         window_name: str,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         opponent_id: int,
         summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
         if (
-            window is None
+            metric_index is None
+            or availability["traditional"][window_name]["status"] != "available"
+        ):
+            return {"components": {}, "blend": None}
+        identity = ("traditional", "OPP_REB", "OPP_REB")
+        league = metric_index.league.get(identity)
+        team = metric_index.teams.get(opponent_id, {}).get(identity)
+        if league is None or team is None or league.average_allowed_per_48 <= 0:
+            return {"components": {}, "blend": None}
+        cell = {
+            "value": self._number(
+                team.allowed_per_48 / league.average_allowed_per_48 - 1
+            ),
+            "thin": (
+                summary is None
+                or summary.season_rate is None
+                or summary.season_rate.game_count
+                < self.settings.matchup_scores.min_games
+            ),
+        }
+        return {"components": {"traditional": cell}, "blend": dict(cell)}
+
+    def _defensive_score_window(
+        self,
+        market: str,
+        window_name: str,
+        metric_index: _WindowMetricIndex | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        if (
+            metric_index is None
             or availability["traditional"][window_name]["status"] != "available"
         ):
             return {"components": {}}
 
         def column_score(column: str) -> float | None:
-            league = self._league_metric(window, "traditional", column, column)
-            team = self._team_metric(
-                window, opponent_id, "traditional", column, column
-            )
+            identity = ("traditional", column, column)
+            league = metric_index.league.get(identity)
+            team = metric_index.teams.get(opponent_id, {}).get(identity)
             if league is None or team is None or league.average_allowed_per_48 <= 0:
                 return None
             return team.allowed_per_48 / league.average_allowed_per_48 - 1
@@ -670,11 +821,12 @@ class MatchupService:
         self,
         market: str,
         window_name: str,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         opponent_id: int,
         summary: PlayerSeasonLogSummary | None,
         diet_facts: Sequence[StoredPlayerDietFact],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        memo: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
         if summary is None or summary.season_rate is None:
             return {"components": {}, "blend": None}
@@ -686,16 +838,21 @@ class MatchupService:
             part: self._score_window(
                 part,
                 window_name,
-                window,
+                metric_index,
                 opponent_id,
                 summary,
                 diet_facts,
                 availability,
+                memo,
             )
             for part, weight in weights.items()
             if weight > 0
         }
+        degraded = any(score["blend"] is None for score in part_scores.values())
         components = {}
+        season_rate_thin = (
+            summary.season_rate.game_count < self.settings.matchup_scores.min_games
+        )
         for base in DEFENSE_BASES:
             contributors = [
                 (weights[part], score["components"][base])
@@ -710,8 +867,13 @@ class MatchupService:
                     sum(weight * cell["value"] for weight, cell in contributors)
                     / total_weight
                 ),
-                "thin": any(cell["thin"] for _weight, cell in contributors),
+                "thin": (
+                    degraded
+                    or any(cell["thin"] for _weight, cell in contributors)
+                ),
             }
+            if season_rate_thin:
+                components[base]["thin"] = True
         blend_contributors = [
             (weights[part], score["blend"])
             for part, score in part_scores.items()
@@ -728,6 +890,7 @@ class MatchupService:
             "thin": (
                 summary.season_rate.game_count
                 < self.settings.matchup_scores.min_games
+                or degraded
                 or any(cell["thin"] for _weight, cell in blend_contributors)
             ),
         }
@@ -738,24 +901,46 @@ class MatchupService:
         *,
         base: str,
         stat_weights: Mapping[str, float] | None,
+        slice_keys: frozenset[str] | None,
         window_name: str,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
         diet_facts: Sequence[StoredPlayerDietFact],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any] | None:
         if (
-            window is None
+            metric_index is None
             or availability[base][window_name]["status"] != "available"
         ):
             return None
         facts = tuple(fact for fact in diet_facts if fact.base == base)
-        if not facts or not isclose(
-            sum(fact.share for fact in facts), 1.0, rel_tol=0.0, abs_tol=1e-6
-        ):
+        if not self._complete_diet(base, facts):
+            return None
+        selected_facts = tuple(
+            fact for fact in facts if slice_keys is None or fact.slice_key in slice_keys
+        )
+        if not selected_facts:
+            return None
+        if slice_keys is None:
+            positive_facts = []
+            for fact in selected_facts:
+                share = fact.share
+                if share > 0:
+                    positive_facts.append((fact, share))
+            weighted_facts = tuple(positive_facts)
+        else:
+            selected_volume = sum(fact.volume for fact in selected_facts)
+            if selected_volume <= 0:
+                return None
+            weighted_facts = tuple(
+                (fact, fact.volume / selected_volume) for fact in selected_facts
+                if fact.volume > 0
+            )
+        if not weighted_facts:
             return None
         total = 0.0
-        for fact in facts:
+        for fact, share in weighted_facts:
             league_value = 0.0
             team_value = 0.0
             slice_key = (
@@ -765,29 +950,47 @@ class MatchupService:
             )
             resolved_weights = stat_weights or {fact.slice_key: 1.0}
             for stat_key, weight in resolved_weights.items():
-                league = self._league_metric(window, base, slice_key, stat_key)
-                team = self._team_metric(
-                    window, opponent_id, base, slice_key, stat_key
-                )
+                identity = (base, slice_key, stat_key)
+                league = metric_index.league.get(identity)
+                team = metric_index.teams.get(opponent_id, {}).get(identity)
                 if league is None or team is None:
                     return None
                 league_value += weight * league.average_allowed_per_48
                 team_value += weight * team.allowed_per_48
             if league_value <= 0:
                 return None
-            total += fact.share * (team_value / league_value)
-        volume_per_game = sum(fact.volume / fact.games_played for fact in facts)
+            total += share * (team_value / league_value)
+        volume_per_game = sum(
+            fact.volume / fact.games_played for fact in selected_facts
+        )
         return {
             "value": self._number(total - 1),
             "thin": (
                 any(
                     fact.games_played < self.settings.matchup_scores.min_games
-                    for fact in facts
+                    for fact in selected_facts
                 )
                 or volume_per_game
                 < self.settings.matchup_scores.minimum_volume_per_game(base)
+                or summary is None
+                or summary.season_rate is None
+                or summary.season_rate.game_count
+                < self.settings.matchup_scores.min_games
             ),
         }
+
+    @staticmethod
+    def _complete_diet(
+        base: str, facts: Sequence[StoredPlayerDietFact]
+    ) -> bool:
+        if not facts:
+            return False
+        keys = [fact.slice_key for fact in facts]
+        if len(keys) != len(set(keys)) or set(keys) != _DIET_SLICE_KEYS[base]:
+            return False
+        lower, upper = _DIET_SHARE_BOUNDS[base]
+        share_sum = sum(fact.share for fact in facts)
+        return lower - 1e-12 <= share_sum <= upper + 1e-12
 
     @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:
@@ -807,9 +1010,10 @@ class MatchupService:
     def _surface_availability(
         cls,
         windows: Mapping[str, TeamMatchupWindow | None],
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
         team_ids: Sequence[int],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        identities = cls._metric_identities(windows, league=True)
+        identities = cls._metric_identities(metric_indexes)
         expected_by_base = {
             base: {
                 (slice_key, stat_key)
@@ -823,40 +1027,45 @@ class MatchupService:
             result[base] = {}
             expected = expected_by_base[base]
             for window_name, window in windows.items():
+                metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
-                if state["status"] != "available" or window is None:
+                if state["status"] != "available" or metric_index is None:
                     result[base][window_name] = state
                     continue
-                if any(team_id not in window.team_metrics for team_id in team_ids):
+                if any(team_id not in metric_index.teams for team_id in team_ids):
                     result[base][window_name] = {
                         "status": "missing",
                         "unavailable_reason": "team_not_in_governed_roster",
                     }
                     continue
                 league_identities = {
-                    (metric.slice_key, metric.stat_key)
-                    for metric in window.league_metrics
-                    if metric.base == base
+                    (slice_key, stat_key)
+                    for metric_base, slice_key, stat_key in metric_index.league
+                    if metric_base == base
                 }
                 team_identities = {
                     team_id: {
-                        (metric.slice_key, metric.stat_key)
-                        for metric in window.team_metrics[team_id]
-                        if metric.base == base
+                        (slice_key, stat_key)
+                        for metric_base, slice_key, stat_key in metric_index.teams[
+                            team_id
+                        ]
+                        if metric_base == base
                     }
                     for team_id in team_ids
                 }
                 slice_sets = (
                     {
-                        metric.slice_key
-                        for metric in window.league_metrics
-                        if metric.base == base
+                        slice_key
+                        for metric_base, slice_key, _stat_key in metric_index.league
+                        if metric_base == base
                     },
                     *(
                         {
-                            metric.slice_key
-                            for metric in window.team_metrics[team_id]
-                            if metric.base == base
+                            slice_key
+                            for metric_base, slice_key, _stat_key in metric_index.teams[
+                                team_id
+                            ]
+                            if metric_base == base
                         }
                         for team_id in team_ids
                     ),
@@ -899,17 +1108,17 @@ class MatchupService:
 
     @staticmethod
     def _metric_identities(
-        windows: Mapping[str, TeamMatchupWindow | None], *, league: bool
+        metric_indexes: Mapping[str, _WindowMetricIndex | None],
     ) -> tuple[tuple[str, str, str], ...]:
         identities = {
-            (metric.base, metric.slice_key, metric.stat_key)
-            for window in windows.values()
-            if window
-            for metric in (window.league_metrics if league else ())
-            if metric.base != "shot_zones"
-            or metric.slice_key in _GOVERNED_SHOT_ZONES
-            if metric.base != "shot_types"
-            or metric.slice_key in _SHOT_TYPE_DISPLAY_SLICES
+            identity
+            for metric_index in metric_indexes.values()
+            if metric_index is not None
+            for identity in metric_index.league
+            if identity[0] != "shot_zones"
+            or identity[1] in _GOVERNED_SHOT_ZONES
+            if identity[0] != "shot_types"
+            or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
         }
         return tuple(
             sorted(
@@ -921,15 +1130,15 @@ class MatchupService:
     @classmethod
     def _league_window_value(
         cls,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         base: str,
         slice_key: str,
         stat_key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, float] | None:
-        if availability["status"] != "available" or not window:
+        if availability["status"] != "available" or metric_index is None:
             return None
-        metric = cls._league_metric(window, base, slice_key, stat_key)
+        metric = metric_index.league.get((base, slice_key, stat_key))
         if metric is None:
             raise ProviderUnavailableError(
                 "Stored matchup league facts are incomplete."
@@ -942,16 +1151,16 @@ class MatchupService:
     @classmethod
     def _team_window_value(
         cls,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         team_id: int,
         base: str,
         slice_key: str,
         stat_key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, Any] | None:
-        if availability["status"] != "available" or not window:
+        if availability["status"] != "available" or metric_index is None:
             return None
-        metric = cls._team_metric(window, team_id, base, slice_key, stat_key)
+        metric = metric_index.teams.get(team_id, {}).get((base, slice_key, stat_key))
         if metric is None:
             raise ProviderUnavailableError("Stored matchup team facts are incomplete.")
         return {
@@ -968,11 +1177,13 @@ class MatchupService:
     @classmethod
     def _league_column_value(
         cls,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, float] | None:
-        value = cls._league_window_value(window, "traditional", key, key, availability)
+        value = cls._league_window_value(
+            metric_index, "traditional", key, key, availability
+        )
         if value is None:
             return None
         return {
@@ -983,13 +1194,13 @@ class MatchupService:
     @classmethod
     def _team_column_value(
         cls,
-        window: TeamMatchupWindow | None,
+        metric_index: _WindowMetricIndex | None,
         team_id: int,
         key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, float | None] | None:
         value = cls._team_window_value(
-            window, team_id, "traditional", key, key, availability
+            metric_index, team_id, "traditional", key, key, availability
         )
         if value is None:
             return None
@@ -997,38 +1208,6 @@ class MatchupService:
             "per_48": value["allowed_per_48"],
             "percent_vs_league_average": value["percent_vs_league_average"],
         }
-
-    @staticmethod
-    def _league_metric(
-        window: TeamMatchupWindow, base: str, slice_key: str, stat_key: str
-    ) -> LeagueMatchupMetric | None:
-        return next(
-            (
-                metric
-                for metric in window.league_metrics
-                if (metric.base, metric.slice_key, metric.stat_key)
-                == (base, slice_key, stat_key)
-            ),
-            None,
-        )
-
-    @staticmethod
-    def _team_metric(
-        window: TeamMatchupWindow,
-        team_id: int,
-        base: str,
-        slice_key: str,
-        stat_key: str,
-    ) -> TeamMatchupMetric | None:
-        return next(
-            (
-                metric
-                for metric in window.team_metrics.get(team_id, ())
-                if (metric.base, metric.slice_key, metric.stat_key)
-                == (base, slice_key, stat_key)
-            ),
-            None,
-        )
 
     @staticmethod
     def _metric_key(base: str, slice_key: str, stat_key: str) -> str:

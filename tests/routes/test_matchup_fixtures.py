@@ -52,6 +52,23 @@ SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
 BOS = 1610612738
+COMMON_POSTED_MARKETS = (
+    "PTS",
+    "REB",
+    "AST",
+    "3PM",
+    "FGA",
+    "FG2A",
+    "FG3A",
+    "PRA",
+    "PA",
+    "PR",
+    "RA",
+    "TOV",
+    "STL",
+    "BLK",
+    "STKS",
+)
 
 
 class _NoProvider:
@@ -126,7 +143,12 @@ def _team_matchups(engine, *, asymmetric_shot_zones=False):
         ("shot_types", "less_than_10_ft", "FG2A"),
         ("shot_types", "less_than_10_ft", "FG3M"),
         ("shot_types", "less_than_10_ft", "FG3A"),
+        ("assist_locations", "Arc3Assists", "Arc3Assists"),
+        ("assist_locations", "Corner3Assists", "Corner3Assists"),
         ("assist_locations", "AtRimAssists", "AtRimAssists"),
+        ("assist_locations", "ShortMidRangeAssists", "ShortMidRangeAssists"),
+        ("assist_locations", "LongMidRangeAssists", "LongMidRangeAssists"),
+        ("traditional", "OPP_REB", "OPP_REB"),
         ("traditional", "OPP_TOV", "OPP_TOV"),
         ("traditional", "OPP_STL", "OPP_STL"),
         ("traditional", "OPP_BLK", "OPP_BLK"),
@@ -204,9 +226,9 @@ def _player_pool(engine):
                     "canonical_player_id": 2544,
                     "name": "LeBron James",
                     "team_id": LAL,
-                    "market_categories": ["PTS", "FGA"],
+                    "market_categories": list(COMMON_POSTED_MARKETS),
                     "provenance": {
-                        "prizepicks": ["PTS", "FGA"],
+                        "prizepicks": list(COMMON_POSTED_MARKETS),
                         "underdog": ["PTS"],
                     },
                 }
@@ -287,28 +309,70 @@ def _player_diets(engine):
                 2544,
                 "play_types",
                 "Transition",
-                0.19,
+                1.0,
                 95.0,
                 20,
                 "possessions",
                 "nba_synergy",
             ),
+            *(
+                PlayerDietFact(
+                    2544,
+                    "play_types",
+                    slice_key,
+                    0.0,
+                    0.0,
+                    20,
+                    "possessions",
+                    "nba_synergy",
+                )
+                for slice_key in (
+                    "Isolation",
+                    "PRBallHandler",
+                    "PRRollMan",
+                    "OffRebound",
+                    "Spotup",
+                    "Cut",
+                    "Handoff",
+                    "OffScreen",
+                    "Misc",
+                    "Postup",
+                )
+            ),
             PlayerDietFact(
                 2544,
                 "shot_zones",
                 "Restricted Area",
-                0.27,
-                108.0,
+                0.2,
+                20.0,
                 20,
                 "field_goal_attempts",
                 "nba_stats",
+            ),
+            *(
+                PlayerDietFact(
+                    2544,
+                    "shot_zones",
+                    slice_key,
+                    0.2,
+                    20.0,
+                    20,
+                    "field_goal_attempts",
+                    "nba_stats",
+                )
+                for slice_key in (
+                    "In The Paint (Non-RA)",
+                    "Mid-Range",
+                    "Corner 3",
+                    "Above the Break 3",
+                )
             ),
             PlayerDietFact(
                 2544,
                 "shot_types",
                 "Catch and Shoot",
-                0.36,
-                72.0,
+                0.4,
+                40.0,
                 20,
                 "field_goal_attempts",
                 "nba_stats",
@@ -317,8 +381,8 @@ def _player_diets(engine):
                 2544,
                 "shot_types",
                 "Pullups",
-                0.21,
-                42.0,
+                0.3,
+                30.0,
                 20,
                 "field_goal_attempts",
                 "nba_stats",
@@ -327,8 +391,8 @@ def _player_diets(engine):
                 2544,
                 "shot_types",
                 "Less Than 10 ft",
-                0.12,
-                24.0,
+                0.3,
+                30.0,
                 20,
                 "field_goal_attempts",
                 "nba_stats",
@@ -337,11 +401,29 @@ def _player_diets(engine):
                 2544,
                 "assist_locations",
                 "AtRimAssists",
-                0.31,
-                31.0,
+                0.2,
+                20.0,
                 20,
                 "assists",
                 "pbp_stats",
+            ),
+            *(
+                PlayerDietFact(
+                    2544,
+                    "assist_locations",
+                    slice_key,
+                    0.2,
+                    20.0,
+                    20,
+                    "assists",
+                    "pbp_stats",
+                )
+                for slice_key in (
+                    "Arc3Assists",
+                    "Corner3Assists",
+                    "ShortMidRangeAssists",
+                    "LongMidRangeAssists",
+                )
             ),
         ),
         tuple(
@@ -462,33 +544,47 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["players"][0]["canonical_id"] == 2544
     assert payload["players"][0]["season_scoring"] == 25.0
     assert payload["players"][0]["last_10_minutes"] == [35.0]
-    assert payload["players"][0]["diet_shares"]["play_types"] == [
-        {
-            "key": "Transition",
-            "season": {
-                "share": 0.19,
-                "volume": 95.0,
-                "games_played": 20,
-                "volume_unit": "possessions",
-            },
-        }
-    ]
+    play_diet = payload["players"][0]["diet_shares"]["play_types"]
+    assert {row["key"] for row in play_diet} == {
+        "Transition",
+        "Isolation",
+        "PRBallHandler",
+        "PRRollMan",
+        "OffRebound",
+        "Spotup",
+        "Cut",
+        "Handoff",
+        "OffScreen",
+        "Misc",
+        "Postup",
+    }
+    assert next(row for row in play_diet if row["key"] == "Transition") == {
+        "key": "Transition",
+        "season": {
+            "share": 1.0,
+            "volume": 95.0,
+            "games_played": 20,
+            "volume_unit": "possessions",
+        },
+    }
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
     assert payload["injuries"]["status"] == "fresh"
     assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
     assert payload["injuries"]["teams"][0]["entries"][0][
         "canonical_player_id"
     ] == 2544
-    assert payload["players"][0]["scores"] == {
-        "PTS": {
-            "season": {"components": {}, "blend": None},
-            "last_15": {"components": {}, "blend": None},
-        },
-        "FGA": {
-            "season": {"components": {}, "blend": None},
-            "last_15": {"components": {}, "blend": None},
-        },
-    }
+    scores = payload["players"][0]["scores"]
+    assert set(scores) == set(COMMON_POSTED_MARKETS)
+    for market, score in scores.items():
+        for window_name in ("season", "last_15"):
+            window = score[window_name]
+            assert isinstance(window["components"], dict)
+            if market in {"TOV", "STL", "BLK", "STKS"}:
+                assert "blend" not in window
+            else:
+                assert set(window["blend"]) == {"value", "thin"}
+                assert isinstance(window["blend"]["value"], float)
+                assert isinstance(window["blend"]["thin"], bool)
     assert {
         row["key"]: row["markets"]
         for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
