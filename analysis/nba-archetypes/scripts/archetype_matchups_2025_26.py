@@ -10,10 +10,32 @@
 # The reusable, deterministic Analysis Run builder lives in
 # `scripts/matchup_analysis.py`; this script is the data/IO shell that feeds it
 # the membership and game-log frames and renders its artifacts.
+#
+# Production runs must go through `run_matchup_analysis.py`, run as a plain
+# script (`python run_matchup_analysis.py`): it captures the code revision
+# before any analysis module is loaded and imports this script as a module, so
+# immediately before publication the loaded code of every analysis module can
+# be proven to match the disk code it is attributed to.
+
+# ruff: noqa: E402  # the code-revision capture must precede implementation imports
 
 # %%
+import io
+import json
+import os
 from pathlib import Path
+import shutil
+import tempfile
 import time
+
+from code_revision import current_code_revision, verify_loaded_code_matches_disk
+
+# The launcher captures this snapshot before importing any analysis module, so
+# the run id is bound to the disk state the code was loaded from rather than to
+# whatever the disk happens to hold after the (potentially long) data fetch or
+# after a later edit. Running this script directly falls back to a disk capture
+# and is rejected before publication by the loaded-code verification below.
+code_revision = os.environ.get("STATSPLUS_ANALYSIS_CODE_REVISION") or current_code_revision()
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +43,18 @@ import pandas as pd
 import seaborn as sns
 from nba_api.stats import endpoints
 
-from matchup_analysis import AnalysisRunBuilder, DEFAULT_SETTINGS
+from artifact_persistence import (
+    artifact_manifest,
+    publish_artifact_set,
+    stamp_png_identity,
+    verify_persisted_manifest,
+)
+from matchup_analysis import (
+    AnalysisRunBuilder,
+    DEFAULT_SETTINGS,
+    fail_if_code_changed,
+    spec_from_clustering_metadata,
+)
 
 pd.set_option("display.max_columns", 100)
 sns.set_theme(style="whitegrid", context="notebook")
@@ -34,13 +67,22 @@ MAX_CACHE_AGE_DAYS = 2
 ROOT = Path(__file__).resolve().parents[1] if "__file__" in globals() else Path.cwd()
 SEASON_KEY = SEASON.replace("-", "_")
 ARCHETYPE_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_archetypes.csv"
+FEATURES_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_scoring_features.csv"
+# The exact standardized feature matrix the clustering was fit on.
+MODEL_MATRIX_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_model_matrix.csv"
+CLUSTERING_METADATA_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "clustering_metadata.json"
 CACHE_DIR = ROOT / "archetypes_data" / SEASON_KEY
+# The published directory is a symlink pointer into an immutable versioned
+# ``matchups-runs`` namespace (see ``publish_artifact_set``), so only its parent
+# is created here; creating a real directory at the pointer would break the
+# atomic publication swap.
 OUTPUT_DIR = ROOT / "archetypes_outputs" / SEASON_KEY / "matchups"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
 GAME_LOG_CACHE = CACHE_DIR / "player_game_logs_regular_season.csv"
 
 print(f"Season: {SEASON} {SEASON_TYPE}")
+
 
 # %% [markdown]
 # ## Load classifications and game logs
@@ -50,8 +92,25 @@ if not ARCHETYPE_PATH.exists():
     raise FileNotFoundError(
         f"Run archetypes_fixed.ipynb first; missing {ARCHETYPE_PATH}"
     )
+if not FEATURES_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {FEATURES_PATH}"
+    )
+if not MODEL_MATRIX_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {MODEL_MATRIX_PATH}"
+    )
+if not CLUSTERING_METADATA_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {CLUSTERING_METADATA_PATH}"
+    )
 
-archetypes = pd.read_csv(ARCHETYPE_PATH)
+# ``float_precision="round_trip"`` reads back exactly the values the clustering
+# wrote, so the input-data identity both sides compute covers the exact fitted
+# matrix rather than a precision-truncated serialization.
+archetypes = pd.read_csv(ARCHETYPE_PATH, float_precision="round_trip")
+clustering_features = pd.read_csv(MODEL_MATRIX_PATH, float_precision="round_trip")
+clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
 
 
 def fetch_game_logs(attempts=3):
@@ -104,8 +163,23 @@ print(
 # thresholds are the builder's defaults, mirrored nowhere in this script.
 
 # %%
-run = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
+# The model specification is read from the clustering notebook's written
+# metadata so the archetype-model identity reflects the clustering that actually
+# ran (feature definition, two-stage conditional KMeans, base seed, subtype
+# count). The input-data identity is the digest the clustering execution
+# recorded over its own membership and exact fitted feature matrix — not a
+# digest recomputed from whatever files happen to coexist — so a stale or mixed
+# model cannot silently pass the builder's fail-closed guard.
+model_spec = spec_from_clustering_metadata(clustering_metadata)
+run = AnalysisRunBuilder(
+    archetypes=archetypes,
+    game_logs=game_logs,
+    model_spec=model_spec,
+    clustering_features=clustering_features,
+    code_revision=code_revision,
+).build()
 
+print(f"Analysis Run {run.run_id} of model {run.model_version}")
 coverage = run.coverage
 print(coverage.to_string())
 
@@ -138,90 +212,160 @@ print(payload["validated_volume_interactions"].round(3).to_string(index=False))
 # %%
 artifacts = run.artifacts
 
-summary_path = OUTPUT_DIR / "matchup_summary.csv"
-notable_path = OUTPUT_DIR / "notable_pts_per_min_matchups.csv"
-validated_path = OUTPUT_DIR / "validated_pts_per_min_interactions.csv"
-watchlist_path = OUTPUT_DIR / "descriptive_pts_per_min_watchlist.csv"
-player_relative_path = OUTPUT_DIR / "player_relative_matchups.csv"
-volume_summary_path = OUTPUT_DIR / "volume_matchup_summary.csv"
-validated_volume_path = OUTPUT_DIR / "validated_volume_interactions.csv"
-volume_reliability_path = OUTPUT_DIR / "volume_split_half_reliability.csv"
-player_volume_path = OUTPUT_DIR / "player_relative_volume_matchups.csv"
-artifacts["matchup_summary"].to_csv(summary_path, index=False)
-artifacts["notable_matchups"].to_csv(notable_path, index=False)
-artifacts["validated_interactions"].to_csv(validated_path, index=False)
-artifacts["watchlist"].to_csv(watchlist_path, index=False)
-artifacts["player_relative_matchups"].to_csv(player_relative_path, index=False)
-artifacts["volume_matchup_summary"].to_csv(volume_summary_path, index=False)
-artifacts["validated_volume_interactions"].to_csv(validated_volume_path, index=False)
-artifacts["volume_reliability"].to_csv(volume_reliability_path, index=False)
-artifacts["player_relative_volume_matchups"].to_csv(player_volume_path, index=False)
-
-heatmap_data = artifacts["pts_per_min_heatmap"]
-heatmap_limit = payload["pts_per_min_heatmap_limit"]
-
-plt.figure(figsize=(22, 9))
-sns.heatmap(
-    heatmap_data,
-    cmap="vlag",
-    center=0,
-    vmin=-heatmap_limit,
-    vmax=heatmap_limit,
-    linewidths=0.25,
-    mask=heatmap_data.isna(),
-    cbar_kws={"label": "Shrunken interaction (% of league-average PTS/MIN)"},
+# The full artifact set is rendered into a private staging directory and only
+# swapped into place after the code-race check and a complete set verification,
+# so a failure mid-render or a concurrent edit never destroys an
+# already-published run's artifact set or leaves a new manifest beside partially
+# replaced files. The staging directory is a unique per-run/per-process sibling
+# of the published directory (never a single shared destructive path), so a
+# concurrent run cannot clobber another's staged bytes, and the final swap is an
+# atomic move that consumes the directory.
+staging_dir = Path(
+    tempfile.mkdtemp(prefix="matchups.staging.", dir=str(OUTPUT_DIR.parent))
 )
-plt.title(f"{SEASON} shrunken PTS/MIN subtype interactions by opponent")
-plt.xlabel("Opponent")
-plt.ylabel("Scoring subtype")
-plt.tight_layout()
-descriptive_heatmap_path = OUTPUT_DIR / "descriptive_pts_per_min_interaction_heatmap.png"
-plt.savefig(descriptive_heatmap_path, dpi=180, bbox_inches="tight")
-plt.show()
-plt.close()
+try:
+    summary_path = staging_dir / "matchup_summary.csv"
+    notable_path = staging_dir / "notable_pts_per_min_matchups.csv"
+    validated_path = staging_dir / "validated_pts_per_min_interactions.csv"
+    watchlist_path = staging_dir / "descriptive_pts_per_min_watchlist.csv"
+    player_relative_path = staging_dir / "player_relative_matchups.csv"
+    volume_summary_path = staging_dir / "volume_matchup_summary.csv"
+    validated_volume_path = staging_dir / "validated_volume_interactions.csv"
+    volume_reliability_path = staging_dir / "volume_split_half_reliability.csv"
+    player_volume_path = staging_dir / "player_relative_volume_matchups.csv"
+    # Every persisted CSV carries the run and model identifiers that produced it on
+    # every row, including an identity row for otherwise-empty outputs, so a later
+    # reader or the persisted verifier can attribute the file without trusting a
+    # sibling manifest.
+    identity_columns = {"RUN_ID": run.run_id, "MODEL_VERSION": run.model_version}
 
-fig, axes = plt.subplots(2, 2, figsize=(22, 17))
-for axis, (metric, metric_spec) in zip(
-    axes.flat, artifacts["volume_heatmaps"].items()
-):
-    metric_heatmap = metric_spec["data"]
-    metric_limit = metric_spec["limit"]
-    metric_label = DEFAULT_SETTINGS.volume_metrics[metric]
+    def write_artifact_csv(frame, path):
+        attributed = frame.assign(**identity_columns)
+        if attributed.empty:
+            row = {column: "" for column in attributed.columns}
+            row.update(identity_columns)
+            attributed = pd.DataFrame([row], columns=attributed.columns)
+        attributed.to_csv(path, index=False)
+
+
+    write_artifact_csv(artifacts["matchup_summary"], summary_path)
+    write_artifact_csv(artifacts["notable_matchups"], notable_path)
+    write_artifact_csv(artifacts["validated_interactions"], validated_path)
+    write_artifact_csv(artifacts["watchlist"], watchlist_path)
+    write_artifact_csv(artifacts["player_relative_matchups"], player_relative_path)
+    write_artifact_csv(artifacts["volume_matchup_summary"], volume_summary_path)
+    write_artifact_csv(artifacts["validated_volume_interactions"], validated_volume_path)
+    write_artifact_csv(artifacts["volume_reliability"], volume_reliability_path)
+    write_artifact_csv(artifacts["player_relative_volume_matchups"], player_volume_path)
+
+
+    def save_stamped_png(figure, path, **kwargs):
+        buffer = io.BytesIO()
+        figure.savefig(buffer, format="png", **kwargs)
+        path.write_bytes(
+            stamp_png_identity(buffer.getvalue(), run.run_id, run.model_version)
+        )
+
+
+    heatmap_data = artifacts["pts_per_min_heatmap"]
+    heatmap_limit = payload["pts_per_min_heatmap_limit"]
+
+    plt.figure(figsize=(22, 9))
     sns.heatmap(
-        metric_heatmap,
-        ax=axis,
+        heatmap_data,
         cmap="vlag",
         center=0,
-        vmin=-metric_limit,
-        vmax=metric_limit,
-        linewidths=0.2,
-        mask=metric_heatmap.isna(),
-        cbar_kws={"label": "% of league-average rate"},
+        vmin=-heatmap_limit,
+        vmax=heatmap_limit,
+        linewidths=0.25,
+        mask=heatmap_data.isna(),
+        cbar_kws={"label": "Shrunken interaction (% of league-average PTS/MIN)"},
     )
-    axis.set_title(f"{metric_label} per minute")
-    axis.set_xlabel("Opponent")
-    axis.set_ylabel("Scoring subtype")
-fig.suptitle(f"{SEASON} shrunken archetype volume interactions", y=1.01)
-fig.tight_layout()
-volume_heatmap_path = OUTPUT_DIR / "descriptive_volume_interaction_heatmaps.png"
-fig.savefig(volume_heatmap_path, dpi=180, bbox_inches="tight")
-plt.show()
-plt.close(fig)
+    plt.title(f"{SEASON} shrunken PTS/MIN subtype interactions by opponent")
+    plt.xlabel("Opponent")
+    plt.ylabel("Scoring subtype")
+    plt.tight_layout()
+    descriptive_heatmap_path = (
+        staging_dir / "descriptive_pts_per_min_interaction_heatmap.png"
+    )
+    save_stamped_png(plt.gcf(), descriptive_heatmap_path, dpi=180, bbox_inches="tight")
+    plt.show()
+    plt.close()
 
-for path in [
-    summary_path,
-    notable_path,
-    validated_path,
-    watchlist_path,
-    player_relative_path,
-    volume_summary_path,
-    validated_volume_path,
-    volume_reliability_path,
-    player_volume_path,
-    descriptive_heatmap_path,
-    volume_heatmap_path,
-]:
-    print(f"Saved {path}")
+    fig, axes = plt.subplots(2, 2, figsize=(22, 17))
+    for axis, (metric, metric_spec) in zip(
+        axes.flat, artifacts["volume_heatmaps"].items()
+    ):
+        metric_heatmap = metric_spec["data"]
+        metric_limit = metric_spec["limit"]
+        metric_label = DEFAULT_SETTINGS.volume_metrics[metric]
+        sns.heatmap(
+            metric_heatmap,
+            ax=axis,
+            cmap="vlag",
+            center=0,
+            vmin=-metric_limit,
+            vmax=metric_limit,
+            linewidths=0.2,
+            mask=metric_heatmap.isna(),
+            cbar_kws={"label": "% of league-average rate"},
+        )
+        axis.set_title(f"{metric_label} per minute")
+        axis.set_xlabel("Opponent")
+        axis.set_ylabel("Scoring subtype")
+    fig.suptitle(f"{SEASON} shrunken archetype volume interactions", y=1.01)
+    fig.tight_layout()
+    volume_heatmap_path = staging_dir / "descriptive_volume_interaction_heatmaps.png"
+    save_stamped_png(fig, volume_heatmap_path, dpi=180, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    # The run id is bound to the code snapshot captured before the implementation
+    # modules were imported. The snapshot is re-captured now that every artifact has
+    # been computed, and publication aborts if it moved: an edit made while the run
+    # was building must not let newer disk code claim an older run's identity. The
+    # loaded-code check then proves the bytecode actually executing for every
+    # analysis module matches the disk code it is attributed to, closing the window
+    # where the entry script and code_revision are loaded before any snapshot exists.
+    fail_if_code_changed(code_revision, current_code_revision())
+    verify_loaded_code_matches_disk()
+
+    # Persist one content-addressed identity manifest so every saved artifact is
+    # attributable to the exact Analysis Run and archetype model that produced it.
+    # Each file is bound to a SHA-256 digest of its persisted bytes and to its own
+    # embedded identity, and the staged set is verified before it is published: a
+    # file that does not carry this run's identity is rejected rather than blessed.
+    # The manifest must cover exactly the required persisted artifact set, and the
+    # verified staging directory is swapped in atomically, so an interrupted or
+    # failed run never leaves the old manifest beside mixed/new files.
+    saved_paths = {
+        "matchup_summary": summary_path,
+        "notable_matchups": notable_path,
+        "validated_interactions": validated_path,
+        "watchlist": watchlist_path,
+        "player_relative_matchups": player_relative_path,
+        "volume_matchup_summary": volume_summary_path,
+        "validated_volume_interactions": validated_volume_path,
+        "volume_reliability": volume_reliability_path,
+        "player_relative_volume_matchups": player_volume_path,
+        "descriptive_pts_per_min_heatmap": descriptive_heatmap_path,
+        "descriptive_volume_interaction_heatmaps": volume_heatmap_path,
+    }
+    run_manifest = artifact_manifest(run, saved_paths)
+    verify_persisted_manifest(run_manifest, staging_dir)
+    (staging_dir / "run_identity_manifest.json").write_text(
+        json.dumps(run_manifest, indent=2, sort_keys=True)
+    )
+    publish_artifact_set(staging_dir, OUTPUT_DIR)
+finally:
+    # Successful publication moved the staging directory into the versioned
+    # namespace; a failure before publication leaves it behind, so remove it.
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+for name, path in saved_paths.items():
+    print(f"Saved {OUTPUT_DIR / Path(path).name}")
+print(f"Saved {OUTPUT_DIR / 'run_identity_manifest.json'}")
 
 # %% [markdown]
 # ## Interpretation guardrails

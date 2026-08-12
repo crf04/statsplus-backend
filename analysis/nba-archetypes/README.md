@@ -10,13 +10,29 @@ runtime code.
 - `notebooks/original/archetypes.ipynb` — untouched original workbook copied
   from the Windows PC.
 - `notebooks/archetypes_fixed.ipynb` — cleaned, reproducible clustering
-  workflow.
+  workflow; writes `clustering_metadata.json` describing the model that ran.
 - `notebooks/archetype_matchups_2025_26.ipynb` — interactive matchup analysis.
+- `scripts/run_matchup_analysis.py` — production entry point; captures the
+  code revision before any analysis module is loaded, establishes the
+  import-time loaded-code proof, then imports the matchup script as a module so
+  its loaded code is provable against disk. Must be run as a plain script:
+  `python run_matchup_analysis.py`.
 - `scripts/archetype_matchups_2025_26.py` — data/IO shell of the matchup
   analysis; feeds the builder below and renders its artifacts.
 - `scripts/matchup_analysis.py` — deterministic `AnalysisRunBuilder` that
   assembles the analysis stages (membership loading and validation, prepared
-  outcomes, scoring and volume fits, artifact assembly, dashboard payload).
+  outcomes, scoring and volume fits, artifact assembly, dashboard payload) and
+  the identity value objects.
+- `scripts/artifact_persistence.py` — PNG identity stamping and strict PNG
+  structure verification, self-attributing artifact checks, the
+  content-addressed persisted-artifact manifest and its verifier, and
+  crash-safe staged publication of a verified artifact set through an atomic
+  versioned pointer serialized by a cross-process lock with durability barriers
+  before garbage collection.
+- `scripts/code_revision.py` — stdlib-only code-revision snapshot and the
+  fail-closed loaded-code verification that proves, from process-local
+  import-time evidence, that the code each analysis module actually executed
+  matches the disk code it is attributed to.
 - `archetypes_data/<season>/` — cached provider inputs.
 - `archetypes_outputs/<season>/` — assignments, profiles, diagnostics, matchup
   tables, sensitivity tests, and figures.
@@ -32,10 +48,13 @@ The current NBA analysis is `2025-26`. Its primary artifacts are:
 
 - `archetypes_outputs/2025_26/player_archetypes.csv`
 - `archetypes_outputs/2025_26/player_scoring_features.csv`
+- `archetypes_outputs/2025_26/player_model_matrix.csv`
+- `archetypes_outputs/2025_26/clustering_metadata.json`
 - `archetypes_outputs/2025_26/subtype_summary.csv`
 - `archetypes_outputs/2025_26/subtype_profiles.csv`
 - `archetypes_outputs/2025_26/matchups/validated_pts_per_min_interactions.csv`
 - `archetypes_outputs/2025_26/matchups/validated_volume_interactions.csv`
+- `archetypes_outputs/2025_26/matchups/run_identity_manifest.json`
 
 Files beginning with `legacy_` are retained only to preserve the development
 history. Use the `validated_`, `player_relative_`, and current summary files for
@@ -46,11 +65,25 @@ analysis.
 Run notebooks with this directory as the working directory so their relative
 `archetypes_data` and `archetypes_outputs` paths resolve correctly.
 
-The matchup script can be run from anywhere:
+Production runs go through the launcher, which must be run from the scripts
+directory as a plain script so the analysis modules are imported as modules
+(whose loaded code the provenance proof can verify) rather than executed as
+`__main__`:
 
 ```bash
-python scripts/archetype_matchups_2025_26.py
+cd analysis/nba-archetypes/scripts
+python run_matchup_analysis.py
 ```
+
+Plain script execution ignores `__pycache__`: the launcher's `__main__` module
+is always compiled from its disk source, never from a shared bytecode cache, so
+no stale pre-bootstrap bytecode can execute before the code-revision proof is
+established. The `-m` form is rejected before any analysis work because it
+would load the launcher through the normal import machinery, which may execute
+a valid stale `.pyc` before the launcher could verify itself. Running
+`archetype_matchups_2025_26.py` directly is also rejected before publication:
+the loaded code of a directly executed entry script cannot be proven against
+disk, so no run would be attributable to its exact code.
 
 Cached inputs make the existing outputs reproducible without downloading a new
 snapshot. Set the notebook's refresh option only when deliberately updating the
@@ -73,6 +106,154 @@ The tests assert observable artifacts and arithmetic (not source text or
 dataframe implementations) and exercise repeated players, unequal archetype
 sizes, and teammates sharing games. The repository completion gate is
 `./scripts/check.sh` from the repository root.
+
+### Analysis Run and archetype-model identity
+
+Each Analysis Run is immutable and belongs to one published archetype model,
+one input-data snapshot, and one Information Cutoff. `AnalysisRunBuilder` now
+requires an `ArchetypeModelSpec` naming the season, feature definition,
+clustering method, cluster count, base random seed, top-level cluster count,
+bootstrap count, minimum subtype size, the subtype silhouette and stability
+thresholds, and a content-addressed `input_data_identity`. The model input
+snapshot is the exact standardized feature matrix the clustering was actually
+fit on; the clustering notebook persists it losslessly as
+`player_model_matrix.csv` and production hands it to the builder as
+`clustering_features`, so a stale model cannot silently join new data. The
+spec's `version` is a content hash of those fields, and `build()` fails closed
+at artifact assembly when the input-data identity is missing or mismatched,
+when the spec's `cluster_count` disagrees with the membership's actual subtype
+count, or when the artifact bundle's identity does not match the run's. Two
+clustering executions that differ in any method parameter — including the
+top-level `SELECTED_K`, bootstrap count, minimum subtype size, or the
+silhouette/stability split thresholds — are distinct models with distinct
+versions. Every build validates final identity consistency before combining
+any cached stage state, and every stage that derives (and caches) data checks
+the immutable identity state first, so a temporarily desynchronized model spec
+or settings snapshot fails immediately even when the stage would otherwise
+return cached data — a tampered identity can never poison a cache under the
+wrong run id.
+
+The `input_data_identity` is recorded once, by `archetypes_fixed.ipynb`, as a
+SHA-256 digest over the membership and exact fitted feature matrix it just
+wrote, and is written into `clustering_metadata.json` alongside the clustering
+method parameters (`top_level_clusters`, `n_bootstraps`, `min_subtype_size`,
+`subtype_min_silhouette`, `subtype_min_stability`). Both the notebook and the
+matchup script read the persisted frames with `float_precision="round_trip"`
+so the digest covers the exact fitted values rather than a precision-truncated
+serialization. Production reads that recorded digest via
+`spec_from_clustering_metadata` instead of recomputing it from whichever
+membership/matrix files happen to coexist, so mixed outputs from different
+clustering executions cannot pass the guard just because their subtype counts
+match. The matchup script derives the rest of the spec from the same metadata
+(feature definition, two-stage conditional clustering method, base random seed,
+and subtype count), so the model identity reflects the clustering that actually
+ran — not a hard-coded approximation.
+
+Every run records a `RunProvenance` (Information Cutoff, per-input hashes, code
+revision, UTC generation time, cluster count, and clustering-attempt number) and
+derives one deterministic `run_id` from the model version, code revision,
+Information Cutoff, analysis settings, and the recorded input hashes, so a
+changed data snapshot with an unchanged cutoff/model/code still produces a
+distinct run id — and so do different thresholds on identical data.
+`code_revision` is required: the builder rejects an empty revision and
+production fails closed when the git revision cannot be determined, so distinct
+unversioned code cannot share a run id. The production revision also folds in
+the working-tree state (uncommitted tracked changes and the contents of
+untracked analysis files), so dirty analysis code never receives the clean HEAD
+identity. A disk-only snapshot cannot prove which code actually executed: the
+entry script and `code_revision` are already loaded before any snapshot can be
+taken. The launcher therefore captures the revision **before importing any
+analysis module** (binding the run id to the disk state the code is about to be
+loaded from) and re-captures it immediately before persisting, aborting if the
+code changed during the build; immediately before publication the script also
+calls `verify_loaded_code_matches_disk()`. Loaded-code evidence is process-local
+and captured at import time: `begin_load_proof` records the launcher's own
+actual executing frame code (compiled from disk source, since plain script
+execution ignores `__pycache__`) and source-loads `code_revision` exactly once
+(never through the import machinery or a shared bytecode cache), and installs
+an import finder that records every analysis module's executed code object in
+memory the moment it is imported. Verification compares that in-memory evidence
+against the current disk source and never re-reads a shared `__pycache__` file
+after the fact, so a post-load edit — to the entry, its imports, `code_revision`,
+or the launcher itself — or a replaced shared bytecode cache can never attribute
+a run to code it did not execute. The generation time defaults to the wall clock
+but is injectable (`generated_at`) so a fully pinned build is reproducible; it
+never feeds the deterministic identity hashes. `clustering_attempt` must be a
+positive integer (booleans, zero, negatives, and strings are rejected).
+
+The artifacts collection and dashboard payload each carry one immutable
+`RunIdentity` value (run id, model version, and stable subtype keys) plus
+content digests for every artifact frame. Each digest is bound to the run id,
+model version, artifact name, and frame content — including, for heatmaps, the
+display-label index and the color-scale limit that controls the rendered PNG —
+so two runs with identical content still record distinct digests, and dashboard
+assembly recomputes every digest and rejects a frame that was replaced with
+content assembled under a different identity. The expected digest record is an
+immutable `FrozenDict` captured at artifact assembly; replacing it is rejected
+rather than trusted. `AnalysisRun` is a frozen dataclass whose frames, series,
+fits, artifact, and payload collections are serialized to immutable `bytes` at
+construction time, so even direct access to a private `_`-prefixed backing
+field cannot mutate the run graph: each read-only property deserializes a fresh
+object that no caller can write back through. Published fits are immutable
+snapshots of the live statsmodels results whose arrays are backed by immutable
+`bytes` buffers — neither the array, nor any `.base` reached from it, nor
+re-enabling writes (`setflags(write=True)`), nor the base-class
+`np.ndarray.setflags`/`np.ndarray.__setitem__` invocations after a pickle
+round-trip can change a run's recorded fits (deserialized arrays are rebuilt
+over immutable bytes by `FrozenFitResult.__setstate__`). `AnalysisRunSettings`
+deep-freezes its nested `volume_metrics` mapping at construction and the
+builder snapshots the settings, so mutating a caller's settings after
+construction cannot desynchronize the run id from the artifacts it is
+attributed to. `RunProvenance` and `RunIdentity` reject every in-place mutation
+of their hash maps (including `|=`), and `FrozenDict` is a read-only `Mapping`
+over a read-only backing proxy, so even the private `_data` attribute cannot be
+written through. Stable subtype membership keys are content hashes of each
+subtype's sorted member IDs, so they are invariant under arbitrary
+cluster-label permutation; the builder rejects overlapping, colliding, or
+null-identified membership (a classified player must carry a non-null
+`PLAYER_ID` and `SUBTYPE_ID`). Matrix rows and subtype labels always derive from
+the run's complete model membership — a membership subtype with no usable games
+is still an explicit all-missing heatmap row — while eligible-cell counts derive
+from actual game data.
+
+When the matchup script persists artifacts, every CSV is written with `RUN_ID`
+and `MODEL_VERSION` values on every row (including an identity row for
+otherwise-empty outputs) and every PNG is structurally validated and embeds the
+run identity in tEXt chunks, so each file is self-attributing. A PNG that
+embeds the same tEXt keyword twice (for example a conflicting double-stamped
+identity) is rejected rather than resolved to whichever chunk came last.
+`artifact_manifest()` refuses to bless a file that does not carry the run's
+identity, and it requires exactly the complete required persisted artifact set
+— missing, unexpected, or duplicate files are rejected, so an incomplete run
+cannot get a manifest. Every logical artifact is bound to exactly one canonical
+filename and file type, so absolute paths, traversal paths, and CSV-for-PNG (or
+PNG-for-CSV) type substitution are structurally rejected before any content is
+trusted. Only `.csv` and `.png` files can carry run identity; any other file
+type is rejected rather than silently accepted.
+`run_identity_manifest.json` records a SHA-256 content digest for every saved
+file (CSV and PNG) in addition to the run identity. The whole set is rendered
+into a private staging directory, verified there, and published crash-safely
+(`publish_artifact_set()`): the verified set is moved into an immutable,
+run-addressed versioned directory and the externally observed `matchups`
+directory is a symlink whose target is swapped in one atomic rename, so a crash
+(or SIGKILL or power loss) at any point either leaves the previous set fully
+live or publishes the new set — never an absent publication path or a partially
+replaced set. Publication is serialized across processes by a cross-process
+lock held from version install through pointer flip and garbage collection, so
+a concurrent publisher can never delete another publisher's pending (not yet
+live) version; and the prior set survives until the new set and pointer are
+durably committed (every artifact file, the versioned directory, and the
+pointer's parent directory are fsynced), so old sets are garbage-collected only
+after the new set is durable. If the new set's durability cannot be confirmed,
+publication aborts before the pointer is created or flipped: the old live
+pointer is preserved and the non-durable installed set is removed rather than
+published.
+`verify_persisted_manifest()` then fails closed if any recorded file is
+missing, has been replaced, resolves outside the artifact directory, no longer
+embeds the manifest's identity, is bound to a non-canonical name, or if the
+recorded set is partial or contains duplicate filenames. PNG identity parsing
+and the manifest live in `scripts/artifact_persistence.py`, separated from the
+statistical builder in `scripts/matchup_analysis.py`.
 
 ## Modeling boundaries
 
