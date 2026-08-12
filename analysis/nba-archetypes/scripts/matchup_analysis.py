@@ -13,6 +13,7 @@ choice, and effects extraction are deterministic given the input frames.
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
@@ -105,22 +106,38 @@ def _json_default(value):
     raise TypeError(f"Cannot serialize {type(value).__name__} deterministically")
 
 
-def _frame_digest(frame) -> str:
-    """Canonical deterministic text form of a frame for content hashing."""
+def _frame_canonical_text(frame) -> str:
+    """Canonical, lossless deterministic text form of a frame for content hashing.
+
+    Numeric columns keep their exact stored values: integers are serialized as
+    JSON integers (so values beyond ``2**53`` remain distinct) and floats use
+    Python's shortest round-trip representation instead of pandas' truncated
+    10-digit JSON precision. Column order, row order, and the index are
+    normalized before serialization.
+    """
     canonical = frame.copy()
-    for column in canonical.columns:
-        if pd.api.types.is_numeric_dtype(canonical[column]):
-            canonical[column] = canonical[column].astype(float)
     canonical = canonical.reindex(sorted(canonical.columns), axis=1)
     canonical = canonical.sort_values(list(canonical.columns))
     canonical = canonical.reset_index(drop=True)
-    return canonical.to_json(orient="split", date_format="iso")
+    return json.dumps(
+        canonical.to_dict(orient="records"),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
+    )
 
 
-def compute_input_data_identity(archetypes, game_logs) -> str:
-    """Content identity of the archetype membership and game-log snapshot."""
+def compute_input_data_identity(archetypes, model_inputs) -> str:
+    """Content identity of the archetype membership and the model input snapshot.
+
+    ``model_inputs`` is the data the clustering model was actually fit on (the
+    archetype feature snapshot in production), not the downstream matchup game
+    logs. The same snapshot must be handed to ``AnalysisRunBuilder`` through its
+    ``clustering_features`` argument so artifact assembly can fail closed when a
+    stale model is joined to new data.
+    """
     return content_hash(
-        ("input-data", _frame_digest(archetypes), _frame_digest(game_logs))
+        ("input-data", _frame_canonical_text(archetypes), _frame_canonical_text(model_inputs))
     )
 
 
@@ -169,6 +186,29 @@ class ArchetypeModelSpec:
         )
 
 
+class FrozenDict(dict):
+    """A dict that rejects every in-place mutation after construction.
+
+    ``AnalysisRun`` is frozen and ``RunProvenance``/``RunIdentity`` must not
+    expose mutable hashes, so the identity-carrying dicts they own are frozen at
+    construction time.
+    """
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("This mapping is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+    def __hash__(self):
+        return hash(frozenset(self.items()))
+
+
 @dataclass(frozen=True)
 class RunProvenance:
     """Immutable provenance recorded for one Analysis Run."""
@@ -179,6 +219,13 @@ class RunProvenance:
     generated_at: datetime
     cluster_count: int
     clustering_attempt: int
+
+    def __post_init__(self):
+        if isinstance(self.information_cutoff, datetime):
+            raise ValueError("information_cutoff must be a date, not a datetime")
+        if not isinstance(self.generated_at, datetime) or self.generated_at.tzinfo is None:
+            raise ValueError("generated_at must be a timezone-aware datetime")
+        object.__setattr__(self, "input_hashes", FrozenDict(dict(self.input_hashes)))
 
     def to_dict(self) -> dict:
         return {
@@ -191,8 +238,37 @@ class RunProvenance:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
+class RunIdentity:
+    """Immutable identity shared by an Analysis Run, its artifacts, and payload.
+
+    The raw ``run_id``, ``model_version``, and subtype-key map previously
+    travelled together as separate mutable fields; one immutable value now owns
+    all three so the bundle cannot drift or be rewritten after build.
+    """
+
+    run_id: str
+    model_version: str
+    stable_subtype_keys: dict
+
+    def __post_init__(self):
+        for name in ("run_id", "model_version"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"{name} must be a 64-character lowercase hex digest")
+        keys = self.stable_subtype_keys
+        if not isinstance(keys, dict) or not keys:
+            raise ValueError("stable_subtype_keys must be a non-empty mapping")
+        for key in keys.values():
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+                raise ValueError("each stable subtype key must be a 64-character hex digest")
+        object.__setattr__(self, "stable_subtype_keys", FrozenDict(dict(keys)))
+
+
+@dataclass(frozen=True)
 class AnalysisRun:
+    """Immutable result of one Analysis Run build."""
+
     membership: pd.DataFrame
     logs: pd.DataFrame
     coverage: pd.Series
@@ -204,11 +280,21 @@ class AnalysisRun:
     volume_shrinkage_summary: pd.DataFrame
     artifacts: dict
     dashboard_payload: dict
+    identity: RunIdentity
     model_spec: ArchetypeModelSpec
-    model_version: str
-    run_id: str
     provenance: RunProvenance
-    stable_subtype_keys: dict
+
+    @property
+    def run_id(self) -> str:
+        return self.identity.run_id
+
+    @property
+    def model_version(self) -> str:
+        return self.identity.model_version
+
+    @property
+    def stable_subtype_keys(self) -> dict:
+        return self.identity.stable_subtype_keys
 
 
 def matchup_columns(frame):
@@ -449,6 +535,8 @@ class AnalysisRunBuilder:
         settings=None,
         clustering_attempt=1,
         code_revision=None,
+        generated_at=None,
+        clustering_features=None,
     ):
         self.archetypes = archetypes
         self.game_logs = game_logs
@@ -456,6 +544,8 @@ class AnalysisRunBuilder:
         self.settings = settings or DEFAULT_SETTINGS
         self.clustering_attempt = clustering_attempt
         self.code_revision = code_revision
+        self.generated_at = generated_at
+        self.clustering_features = clustering_features
         self._model_version = (
             model_spec.version if isinstance(model_spec, ArchetypeModelSpec) else None
         )
@@ -472,6 +562,7 @@ class AnalysisRunBuilder:
         self._information_cutoff = None
         self._input_hashes = None
         self._run_id = None
+        self._run_identity = None
         self._provenance = None
 
     def load_membership(self):
@@ -530,25 +621,47 @@ class AnalysisRunBuilder:
                 self._information_cutoff.isoformat(),
             )
         )
+        generated_at = self.generated_at
+        if generated_at is None:
+            generated_at = datetime.now(timezone.utc)
+        elif not isinstance(generated_at, datetime) or generated_at.tzinfo is None:
+            raise ValueError("generated_at must be a timezone-aware datetime")
         self._provenance = RunProvenance(
             information_cutoff=self._information_cutoff,
             input_hashes=dict(self._input_hashes),
             code_revision=self.code_revision,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=generated_at,
             cluster_count=self.model_spec.cluster_count,
             clustering_attempt=self.clustering_attempt,
+        )
+        self._run_identity = RunIdentity(
+            run_id=self._run_id,
+            model_version=self._model_version,
+            stable_subtype_keys=dict(self._stable_subtype_keys),
         )
         return self._provenance
 
     def _require_identity(self):
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError("An ArchetypeModelSpec is required to assemble artifacts")
-        self.load_membership()
+        membership = self.load_membership()
         self.prepare_logs()
         self.record_provenance()
-        observed_identity = compute_input_data_identity(
-            self.archetypes, self.game_logs
+        actual_cluster_count = int(membership["SUBTYPE_ID"].nunique())
+        if actual_cluster_count != self.model_spec.cluster_count:
+            raise ValueError(
+                f"Model spec cluster_count {self.model_spec.cluster_count} does not "
+                f"match the actual membership subtype count {actual_cluster_count}"
+            )
+        # Production passes the clustering input snapshot explicitly. The
+        # synthetic-fixture seam (issue 70) has no clustering stage, so it
+        # falls back to the game-log frame it hashes its specs over.
+        model_inputs = (
+            self.clustering_features
+            if self.clustering_features is not None
+            else self.game_logs
         )
+        observed_identity = compute_input_data_identity(self.archetypes, model_inputs)
         if observed_identity != self.model_spec.input_data_identity:
             raise ValueError(
                 "Input data identity does not match the archetype model specification"
@@ -644,8 +757,8 @@ class AnalysisRunBuilder:
         self._league_average_volume_rates = league_average_volume_rates
         self._information_cutoff = logs["GAME_DATE"].max().date()
         self._input_hashes = {
-            "archetypes": content_hash(("frame", _frame_digest(self.archetypes))),
-            "game_logs": content_hash(("frame", _frame_digest(self.game_logs))),
+            "archetypes": content_hash(("frame", _frame_canonical_text(self.archetypes))),
+            "game_logs": content_hash(("frame", _frame_canonical_text(self.game_logs))),
         }
         return logs
 
@@ -1422,9 +1535,7 @@ class AnalysisRunBuilder:
             ),
             "pts_per_min_heatmap": heatmap_data,
             "volume_heatmaps": volume_heatmaps,
-            "run_id": self._run_id,
-            "model_version": self._model_version,
-            "stable_subtype_keys": dict(self._stable_subtype_keys),
+            "identity": self._run_identity,
         }
         self._pts_per_min_heatmap_limit = heatmap_limit
         self._subtype_labels = subtype_labels
@@ -1436,6 +1547,12 @@ class AnalysisRunBuilder:
         self.fit_scoring()
         self.fit_volume()
         artifacts = self.assemble_artifacts()
+
+        bundle_identity = artifacts.get("identity")
+        if bundle_identity is not self._run_identity:
+            raise ValueError(
+                "Artifact bundle identity is missing or does not match the run identity"
+            )
 
         validated_interactions = artifacts["validated_interactions"]
         validated_volume_interactions = artifacts["validated_volume_interactions"]
@@ -1457,9 +1574,7 @@ class AnalysisRunBuilder:
                 VOLUME_DISPLAY_COLUMNS
             ],
             "volume_reliability_display": volume_reliability.round(3),
-            "run_id": self._run_id,
-            "model_version": self._model_version,
-            "stable_subtype_keys": dict(self._stable_subtype_keys),
+            "identity": self._run_identity,
             "provenance": self._provenance.to_dict(),
         }
         self._dashboard_payload = payload
@@ -1486,9 +1601,7 @@ class AnalysisRunBuilder:
             volume_shrinkage_summary=volume["volume_shrinkage_summary"],
             artifacts=self._artifacts,
             dashboard_payload=self._dashboard_payload,
+            identity=self._run_identity,
             model_spec=self.model_spec,
-            model_version=self._model_version,
-            run_id=self._run_id,
             provenance=self._provenance,
-            stable_subtype_keys=self._stable_subtype_keys,
         )

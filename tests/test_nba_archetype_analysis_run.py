@@ -10,7 +10,8 @@ instead of source text or dataframe implementations.
 import json
 import re
 import sys
-from datetime import date, datetime, timedelta
+from dataclasses import FrozenInstanceError
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from matchup_analysis import (  # noqa: E402
     AnalysisRunBuilder,
     ArchetypeModelSpec,
+    RunIdentity,
     compute_input_data_identity,
 )
 
@@ -398,9 +400,7 @@ def test_artifact_assembly_boundary_exposes_expected_schema():
         "player_relative_volume_matchups",
         "pts_per_min_heatmap",
         "volume_heatmaps",
-        "run_id",
-        "model_version",
-        "stable_subtype_keys",
+        "identity",
     }
     summary = artifacts["matchup_summary"]
     assert summary["SUBTYPE_ID"].is_monotonic_increasing or summary["OPP_TEAM"].is_monotonic_increasing
@@ -456,9 +456,9 @@ def test_dashboard_payload_boundary_exposes_expected_payload():
         payload["volume_reliability_display"]
     )
     assert {"pearson_reliability", "spearman_reliability"} <= set(payload)
-    assert payload["run_id"] == run.run_id
-    assert payload["model_version"] == run.model_version
-    assert set(payload["stable_subtype_keys"]) == {100, 200, 300}
+    assert payload["identity"] == run.identity
+    assert payload["identity"].run_id == run.run_id
+    assert set(payload["identity"].stable_subtype_keys) == {100, 200, 300}
     assert set(payload["provenance"]) == {
         "information_cutoff",
         "input_hashes",
@@ -543,18 +543,19 @@ def test_run_records_provenance_and_carries_matching_identity():
     for digest in provenance.input_hashes.values():
         assert re.fullmatch(r"[0-9a-f]{64}", digest)
     payload = run.dashboard_payload
-    assert payload["run_id"] == run.run_id
-    assert payload["model_version"] == run.model_version
-    assert payload["stable_subtype_keys"] == run.stable_subtype_keys
+    assert payload["identity"] == run.identity
+    assert payload["identity"].run_id == run.run_id
+    assert payload["identity"].stable_subtype_keys == run.stable_subtype_keys
     assert payload["provenance"] == provenance.to_dict()
     assert payload["provenance"]["clustering_attempt"] == 3
 
 
 def test_artifacts_carry_matching_run_and_model_identifiers():
     run = build_run()
-    assert run.artifacts["run_id"] == run.run_id
-    assert run.artifacts["model_version"] == run.model_version
-    assert run.artifacts["stable_subtype_keys"] == run.stable_subtype_keys
+    assert run.artifacts["identity"] == run.identity
+    assert run.artifacts["identity"].run_id == run.run_id
+    assert run.artifacts["identity"].model_version == run.model_version
+    assert run.artifacts["identity"].stable_subtype_keys == run.stable_subtype_keys
 
 
 def test_stable_subtype_keys_invariant_under_label_permutation():
@@ -622,6 +623,105 @@ def test_run_identity_is_deterministic_across_builds():
     assert run_a.model_version == run_b.model_version
     assert run_a.provenance.input_hashes == run_b.provenance.input_hashes
     assert run_a.provenance.information_cutoff == run_b.provenance.information_cutoff
+
+
+def test_input_data_identity_preserves_full_numeric_precision():
+    archetypes, game_logs = synthetic_fixture()
+    precise = game_logs.assign(MODEL_VALUE=0.12345678901)
+    tweaked = precise.copy()
+    tweaked.loc[tweaked.index[0], "MODEL_VALUE"] = 0.12345678902
+    assert compute_input_data_identity(archetypes, precise) != compute_input_data_identity(
+        archetypes, tweaked
+    )
+
+
+def test_input_data_identity_preserves_integers_beyond_2_53():
+    archetypes, game_logs = synthetic_fixture()
+    large = game_logs.assign(BIG_ID=2**53)
+    tweaked = large.copy()
+    tweaked.loc[tweaked.index[0], "BIG_ID"] = 2**53 + 1
+    assert compute_input_data_identity(archetypes, large) != compute_input_data_identity(
+        archetypes, tweaked
+    )
+
+
+def test_spec_cluster_count_must_match_actual_membership():
+    archetypes, game_logs = synthetic_fixture()
+    spec = make_model_spec(archetypes, game_logs, cluster_count=999)
+    with pytest.raises(ValueError, match="cluster_count"):
+        AnalysisRunBuilder(
+            archetypes=archetypes, game_logs=game_logs, model_spec=spec
+        ).build()
+
+
+def test_analysis_run_and_identity_are_immutable():
+    run = build_run()
+    with pytest.raises(FrozenInstanceError):
+        run.run_id = "tampered"
+    with pytest.raises(TypeError, match="immutable"):
+        run.provenance.input_hashes["archetypes"] = "0" * 64
+    with pytest.raises(TypeError, match="immutable"):
+        run.stable_subtype_keys[100] = "0" * 64
+
+
+def test_run_identity_value_object_validates_and_equals():
+    run = build_run()
+    assert isinstance(run.identity, RunIdentity)
+    assert run.identity == run.identity
+    with pytest.raises(ValueError):
+        RunIdentity(run_id="not-hex", model_version=run.model_version, stable_subtype_keys={100: "0" * 64})
+    with pytest.raises(ValueError):
+        RunIdentity(run_id=run.run_id, model_version="not-hex", stable_subtype_keys={100: "0" * 64})
+    with pytest.raises(ValueError):
+        RunIdentity(run_id=run.run_id, model_version=run.model_version, stable_subtype_keys={100: "short"})
+
+
+def test_generated_at_is_injectable_and_pinned():
+    archetypes, game_logs = synthetic_fixture()
+    pinned = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+    run_a = build_builder(
+        archetypes, game_logs, code_revision="rev-1", generated_at=pinned
+    ).build()
+    run_b = build_builder(
+        archetypes, game_logs, code_revision="rev-1", generated_at=pinned
+    ).build()
+    assert run_a.provenance.generated_at == pinned
+    assert run_b.provenance == run_a.provenance
+
+
+def test_model_identity_uses_clustering_inputs_not_game_logs():
+    archetypes, game_logs = synthetic_fixture()
+    clustering_snapshot = game_logs[["PLAYER_ID", "MIN"]].copy()
+    model_input_identity = compute_input_data_identity(archetypes, clustering_snapshot)
+    assert model_input_identity != compute_input_data_identity(archetypes, game_logs)
+    spec = make_model_spec(
+        archetypes, game_logs, input_data_identity=model_input_identity
+    )
+    run = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=spec,
+        clustering_features=clustering_snapshot,
+    ).build()
+    assert run.model_version == spec.version
+    with pytest.raises(ValueError, match="Input data identity does not match"):
+        AnalysisRunBuilder(
+            archetypes=archetypes,
+            game_logs=game_logs,
+            model_spec=spec,
+            clustering_features=game_logs,
+        ).build()
+
+
+def test_dashboard_assembly_rejects_missing_bundle_identity():
+    # Drive the public assembly seam into the guarded state: an artifact bundle
+    # whose identity was removed must be rejected, not silently accepted.
+    archetypes, game_logs = synthetic_fixture()
+    builder = build_builder(archetypes, game_logs)
+    builder.assemble_artifacts()
+    builder._artifacts["identity"] = None
+    with pytest.raises(ValueError, match="Artifact bundle identity"):
+        builder.assemble_dashboard_payload()
 
 
 def test_matrix_dimensions_and_labels_derive_from_run_data():

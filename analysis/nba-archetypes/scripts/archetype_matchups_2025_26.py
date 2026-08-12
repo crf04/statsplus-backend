@@ -12,7 +12,9 @@
 # the membership and game-log frames and renders its artifacts.
 
 # %%
+import json
 from pathlib import Path
+import subprocess
 import time
 
 import matplotlib.pyplot as plt
@@ -35,15 +37,12 @@ SEASON = "2025-26"
 SEASON_TYPE = "Regular Season"
 REFRESH_DATA = False
 MAX_CACHE_AGE_DAYS = 2
-CLUSTERING_METHOD = "KMeans"
-RANDOM_STATE = 42
-FEATURE_DEFINITION = (
-    "play-type and shot-zone composition shares with centered log-ratio, weighted"
-)
 
 ROOT = Path(__file__).resolve().parents[1] if "__file__" in globals() else Path.cwd()
 SEASON_KEY = SEASON.replace("-", "_")
 ARCHETYPE_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_archetypes.csv"
+FEATURES_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_scoring_features.csv"
+CLUSTERING_METADATA_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "clustering_metadata.json"
 CACHE_DIR = ROOT / "archetypes_data" / SEASON_KEY
 OUTPUT_DIR = ROOT / "archetypes_outputs" / SEASON_KEY / "matchups"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,8 +59,33 @@ if not ARCHETYPE_PATH.exists():
     raise FileNotFoundError(
         f"Run archetypes_fixed.ipynb first; missing {ARCHETYPE_PATH}"
     )
+if not FEATURES_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {FEATURES_PATH}"
+    )
+if not CLUSTERING_METADATA_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {CLUSTERING_METADATA_PATH}"
+    )
 
 archetypes = pd.read_csv(ARCHETYPE_PATH)
+# The model input snapshot the clustering was actually fit on; its content
+# identity (not the matchup game logs) feeds the archetype-model identity.
+clustering_features = pd.read_csv(FEATURES_PATH)
+clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
+
+
+def current_code_revision():
+    """Current git revision of the analysis code, or ``unknown`` when unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
 
 
 def fetch_game_logs(attempts=3):
@@ -114,16 +138,25 @@ print(
 # thresholds are the builder's defaults, mirrored nowhere in this script.
 
 # %%
+# The model specification is read from the clustering notebook's written
+# metadata so the archetype-model identity reflects the clustering that actually
+# ran (feature definition, two-stage conditional KMeans, base seed, subtype
+# count) rather than a hard-coded approximation. The input-data identity binds
+# the membership to the clustering input snapshot, not to the matchup logs.
 model_spec = ArchetypeModelSpec(
-    season=SEASON,
-    feature_definition=FEATURE_DEFINITION,
-    clustering_method=CLUSTERING_METHOD,
-    cluster_count=int(archetypes["SUBTYPE_ID"].nunique()),
-    random_seed=RANDOM_STATE,
-    input_data_identity=compute_input_data_identity(archetypes, game_logs),
+    season=clustering_metadata["season"],
+    feature_definition=clustering_metadata["feature_definition"],
+    clustering_method=clustering_metadata["clustering_method"],
+    cluster_count=int(clustering_metadata["cluster_count"]),
+    random_seed=int(clustering_metadata["random_seed"]),
+    input_data_identity=compute_input_data_identity(archetypes, clustering_features),
 )
 run = AnalysisRunBuilder(
-    archetypes=archetypes, game_logs=game_logs, model_spec=model_spec
+    archetypes=archetypes,
+    game_logs=game_logs,
+    model_spec=model_spec,
+    clustering_features=clustering_features,
+    code_revision=current_code_revision(),
 ).build()
 
 print(f"Analysis Run {run.run_id} of model {run.model_version}")
@@ -229,7 +262,9 @@ fig.savefig(volume_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close(fig)
 
-for path in [
+# Persist one identity manifest so every saved artifact is attributable to the
+# exact Analysis Run and archetype model that produced it.
+saved_paths = [
     summary_path,
     notable_path,
     validated_path,
@@ -241,7 +276,20 @@ for path in [
     player_volume_path,
     descriptive_heatmap_path,
     volume_heatmap_path,
-]:
+]
+run_manifest = {
+    "run_id": run.run_id,
+    "model_version": run.model_version,
+    "stable_subtype_keys": {
+        str(key): value for key, value in run.stable_subtype_keys.items()
+    },
+    "provenance": run.provenance.to_dict(),
+    "artifacts": [path.name for path in saved_paths],
+}
+manifest_path = OUTPUT_DIR / "run_identity_manifest.json"
+manifest_path.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
+
+for path in saved_paths + [manifest_path]:
     print(f"Saved {path}")
 
 # %% [markdown]

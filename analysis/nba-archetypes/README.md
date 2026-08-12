@@ -10,7 +10,7 @@ runtime code.
 - `notebooks/original/archetypes.ipynb` — untouched original workbook copied
   from the Windows PC.
 - `notebooks/archetypes_fixed.ipynb` — cleaned, reproducible clustering
-  workflow.
+  workflow; writes `clustering_metadata.json` describing the model that ran.
 - `notebooks/archetype_matchups_2025_26.ipynb` — interactive matchup analysis.
 - `scripts/archetype_matchups_2025_26.py` — data/IO shell of the matchup
   analysis; feeds the builder below and renders its artifacts.
@@ -32,10 +32,12 @@ The current NBA analysis is `2025-26`. Its primary artifacts are:
 
 - `archetypes_outputs/2025_26/player_archetypes.csv`
 - `archetypes_outputs/2025_26/player_scoring_features.csv`
+- `archetypes_outputs/2025_26/clustering_metadata.json`
 - `archetypes_outputs/2025_26/subtype_summary.csv`
 - `archetypes_outputs/2025_26/subtype_profiles.csv`
 - `archetypes_outputs/2025_26/matchups/validated_pts_per_min_interactions.csv`
 - `archetypes_outputs/2025_26/matchups/validated_volume_interactions.csv`
+- `archetypes_outputs/2025_26/matchups/run_identity_manifest.json`
 
 Files beginning with `legacy_` are retained only to preserve the development
 history. Use the `validated_`, `player_relative_`, and current summary files for
@@ -81,20 +83,38 @@ one input-data snapshot, and one Information Cutoff. `AnalysisRunBuilder` now
 requires an `ArchetypeModelSpec` naming the season, feature definition,
 clustering method, cluster count, random seed, and a content-addressed
 `input_data_identity` (computed with `compute_input_data_identity` over the
-membership and game-log frames). The spec's `version` is a content hash of
-those six fields, and `build()` rejects a missing or mismatched input-data
-identity at artifact assembly so a stale model cannot silently join new data.
+membership and the model's input-data snapshot). The model input snapshot is the
+data the clustering was actually fit on; production hands it to the builder as
+`clustering_features`, so a stale model cannot silently join new data. The
+spec's `version` is a content hash of those six fields, and `build()` fails
+closed at artifact assembly when the input-data identity is missing or
+mismatched, when the spec's `cluster_count` disagrees with the membership's
+actual subtype count, or when the artifact bundle's identity does not match the
+run's.
 
-Every run records a `RunProvenance` (Information Cutoff, per-input hashes,
-code revision, UTC generation time, cluster count, and clustering-attempt
-number), derives one deterministic `run_id` from the model version, code
-revision, and Information Cutoff, and stamps the artifacts collection and
-dashboard payload with the matching `run_id` and `model_version`. Stable
-subtype membership keys are content hashes of each subtype's sorted member
-IDs, so they are invariant under arbitrary cluster-label permutation; the
-builder rejects overlapping or colliding membership. Matrix dimensions,
-eligible-cell counts, and subtype labels always derive from the run's actual
-membership and games, never from a fixed cluster count.
+The matchup script derives the spec from `clustering_metadata.json`, written by
+`archetypes_fixed.ipynb` beside the membership and feature snapshots, so the
+feature definition, two-stage conditional clustering method, base random seed,
+and subtype count recorded in the model identity are the ones the clustering
+actually used — not a hard-coded approximation. It also records the current git
+revision as the run's `code_revision` and writes a `run_identity_manifest.json`
+next to the saved artifacts so every persisted CSV/PNG is attributable to the
+exact run and model.
+
+Every run records a `RunProvenance` (Information Cutoff, per-input hashes, code
+revision, UTC generation time, cluster count, and clustering-attempt number) and
+derives one deterministic `run_id` from the model version, code revision, and
+Information Cutoff. The generation time defaults to the wall clock but is
+injectable (`generated_at`) so a fully pinned build is reproducible; it never
+feeds the deterministic identity hashes. The artifacts collection and dashboard
+payload each carry one immutable `RunIdentity` value (run id, model version,
+and stable subtype keys) instead of three loose fields. `AnalysisRun` is a
+frozen dataclass, `RunProvenance` and `RunIdentity` reject mutation of their
+hash maps, and stable subtype membership keys are content hashes of each
+subtype's sorted member IDs, so they are invariant under arbitrary cluster-label
+permutation; the builder rejects overlapping or colliding membership. Matrix
+dimensions, eligible-cell counts, and subtype labels always derive from the
+run's actual membership and games, never from a fixed cluster count.
 
 ## Modeling boundaries
 
