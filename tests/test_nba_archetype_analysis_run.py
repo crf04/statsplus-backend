@@ -9,12 +9,15 @@ instead of source text or dataframe implementations.
 
 import hashlib
 import json
+import os
+import pickle
 import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
@@ -31,6 +34,7 @@ SCRIPTS_DIR = (
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from artifact_persistence import (  # noqa: E402
+    PERSISTED_ARTIFACT_FILENAMES,
     artifact_manifest,
     png_text_entries,
     publish_artifact_set,
@@ -42,8 +46,8 @@ from matchup_analysis import (  # noqa: E402
     AnalysisRunSettings,
     ArchetypeModelSpec,
     FrozenDict,
+    FrozenFitResult,
     RunIdentity,
-    _defensive_copy,
     compute_input_data_identity,
     fail_if_code_changed,
     spec_from_clustering_metadata,
@@ -353,15 +357,23 @@ PERSISTED_ARTIFACTS = [*PERSISTED_CSV_ARTIFACTS, *PERSISTED_PNG_ARTIFACTS]
 
 
 def write_full_artifact_set(directory, run, empty_csv_names=()):
-    """Write every required persisted artifact into ``directory`` and return paths."""
+    """Write every required persisted artifact into ``directory`` and return paths.
+
+    Each artifact is written under its canonical persisted filename, so a
+    manifest built from the returned paths always binds the logical artifact to
+    its canonical name.
+    """
     paths = {}
     for name in PERSISTED_CSV_ARTIFACTS:
+        filename = PERSISTED_ARTIFACT_FILENAMES[name]
         if name in empty_csv_names:
-            paths[name] = write_empty_attributed_csv(directory / f"{name}.csv", run)
+            paths[name] = write_empty_attributed_csv(directory / filename, run)
         else:
-            paths[name] = write_attributed_csv(directory / f"{name}.csv", run)
+            paths[name] = write_attributed_csv(directory / filename, run)
     for name in PERSISTED_PNG_ARTIFACTS:
-        paths[name] = write_stamped_png(directory / f"{name}.png", run)
+        paths[name] = write_stamped_png(
+            directory / PERSISTED_ARTIFACT_FILENAMES[name], run
+        )
     return paths
 
 
@@ -1014,7 +1026,7 @@ def test_artifact_manifest_records_content_digests():
             "sha256": hashlib.sha256(paths["matchup_summary"].read_bytes()).hexdigest(),
         }
         assert manifest["artifacts"]["descriptive_pts_per_min_heatmap"] == {
-            "file": "descriptive_pts_per_min_heatmap.png",
+            "file": "descriptive_pts_per_min_interaction_heatmap.png",
             "sha256": hashlib.sha256(
                 paths["descriptive_pts_per_min_heatmap"].read_bytes()
             ).hexdigest(),
@@ -1179,17 +1191,6 @@ def test_published_fit_arrays_cannot_be_made_writable_again():
         with pytest.raises(ValueError):
             array += 1
         np.testing.assert_array_equal(getattr(fit, name), original)
-
-
-def test_defensive_copy_closes_object_valued_cells():
-    source = {
-        "frame": pd.DataFrame({"notes": [["a"], {"b": 1}], "value": [1, 2]})
-    }
-    copied = _defensive_copy(source)
-    copied["frame"].at[0, "notes"].append("leaked")
-    copied["frame"].at[1, "notes"]["b"] = 99
-    assert source["frame"].at[0, "notes"] == ["a"]
-    assert source["frame"].at[1, "notes"] == {"b": 1}
 
 
 def test_frozen_dict_rejects_base_dict_invocation():
@@ -1502,26 +1503,6 @@ class _MutableMappingView(Mapping):
         self._items[key] = value
 
 
-def test_defensive_copy_closes_set_and_custom_mapping_cells():
-    cell_map = _MutableMappingView({"b": 1})
-    source = {
-        "frame": pd.DataFrame(
-            {
-                "tags": [{"a"}, {1, 2}],
-                "meta": [cell_map, {"c": 3}],
-                "value": [1, 2],
-            }
-        )
-    }
-    copied = _defensive_copy(source)
-    copied["frame"].at[0, "tags"].add("leaked")
-    copied["frame"].at[1, "meta"]["c"] = 99
-    assert source["frame"].at[0, "tags"] == {"a"}
-    assert source["frame"].at[1, "meta"] == {"c": 3}
-    copied["frame"].at[0, "meta"]["b"] = 99
-    assert cell_map._items == {"b": 1}
-
-
 def test_fail_if_code_changed_guards_mixed_snapshots():
     fail_if_code_changed("rev", "rev")
     with pytest.raises(RuntimeError, match="code"):
@@ -1585,12 +1566,12 @@ def test_artifact_manifest_rejects_empty_and_incomplete_graphs():
             artifact_manifest(run, paths)
 
 
-def test_artifact_manifest_rejects_duplicate_files():
+def test_artifact_manifest_binds_each_logical_artifact_to_its_canonical_file():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
         paths = write_full_artifact_set(Path(tmp), run)
         paths["watchlist"] = paths["matchup_summary"]
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(ValueError, match="must be saved as"):
             artifact_manifest(run, paths)
 
 
@@ -1710,7 +1691,7 @@ def test_artifact_manifest_rejects_unsupported_file_types():
             path = directory / f"{name}.bin"
             path.write_bytes(b"not a csv or png")
             paths[name] = path
-        with pytest.raises(ValueError, match="supported"):
+        with pytest.raises(ValueError, match="must be saved as"):
             artifact_manifest(run, paths)
 
 
@@ -1734,7 +1715,7 @@ def test_verify_persisted_manifest_rejects_unsupported_file_types():
                 "file": f"{name}.bin",
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
-        with pytest.raises(ValueError, match="supported"):
+        with pytest.raises(ValueError, match="must be persisted as"):
             verify_persisted_manifest(crafted, directory)
 
 
@@ -1818,3 +1799,557 @@ def test_matrix_and_labels_cover_membership_subtypes_without_usable_logs():
         data = run.artifacts["volume_heatmaps"][metric]["data"]
         assert data.shape == (3, 6)
         assert data.loc["300 \u2014 Quarterback"].isna().all()
+
+
+# --- Round-6 adversarial tests (issue 71 review) -----------------------------
+
+
+def _assert_base_chain_cannot_be_made_writable(array, label):
+    """Walk the ``.base`` chain; every ndarray link must refuse writes and the
+    chain must terminate in an immutable bytes buffer."""
+    seen = 0
+    cursor = array
+    while isinstance(cursor, np.ndarray) and cursor.base is not None:
+        if isinstance(cursor.base, np.ndarray):
+            with pytest.raises(ValueError):
+                cursor.base.setflags(write=True)
+            with pytest.raises(ValueError):
+                cursor.base[0] = 999
+        cursor = cursor.base
+        seen += 1
+        assert seen < 16, label
+    assert isinstance(cursor, bytes), label
+
+
+def test_frozen_fit_snapshot_exposes_no_mutable_base_backing():
+    # The directly constructed snapshot (the in-memory publication path) must
+    # back its arrays with immutable bytes: no link in the ``.base`` chain can
+    # ever be re-enabled for writing.
+    arr = np.array([1.0, 2.0, 3.0])
+    frozen = FrozenFitResult(
+        params=arr,
+        bse=arr,
+        tvalues=arr,
+        pvalues=arr,
+        resid=arr,
+        fittedvalues=arr,
+        df_resid=1.0,
+        df_model=1.0,
+        nobs=3.0,
+    )
+    for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+        _assert_base_chain_cannot_be_made_writable(getattr(frozen, name), name)
+    run = build_run()
+    fit = run.scoring_fits["points_fit"]["fit"]
+    for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+        array = getattr(fit, name)
+        if isinstance(array.base, np.ndarray):
+            with pytest.raises(ValueError):
+                array.base.setflags(write=True)
+            with pytest.raises(ValueError):
+                array.base[0] = 999
+        with pytest.raises(ValueError):
+            array.setflags(write=True)
+
+
+def test_run_private_backing_state_is_immutable_serialized_bytes():
+    run = build_run()
+    backing_fields = (
+        "_membership",
+        "_logs",
+        "_coverage",
+        "_scoring_fits",
+        "_matchup_summary",
+        "_volume_fits",
+        "_volume_matchup_summary",
+        "_volume_reliability",
+        "_volume_shrinkage_summary",
+        "_artifacts",
+        "_dashboard_payload",
+    )
+    for name in backing_fields:
+        assert isinstance(getattr(run, name), bytes), name
+
+    before_membership = run.membership.copy()
+    before_logs = run.logs.copy()
+    with pytest.raises(TypeError):
+        run._membership[0] = 1
+    with pytest.raises(FrozenInstanceError):
+        run._membership = b"tampered"
+
+    # Even reconstructing the backing from its serialized form and mutating it
+    # must not change what later property reads return.
+    leaked = pickle.loads(run._membership)
+    leaked.iloc[0, 0] = "TAMPERED"
+    pd.testing.assert_frame_equal(run.membership, before_membership)
+
+    leaked_logs = pickle.loads(run._logs)
+    leaked_logs.loc[leaked_logs.index[0], "PTS"] = 999
+    pd.testing.assert_frame_equal(run.logs, before_logs)
+
+    leaked_artifacts = pickle.loads(run._artifacts)
+    leaked_artifacts.pop("watchlist")
+    leaked_artifacts["identity"] = None
+    assert run.artifacts["identity"] == run.identity
+    assert "watchlist" in run.artifacts
+
+    leaked_payload = pickle.loads(run._dashboard_payload)
+    leaked_payload.pop("provenance")
+    leaked_payload["identity"] = None
+    assert run.dashboard_payload["identity"] == run.identity
+    assert "provenance" in run.dashboard_payload
+
+
+def test_publish_artifact_set_uses_versioned_dirs_and_atomic_pointer():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        staging = root / "stage"
+        staging.mkdir()
+        manifest = write_staged_set(staging, run)
+        publish_artifact_set(staging, output)
+        assert output.is_symlink()
+        versioned_root = root / "matchups-runs"
+        entries = list(versioned_root.iterdir())
+        assert len(entries) == 1
+        assert output.resolve() == entries[0].resolve()
+        verify_persisted_manifest(manifest, output)
+        assert (output / "run_identity_manifest.json").exists()
+
+
+def test_publish_artifact_set_replaces_pointer_and_garbage_collects_old_set():
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        versioned_root = root / "matchups-runs"
+
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        manifest_a = write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+        verify_persisted_manifest(manifest_a, output)
+
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        manifest_b = write_staged_set(staging_b, run_b)
+        publish_artifact_set(staging_b, output)
+
+        entries = list(versioned_root.iterdir())
+        assert len(entries) == 1
+        assert output.resolve() == entries[0].resolve()
+        persisted = json.loads((output / "run_identity_manifest.json").read_text())
+        assert persisted["run_id"] == run_b.run_id
+        verify_persisted_manifest(manifest_b, output)
+
+
+def test_publish_artifact_set_sigkill_never_leaves_pointer_absent():
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        manifest_a = write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        write_staged_set(staging_b, run_b)
+
+        # A child process that kills itself with SIGKILL at the exact pointer
+        # swap: no Python exception handler can run, so a crash here must not
+        # leave the published path absent or pointing at a partial set.
+        child = root / "crash_child.py"
+        child.write_text(
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
+            "import artifact_persistence as ap\n"
+            "real_replace = os.replace\n"
+            "def killer(src, dst):\n"
+            "    if '.current-' in str(src):\n"
+            "        os.kill(os.getpid(), 9)\n"
+            "    return real_replace(src, dst)\n"
+            "os.replace = killer\n"
+            f"ap.publish_artifact_set({str(staging_b)!r}, {str(output)!r})\n"
+        )
+        subprocess.run([sys.executable, str(child)], check=False)
+
+        assert output.exists()
+        assert output.is_symlink()
+        persisted = json.loads((output / "run_identity_manifest.json").read_text())
+        assert persisted["run_id"] == run_a.run_id
+        verify_persisted_manifest(manifest_a, output)
+
+
+def test_publish_artifact_set_rejects_real_directory_target():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        output.mkdir()
+        staging = root / "stage"
+        staging.mkdir()
+        write_staged_set(staging, run)
+        with pytest.raises(ValueError, match="real directory"):
+            publish_artifact_set(staging, output)
+
+
+def _crafted_manifest(run_id, model_version, file_map):
+    return {
+        "run_id": run_id,
+        "model_version": model_version,
+        "stable_subtype_keys": {"100": "0" * 64},
+        "provenance": {},
+        "artifacts": {
+            name: {"file": filename, "sha256": "0" * 64}
+            for name, filename in file_map.items()
+        },
+    }
+
+
+def _all_canonical_files():
+    return dict(PERSISTED_ARTIFACT_FILENAMES)
+
+
+def test_verify_persisted_manifest_rejects_path_traversal():
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        crafted = _crafted_manifest(
+            "ab12" * 16,
+            "cd34" * 16,
+            {
+                name: f"../outside/{PERSISTED_ARTIFACT_FILENAMES[name]}"
+                for name in PERSISTED_ARTIFACT_FILENAMES
+            },
+        )
+        with pytest.raises(ValueError, match="must be persisted as"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def test_verify_persisted_manifest_rejects_absolute_and_non_basename_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        for bad_file in ("/etc/passwd", "sub/dir/matchup_summary.csv", "matchup_summary.csv/../../x"):
+            crafted = _crafted_manifest(
+                "ab12" * 16,
+                "cd34" * 16,
+                {
+                    name: (
+                        bad_file if name == "matchup_summary" else PERSISTED_ARTIFACT_FILENAMES[name]
+                    )
+                    for name in PERSISTED_ARTIFACT_FILENAMES
+                },
+            )
+            with pytest.raises(ValueError, match="must be persisted as"):
+                verify_persisted_manifest(crafted, directory)
+
+
+def test_verify_persisted_manifest_rejects_logical_type_substitution():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
+        base = artifact_manifest(run, paths)
+        # PNG logical artifacts substituted with CSV filenames.
+        png_as_csv = dict(base)
+        png_as_csv["artifacts"] = dict(base["artifacts"])
+        png_as_csv["artifacts"]["descriptive_pts_per_min_heatmap"] = {
+            "file": "descriptive_pts_per_min_interaction_heatmap.csv",
+            "sha256": base["artifacts"]["descriptive_pts_per_min_heatmap"]["sha256"],
+        }
+        with pytest.raises(ValueError, match="must be persisted as"):
+            verify_persisted_manifest(png_as_csv, directory)
+        # CSV logical artifacts substituted with PNG filenames.
+        csv_as_png = dict(base)
+        csv_as_png["artifacts"] = dict(base["artifacts"])
+        csv_as_png["artifacts"]["matchup_summary"] = {
+            "file": "matchup_summary.png",
+            "sha256": base["artifacts"]["matchup_summary"]["sha256"],
+        }
+        with pytest.raises(ValueError, match="must be persisted as"):
+            verify_persisted_manifest(csv_as_png, directory)
+
+
+def test_verify_persisted_manifest_rejects_wrong_identity_file_for_canonical_name():
+    # A canonical-name PNG file whose bytes are really a CSV must be rejected by
+    # the file-type binding, not blessed as a substituted artifact.
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
+        manifest = artifact_manifest(run, paths)
+        # Rewrite the heatmap PNG with CSV identity bytes under its canonical name.
+        csv_path = paths["matchup_summary"]
+        (directory / PERSISTED_ARTIFACT_FILENAMES["descriptive_pts_per_min_heatmap"]).write_bytes(
+            csv_path.read_bytes()
+        )
+        crafted = dict(manifest)
+        crafted["artifacts"] = dict(manifest["artifacts"])
+        crafted["artifacts"]["descriptive_pts_per_min_heatmap"] = {
+            "file": PERSISTED_ARTIFACT_FILENAMES["descriptive_pts_per_min_heatmap"],
+            "sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+        }
+        with pytest.raises(ValueError, match="Not a PNG"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def test_verify_persisted_manifest_rejects_symlink_escape():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        directory = root / "matchups"
+        directory.mkdir()
+        outside = root / "outside_secret.csv"
+        pd.DataFrame({"a": [1]}).assign(
+            RUN_ID=run.run_id, MODEL_VERSION=run.model_version
+        ).to_csv(outside, index=False)
+        os.symlink(outside, directory / "matchup_summary.csv")
+        paths = {name: directory / PERSISTED_ARTIFACT_FILENAMES[name] for name in PERSISTED_ARTIFACT_FILENAMES}
+        for name in PERSISTED_ARTIFACT_FILENAMES:
+            if name != "matchup_summary":
+                if PERSISTED_ARTIFACT_FILENAMES[name].endswith(".csv"):
+                    write_attributed_csv(paths[name], run)
+                else:
+                    write_stamped_png(paths[name], run)
+        crafted = _crafted_manifest(
+            run.run_id,
+            run.model_version,
+            {name: PERSISTED_ARTIFACT_FILENAMES[name] for name in PERSISTED_ARTIFACT_FILENAMES},
+        )
+        crafted["artifacts"]["matchup_summary"]["sha256"] = hashlib.sha256(
+            outside.read_bytes()
+        ).hexdigest()
+        with pytest.raises(ValueError, match="resolves outside"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def test_verify_persisted_manifest_rejects_non_hex_identity_fields():
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        for field in ("run_id", "model_version"):
+            crafted = _crafted_manifest(
+                "ab12" * 16, "cd34" * 16, _all_canonical_files()
+            )
+            crafted[field] = "../etc/passwd"
+            with pytest.raises(ValueError, match="hex digest"):
+                verify_persisted_manifest(crafted, directory)
+        crafted = _crafted_manifest("ab12" * 16, "cd34" * 16, _all_canonical_files())
+        crafted["run_id"] = "AB12" * 16
+        with pytest.raises(ValueError, match="hex digest"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def _write_temp_analysis_root(tmp_path):
+    """A git-backed temp analysis root containing the real ``code_revision``."""
+    root = Path(tmp_path) / "analysis"
+    root.mkdir()
+    sync = Path(tmp_path) / "sync"
+    sync.mkdir()
+    shutil.copy(SCRIPTS_DIR / "code_revision.py", root / "code_revision.py")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    return root, sync
+
+
+def _commit_all(root, message="seed"):
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+        cwd=root,
+        check=True,
+    )
+
+
+def _wait_for(path, timeout=45):
+    deadline = time.time() + timeout
+    while not path.exists():
+        if time.time() > deadline:
+            raise RuntimeError(f"timed out waiting for {path}")
+        time.sleep(0.02)
+
+
+ENTRY_TEMPLATE = """
+import os, pathlib, sys, time
+sys.path.insert(0, {root!r})
+from code_revision import current_code_revision, verify_loaded_code_matches_disk
+ROOT = pathlib.Path(__file__).resolve().parent
+SYNC = pathlib.Path({sync!r})
+code_revision = os.environ.get("STATSPLUS_ANALYSIS_CODE_REVISION") or current_code_revision(ROOT)
+(SYNC / "loaded.marker").write_text("loaded\\n")
+deadline = time.time() + 45
+while not (SYNC / "proceed").exists():
+    if time.time() > deadline: raise RuntimeError("timeout")
+    time.sleep(0.02)
+verify_loaded_code_matches_disk(ROOT)
+print("VERIFY_PASSED")
+"""
+
+
+def _format_root_sync(root, sync, template):
+    return template.format(root=str(root), sync=str(sync))
+
+LAUNCHER_TEMPLATE = """
+import os
+from code_revision import current_code_revision
+ROOT = os.path.dirname(os.path.abspath(__file__))
+os.environ["STATSPLUS_ANALYSIS_CODE_REVISION"] = current_code_revision(ROOT)
+import archetype_matchups_2025_26
+"""
+
+
+def test_loaded_code_verification_passes_when_entry_runs_via_launcher(tmp_path):
+    root, sync = _write_temp_analysis_root(tmp_path)
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
+    _commit_all(root)
+    proc = subprocess.Popen(
+        [sys.executable, str(root / "run_matchup_analysis.py")],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    _wait_for(sync / "loaded.marker")
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" in out, out
+
+
+def test_loaded_code_verification_fails_when_entry_runs_directly(tmp_path):
+    root, sync = _write_temp_analysis_root(tmp_path)
+    entry = (
+        "import os, pathlib, sys\n"
+        f"sys.path.insert(0, {str(root)!r})\n"
+        "from code_revision import verify_loaded_code_matches_disk\n"
+        "ROOT = pathlib.Path(__file__).resolve().parent\n"
+        "verify_loaded_code_matches_disk(ROOT)\n"
+        "print('VERIFY_PASSED')\n"
+    )
+    (root / "archetype_matchups_2025_26.py").write_text(entry)
+    _commit_all(root)
+    proc = subprocess.run(
+        [sys.executable, str(root / "archetype_matchups_2025_26.py")],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert "VERIFY_PASSED" not in proc.stdout
+    assert "must run through its launcher" in proc.stdout
+
+
+def test_loaded_code_provenance_race_fails_closed(tmp_path):
+    # Reproduction of the bootstrap race: the entry script is already loaded
+    # (v1) and its disk source is then edited to v2 before verification. Both
+    # a disk-only snapshot pair would agree on v2; the loaded-code proof must
+    # still fail closed instead of attributing the run to code it did not load.
+    root, sync = _write_temp_analysis_root(tmp_path)
+    entry_source = _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    (root / "archetype_matchups_2025_26.py").write_text(entry_source)
+    (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
+    _commit_all(root)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(root / "run_matchup_analysis.py")],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    _wait_for(sync / "loaded.marker")
+    (root / "archetype_matchups_2025_26.py").write_text(
+        entry_source + "\nMARKER = 'v2'\n"
+    )
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" not in out
+    assert "does not match its current disk source" in out
+
+
+def test_loaded_code_verification_fails_closed_without_bytecode_cache(tmp_path):
+    root, sync = _write_temp_analysis_root(tmp_path)
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
+    _commit_all(root)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.Popen(
+        [sys.executable, str(root / "run_matchup_analysis.py")],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    _wait_for(sync / "loaded.marker")
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" not in out
+    assert "no bytecode cache" in out
+
+
+def test_code_objects_equal_is_semantic_not_byte_serialization():
+    from code_revision import _code_objects_equal, _code_from_source_file
+
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "probe.py"
+        path.write_text("VALUE = 1\n\ndef f(x):\n    return x + VALUE\n")
+        first = _code_from_source_file(path)
+        second = _code_from_source_file(path)
+        assert _code_objects_equal(first, second)
+        path.write_text("VALUE = 1\n\ndef f(x):\n    return x + VALUE\n\n# comment only\n")
+        assert _code_objects_equal(first, _code_from_source_file(path))
+        path.write_text("VALUE = 2\n\ndef f(x):\n    return x + VALUE\n")
+        assert not _code_objects_equal(first, _code_from_source_file(path))
+
+
+def test_bytecode_cache_parsing_handles_both_timestamp_and_hash_headers():
+    import py_compile
+
+    from code_revision import _code_from_bytecode_cache, _code_objects_equal, _code_from_source_file
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        src = root / "probe.py"
+        src.write_text("VALUE = 1\n\ndef f(x):\n    return x + VALUE\n")
+        disk_code = _code_from_source_file(src)
+
+        timestamp_cache = root / "probe.timestamp.pyc"
+        py_compile.compile(
+            str(src), cfile=str(timestamp_cache), doraise=True
+        )
+        loaded = _code_from_bytecode_cache(timestamp_cache)
+        assert _code_objects_equal(loaded, disk_code)
+
+        hash_cache = root / "probe.hash.pyc"
+        py_compile.compile(
+            str(src),
+            cfile=str(hash_cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+        )
+        loaded = _code_from_bytecode_cache(hash_cache)
+        assert _code_objects_equal(loaded, disk_code)
+        truncated = root / "truncated.pyc"
+        truncated.write_bytes(b"\x00" * 8)
+        with pytest.raises(ValueError):
+            _code_from_bytecode_cache(truncated)

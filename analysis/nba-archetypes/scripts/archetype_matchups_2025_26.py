@@ -10,24 +10,30 @@
 # The reusable, deterministic Analysis Run builder lives in
 # `scripts/matchup_analysis.py`; this script is the data/IO shell that feeds it
 # the membership and game-log frames and renders its artifacts.
+#
+# Production runs must go through `run_matchup_analysis.py`: it captures the
+# code revision before any analysis module is loaded and imports this script as
+# a module, so immediately before publication the loaded bytecode of every
+# analysis module can be proven to match the disk code it is attributed to.
 
 # ruff: noqa: E402  # the code-revision capture must precede implementation imports
 
 # %%
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import time
 
-from code_revision import current_code_revision
+from code_revision import current_code_revision, verify_loaded_code_matches_disk
 
-# Capture the code snapshot before the implementation modules are imported, so
-# the run id is bound to the exact code Python is about to load rather than to
+# The launcher captures this snapshot before importing any analysis module, so
+# the run id is bound to the disk state the code was loaded from rather than to
 # whatever the disk happens to hold after the (potentially long) data fetch or
-# after a later edit. The snapshot is re-checked immediately before publishing,
-# and publication aborts if it moved.
-code_revision = current_code_revision()
+# after a later edit. Running this script directly falls back to a disk capture
+# and is rejected before publication by the loaded-code verification below.
+code_revision = os.environ.get("STATSPLUS_ANALYSIS_CODE_REVISION") or current_code_revision()
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -64,9 +70,13 @@ FEATURES_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_scoring_featu
 MODEL_MATRIX_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_model_matrix.csv"
 CLUSTERING_METADATA_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "clustering_metadata.json"
 CACHE_DIR = ROOT / "archetypes_data" / SEASON_KEY
+# The published directory is a symlink pointer into an immutable versioned
+# ``matchups-runs`` namespace (see ``publish_artifact_set``), so only its parent
+# is created here; creating a real directory at the pointer would break the
+# atomic publication swap.
 OUTPUT_DIR = ROOT / "archetypes_outputs" / SEASON_KEY / "matchups"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
 GAME_LOG_CACHE = CACHE_DIR / "player_game_logs_regular_season.csv"
 
 print(f"Season: {SEASON} {SEASON_TYPE}")
@@ -311,8 +321,12 @@ plt.close(fig)
 # The run id is bound to the code snapshot captured before the implementation
 # modules were imported. The snapshot is re-captured now that every artifact has
 # been computed, and publication aborts if it moved: an edit made while the run
-# was building must not let newer disk code claim an older run's identity.
+# was building must not let newer disk code claim an older run's identity. The
+# loaded-code check then proves the bytecode actually executing for every
+# analysis module matches the disk code it is attributed to, closing the window
+# where the entry script and code_revision are loaded before any snapshot exists.
 fail_if_code_changed(code_revision, current_code_revision())
+verify_loaded_code_matches_disk()
 
 # Persist one content-addressed identity manifest so every saved artifact is
 # attributable to the exact Analysis Run and archetype model that produced it.

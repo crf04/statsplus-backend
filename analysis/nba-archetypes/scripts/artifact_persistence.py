@@ -12,6 +12,7 @@ module; the production script and the manifest callers are its only users.
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import zlib
@@ -20,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 # The exact persisted artifact set a published run must contain. A manifest is
 # the publication marker for a complete run, so blessing anything short of this
@@ -39,6 +41,25 @@ REQUIRED_PERSISTED_ARTIFACTS = frozenset(
         "descriptive_volume_interaction_heatmaps",
     }
 )
+
+# Every logical artifact is bound to exactly one canonical filename and file
+# type. A manifest may not substitute an arbitrary name or path for a logical
+# artifact: verification resolves each record to its canonical basename, so
+# absolute paths, traversal paths, and CSV-for-PNG (or PNG-for-CSV) type
+# substitution are structurally rejected before any content is trusted.
+PERSISTED_ARTIFACT_FILENAMES = {
+    "matchup_summary": "matchup_summary.csv",
+    "notable_matchups": "notable_pts_per_min_matchups.csv",
+    "validated_interactions": "validated_pts_per_min_interactions.csv",
+    "watchlist": "descriptive_pts_per_min_watchlist.csv",
+    "player_relative_matchups": "player_relative_matchups.csv",
+    "volume_matchup_summary": "volume_matchup_summary.csv",
+    "validated_volume_interactions": "validated_volume_interactions.csv",
+    "volume_reliability": "volume_split_half_reliability.csv",
+    "player_relative_volume_matchups": "player_relative_volume_matchups.csv",
+    "descriptive_pts_per_min_heatmap": "descriptive_pts_per_min_interaction_heatmap.png",
+    "descriptive_volume_interaction_heatmaps": "descriptive_volume_interaction_heatmaps.png",
+}
 
 
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -130,9 +151,19 @@ def _verify_artifact_identity(path, run_id, model_version, name):
     CSVs must be non-empty and carry ``RUN_ID``/``MODEL_VERSION`` values equal
     to the run's on every row (empty CSVs still embed an identity row), and
     PNGs must be structurally valid and embed the run identity in tEXt chunks.
-    Any other file type cannot carry run identity and is rejected, so a
-    misnamed or identity-less file is never silently blessed.
+    The file type is bound to the logical artifact: a ``.csv`` name for a PNG
+    logical artifact (or vice versa) is rejected, and any other file type cannot
+    carry run identity, so a misnamed, substituted, or identity-less file is
+    never silently blessed.
     """
+    expected_suffix = (
+        ".png" if PERSISTED_ARTIFACT_FILENAMES[name].endswith(".png") else ".csv"
+    )
+    if Path(path).suffix.lower() != expected_suffix:
+        raise ValueError(
+            f"Artifact {name} must be persisted as a {expected_suffix} file; "
+            f"got {Path(path).name}"
+        )
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
         frame = pd.read_csv(path)
@@ -195,6 +226,12 @@ def artifact_manifest(run, artifact_paths: dict) -> dict:
             "An artifact manifest must cover exactly the required persisted "
             "artifact set; " + "; ".join(problems)
         )
+    for name, path in artifact_paths.items():
+        expected = PERSISTED_ARTIFACT_FILENAMES[name]
+        if Path(path).name != expected:
+            raise ValueError(
+                f"Artifact {name} must be saved as {expected}, not {Path(path).name}"
+            )
     artifacts = {
         name: {
             "file": Path(path).name,
@@ -226,11 +263,21 @@ def verify_persisted_manifest(manifest: dict, output_dir) -> None:
     """Fail-closed verification that a persisted run is complete and attributable.
 
     The recorded artifact set must be exactly the required persisted set with no
-    duplicate filenames; each artifact must still exist, match its recorded
-    SHA-256, and embed the manifest's run/model identity in its own bytes (CSV
-    identity columns or PNG tEXt chunks). Missing, tampered, partial, or
-    falsely attributed files raise instead of being silently accepted.
+    duplicate filenames, and every logical artifact must be bound to its one
+    canonical basename (which also structurally rejects absolute, traversal, and
+    type-substituted paths). Each artifact must still exist under ``output_dir``,
+    resolve back inside it, match its recorded SHA-256, and embed the manifest's
+    run/model identity in its own bytes (CSV identity columns or PNG tEXt
+    chunks). Missing, tampered, partial, substituted, or falsely attributed
+    files raise instead of being silently accepted.
     """
+    for field in ("run_id", "model_version"):
+        value = manifest.get(field)
+        if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
+            raise ValueError(
+                f"A persisted manifest {field} must be a 64-character lowercase "
+                "hex digest"
+            )
     recorded = dict(manifest["artifacts"])
     provided = set(recorded)
     missing = REQUIRED_PERSISTED_ARTIFACTS - provided
@@ -252,11 +299,22 @@ def verify_persisted_manifest(manifest: dict, output_dir) -> None:
             "A persisted manifest must map each file to exactly one artifact; "
             "duplicate files: " + ", ".join(duplicates)
         )
-    directory = Path(output_dir)
+    directory = Path(output_dir).resolve()
     for name, record in recorded.items():
-        path = directory / record["file"]
+        expected = PERSISTED_ARTIFACT_FILENAMES.get(name)
+        file = record.get("file")
+        if expected is None or file != expected:
+            raise ValueError(
+                f"Artifact {name} must be persisted as {expected}, not {file!r}"
+            )
+        path = directory / file
         if not path.exists():
             raise FileNotFoundError(f"Artifact {name} is missing: {path}")
+        resolved = path.resolve()
+        if resolved.parent != directory:
+            raise ValueError(
+                f"Artifact {name} resolves outside the artifact directory: {resolved}"
+            )
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != record["sha256"]:
             raise ValueError(f"Artifact {name} does not match its recorded digest")
@@ -265,19 +323,59 @@ def verify_persisted_manifest(manifest: dict, output_dir) -> None:
         )
 
 
+def _next_publication_sequence(versioned_root, run_id) -> int:
+    """The next unique suffix for a versioned publication of ``run_id``."""
+    prefix = run_id + "~"
+    sequences = [
+        int(entry.name[len(prefix):])
+        for entry in versioned_root.iterdir()
+        if entry.name.startswith(prefix) and entry.name[len(prefix):].isdigit()
+    ]
+    sequence = max(sequences, default=0) + 1
+    while (versioned_root / f"{run_id}~{sequence}").exists():
+        sequence += 1
+    return sequence
+
+
+def _gc_published_runs(versioned_root, target) -> None:
+    """Best-effort removal of superseded immutable sets, keeping the live one.
+
+    Runs only after the pointer has been flipped, so a crash during garbage
+    collection can strand unreachable sets but can never remove the set the
+    published pointer resolves to.
+    """
+    try:
+        current = Path(target).resolve()
+    except (OSError, RuntimeError):
+        return
+    for entry in versioned_root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            if entry.resolve() == current:
+                continue
+        except (OSError, RuntimeError):
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
 def publish_artifact_set(staging_dir, output_dir) -> None:
-    """Atomically replace a published artifact set with a verified staged set.
+    """Crash-safely replace a published artifact set with a verified staged set.
 
     ``staging_dir`` must contain every required persisted artifact plus the
     ``run_identity_manifest.json`` written by ``artifact_manifest``. The staged
     set is verified here exactly as ``verify_persisted_manifest`` would verify
     the published directory, so an incomplete, tampered, or falsely attributed
-    staging directory raises and leaves ``output_dir`` untouched. Only a fully
-    verified set is then swapped in atomically: the previously published set
-    stays intact until the swap, so an aborted publication never leaves the old
-    manifest beside a partially replaced file set, and the manifest (the
-    publication marker) is swapped with the set rather than written over a
-    partially replaced directory.
+    staging directory raises and leaves ``output_dir`` untouched.
+
+    Publication uses immutable versioned directories plus an atomically replaced
+    pointer. The verified set is first moved into an immutable, run-addressed
+    versioned directory (a sibling ``<name>-runs`` namespace); the externally
+    observed ``output_dir`` is a symlink whose target is swapped in one atomic
+    ``os.replace``. A crash before the swap leaves the previous set fully live;
+    a crash after the swap publishes the new set; the old set survives until a
+    post-swap garbage collection, so SIGKILL or power loss can never leave the
+    publication path absent or expose a partially replaced set.
     """
     staging = Path(staging_dir)
     target = Path(output_dir)
@@ -289,16 +387,31 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     manifest = json.loads(manifest_path.read_text())
     verify_persisted_manifest(manifest, staging)
 
-    backup = target.with_name(target.name + ".previous")
-    if backup.exists():
-        shutil.rmtree(backup)
-    if target.exists():
-        os.replace(target, backup)
+    if target.exists() and not target.is_symlink():
+        raise ValueError(
+            f"{target} is a real directory, not a versioned pointer; move it "
+            "aside and republish so publication can stay atomic"
+        )
+    versioned_root = target.with_name(target.name + "-runs")
+    versioned_root.mkdir(parents=True, exist_ok=True)
+    run_id = manifest["run_id"]
+    sequence = _next_publication_sequence(versioned_root, run_id)
+    versioned = versioned_root / f"{run_id}~{sequence}"
+    # Atomic move of the fully verified set into the immutable versioned
+    # namespace. Until the pointer swap below, the published path still resolves
+    # to the previous set.
+    os.replace(staging, versioned)
     try:
-        os.replace(staging, target)
+        pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
+        os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
+        try:
+            # Atomic pointer flip: the externally observed path switches from the
+            # old set to the new set in a single rename.
+            os.replace(pointer_tmp, target)
+        except BaseException:
+            pointer_tmp.unlink(missing_ok=True)
+            raise
     except BaseException:
-        if backup.exists() and not target.exists():
-            os.replace(backup, target)
+        shutil.rmtree(versioned, ignore_errors=True)
         raise
-    if backup.exists():
-        shutil.rmtree(backup)
+    _gc_published_runs(versioned_root, target)

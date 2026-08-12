@@ -13,6 +13,7 @@ choice, and effects extraction are deterministic given the input frames.
 
 import hashlib
 import json
+import pickle
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -319,6 +320,12 @@ class FrozenDict(Mapping):
     def copy(self):
         return FrozenDict(self._data)
 
+    def __getstate__(self):
+        return dict(self._data)
+
+    def __setstate__(self, state):
+        object.__setattr__(self, "_data", MappingProxyType(state))
+
     def _immutable(self, *args, **kwargs):
         raise TypeError("This mapping is immutable")
 
@@ -395,63 +402,6 @@ class RunIdentity:
         object.__setattr__(self, "stable_subtype_keys", FrozenDict(dict(keys)))
 
 
-def _is_mutable_cell(value):
-    """True for container values that a pandas ``copy(deep=True)`` does not copy."""
-    return isinstance(value, (dict, list, tuple, set, np.ndarray, Mapping))
-
-
-def _copy_container_cells(series):
-    """Return ``series`` deep-copied, including any mutable object-dtype cells.
-
-    ``pandas`` ``copy(deep=True)`` does not recurse into object-dtype elements,
-    so a dict/list/set/array/Mapping stored in a cell would otherwise leak into
-    the run's captured state.
-    """
-    copied = series.copy(deep=True)
-    if copied.dtype == object:
-        mask = copied.map(_is_mutable_cell)
-        if mask.any():
-            copied.loc[mask] = copied.loc[mask].map(_defensive_copy)
-    return copied
-
-
-def _defensive_copy(value):
-    """Recursively copy mutable containers so callers cannot mutate stored state.
-
-    DataFrames, Series, lists, dicts, and sets are copied; numpy arrays are
-    copied as well where directly reachable, and object-dtype DataFrame/Series
-    cells holding containers are copied too. Custom mutable Mappings are copied
-    into fresh dicts. Immutable value objects (RunIdentity, ArchetypeModelSpec,
-    RunProvenance, FrozenDict) and immutable fit snapshots pass through
-    unchanged, so no mutable fit state is reachable through a published property.
-    """
-    if isinstance(value, pd.DataFrame):
-        copied = value.copy(deep=True)
-        for column in copied.columns:
-            if copied[column].dtype == object:
-                mask = copied[column].map(_is_mutable_cell)
-                if mask.any():
-                    copied.loc[mask, column] = copied.loc[mask, column].map(
-                        _defensive_copy
-                    )
-        return copied
-    if isinstance(value, pd.Series):
-        return _copy_container_cells(value)
-    if isinstance(value, np.ndarray):
-        return value.copy()
-    if isinstance(value, dict):
-        return {key: _defensive_copy(item) for key, item in value.items()}
-    if isinstance(value, set):
-        return {_defensive_copy(item) for item in value}
-    if isinstance(value, (list, tuple)):
-        return type(value)(_defensive_copy(item) for item in value)
-    if isinstance(value, Mapping):
-        if isinstance(value, FrozenDict):
-            return value
-        return {key: _defensive_copy(item) for key, item in value.items()}
-    return value
-
-
 def _freeze_fit_arrays(value, _seen=None):
     """Make every numpy array reachable from a model-fit result read-only.
 
@@ -491,9 +441,9 @@ class _ImmutableArray(np.ndarray):
     numpy's ``writeable`` flag alone is not enough for a published snapshot: a
     caller can re-enable writes with ``setflags(write=True)`` and mutate the
     stored data in place. This subclass rejects re-enabling writes and direct
-    element writes, so a ``FrozenFitResult`` array stays unchanged however it
-    is reached. Read operations (indexing, arithmetic, copies, pandas
-    conversion) behave exactly like a plain read-only array.
+    element writes, so a ``FrozenFitResult`` array stays unchanged however it is
+    reached. Read operations (indexing, arithmetic, copies, pandas conversion)
+    behave exactly like a plain read-only array.
     """
 
     __slots__ = ()
@@ -508,6 +458,25 @@ class _ImmutableArray(np.ndarray):
 
     def __setitem__(self, key, value):
         raise ValueError("This array is read-only")
+
+
+def _immutable_ndarray(value) -> np.ndarray:
+    """Return ``value`` as an ndarray whose memory can never be re-enabled.
+
+    ``np.frombuffer`` over the ``bytes`` returned by ``tobytes()`` produces an
+    array whose backing buffer is immutable Python ``bytes``. numpy refuses to
+    re-enable writes on such an array (``setflags(write=True)`` raises), so
+    unlike a ``setflags(write=False)`` copy, neither the returned array nor any
+    ``.base`` reached from it can be made writable again.
+    """
+    value = np.asarray(value)
+    if value.dtype == object:
+        frozen = value.copy()
+        frozen.setflags(write=False)
+        return frozen
+    return np.frombuffer(value.tobytes(order="C"), dtype=value.dtype).reshape(
+        value.shape
+    )
 
 
 @dataclass(frozen=True)
@@ -535,9 +504,11 @@ class FrozenFitResult:
             value = getattr(self, name)
             if not isinstance(value, np.ndarray):
                 raise ValueError(f"{name} must be a numpy array")
-            frozen = value.copy()
-            frozen.setflags(write=False)
-            object.__setattr__(self, name, frozen.view(_ImmutableArray))
+            # The snapshot is backed by immutable bytes, so even the ``.base``
+            # exposed by the published view cannot be made writable again.
+            object.__setattr__(
+                self, name, _immutable_ndarray(value).view(_ImmutableArray)
+            )
         for name in ("df_resid", "df_model", "nobs"):
             object.__setattr__(self, name, float(getattr(self, name)))
 
@@ -554,6 +525,36 @@ class FrozenFitResult:
             df_model=fit.df_model,
             nobs=fit.nobs,
         )
+
+
+def _repin_immutable_arrays(value, _seen=None):
+    """Re-pin published ``_ImmutableArray`` snapshots after a pickle round-trip.
+
+    Pickling reconstructs the immutable fit-snapshot arrays as owned writable
+    ``_ImmutableArray`` instances; re-setting their writeable flag restores the
+    published read-only contract. Plain arrays (such as the clustered
+    covariance) are left writable so a caller mutating a returned copy cannot
+    touch the run's serialized backing, exactly as a defensive copy behaves.
+    """
+    if _seen is None:
+        _seen = set()
+    if id(value) in _seen:
+        return
+    _seen.add(id(value))
+    if isinstance(value, _ImmutableArray):
+        value.setflags(write=False)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _repin_immutable_arrays(item, _seen)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _repin_immutable_arrays(item, _seen)
+        return
+    if hasattr(value, "__dict__"):
+        for item in vars(value).values():
+            _repin_immutable_arrays(item, _seen)
 
 
 def _snapshot_fit_results(scoring_fits):
@@ -577,28 +578,34 @@ def _snapshot_fit_results(scoring_fits):
 class AnalysisRun:
     """Immutable result of one Analysis Run build.
 
-    Mutable containers are stored privately as defensive deep copies and
-    re-exposed through read-only properties that return fresh copies, so a
-    post-build mutation of any returned frame, series, or dict cannot alter the
-    run's captured state.
+    Every mutable backing collection (frames, series, fit dicts, artifact and
+    payload dicts) is serialized to immutable ``bytes`` at construction time,
+    so even direct access to a private ``_``-prefixed field cannot mutate the
+    run graph: the backing bytes have no mutable surface, and each read-only
+    property deserializes a fresh object that no caller can write back through.
+    The fit result snapshots remain immutable through the serialization.
     """
 
-    _membership: pd.DataFrame = field(repr=False)
-    _logs: pd.DataFrame = field(repr=False)
-    _coverage: pd.Series = field(repr=False)
-    _scoring_fits: dict = field(repr=False)
-    _matchup_summary: pd.DataFrame = field(repr=False)
-    _volume_fits: dict = field(repr=False)
-    _volume_matchup_summary: pd.DataFrame = field(repr=False)
-    _volume_reliability: pd.DataFrame = field(repr=False)
-    _volume_shrinkage_summary: pd.DataFrame = field(repr=False)
-    _artifacts: dict = field(repr=False)
-    _dashboard_payload: dict = field(repr=False)
+    _membership: bytes = field(repr=False)
+    _logs: bytes = field(repr=False)
+    _coverage: bytes = field(repr=False)
+    _scoring_fits: bytes = field(repr=False)
+    _matchup_summary: bytes = field(repr=False)
+    _volume_fits: bytes = field(repr=False)
+    _volume_matchup_summary: bytes = field(repr=False)
+    _volume_reliability: bytes = field(repr=False)
+    _volume_shrinkage_summary: bytes = field(repr=False)
+    _artifacts: bytes = field(repr=False)
+    _dashboard_payload: bytes = field(repr=False)
     identity: RunIdentity
     model_spec: ArchetypeModelSpec
     provenance: RunProvenance
 
     def __post_init__(self):
+        # The live statsmodels results are replaced by immutable snapshots so a
+        # published fit cannot be rewritten or have its arrays changed, then the
+        # entire backing graph is serialized to immutable bytes.
+        object.__setattr__(self, "_scoring_fits", _snapshot_fit_results(self._scoring_fits))
         for name in (
             "_membership",
             "_logs",
@@ -612,54 +619,55 @@ class AnalysisRun:
             "_artifacts",
             "_dashboard_payload",
         ):
-            object.__setattr__(self, name, _defensive_copy(getattr(self, name)))
-        # The live statsmodels results are replaced by immutable snapshots so a
-        # published fit cannot be rewritten or have its arrays changed.
-        object.__setattr__(self, "_scoring_fits", _snapshot_fit_results(self._scoring_fits))
+            object.__setattr__(self, name, pickle.dumps(getattr(self, name), protocol=pickle.HIGHEST_PROTOCOL))
 
     @property
     def membership(self) -> pd.DataFrame:
-        return _defensive_copy(self._membership)
+        return pickle.loads(self._membership)
 
     @property
     def logs(self) -> pd.DataFrame:
-        return _defensive_copy(self._logs)
+        return pickle.loads(self._logs)
 
     @property
     def coverage(self) -> pd.Series:
-        return _defensive_copy(self._coverage)
+        return pickle.loads(self._coverage)
 
     @property
     def scoring_fits(self) -> dict:
-        return _defensive_copy(self._scoring_fits)
+        value = pickle.loads(self._scoring_fits)
+        _repin_immutable_arrays(value)
+        return value
 
     @property
     def matchup_summary(self) -> pd.DataFrame:
-        return _defensive_copy(self._matchup_summary)
+        return pickle.loads(self._matchup_summary)
 
     @property
     def volume_fits(self) -> dict:
-        return _defensive_copy(self._volume_fits)
+        value = pickle.loads(self._volume_fits)
+        _repin_immutable_arrays(value)
+        return value
 
     @property
     def volume_matchup_summary(self) -> pd.DataFrame:
-        return _defensive_copy(self._volume_matchup_summary)
+        return pickle.loads(self._volume_matchup_summary)
 
     @property
     def volume_reliability(self) -> pd.DataFrame:
-        return _defensive_copy(self._volume_reliability)
+        return pickle.loads(self._volume_reliability)
 
     @property
     def volume_shrinkage_summary(self) -> pd.DataFrame:
-        return _defensive_copy(self._volume_shrinkage_summary)
+        return pickle.loads(self._volume_shrinkage_summary)
 
     @property
     def artifacts(self) -> dict:
-        return _defensive_copy(self._artifacts)
+        return pickle.loads(self._artifacts)
 
     @property
     def dashboard_payload(self) -> dict:
-        return _defensive_copy(self._dashboard_payload)
+        return pickle.loads(self._dashboard_payload)
 
     @property
     def run_id(self) -> str:
