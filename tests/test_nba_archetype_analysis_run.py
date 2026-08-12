@@ -10,8 +10,10 @@ instead of source text or dataframe implementations.
 import hashlib
 import json
 import re
+import struct
 import sys
 import tempfile
+import zlib
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,11 +29,17 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from matchup_analysis import (  # noqa: E402
     AnalysisRunBuilder,
+    AnalysisRunSettings,
     ArchetypeModelSpec,
+    FrozenDict,
     RunIdentity,
+    _defensive_copy,
     artifact_manifest,
     compute_input_data_identity,
+    png_text_entries,
     spec_from_clustering_metadata,
+    stamp_png_identity,
+    verify_persisted_manifest,
 )
 
 BASE_DATE = date(2026, 1, 5)
@@ -267,6 +275,51 @@ def build_builder(archetypes, game_logs, **builder_kwargs):
         model_spec=model_spec,
         **builder_kwargs,
     )
+
+
+def minimal_png_bytes():
+    """A structurally valid minimal 1x1 RGBA PNG, built offline."""
+
+    def chunk(chunk_type, data):
+        return (
+            struct.pack(">I", len(data))
+            + chunk_type
+            + data
+            + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+        )
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    idat = chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00"))
+    iend = chunk(b"IEND", b"")
+    return signature + ihdr + idat + iend
+
+
+def write_attributed_csv(path, run, rows=None):
+    frame = pd.DataFrame(
+        rows if rows is not None else [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+    )
+    frame = frame.assign(RUN_ID=run.run_id, MODEL_VERSION=run.model_version)
+    frame.to_csv(path, index=False)
+    return path
+
+
+def write_empty_attributed_csv(path, run):
+    empty = pd.DataFrame(columns=["a", "b"]).assign(
+        RUN_ID=run.run_id, MODEL_VERSION=run.model_version
+    )
+    row = {column: "" for column in empty.columns}
+    row.update({"RUN_ID": run.run_id, "MODEL_VERSION": run.model_version})
+    empty = pd.DataFrame([row], columns=empty.columns)
+    empty.to_csv(path, index=False)
+    return path
+
+
+def write_stamped_png(path, run):
+    path.write_bytes(
+        stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
+    )
+    return path
 
 
 def test_fixture_structure_represents_required_shapes():
@@ -868,10 +921,8 @@ def test_artifact_manifest_records_content_digests():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
-        summary_path = directory / "matchup_summary.csv"
-        summary_path.write_text("a,b\n1,2\n")
-        heatmap_path = directory / "heatmap.png"
-        heatmap_path.write_bytes(b"\x89PNG-fake")
+        summary_path = write_attributed_csv(directory / "matchup_summary.csv", run)
+        heatmap_path = write_stamped_png(directory / "heatmap.png", run)
         manifest = artifact_manifest(
             run,
             {
@@ -887,18 +938,207 @@ def test_artifact_manifest_records_content_digests():
         assert manifest["provenance"] == run.provenance.to_dict()
         assert manifest["artifacts"]["matchup_summary"] == {
             "file": "matchup_summary.csv",
-            "sha256": hashlib.sha256(b"a,b\n1,2\n").hexdigest(),
+            "sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
         }
         assert manifest["artifacts"]["pts_per_min_heatmap"] == {
             "file": "heatmap.png",
-            "sha256": hashlib.sha256(b"\x89PNG-fake").hexdigest(),
+            "sha256": hashlib.sha256(heatmap_path.read_bytes()).hexdigest(),
         }
-        summary_path.write_text("a,b\n9,9\n")
+        tampered = pd.DataFrame({"a": [9], "b": [9]}).assign(
+            RUN_ID=run.run_id, MODEL_VERSION=run.model_version
+        )
+        tampered.to_csv(summary_path, index=False)
         replaced = artifact_manifest(run, {"matchup_summary": summary_path})
         assert (
             replaced["artifacts"]["matchup_summary"]["sha256"]
             != manifest["artifacts"]["matchup_summary"]["sha256"]
         )
+
+
+def test_artifact_manifest_rejects_identity_less_csv():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "matchup_summary.csv"
+        path.write_text("a,b\n1,2\n")
+        with pytest.raises(ValueError, match="not self-attributing"):
+            artifact_manifest(run, {"matchup_summary": path})
+
+
+def test_artifact_manifest_rejects_foreign_csv_identity():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "matchup_summary.csv"
+        foreign = pd.DataFrame({"a": [1]}).assign(
+            RUN_ID="0" * 64, MODEL_VERSION="0" * 64
+        )
+        foreign.to_csv(path, index=False)
+        with pytest.raises(ValueError, match="does not match this run"):
+            artifact_manifest(run, {"matchup_summary": path})
+
+
+def test_artifact_manifest_accepts_empty_attributed_csv():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_empty_attributed_csv(Path(tmp) / "watchlist.csv", run)
+        manifest = artifact_manifest(run, {"watchlist": path})
+        frame = pd.read_csv(path)
+        assert frame["RUN_ID"].tolist() == [run.run_id]
+        assert manifest["artifacts"]["watchlist"]["sha256"] == hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        verify_persisted_manifest(manifest, Path(tmp))
+
+
+def test_png_identity_stamping_roundtrips():
+    run = build_run()
+    stamped = stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
+    entries = png_text_entries(stamped)
+    assert entries["run_id"] == run.run_id
+    assert entries["model_version"] == run.model_version
+
+
+def test_verify_persisted_manifest_rejects_tampered_and_missing():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        summary_path = write_attributed_csv(directory / "matchup_summary.csv", run)
+        heatmap_path = write_stamped_png(directory / "heatmap.png", run)
+        manifest = artifact_manifest(
+            run,
+            {"matchup_summary": summary_path, "pts_per_min_heatmap": heatmap_path},
+        )
+        verify_persisted_manifest(manifest, directory)
+
+        summary_path.write_text("tampered\n1\n")
+        with pytest.raises(ValueError, match="does not match its recorded digest"):
+            verify_persisted_manifest(manifest, directory)
+        write_attributed_csv(summary_path, run)
+
+        (directory / "matchup_summary.csv").unlink()
+        with pytest.raises(FileNotFoundError, match="is missing"):
+            verify_persisted_manifest(manifest, directory)
+        write_attributed_csv(summary_path, run)
+
+        foreign = pd.DataFrame({"a": [1]}).assign(
+            RUN_ID="1" * 64, MODEL_VERSION="1" * 64
+        )
+        foreign.to_csv(summary_path, index=False)
+        crafted = dict(manifest)
+        crafted["artifacts"] = {
+            "matchup_summary": {
+                "file": "matchup_summary.csv",
+                "sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+            }
+        }
+        with pytest.raises(ValueError, match="embeds identity that does not match"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def test_run_id_is_versioned_by_analysis_settings():
+    archetypes, game_logs = synthetic_fixture()
+    defaults = build_builder(archetypes, game_logs, code_revision="rev-1").build()
+    tight = build_builder(
+        archetypes,
+        game_logs,
+        code_revision="rev-1",
+        settings=AnalysisRunSettings(
+            min_cell_players=1,
+            min_cell_games=1,
+            min_cell_offensive_teams=1,
+        ),
+    ).build()
+    assert defaults.run_id != tight.run_id
+    assert defaults.model_version == tight.model_version
+
+
+def test_artifact_digests_are_bound_to_run_identity():
+    archetypes, game_logs = synthetic_fixture()
+    run_a = build_builder(archetypes, game_logs, code_revision="rev-a").build()
+    run_b = build_builder(archetypes, game_logs, code_revision="rev-b").build()
+    assert run_a.run_id != run_b.run_id
+    pd.testing.assert_frame_equal(
+        run_a.artifacts["matchup_summary"], run_b.artifacts["matchup_summary"]
+    )
+    assert (
+        run_a.artifacts["artifact_digests"]["matchup_summary"]
+        != run_b.artifacts["artifact_digests"]["matchup_summary"]
+    )
+
+
+def test_dashboard_assembly_rejects_replaced_digest_record():
+    archetypes, game_logs = synthetic_fixture()
+    builder = build_builder(archetypes, game_logs)
+    builder.assemble_artifacts()
+    builder._artifacts["artifact_digests"] = FrozenDict()
+    with pytest.raises(ValueError, match="digest record"):
+        builder.assemble_dashboard_payload()
+
+
+def test_fit_objects_published_by_analysis_run_are_immutable():
+    run = build_run()
+    fit = run.scoring_fits["points_fit"]["fit"]
+    original = fit.params.copy()
+    with pytest.raises(ValueError):
+        fit.params[0] = 999
+    np.testing.assert_array_equal(fit.params, original)
+    with pytest.raises(ValueError):
+        fit.params += 1
+    np.testing.assert_array_equal(fit.params, original)
+    original_cov = run.scoring_fits["points_fit"]["covariance"].copy()
+    covariance = run.scoring_fits["points_fit"]["covariance"]
+    covariance[0, 0] = 999
+    np.testing.assert_array_equal(
+        run.scoring_fits["points_fit"]["covariance"], original_cov
+    )
+
+
+def test_defensive_copy_closes_object_valued_cells():
+    source = {
+        "frame": pd.DataFrame({"notes": [["a"], {"b": 1}], "value": [1, 2]})
+    }
+    copied = _defensive_copy(source)
+    copied["frame"].at[0, "notes"].append("leaked")
+    copied["frame"].at[1, "notes"]["b"] = 99
+    assert source["frame"].at[0, "notes"] == ["a"]
+    assert source["frame"].at[1, "notes"] == {"b": 1}
+
+
+def test_frozen_dict_rejects_base_dict_invocation():
+    frozen = FrozenDict({"a": 1})
+    with pytest.raises(TypeError):
+        dict.__setitem__(frozen, "a", 2)
+    with pytest.raises(TypeError):
+        dict.update(frozen, {"a": 2})
+    with pytest.raises(TypeError):
+        dict.__ior__(frozen, {"a": 2})
+    assert frozen["a"] == 1
+    assert dict(frozen) == {"a": 1}
+    assert frozen == {"a": 1}
+
+
+def test_clustering_attempt_requires_positive_integer():
+    archetypes, game_logs = synthetic_fixture()
+    spec = make_model_spec(archetypes, game_logs)
+    for bad in (None, "3", 0, -2, 2.5, True, False):
+        with pytest.raises(ValueError, match="clustering_attempt"):
+            AnalysisRunBuilder(
+                archetypes=archetypes,
+                game_logs=game_logs,
+                model_spec=spec,
+                code_revision="rev-1",
+                clustering_attempt=bad,
+            )
+
+
+def test_input_data_identity_survives_lossless_csv_round_trip():
+    archetypes, game_logs = synthetic_fixture()
+    snapshot = game_logs[["PLAYER_ID", "MIN"]].assign(RATE=0.12345678901234567)
+    expected = compute_input_data_identity(archetypes, snapshot)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "snapshot.csv"
+        snapshot.to_csv(path, index=False)
+        loaded = pd.read_csv(path, float_precision="round_trip")
+        assert compute_input_data_identity(archetypes, loaded) == expected
 
 
 def test_spec_from_clustering_metadata_requires_recorded_identity():

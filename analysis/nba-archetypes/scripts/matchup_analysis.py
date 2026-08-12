@@ -14,7 +14,10 @@ choice, and effects extraction are deterministic given the input frames.
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+import struct
+import zlib
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -104,6 +107,8 @@ def _json_default(value):
         return float(value)
     if isinstance(value, np.bool_):
         return bool(value)
+    if isinstance(value, Mapping):
+        return dict(value)
     raise TypeError(f"Cannot serialize {type(value).__name__} deterministically")
 
 
@@ -219,14 +224,99 @@ def spec_from_clustering_metadata(metadata: dict) -> ArchetypeModelSpec:
     )
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + chunk_type
+        + data
+        + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+    )
+
+
+def stamp_png_identity(png_bytes: bytes, run_id: str, model_version: str) -> bytes:
+    """Return ``png_bytes`` with tEXt chunks binding run/model identity.
+
+    The chunks are inserted immediately after the first (IHDR) chunk so the
+    persisted PNG is self-attributing without disturbing the image data.
+    """
+    if not png_bytes.startswith(_PNG_SIGNATURE):
+        raise ValueError("Not a PNG file")
+    offset = len(_PNG_SIGNATURE)
+    first_length = struct.unpack(">I", png_bytes[offset : offset + 4])[0]
+    first_chunk_end = offset + 12 + first_length
+    identity_chunks = _png_chunk(
+        b"tEXt", b"run_id\x00" + run_id.encode("utf-8")
+    ) + _png_chunk(
+        b"tEXt", b"model_version\x00" + model_version.encode("utf-8")
+    )
+    return png_bytes[:first_chunk_end] + identity_chunks + png_bytes[first_chunk_end:]
+
+
+def png_text_entries(png_bytes: bytes) -> dict:
+    """Parse the tEXt chunks of a PNG into a ``{keyword: text}`` mapping."""
+    if not png_bytes.startswith(_PNG_SIGNATURE):
+        raise ValueError("Not a PNG file")
+    entries = {}
+    offset = len(_PNG_SIGNATURE)
+    while offset + 8 <= len(png_bytes):
+        length = struct.unpack(">I", png_bytes[offset : offset + 4])[0]
+        chunk_type = png_bytes[offset + 4 : offset + 8]
+        data = png_bytes[offset + 8 : offset + 8 + length]
+        if chunk_type == b"tEXt":
+            keyword, separator, text = data.partition(b"\x00")
+            if separator:
+                entries[keyword.decode("ascii")] = text.decode("utf-8")
+        offset += 12 + length
+    return entries
+
+
+def _verify_artifact_identity(path, run_id, model_version, name):
+    """Fail closed unless a persisted artifact is verifiably attributed to a run.
+
+    CSVs must carry ``RUN_ID``/``MODEL_VERSION`` values equal to the run's on
+    every row (empty CSVs still embed an identity row), and PNGs must embed the
+    run identity in tEXt chunks. A file that cannot be positively attributed is
+    rejected rather than blessed.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix == ".csv":
+        frame = pd.read_csv(path)
+        if not {"RUN_ID", "MODEL_VERSION"}.issubset(frame.columns):
+            raise ValueError(
+                f"Artifact {name} ({Path(path).name}) is not self-attributing: "
+                "missing RUN_ID/MODEL_VERSION columns"
+            )
+        mismatched = frame.loc[
+            (frame["RUN_ID"].astype(str) != run_id)
+            | (frame["MODEL_VERSION"].astype(str) != model_version)
+        ]
+        if not mismatched.empty:
+            raise ValueError(
+                f"Artifact {name} ({Path(path).name}) embeds identity that does "
+                "not match this run"
+            )
+    elif suffix == ".png":
+        entries = png_text_entries(Path(path).read_bytes())
+        if (
+            entries.get("run_id") != run_id
+            or entries.get("model_version") != model_version
+        ):
+            raise ValueError(
+                f"Artifact {name} ({Path(path).name}) does not embed this run's identity"
+            )
+
+
 def artifact_manifest(run, artifact_paths: dict) -> dict:
     """Content-addressed manifest attributing persisted artifacts to one run.
 
     ``artifact_paths`` maps a logical artifact name to the file that was just
-    saved for it. The manifest records the run identity plus a SHA-256 content
-    digest of every persisted file, so later replacement of a file, or an
-    interrupted publication that leaves older files behind, is detectable
-    against the recorded digests.
+    saved for it. Every CSV must carry the run's own ``RUN_ID``/``MODEL_VERSION``
+    on every row and every PNG must embed them, or the manifest refuses to bless
+    the file; the recorded SHA-256 covers the persisted bytes, so later
+    replacement or an interrupted publication is detectable against the digest.
     """
     artifacts = {
         name: {
@@ -235,6 +325,8 @@ def artifact_manifest(run, artifact_paths: dict) -> dict:
         }
         for name, path in artifact_paths.items()
     }
+    for name, path in artifact_paths.items():
+        _verify_artifact_identity(path, run.run_id, run.model_version, name)
     return {
         "run_id": run.run_id,
         "model_version": run.model_version,
@@ -246,13 +338,59 @@ def artifact_manifest(run, artifact_paths: dict) -> dict:
     }
 
 
-class FrozenDict(dict):
-    """A dict that rejects every in-place mutation after construction.
+def verify_persisted_manifest(manifest: dict, output_dir) -> None:
+    """Fail-closed verification that every recorded artifact is still attributable.
+
+    Each artifact must still exist, match its recorded SHA-256, and embed the
+    manifest's run/model identity in its own bytes (CSV identity columns or PNG
+    tEXt chunks). Missing, tampered, or falsely attributed files raise instead
+    of being silently accepted.
+    """
+    directory = Path(output_dir)
+    for name, record in manifest["artifacts"].items():
+        path = directory / record["file"]
+        if not path.exists():
+            raise FileNotFoundError(f"Artifact {name} is missing: {path}")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != record["sha256"]:
+            raise ValueError(f"Artifact {name} does not match its recorded digest")
+        _verify_artifact_identity(
+            path, manifest["run_id"], manifest["model_version"], name
+        )
+
+
+class FrozenDict(Mapping):
+    """An immutable read-only mapping.
 
     ``AnalysisRun`` is frozen and ``RunProvenance``/``RunIdentity`` must not
     expose mutable hashes, so the identity-carrying dicts they own are frozen at
-    construction time.
+    construction time. It is a ``Mapping`` rather than a ``dict`` subclass so the
+    base ``dict.__setitem__``/``dict.update``/``dict.__ior__`` invocations cannot
+    mutate its storage.
     """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, items=(), **kwargs):
+        object.__setattr__(self, "_data", dict(items, **kwargs))
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+    def __repr__(self):
+        return f"FrozenDict({self._data!r})"
+
+    def __hash__(self):
+        return hash(frozenset(self._data.items()))
+
+    def copy(self):
+        return FrozenDict(self._data)
 
     def _immutable(self, *args, **kwargs):
         raise TypeError("This mapping is immutable")
@@ -265,9 +403,7 @@ class FrozenDict(dict):
     setdefault = _immutable
     update = _immutable
     __ior__ = _immutable
-
-    def __hash__(self):
-        return hash(frozenset(self.items()))
+    __or__ = _immutable
 
 
 @dataclass(frozen=True)
@@ -286,6 +422,12 @@ class RunProvenance:
             raise ValueError("information_cutoff must be a date, not a datetime")
         if not isinstance(self.generated_at, datetime) or self.generated_at.tzinfo is None:
             raise ValueError("generated_at must be a timezone-aware datetime")
+        if (
+            not isinstance(self.clustering_attempt, int)
+            or isinstance(self.clustering_attempt, bool)
+            or self.clustering_attempt < 1
+        ):
+            raise ValueError("clustering_attempt must be a positive integer")
         object.__setattr__(self, "input_hashes", FrozenDict(dict(self.input_hashes)))
 
     def to_dict(self) -> dict:
@@ -326,18 +468,49 @@ class RunIdentity:
         object.__setattr__(self, "stable_subtype_keys", FrozenDict(dict(keys)))
 
 
+def _copy_container_cells(series):
+    """Return ``series`` deep-copied, including any mutable object-dtype cells.
+
+    ``pandas`` ``copy(deep=True)`` does not recurse into object-dtype elements,
+    so a dict/list/array stored in a cell would otherwise leak into the run's
+    captured state.
+    """
+    copied = series.copy(deep=True)
+    if copied.dtype == object:
+        mask = copied.map(
+            lambda value: isinstance(value, (dict, list, tuple, set, np.ndarray))
+        )
+        if mask.any():
+            copied.loc[mask] = copied.loc[mask].map(_defensive_copy)
+    return copied
+
+
 def _defensive_copy(value):
     """Recursively copy mutable containers so callers cannot mutate stored state.
 
     DataFrames, Series, lists, and dicts are copied; numpy arrays are copied as
-    well where directly reachable. Immutable value objects (RunIdentity,
-    ArchetypeModelSpec, RunProvenance) and opaque model-fit results pass through
-    unchanged.
+    well where directly reachable. Object-dtype DataFrame/Series cells holding
+    containers are copied too. Immutable value objects (RunIdentity,
+    ArchetypeModelSpec, RunProvenance, FrozenDict) and model-fit results pass
+    through unchanged; model-fit results are frozen read-only at fit time so no
+    mutable fit state is reachable through a published property.
     """
     if isinstance(value, pd.DataFrame):
-        return value.copy(deep=True)
+        copied = value.copy(deep=True)
+        for column in copied.columns:
+            if copied[column].dtype == object:
+                mask = copied[column].map(
+                    lambda item: isinstance(
+                        item, (dict, list, tuple, set, np.ndarray)
+                    )
+                )
+                if mask.any():
+                    copied.loc[mask, column] = copied.loc[mask, column].map(
+                        _defensive_copy
+                    )
+        return copied
     if isinstance(value, pd.Series):
-        return value.copy(deep=True)
+        return _copy_container_cells(value)
     if isinstance(value, np.ndarray):
         return value.copy()
     if isinstance(value, dict):
@@ -345,6 +518,39 @@ def _defensive_copy(value):
     if isinstance(value, (list, tuple)):
         return type(value)(_defensive_copy(item) for item in value)
     return value
+
+
+def _freeze_fit_arrays(value, _seen=None):
+    """Make every numpy array reachable from a model-fit result read-only.
+
+    statsmodels fit results are opaque objects that cannot be deep-copied
+    safely, so after the fit (and its clustered covariance) is complete the
+    result's arrays are pinned read-only. ``AnalysisRun`` publishes the fit
+    objects by reference, which is safe only because none of their state can
+    change afterwards.
+    """
+    if _seen is None:
+        _seen = set()
+    if id(value) in _seen:
+        return
+    _seen.add(id(value))
+    if isinstance(value, np.ndarray):
+        try:
+            value.setflags(write=False)
+        except ValueError:
+            pass
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _freeze_fit_arrays(item, _seen)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _freeze_fit_arrays(item, _seen)
+        return
+    if hasattr(value, "__dict__"):
+        for item in vars(value).values():
+            _freeze_fit_arrays(item, _seen)
 
 
 @dataclass(frozen=True)
@@ -513,6 +719,10 @@ def fit_model(frame, outcome, weight_column=None):
     if full_residual_df <= 0:
         raise ValueError("Not enough residual degrees of freedom after player effects")
     covariance *= visible_residual_df / full_residual_df
+    # The fit result is published on AnalysisRun by reference; pin every array
+    # reachable from it read-only so no published property exposes mutable fit
+    # state (its clustered covariance is a separate writable array).
+    _freeze_fit_arrays(fit)
     return {
         "fit": fit,
         "covariance": covariance,
@@ -688,6 +898,12 @@ class AnalysisRunBuilder:
     ):
         if not isinstance(code_revision, str) or not code_revision.strip():
             raise ValueError("code_revision must be a non-empty string")
+        if (
+            not isinstance(clustering_attempt, int)
+            or isinstance(clustering_attempt, bool)
+            or clustering_attempt < 1
+        ):
+            raise ValueError("clustering_attempt must be a positive integer")
         self.archetypes = archetypes
         self.game_logs = game_logs
         self.model_spec = model_spec
@@ -764,15 +980,17 @@ class AnalysisRunBuilder:
             raise ValueError("An ArchetypeModelSpec is required to record provenance")
         self.prepare_logs()
         # The run is versioned by its exact archetype model, code revision,
-        # Information Cutoff, and the data snapshot it was built from. The
-        # per-input hashes are recorded here so changing game points with an
-        # unchanged cutoff/model/code still yields a distinct run id.
+        # Information Cutoff, analysis settings, and the data snapshot it was
+        # built from. The per-input hashes are recorded here so changing game
+        # points with an unchanged cutoff/model/code still yields a distinct run
+        # id, and so do different thresholds on identical data.
         self._run_id = content_hash(
             (
                 "analysis-run",
                 self._model_version,
                 self.code_revision,
                 self._information_cutoff.isoformat(),
+                content_hash(("settings", asdict(self.settings))),
                 self._input_hashes["archetypes"],
                 self._input_hashes["game_logs"],
             )
@@ -1693,18 +1911,33 @@ class AnalysisRunBuilder:
             "volume_heatmaps": volume_heatmaps,
             "identity": self._run_identity,
         }
-        # Every artifact frame is attributed to the run by content digest so
-        # artifact assembly and dashboard assembly reject a frame that was
-        # replaced with content from a different run.
+        # Every artifact frame is attributed to this exact run and model by a
+        # content digest bound to the run/model identity, so artifact assembly
+        # and dashboard assembly reject a frame that was replaced with content
+        # assembled under a different run identity.
         artifact_digests = {
-            name: content_hash(("artifact", name, _frame_canonical_text(frame)))
+            name: content_hash(
+                (
+                    "artifact",
+                    self._run_id,
+                    self._model_version,
+                    name,
+                    _frame_canonical_text(frame),
+                )
+            )
             for name, frame in self._artifacts.items()
             if isinstance(frame, pd.DataFrame)
         }
         for metric, heatmap in self._artifacts["volume_heatmaps"].items():
             digest_name = f"volume_heatmap__{metric}"
             artifact_digests[digest_name] = content_hash(
-                ("artifact", digest_name, _frame_canonical_text(heatmap["data"]))
+                (
+                    "artifact",
+                    self._run_id,
+                    self._model_version,
+                    digest_name,
+                    _frame_canonical_text(heatmap["data"]),
+                )
             )
         self._artifact_digests = FrozenDict(artifact_digests)
         self._artifacts["artifact_digests"] = self._artifact_digests
@@ -1724,8 +1957,16 @@ class AnalysisRunBuilder:
             raise ValueError(
                 "Artifact bundle identity is missing or does not match the run identity"
             )
-        # Reject any artifact frame that was replaced with content from another
-        # run: each artifact is bound to this run by its recorded content digest.
+        # The expected digest record is the immutable FrozenDict captured at
+        # artifact assembly; replacing it (or removing it) is rejected rather
+        # than silently trusting a rewritten expectation.
+        if artifacts.get("artifact_digests") is not self._artifact_digests:
+            raise ValueError(
+                "Artifact digest record is missing or was replaced"
+            )
+        # Reject any artifact frame that was replaced with content assembled
+        # under another run: each artifact is bound to this run and model by its
+        # recorded content digest.
         for name, expected in self._artifact_digests.items():
             if name.startswith("volume_heatmap__"):
                 frame = artifacts["volume_heatmaps"][
@@ -1733,7 +1974,15 @@ class AnalysisRunBuilder:
                 ]["data"]
             else:
                 frame = artifacts[name]
-            observed = content_hash(("artifact", name, _frame_canonical_text(frame)))
+            observed = content_hash(
+                (
+                    "artifact",
+                    self._run_id,
+                    self._model_version,
+                    name,
+                    _frame_canonical_text(frame),
+                )
+            )
             if observed != expected:
                 raise ValueError(
                     f"Artifact {name} does not match the run's assembled content"

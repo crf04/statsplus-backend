@@ -12,6 +12,8 @@
 # the membership and game-log frames and renders its artifacts.
 
 # %%
+import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -27,7 +29,10 @@ from matchup_analysis import (
     AnalysisRunBuilder,
     DEFAULT_SETTINGS,
     artifact_manifest,
+    content_hash,
     spec_from_clustering_metadata,
+    stamp_png_identity,
+    verify_persisted_manifest,
 )
 
 pd.set_option("display.max_columns", 100)
@@ -42,6 +47,8 @@ ROOT = Path(__file__).resolve().parents[1] if "__file__" in globals() else Path.
 SEASON_KEY = SEASON.replace("-", "_")
 ARCHETYPE_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_archetypes.csv"
 FEATURES_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_scoring_features.csv"
+# The exact standardized feature matrix the clustering was fit on.
+MODEL_MATRIX_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "player_model_matrix.csv"
 CLUSTERING_METADATA_PATH = ROOT / "archetypes_outputs" / SEASON_KEY / "clustering_metadata.json"
 CACHE_DIR = ROOT / "archetypes_data" / SEASON_KEY
 OUTPUT_DIR = ROOT / "archetypes_outputs" / SEASON_KEY / "matchups"
@@ -63,37 +70,68 @@ if not FEATURES_PATH.exists():
     raise FileNotFoundError(
         f"Run archetypes_fixed.ipynb first; missing {FEATURES_PATH}"
     )
+if not MODEL_MATRIX_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {MODEL_MATRIX_PATH}"
+    )
 if not CLUSTERING_METADATA_PATH.exists():
     raise FileNotFoundError(
         f"Run archetypes_fixed.ipynb first; missing {CLUSTERING_METADATA_PATH}"
     )
 
-archetypes = pd.read_csv(ARCHETYPE_PATH)
-# The model input snapshot the clustering was actually fit on; its content
-# identity (not the matchup game logs) feeds the archetype-model identity.
-clustering_features = pd.read_csv(FEATURES_PATH)
+# ``float_precision="round_trip"`` reads back exactly the values the clustering
+# wrote, so the input-data identity both sides compute covers the exact fitted
+# matrix rather than a precision-truncated serialization.
+archetypes = pd.read_csv(ARCHETYPE_PATH, float_precision="round_trip")
+clustering_features = pd.read_csv(MODEL_MATRIX_PATH, float_precision="round_trip")
 clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
 
 
 def current_code_revision():
-    """Current git revision of the analysis code; fail closed when unavailable.
+    """Current git revision of the analysis code, including working-tree state.
 
     A run cannot be attributed to its exact code without a revision, so an
     undeterminable revision aborts instead of silently recording ``unknown``
-    and letting distinct code share one run id.
+    and letting distinct code share one run id. Uncommitted changes to tracked
+    files and the contents of untracked analysis files also feed the revision,
+    so dirty analysis code never receives the clean HEAD identity.
     """
     try:
-        return subprocess.check_output(
+        head = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=ROOT,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
+        tracked_diff = subprocess.check_output(
+            ["git", "diff", "HEAD", "--", "."],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "."],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
     except Exception as error:
         raise RuntimeError(
             "Could not determine the analysis code revision; refusing to build "
             "an unattributable run"
         ) from error
+    untracked_entries = []
+    for relative in untracked.splitlines():
+        path = ROOT / relative
+        try:
+            untracked_entries.append(
+                (relative, hashlib.sha256(path.read_bytes()).hexdigest())
+            )
+        except OSError:
+            untracked_entries.append((relative, "unreadable"))
+    if tracked_diff or untracked_entries:
+        return content_hash(("analysis-code", head, tracked_diff, untracked_entries))
+    return head
 
 
 def fetch_game_logs(attempts=3):
@@ -150,9 +188,9 @@ print(
 # metadata so the archetype-model identity reflects the clustering that actually
 # ran (feature definition, two-stage conditional KMeans, base seed, subtype
 # count). The input-data identity is the digest the clustering execution
-# recorded over its own membership and feature snapshots — not a digest
-# recomputed from whatever files happen to coexist — so a stale or mixed model
-# cannot silently pass the builder's fail-closed guard.
+# recorded over its own membership and exact fitted feature matrix — not a
+# digest recomputed from whatever files happen to coexist — so a stale or mixed
+# model cannot silently pass the builder's fail-closed guard.
 model_spec = spec_from_clustering_metadata(clustering_metadata)
 run = AnalysisRunBuilder(
     archetypes=archetypes,
@@ -204,30 +242,40 @@ volume_summary_path = OUTPUT_DIR / "volume_matchup_summary.csv"
 validated_volume_path = OUTPUT_DIR / "validated_volume_interactions.csv"
 volume_reliability_path = OUTPUT_DIR / "volume_split_half_reliability.csv"
 player_volume_path = OUTPUT_DIR / "player_relative_volume_matchups.csv"
-# Every persisted CSV carries the run and model identifiers that produced it so
-# a later reader can attribute the file without trusting the sibling manifest.
+# Every persisted CSV carries the run and model identifiers that produced it on
+# every row, including an identity row for otherwise-empty outputs, so a later
+# reader or the persisted verifier can attribute the file without trusting a
+# sibling manifest.
 identity_columns = {"RUN_ID": run.run_id, "MODEL_VERSION": run.model_version}
-artifacts["matchup_summary"].assign(**identity_columns).to_csv(summary_path, index=False)
-artifacts["notable_matchups"].assign(**identity_columns).to_csv(notable_path, index=False)
-artifacts["validated_interactions"].assign(**identity_columns).to_csv(
-    validated_path, index=False
-)
-artifacts["watchlist"].assign(**identity_columns).to_csv(watchlist_path, index=False)
-artifacts["player_relative_matchups"].assign(**identity_columns).to_csv(
-    player_relative_path, index=False
-)
-artifacts["volume_matchup_summary"].assign(**identity_columns).to_csv(
-    volume_summary_path, index=False
-)
-artifacts["validated_volume_interactions"].assign(**identity_columns).to_csv(
-    validated_volume_path, index=False
-)
-artifacts["volume_reliability"].assign(**identity_columns).to_csv(
-    volume_reliability_path, index=False
-)
-artifacts["player_relative_volume_matchups"].assign(**identity_columns).to_csv(
-    player_volume_path, index=False
-)
+
+
+def write_artifact_csv(frame, path):
+    attributed = frame.assign(**identity_columns)
+    if attributed.empty:
+        row = {column: "" for column in attributed.columns}
+        row.update(identity_columns)
+        attributed = pd.DataFrame([row], columns=attributed.columns)
+    attributed.to_csv(path, index=False)
+
+
+write_artifact_csv(artifacts["matchup_summary"], summary_path)
+write_artifact_csv(artifacts["notable_matchups"], notable_path)
+write_artifact_csv(artifacts["validated_interactions"], validated_path)
+write_artifact_csv(artifacts["watchlist"], watchlist_path)
+write_artifact_csv(artifacts["player_relative_matchups"], player_relative_path)
+write_artifact_csv(artifacts["volume_matchup_summary"], volume_summary_path)
+write_artifact_csv(artifacts["validated_volume_interactions"], validated_volume_path)
+write_artifact_csv(artifacts["volume_reliability"], volume_reliability_path)
+write_artifact_csv(artifacts["player_relative_volume_matchups"], player_volume_path)
+
+
+def save_stamped_png(figure, path, **kwargs):
+    buffer = io.BytesIO()
+    figure.savefig(buffer, format="png", **kwargs)
+    path.write_bytes(
+        stamp_png_identity(buffer.getvalue(), run.run_id, run.model_version)
+    )
+
 
 heatmap_data = artifacts["pts_per_min_heatmap"]
 heatmap_limit = payload["pts_per_min_heatmap_limit"]
@@ -248,7 +296,7 @@ plt.xlabel("Opponent")
 plt.ylabel("Scoring subtype")
 plt.tight_layout()
 descriptive_heatmap_path = OUTPUT_DIR / "descriptive_pts_per_min_interaction_heatmap.png"
-plt.savefig(descriptive_heatmap_path, dpi=180, bbox_inches="tight")
+save_stamped_png(plt.gcf(), descriptive_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -276,15 +324,15 @@ for axis, (metric, metric_spec) in zip(
 fig.suptitle(f"{SEASON} shrunken archetype volume interactions", y=1.01)
 fig.tight_layout()
 volume_heatmap_path = OUTPUT_DIR / "descriptive_volume_interaction_heatmaps.png"
-fig.savefig(volume_heatmap_path, dpi=180, bbox_inches="tight")
+save_stamped_png(fig, volume_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close(fig)
 
 # Persist one content-addressed identity manifest so every saved artifact is
 # attributable to the exact Analysis Run and archetype model that produced it.
-# Each file is bound to a SHA-256 digest of its persisted bytes, so later
-# replacement of a file, or an interrupted publication that leaves older files
-# behind, is detectable against the recorded manifest.
+# Each file is bound to a SHA-256 digest of its persisted bytes and to its own
+# embedded identity, and the manifest is verified before it is written: a file
+# that does not carry this run's identity is rejected rather than blessed.
 saved_paths = {
     "matchup_summary": summary_path,
     "notable_matchups": notable_path,
@@ -299,6 +347,7 @@ saved_paths = {
     "descriptive_volume_interaction_heatmaps": volume_heatmap_path,
 }
 run_manifest = artifact_manifest(run, saved_paths)
+verify_persisted_manifest(run_manifest, OUTPUT_DIR)
 manifest_path = OUTPUT_DIR / "run_identity_manifest.json"
 manifest_path.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
 
