@@ -11,10 +11,11 @@
 # `scripts/matchup_analysis.py`; this script is the data/IO shell that feeds it
 # the membership and game-log frames and renders its artifacts.
 #
-# Production runs must go through `run_matchup_analysis.py`: it captures the
-# code revision before any analysis module is loaded and imports this script as
-# a module, so immediately before publication the loaded bytecode of every
-# analysis module can be proven to match the disk code it is attributed to.
+# Production runs must go through `run_matchup_analysis.py`, run as a plain
+# script (`python run_matchup_analysis.py`): it captures the code revision
+# before any analysis module is loaded and imports this script as a module, so
+# immediately before publication the loaded code of every analysis module can
+# be proven to match the disk code it is attributed to.
 
 # ruff: noqa: E402  # the code-revision capture must precede implementation imports
 

@@ -15,8 +15,8 @@ runtime code.
 - `scripts/run_matchup_analysis.py` — production entry point; captures the
   code revision before any analysis module is loaded, establishes the
   import-time loaded-code proof, then imports the matchup script as a module so
-  its loaded code is provable against disk. Must be run as
-  `python -m run_matchup_analysis`.
+  its loaded code is provable against disk. Must be run as a plain script:
+  `python run_matchup_analysis.py`.
 - `scripts/archetype_matchups_2025_26.py` — data/IO shell of the matchup
   analysis; feeds the builder below and renders its artifacts.
 - `scripts/matchup_analysis.py` — deterministic `AnalysisRunBuilder` that
@@ -66,20 +66,24 @@ Run notebooks with this directory as the working directory so their relative
 `archetypes_data` and `archetypes_outputs` paths resolve correctly.
 
 Production runs go through the launcher, which must be run from the scripts
-directory with the `-m` form so the analysis modules are imported as modules
+directory as a plain script so the analysis modules are imported as modules
 (whose loaded code the provenance proof can verify) rather than executed as
-`__main__`, and so the launcher's own loaded code is provable:
+`__main__`:
 
 ```bash
 cd analysis/nba-archetypes/scripts
-python -m run_matchup_analysis
+python run_matchup_analysis.py
 ```
 
-Running `run_matchup_analysis.py` as a plain script is rejected before any
-analysis work, and running `archetype_matchups_2025_26.py` directly is rejected
-before publication: the loaded bytecode of a directly executed entry script (or
-a plain-script launcher) cannot be proven against disk, so no run would be
-attributable to its exact code.
+Plain script execution ignores `__pycache__`: the launcher's `__main__` module
+is always compiled from its disk source, never from a shared bytecode cache, so
+no stale pre-bootstrap bytecode can execute before the code-revision proof is
+established. The `-m` form is rejected before any analysis work because it
+would load the launcher through the normal import machinery, which may execute
+a valid stale `.pyc` before the launcher could verify itself. Running
+`archetype_matchups_2025_26.py` directly is also rejected before publication:
+the loaded code of a directly executed entry script cannot be proven against
+disk, so no run would be attributable to its exact code.
 
 Cached inputs make the existing outputs reproducible without downloading a new
 snapshot. Set the notebook's refresh option only when deliberately updating the
@@ -159,13 +163,15 @@ loaded from) and re-captures it immediately before persisting, aborting if the
 code changed during the build; immediately before publication the script also
 calls `verify_loaded_code_matches_disk()`. Loaded-code evidence is process-local
 and captured at import time: `begin_load_proof` records the launcher's own
-loaded bytecode (and `code_revision`'s) at bootstrap and installs an import
-finder that records every analysis module's executed code object in memory the
-moment it is imported. Verification compares that in-memory evidence against
-the current disk source and never re-reads a shared `__pycache__` file after
-the fact, so a post-load edit — to the entry, its imports, `code_revision`, or
-the launcher itself — or a replaced shared bytecode cache can never attribute a
-run to code it did not execute. The generation time defaults to the wall clock
+actual executing frame code (compiled from disk source, since plain script
+execution ignores `__pycache__`) and source-loads `code_revision` exactly once
+(never through the import machinery or a shared bytecode cache), and installs
+an import finder that records every analysis module's executed code object in
+memory the moment it is imported. Verification compares that in-memory evidence
+against the current disk source and never re-reads a shared `__pycache__` file
+after the fact, so a post-load edit — to the entry, its imports, `code_revision`,
+or the launcher itself — or a replaced shared bytecode cache can never attribute
+a run to code it did not execute. The generation time defaults to the wall clock
 but is injectable (`generated_at`) so a fully pinned build is reproducible; it
 never feeds the deterministic identity hashes. `clustering_attempt` must be a
 positive integer (booleans, zero, negatives, and strings are rejected).

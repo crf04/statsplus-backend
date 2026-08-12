@@ -2671,31 +2671,37 @@ def _format_root_sync(root, sync, template):
 LAUNCHER_TEMPLATE = """
 import os
 import sys
+import types
 from pathlib import Path
 
-import code_revision as _code_revision
+if getattr(globals().get("__spec__"), "name", None) == "run_matchup_analysis":
+    raise RuntimeError(
+        "The analysis launcher must run as a plain script ``python "
+        "run_matchup_analysis.py``; the ``-m`` form may execute a valid stale "
+        "bytecode cache before the code-revision proof can run"
+    )
 
 _LAUNCHER_FILE = Path(__file__).resolve()
+_CODE_REVISION_FILE = _LAUNCHER_FILE.parent / "code_revision.py"
 
 if globals().get("__launcher_bootstrapped__") is None:
     globals()["__launcher_bootstrapped__"] = True
-    if getattr(globals().get("__spec__"), "name", None) != "run_matchup_analysis":
-        raise RuntimeError(
-            "The analysis launcher must run as ``python -m run_matchup_analysis`` "
-            "so its trusted bootstrap records and executes one code object; "
-            "running it as a plain script cannot prove which code ran"
-        )
-    _bootstrap_source = _LAUNCHER_FILE.read_bytes()
-    _bootstrap_code = compile(
-        _bootstrap_source,
-        str(_LAUNCHER_FILE),
+    _launcher_frame_code = sys._getframe().f_code
+    code_revision_module = types.ModuleType("code_revision")
+    code_revision_module.__file__ = str(_CODE_REVISION_FILE)
+    _code_revision_source = _CODE_REVISION_FILE.read_bytes()
+    _code_revision_code = compile(
+        _code_revision_source,
+        str(_CODE_REVISION_FILE),
         "exec",
         dont_inherit=True,
         optimize=sys.flags.optimize,
     )
-    _code_revision.record_bootstrap_code("run_matchup_analysis", _bootstrap_code)
-    exec(_bootstrap_code, globals())
-else:
+    code_revision_module.__dict__["__code_revision_bootstrapped__"] = True
+    exec(_code_revision_code, code_revision_module.__dict__)
+    sys.modules["code_revision"] = code_revision_module
+    code_revision_module.record_bootstrap_code("code_revision", _code_revision_code)
+    code_revision_module.record_bootstrap_code("__main__", _launcher_frame_code)
     from code_revision import begin_load_proof, current_code_revision
 
     ANALYSIS_ROOT = _LAUNCHER_FILE.parent
@@ -2706,10 +2712,14 @@ else:
 
 
 def _run_launcher(root, env=None):
-    """Run the launcher via ``python -m`` from ``root`` so its own loaded code
-    is provable; returns the ``Popen`` child."""
+    """Run the launcher as a plain script from ``root``.
+
+    Plain script execution compiles ``__main__`` from disk source and never
+    consults ``__pycache__``, so the launcher's actual executing code is
+    provably current source; returns the ``Popen`` child.
+    """
     return subprocess.Popen(
-        [sys.executable, "-m", "run_matchup_analysis"],
+        [sys.executable, str(root / "run_matchup_analysis.py")],
         cwd=root,
         env=env,
         stdout=subprocess.PIPE,
@@ -2800,34 +2810,40 @@ def test_launcher_loaded_code_proof_fails_closed_on_post_load_edit(tmp_path):
     # Reproduction of the round-7 finding: the launcher was skipped by the
     # verifier, so editing the launcher after load but before revision capture
     # executed v1 while the disk and revision said v2 and verification passed.
-    # The launcher's own loaded code is captured at bootstrap and proven against
-    # its disk source like every analysis module, so the mixed snapshot fails
-    # closed.
+    # The launcher's actual executing frame code is captured at bootstrap and
+    # proven against its disk source like every analysis module, so the mixed
+    # snapshot fails closed.
     root, sync = _write_temp_analysis_root(tmp_path)
-    # The launcher exercises the same trusted bootstrap as production: it reads
-    # its own source once, compiles it once, records the exact code object, and
-    # then executes that same object, so the attributable body below provably
-    # runs from the recorded code and a post-load disk edit fails closed.
+    # The launcher exercises the same trusted bootstrap as production: it runs
+    # as a plain script (so its frame code is the exact module code compiled
+    # from disk source, never from __pycache__), records that actual frame code,
+    # and source-loads code_revision exactly once, so a post-load disk edit
+    # fails closed at verification.
     launcher_source = (
-        "import os, sys, time, pathlib\n"
+        "import os, sys, time, pathlib, types\n"
         "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
-        "import code_revision as _code_revision\n"
         "_LAUNCHER_FILE = pathlib.Path(__file__).resolve()\n"
+        "_CODE_REVISION_FILE = _LAUNCHER_FILE.parent / 'code_revision.py'\n"
+        "if getattr(globals().get('__spec__'), 'name', None) == 'run_matchup_analysis':\n"
+        "    raise RuntimeError(\n"
+        "        'The analysis launcher must run as a plain script '\n"
+        "        '``python run_matchup_analysis.py``'\n"
+        "    )\n"
         "if globals().get('__launcher_bootstrapped__') is None:\n"
         "    globals()['__launcher_bootstrapped__'] = True\n"
-        "    if getattr(globals().get('__spec__'), 'name', None) != 'run_matchup_analysis':\n"
-        "        raise RuntimeError(\n"
-        "            'The analysis launcher must run as ``python -m run_matchup_analysis`` '\n"
-        "            'so its trusted bootstrap records and executes one code object'\n"
-        "        )\n"
-        "    _bootstrap_source = _LAUNCHER_FILE.read_bytes()\n"
-        "    _bootstrap_code = compile(\n"
-        "        _bootstrap_source, str(_LAUNCHER_FILE), 'exec',\n"
+        "    _launcher_frame_code = sys._getframe().f_code\n"
+        "    code_revision_module = types.ModuleType('code_revision')\n"
+        "    code_revision_module.__file__ = str(_CODE_REVISION_FILE)\n"
+        "    _code_revision_source = _CODE_REVISION_FILE.read_bytes()\n"
+        "    _code_revision_code = compile(\n"
+        "        _code_revision_source, str(_CODE_REVISION_FILE), 'exec',\n"
         "        dont_inherit=True, optimize=sys.flags.optimize,\n"
         "    )\n"
-        "    _code_revision.record_bootstrap_code('run_matchup_analysis', _bootstrap_code)\n"
-        "    exec(_bootstrap_code, globals())\n"
-        "else:\n"
+        "    code_revision_module.__dict__['__code_revision_bootstrapped__'] = True\n"
+        "    exec(_code_revision_code, code_revision_module.__dict__)\n"
+        "    sys.modules['code_revision'] = code_revision_module\n"
+        "    code_revision_module.record_bootstrap_code('code_revision', _code_revision_code)\n"
+        "    code_revision_module.record_bootstrap_code('__main__', _launcher_frame_code)\n"
         "    from code_revision import begin_load_proof, current_code_revision\n"
         "    SYNC = pathlib.Path(" + repr(str(sync)) + ")\n"
         "    ROOT = pathlib.Path(__file__).resolve().parent\n"
@@ -2908,7 +2924,12 @@ def test_loaded_code_proof_rejects_replaced_shared_cache(tmp_path):
     assert "does not match its current disk source" in out
 
 
-def test_launcher_run_as_plain_script_is_rejected_before_analysis(tmp_path):
+def test_launcher_run_as_module_is_rejected_before_analysis(tmp_path):
+    # The supported boundary is plain script execution (which ignores
+    # __pycache__). The ``-m`` form loads the launcher through the import
+    # machinery, which may execute a valid stale ``.pyc`` before the launcher
+    # could verify itself, so it is rejected before any analysis work: the
+    # entry module is never imported (no loaded.marker).
     root, sync = _write_temp_analysis_root(tmp_path)
     (root / "archetype_matchups_2025_26.py").write_text(
         _format_root_sync(root, sync, ENTRY_TEMPLATE)
@@ -2916,14 +2937,102 @@ def test_launcher_run_as_plain_script_is_rejected_before_analysis(tmp_path):
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
     proc = subprocess.run(
-        [sys.executable, str(root / "run_matchup_analysis.py")],
+        [sys.executable, "-m", "run_matchup_analysis"],
         cwd=root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-    assert "VERIFY_PASSED" not in proc.stdout
-    assert "python -m run_matchup_analysis" in proc.stdout
+    assert "python run_matchup_analysis.py" in proc.stdout
+    assert not (sync / "loaded.marker").exists()
+
+
+def _craft_valid_stale_launcher_pyc(root, sync, launcher_source):
+    """Plant a bytecode cache for the launcher that the normal import machinery
+    accepts as valid for ``launcher_source`` but whose code runs an observable
+    stale prelude first (writes ``stale_prelude.marker``). The compiled stale
+    source's stored source hash is patched to the current source's hash, so the
+    cache passes the hash validation the import machinery uses.
+    """
+    cache_dir = root / "__pycache__"
+    cache_dir.mkdir(exist_ok=True)
+    pyc_path = Path(
+        importlib.util.cache_from_source(str(root / "run_matchup_analysis.py"))
+    )
+    stale = (
+        "import os\n"
+        f"open({str(sync / 'stale_prelude.marker')!r}, 'w').write('stale\\n')\n"
+        + launcher_source
+    )
+    stale_tmp = root / "stale_launcher.py"
+    stale_tmp.write_text(stale)
+    py_compile.compile(
+        str(stale_tmp),
+        cfile=str(pyc_path),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+    )
+    data = bytearray(pyc_path.read_bytes())
+    data[8:16] = importlib.util.source_hash(launcher_source.encode("utf-8"))
+    pyc_path.write_bytes(bytes(data))
+    stale_tmp.unlink()
+    return sync / "stale_prelude.marker"
+
+
+def test_launcher_plain_script_ignores_valid_stale_bytecode(tmp_path):
+    # Reproduction of the round-9 finding: ``python -m`` may execute a valid
+    # stale ``.pyc`` before a module can verify itself, so a self-bootstrap
+    # cannot prove pre-check code. The supported boundary is plain script
+    # execution, which compiles ``__main__`` from disk source and never consults
+    # ``__pycache__``: a crafted valid stale launcher cache whose prelude writes
+    # an observable marker never executes, and the run verifies against the
+    # current disk source.
+    root, sync = _write_temp_analysis_root(tmp_path)
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    launcher_source = _format_root_sync(root, sync, LAUNCHER_TEMPLATE)
+    (root / "run_matchup_analysis.py").write_text(launcher_source)
+    _commit_all(root)
+    stale_marker = _craft_valid_stale_launcher_pyc(root, sync, launcher_source)
+
+    env = dict(os.environ, SOURCE_DATE_EPOCH="0")
+    proc = _run_launcher(root, env=env)
+    _wait_for(sync / "loaded.marker")
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" in out, out
+    assert not stale_marker.exists()
+
+
+def test_launcher_run_as_module_can_execute_stale_prelude_so_is_rejected(tmp_path):
+    # The ``-m`` form loads the launcher through the import machinery, which
+    # accepts a valid stale bytecode cache and executes its prelude before any
+    # rejection — so it can never prove pre-check code and is unsupported. The
+    # crafted valid stale cache's observable prelude runs under ``-m`` (proving
+    # the danger), while the entry module is never imported (no loaded.marker):
+    # unsupported ``-m`` fails before analysis.
+    root, sync = _write_temp_analysis_root(tmp_path)
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    launcher_source = _format_root_sync(root, sync, LAUNCHER_TEMPLATE)
+    (root / "run_matchup_analysis.py").write_text(launcher_source)
+    _commit_all(root)
+    stale_marker = _craft_valid_stale_launcher_pyc(root, sync, launcher_source)
+
+    env = dict(os.environ, SOURCE_DATE_EPOCH="0")
+    proc = subprocess.run(
+        [sys.executable, "-m", "run_matchup_analysis"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert "python run_matchup_analysis.py" in proc.stdout
+    assert not (sync / "loaded.marker").exists()
+    assert stale_marker.exists()
 
 
 def test_code_objects_equal_is_semantic_not_byte_serialization():
@@ -2992,10 +3101,10 @@ def test_begin_load_proof_fails_closed_without_bootstrap_records(tmp_path):
     # Reproduction of the round-8 finding: launcher/code_revision evidence was
     # inferred from the shared bytecode cache after the code was already
     # executing, so a concurrent cache replacement could present v2 cache/disk
-    # as what v1 ran. Evidence is now captured by a trusted bootstrap as the
-    # immutable process-local code object each module executes, and
-    # ``begin_load_proof`` fails closed when that evidence was not recorded
-    # before attributable logic began.
+    # as what v1 ran. Evidence is now captured before attributable logic begins
+    # — the launcher records its actual executing frame code and source-loads
+    # code_revision exactly once — and ``begin_load_proof`` fails closed when
+    # that evidence was not recorded.
     import importlib.util
     import types as _types
 
@@ -3006,7 +3115,7 @@ def test_begin_load_proof_fails_closed_without_bootstrap_records(tmp_path):
     saved = dict(cr._LOADED_CODE)
     try:
         cr._LOADED_CODE.pop("code_revision", None)
-        with pytest.raises(RuntimeError, match="trusted bootstrap did not record"):
+        with pytest.raises(RuntimeError, match="source-loaded exactly once"):
             cr.begin_load_proof(str(root))
     finally:
         cr._LOADED_CODE.clear()
@@ -3022,10 +3131,217 @@ def test_begin_load_proof_fails_closed_without_bootstrap_records(tmp_path):
     )
     sys.modules["run_matchup_analysis"] = launcher_module
     try:
-        with pytest.raises(RuntimeError, match="trusted bootstrap records"):
+        with pytest.raises(RuntimeError, match="must run as a plain script"):
             cr.begin_load_proof(str(root), launcher_file=str(launcher))
     finally:
         sys.modules.pop("run_matchup_analysis", None)
         cr._LOADED_CODE.clear()
         cr._LOADED_CODE.update(saved)
         cr._PROOF_BEGUN = False
+
+
+# --- Round-9 regression tests (issue 71 review) ------------------------------
+
+
+def test_builder_model_spec_cannot_be_reassigned_after_provenance():
+    # Reproduction of the round-9 finding: ``model_spec`` was a plain writable
+    # attribute, so a caller could swap the spec after provenance was recorded
+    # and get ``run.model_version != run.model_spec.version``. The spec is now a
+    # read-only property backed by a one-shot private slot, and identity
+    # assembly validates final consistency against the recorded model version.
+    archetypes, game_logs = synthetic_fixture()
+    model_spec = make_model_spec(archetypes, game_logs)
+    builder = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        code_revision="rev-1",
+    )
+    builder.record_provenance()
+    other_spec = make_model_spec(archetypes, game_logs, season="2024-25")
+    with pytest.raises(AttributeError, match="no setter"):
+        builder.model_spec = other_spec
+    with pytest.raises(AttributeError, match="read-only"):
+        builder._model_spec = other_spec
+    run = builder.build()
+    assert run.model_spec is model_spec
+    assert run.model_version == model_spec.version
+    control = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        code_revision="rev-1",
+    ).build()
+    assert run.run_id == control.run_id
+
+    # Bypassing the one-shot guard through the instance dict is still caught by
+    # the final-consistency check at identity assembly.
+    tampered = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        code_revision="rev-1",
+    )
+    tampered.record_provenance()
+    tampered.__dict__["_model_spec"] = other_spec
+    with pytest.raises(ValueError, match="changed after construction"):
+        tampered.build()
+
+
+def test_builder_private_settings_snapshot_cannot_be_reassigned():
+    # Reproduction of the round-9 finding: the read-only ``settings`` property
+    # had a plain ``_settings`` backing that could still be reassigned directly
+    # after provenance, changing artifact eligibility under the cached run id.
+    # The private snapshot is now a one-shot slot, and identity assembly
+    # revalidates the settings hash under the cached run id.
+    archetypes, game_logs = synthetic_fixture()
+    settings = AnalysisRunSettings()
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings)
+    builder.record_provenance()
+    expected_run_id = builder._run_id
+    with pytest.raises(AttributeError, match="read-only"):
+        builder._settings = AnalysisRunSettings(
+            min_cell_players=1,
+            min_cell_games=1,
+            min_cell_offensive_teams=1,
+        )
+    run = builder.build()
+    assert run.run_id == expected_run_id
+    control = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings
+    ).build()
+    assert run.run_id == control.run_id
+    pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
+    pd.testing.assert_frame_equal(
+        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
+    )
+
+    # Bypassing the one-shot guard through the instance dict is still caught by
+    # the settings final-consistency check at artifact assembly.
+    tampered = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings
+    )
+    tampered.record_provenance()
+    tampered.__dict__["_settings"] = AnalysisRunSettings(
+        min_cell_players=1,
+        min_cell_games=1,
+        min_cell_offensive_teams=1,
+    )
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        tampered.build()
+
+
+def test_prepare_logs_returns_defensive_copy_so_cached_snapshot_cannot_be_mutated():
+    # Reproduction of the round-9 finding: ``prepare_logs()`` returned the
+    # cached internal DataFrame, so a caller mutating the returned frame after
+    # ``record_provenance()`` changed every later artifact stage while keeping
+    # the original run id/input hash — changed PTS under the same identity. The
+    # cached snapshot is never exposed; only defensive copies are returned.
+    archetypes, game_logs = synthetic_fixture()
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1")
+    builder.record_provenance()
+    expected_run_id = builder._run_id
+    original_pts_sum = builder.prepare_logs()["PTS"].sum()
+    leaked = builder.prepare_logs()
+    leaked.loc[leaked.index[0], "PTS"] = 999
+    leaked["PTS"] = leaked["PTS"] + 1
+    run = builder.build()
+    assert run.run_id == expected_run_id
+    assert run.logs["PTS"].sum() == original_pts_sum
+    control = build_builder(archetypes, game_logs, code_revision="rev-1").build()
+    assert run.run_id == control.run_id
+    pd.testing.assert_frame_equal(run.logs, control.logs)
+    pd.testing.assert_frame_equal(
+        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
+    )
+
+
+def test_pointer_flip_waits_for_set_durability_and_persists_pointer_before_gc(
+    tmp_path, monkeypatch
+):
+    # Reproduction of the round-9 finding: the live symlink was flipped before
+    # artifact files and version directories were fsynced. Durability is now
+    # ordered: every artifact file, the installed version directory, and the
+    # versioned root are fsynced before the pointer flip; the pointer's parent
+    # directory is fsynced after the flip; only then does garbage collection run.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    root = Path(tmp_path)
+    output = root / "matchups"
+    versioned_root = root / "matchups-runs"
+    staging_a = root / "stage_a"
+    staging_a.mkdir()
+    write_staged_set(staging_a, run_a)
+    publish_artifact_set(staging_a, output)
+
+    order = []
+
+    def fsync_path(path):
+        order.append(("file", Path(path)))
+
+    def fsync_directory(path):
+        order.append(("dir", Path(path)))
+
+    def gc(versioned_root_arg, target):
+        order.append(("gc", Path(target)))
+
+    monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
+    monkeypatch.setattr(
+        artifact_persistence_module, "_fsync_directory", fsync_directory
+    )
+    monkeypatch.setattr(artifact_persistence_module, "_gc_published_runs", gc)
+
+    artifact_persistence_module._PUBLISH_HOOKS["before_pointer_flip"] = (
+        lambda: order.append(("before_flip", None))
+    )
+    artifact_persistence_module._PUBLISH_HOOKS["after_pointer_flip"] = (
+        lambda: order.append(("after_flip", None))
+    )
+    try:
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        manifest_b = write_staged_set(staging_b, run_b)
+        publish_artifact_set(staging_b, output)
+    finally:
+        artifact_persistence_module._PUBLISH_HOOKS.clear()
+
+    versioned_dir = versioned_root / f"{run_b.run_id}~1"
+    file_indices = [i for i, (kind, _) in enumerate(order) if kind == "file"]
+    dir_indices = {path: i for i, (kind, path) in enumerate(order) if kind == "dir"}
+    before_flip = order.index(("before_flip", None))
+    after_flip = order.index(("after_flip", None))
+    gc_index = order.index(("gc", output))
+    assert file_indices, "no artifact file was fsynced before the pointer flip"
+    assert max(file_indices) < before_flip
+    assert dir_indices[versioned_dir] < before_flip
+    assert dir_indices[versioned_root] < before_flip
+    assert dir_indices[root] > after_flip
+    assert gc_index > after_flip
+    assert gc_index == len(order) - 1
+    verify_persisted_manifest(manifest_b, output)
+
+
+def test_publish_rejects_escaped_run_id_before_any_movement(tmp_path):
+    # Reproduction of the round-9 finding: the manifest ``run_id`` was used to
+    # build the versioned directory path and move the staged set into it before
+    # verification, so a crafted ``run_id="../escaped"`` moved staging outside
+    # the version namespace. The manifest identity is now validated before any
+    # path interpolation or movement, so the staged set never escapes and the
+    # crafted run id is rejected without touching the staging directory.
+    run = build_run()
+    root = Path(tmp_path)
+    output = root / "matchups"
+    staging = root / "stage"
+    staging.mkdir()
+    paths = write_full_artifact_set(staging, run)
+    manifest = artifact_manifest(run, paths)
+    manifest["run_id"] = "../escaped"
+    (staging / "run_identity_manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="hex digest"):
+        publish_artifact_set(staging, output)
+    assert (staging / "matchup_summary.csv").exists()
+    assert (staging / "run_identity_manifest.json").exists()
+    assert not (root / "escaped~1").exists()
+    assert not output.exists()
+    versioned_root = root / "matchups-runs"
+    assert list(versioned_root.iterdir()) == []

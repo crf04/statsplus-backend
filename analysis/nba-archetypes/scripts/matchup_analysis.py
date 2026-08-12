@@ -948,6 +948,23 @@ class AnalysisRunBuilder:
     frames disagrees with the specification.
     """
 
+    # Identity-bearing state is written exactly once at construction: the model
+    # spec the run is versioned against, the model version digest derived from
+    # it, and the deep-frozen settings snapshot. Reassigning any of these after
+    # provenance is recorded could desynchronize the cached run id from the
+    # artifacts a later stage would assemble, so the private slots are one-shot
+    # (public reassignment is already blocked by the read-only properties).
+    _IDENTITY_BEARING_SLOTS = frozenset(
+        {"_settings", "_model_spec", "_model_version", "_settings_hash"}
+    )
+
+    def __setattr__(self, name, value):
+        if name in self._IDENTITY_BEARING_SLOTS and name in self.__dict__:
+            raise AttributeError(
+                f"{name} is read-only and cannot be reassigned after construction"
+            )
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         archetypes,
@@ -970,7 +987,7 @@ class AnalysisRunBuilder:
             raise ValueError("clustering_attempt must be a positive integer")
         self.archetypes = archetypes
         self.game_logs = game_logs
-        self.model_spec = model_spec
+        self._model_spec = model_spec
         provided_settings = settings if settings is not None else DEFAULT_SETTINGS
         if not isinstance(provided_settings, AnalysisRunSettings):
             raise ValueError("settings must be an AnalysisRunSettings instance")
@@ -1004,6 +1021,18 @@ class AnalysisRunBuilder:
         self._run_id = None
         self._run_identity = None
         self._provenance = None
+
+    @property
+    def model_spec(self) -> "ArchetypeModelSpec | None":
+        """The archetype model spec this run is versioned and attributed to.
+
+        Read-only: assigned exactly once at construction (it may be ``None``
+        until a stage that requires it rejects the build), and the private
+        backing cannot be reassigned, so the recorded model version always
+        matches the spec whose cluster count and input-data identity later
+        stages validate against.
+        """
+        return self._model_spec
 
     @property
     def settings(self) -> AnalysisRunSettings:
@@ -1070,19 +1099,25 @@ class AnalysisRunBuilder:
             return self._provenance
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError("An ArchetypeModelSpec is required to record provenance")
+        if self._model_version != self.model_spec.version:
+            raise ValueError(
+                "The model spec changed after construction; refusing to record "
+                "provenance attributed to a different model"
+            )
         self.prepare_logs()
         # The run is versioned by its exact archetype model, code revision,
         # Information Cutoff, analysis settings, and the data snapshot it was
         # built from. The per-input hashes are recorded here so changing game
         # points with an unchanged cutoff/model/code still yields a distinct run
         # id, and so do different thresholds on identical data.
+        self._settings_hash = content_hash(("settings", asdict(self.settings)))
         self._run_id = content_hash(
             (
                 "analysis-run",
                 self._model_version,
                 self.code_revision,
                 self._information_cutoff.isoformat(),
-                content_hash(("settings", asdict(self.settings))),
+                self._settings_hash,
                 self._input_hashes["archetypes"],
                 self._input_hashes["game_logs"],
             )
@@ -1110,9 +1145,22 @@ class AnalysisRunBuilder:
     def _require_identity(self):
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError("An ArchetypeModelSpec is required to assemble artifacts")
+        if self._model_version != self.model_spec.version:
+            raise ValueError(
+                "The model spec changed after construction; refusing to assemble "
+                "artifacts attributed to a different model"
+            )
         membership = self.load_membership()
         self.prepare_logs()
         self.record_provenance()
+        if (
+            self._settings_hash is not None
+            and content_hash(("settings", asdict(self.settings))) != self._settings_hash
+        ):
+            raise ValueError(
+                "Analysis settings changed after construction; refusing to "
+                "assemble artifacts under a different settings snapshot"
+            )
         actual_cluster_count = int(membership["SUBTYPE_ID"].nunique())
         if actual_cluster_count != self.model_spec.cluster_count:
             raise ValueError(
@@ -1135,7 +1183,7 @@ class AnalysisRunBuilder:
 
     def prepare_logs(self):
         if self._logs is not None:
-            return self._logs
+            return self._logs.copy()
         membership = self.load_membership()
         settings = self.settings
 
@@ -1226,7 +1274,11 @@ class AnalysisRunBuilder:
             "archetypes": content_hash(("frame", _frame_canonical_text(self.archetypes))),
             "game_logs": content_hash(("frame", _frame_canonical_text(self.game_logs))),
         }
-        return logs
+        # A caller must never receive the cached internal snapshot: the prepared
+        # frame is the exact data the run id, input hashes, and every later
+        # artifact stage are derived from, so mutating a returned frame must not
+        # change what later stages read. Only a defensive copy is ever exposed.
+        return self._logs.copy()
 
     def fit_scoring(self):
         if self._scoring is not None:

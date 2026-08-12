@@ -310,6 +310,24 @@ def artifact_manifest(run, artifact_paths: dict) -> dict:
     }
 
 
+def _require_manifest_identity(manifest: dict) -> None:
+    """Fail closed unless the manifest's run/model identity is path-safe.
+
+    The ``run_id`` is used to build the private versioned directory name, so a
+    crafted value like ``../escaped`` must be rejected before it is interpolated
+    into any path: an escaped run id could move a staged set outside the version
+    namespace before verification. Both identity fields must be 64-character
+    lowercase hex digests, which also structurally rules out traversal.
+    """
+    for field in ("run_id", "model_version"):
+        value = manifest.get(field)
+        if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
+            raise ValueError(
+                f"A persisted manifest {field} must be a 64-character lowercase "
+                "hex digest"
+            )
+
+
 def verify_persisted_manifest(manifest: dict, output_dir) -> None:
     """Fail-closed verification that a persisted run is complete and attributable.
 
@@ -322,13 +340,7 @@ def verify_persisted_manifest(manifest: dict, output_dir) -> None:
     chunks). Missing, tampered, partial, substituted, or falsely attributed
     files raise instead of being silently accepted.
     """
-    for field in ("run_id", "model_version"):
-        value = manifest.get(field)
-        if not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value):
-            raise ValueError(
-                f"A persisted manifest {field} must be a 64-character lowercase "
-                "hex digest"
-            )
+    _require_manifest_identity(manifest)
     recorded = dict(manifest["artifacts"])
     provided = set(recorded)
     missing = REQUIRED_PERSISTED_ARTIFACTS - provided
@@ -448,16 +460,17 @@ def _fsync_directory(path) -> None:
         os.close(fd)
 
 
-def _durability_barriers(versioned, versioned_root, target) -> bool:
-    """Fsync the new set and pointer before any prior set may be removed.
+def _fsync_artifact_set(versioned, versioned_root) -> bool:
+    """Best-effort fsync of the installed set before it becomes the live pointer.
 
     Ordering: every artifact file's contents are flushed first, then the
     installed version directory itself (persisting its artifact entries), then
-    the versioned root (persisting the renamed immutable set), then the
-    published pointer's parent (persisting the flipped symlink). Only after all
-    barriers succeed may the superseded immutable sets be garbage-collected; if
-    any barrier cannot be confirmed (for example on a filesystem that does not
-    support directory fsync), the prior set is retained rather than risked.
+    the versioned root (persisting the renamed immutable set). Only after these
+    succeed may the pointer be flipped, so the externally observed publication
+    never points at set contents or directory entries that could be lost on
+    power failure. A filesystem that cannot confirm a barrier reports ``False``
+    and publication proceeds without garbage collection rather than removing
+    the prior set.
     """
     try:
         for path in versioned.iterdir():
@@ -465,6 +478,19 @@ def _durability_barriers(versioned, versioned_root, target) -> bool:
                 _fsync_path(path)
         _fsync_directory(versioned)
         _fsync_directory(versioned_root)
+    except OSError:
+        return False
+    return True
+
+
+def _fsync_pointer_parent(target) -> bool:
+    """Best-effort fsync of the pointer's parent after the flip.
+
+    Persists the directory entry naming the flipped symlink so the new pointer
+    survives power loss. Only after this is confirmed may any superseded set be
+    removed.
+    """
+    try:
         _fsync_directory(target.parent)
     except OSError:
         return False
@@ -513,12 +539,13 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     ``<name>-runs`` namespace); the externally observed ``output_dir`` is a
     symlink whose target is swapped in one atomic ``os.replace``. A crash before
     the swap leaves the previous set fully live; a crash after the swap
-    publishes the new set. The old set survives until the new set and pointer
-    are durably committed (every artifact file, the installed version directory,
-    the versioned root, and the pointer's parent directory are fsynced) and the
-    lock is still held, so SIGKILL or power loss can never leave the publication
-    path absent, expose a partially replaced set, or delete the live set while
-    another publisher is mid-swap.
+    publishes the new set. The old set survives until the new set is durable
+    (every artifact file, the installed version directory, and the versioned
+    root are fsynced before the pointer is flipped) and the flipped pointer is
+    durable (its parent directory is fsynced), all while the lock is still held,
+    so SIGKILL or power loss can never leave the publication path absent, expose
+    a partially replaced set, or delete the live set while another publisher is
+    mid-swap.
     """
     staging = Path(staging_dir)
     target = Path(output_dir)
@@ -537,6 +564,12 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     _run_publish_hook("before_lock")
     with _PublicationLock(versioned_root):
         manifest = json.loads(manifest_path.read_text())
+        # The run id is used to build the private versioned directory name and
+        # is moved into it, so the manifest identity must be validated before
+        # any path interpolation or movement: a crafted ``run_id`` that escapes
+        # the version namespace must be rejected here, not after the staging
+        # directory has already been moved somewhere it should not be.
+        _require_manifest_identity(manifest)
         run_id = manifest["run_id"]
         sequence = _next_publication_sequence(versioned_root, run_id)
         versioned = versioned_root / f"{run_id}~{sequence}"
@@ -549,9 +582,17 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
         # the published path still resolves to the previous set.
         os.replace(staging, versioned)
         _run_publish_hook("after_version_install")
+        set_durable = False
+        pointer_durable = False
         try:
             verify_persisted_manifest(manifest, versioned)
             _run_publish_hook("after_verify")
+            # The new set must be durable before it becomes the externally
+            # observed publication: flush every artifact file, the installed
+            # version directory, and the versioned root before the pointer is
+            # flipped.
+            set_durable = _fsync_artifact_set(versioned, versioned_root)
+            _run_publish_hook("after_set_durable")
             pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
             os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
             _run_publish_hook("before_pointer_flip")
@@ -563,13 +604,14 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
                 pointer_tmp.unlink(missing_ok=True)
                 raise
             _run_publish_hook("after_pointer_flip")
+            # Persist the flipped pointer in its parent directory before any
+            # prior set may be removed, so garbage collection only ever runs
+            # after the new set and pointer are durably committed.
+            pointer_durable = _fsync_pointer_parent(target)
+            _run_publish_hook("after_durability")
         except BaseException:
             shutil.rmtree(versioned, ignore_errors=True)
             raise
         _run_publish_hook("before_gc")
-        # Retain the prior immutable set until the new set and pointer are
-        # durably committed; only then may the superseded sets be removed.
-        durable = _durability_barriers(versioned, versioned_root, target)
-        _run_publish_hook("after_durability")
-        if durable:
+        if set_durable and pointer_durable:
             _gc_published_runs(versioned_root, target)

@@ -11,13 +11,24 @@ immediately before publication the script calls
 analysis module actually executed (recorded in-process at import time) provably
 matches the current disk source it is attributed to.
 
+The supported launch boundary is plain script execution of the launcher
+(``python run_matchup_analysis.py``), which ignores ``__pycache__``: the
+``__main__`` module is always compiled from disk source, never from a shared
+bytecode cache, so no stale pre-bootstrap bytecode can execute before the proof
+is established. The launcher records its own actual executing frame code (the
+exact module code the interpreter compiled from source) and source-loads this
+module exactly once — read from disk, compiled once, and executed once into a
+fresh module before any attributable analysis import, with that exact code
+object recorded — so this module's shared bytecode cache is never consulted by
+the supported path either.
+
 Loaded-code evidence is process-local and captured the moment each module's
 code object starts executing. Analysis modules are recorded by an import
 finder installed by ``begin_load_proof``: the finder fetches each module's code
 object exactly once, records that same object, and executes that same object
 (instead of asking the loader a second time), so nothing can record one code
-object while a different one runs. The launcher and this module record
-themselves with a minimal trusted bootstrap: each reads its own source once,
+object while a different one runs. When this module is imported directly
+(outside the launcher) its own trusted bootstrap reads its source once,
 compiles it once, records the resulting code object, and then executes that
 same object, so the code that runs is provably the recorded code no matter what
 the shared ``__pycache__`` holds. Verification never reads a shared cache file
@@ -244,10 +255,10 @@ else:
     def _evidence_key(module) -> str:
         """The key a module's loaded-code evidence is recorded under.
 
-        Under ``python -m`` the launcher is executed as ``__main__`` but was
-        imported under its real name, so the module's ``__spec__.name`` is the
-        import name the evidence is keyed by; a directly executed script has no
-        spec and falls back to its module name.
+        Under plain script execution the launcher runs as ``__main__`` with a
+        spec whose name is ``__main__``, so the evidence key is the spec name
+        when present; a module without a spec (for example the source-loaded
+        ``code_revision`` module) falls back to its module name.
         """
         spec = getattr(module, "__spec__", None)
         if spec is not None and spec.name:
@@ -267,12 +278,16 @@ else:
             _LOADED_CODE[name] = code
 
     def record_bootstrap_code(key, code) -> None:
-        """Record the exact code object a bootstrap module reads, compiles, and runs.
+        """Record the exact code object a bootstrap module executes.
 
-        The launcher's trusted bootstrap calls this before executing the
-        attributable body from the recorded object, so the evidence is immutable
-        process-local memory captured before any attributable logic runs — never
-        inferred from a shared bytecode cache after the fact.
+        The launcher's trusted bootstrap records the exact code objects it
+        executes before any attributable logic runs: its own actual launcher
+        frame code (the module code the interpreter compiled from disk source,
+        since plain script execution ignores ``__pycache__``) and the exact
+        object it compiled and executed when source-loading this module. The
+        evidence is immutable process-local memory captured before any
+        attributable logic runs — never inferred from a shared bytecode cache
+        after the fact.
         """
         _LOADED_CODE[key] = code
 
@@ -280,13 +295,13 @@ else:
         """Establish process-local loaded-code evidence before analysis imports.
 
         Called by the launcher as its first action, before any analysis
-        implementation module is imported. The launcher and this module recorded
-        their own loaded code during their trusted bootstrap (read once, compile
-        once, record the exact code object, execute that same object); a missing
-        record means the bootstrap did not run and fails closed. Every later
+        implementation module is imported. The launcher recorded its own actual
+        executing frame code (compiled from disk source, since plain script
+        execution ignores ``__pycache__``) and source-loaded this module exactly
+        once, recording the exact code object it executes; a missing record
+        means that trusted bootstrap did not run and fails closed. Every later
         analysis import is recorded in-memory by the proof finder at import time.
-        Idempotent, so the ``-m`` launcher re-execution cannot double-install the
-        finder.
+        Idempotent, so a second call cannot double-install the finder.
         """
         global _PROOF_BEGUN, _LAUNCHER_FILE, _LAUNCHER_KEY
         if _PROOF_BEGUN:
@@ -304,8 +319,8 @@ else:
             if key not in _LOADED_CODE:
                 raise RuntimeError(
                     "Cannot prove the loaded code of the launcher: it must run "
-                    "as ``python -m run_matchup_analysis`` so its trusted "
-                    "bootstrap records and executes one code object"
+                    "as a plain script ``python run_matchup_analysis.py`` so its "
+                    "actual frame code is recorded and verified"
                 )
             _LAUNCHER_KEY = next(
                 (key for key, module in sys.modules.items() if module is launcher),
@@ -313,8 +328,9 @@ else:
             )
         if "code_revision" not in _LOADED_CODE:
             raise RuntimeError(
-                "Cannot prove the loaded code of code_revision: its trusted "
-                "bootstrap did not record the code object it executes"
+                "Cannot prove the loaded code of code_revision: it was not "
+                "source-loaded exactly once into a module before attributable "
+                "analysis imports"
             )
         sys.meta_path.insert(0, _LoadProofFinder(root, _record_loaded_code))
         _PROOF_BEGUN = True
@@ -325,9 +341,14 @@ else:
         The module's code object was recorded in this process the moment it began
         executing; if the disk source has since been edited (or another process
         swapped the shared bytecode cache), recompiling the current disk source
-        yields a different code object and the comparison fails.
+        yields a different code object and the comparison fails. The disk source
+        is compiled with the module's own ``__file__`` as the filename so the
+        freshly compiled code's ``co_filename`` equals the filename the recorded
+        code was compiled under (the launcher running as a plain script may have
+        been invoked with a relative path, and its frame code's ``co_filename``
+        is that same relative path).
         """
-        source_file = Path(module.__file__).resolve()
+        source_file = Path(module.__file__)
         try:
             loaded_code = _LOADED_CODE[_evidence_key(module)]
             disk_code = _code_from_source_file(source_file)
@@ -351,13 +372,13 @@ else:
         """Fail closed unless the loaded analysis code provably matches the disk.
 
         The analysis entry script must be loaded as a module through the launcher
-        (``python -m run_matchup_analysis``), which establishes import-time,
+        (``python run_matchup_analysis.py``), which establishes import-time,
         process-local evidence for its own loaded code and every analysis module it
         imports. Every analysis module loaded from under the analysis root is then
         checked module by module against the code this process actually executed,
         and any module whose loaded code cannot be proven to equal its current disk
-        source (including the launcher itself, whose evidence was recorded at
-        bootstrap) aborts publication.
+        source (including the launcher itself, whose actual frame code was recorded
+        at bootstrap) aborts publication.
         """
         root = (
             Path(analysis_dir).resolve()
