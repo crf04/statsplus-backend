@@ -420,9 +420,12 @@ call: it requests one PBP per-player season game-log observation
 (`GET /get-game-logs/nba` with `EntityType=Player` and `EntityId`) through
 `PBPGameLogAdapter`, normalizes it through the shared canonical contract, and
 joins every row to the governed Event Catalog by game ID to recover team and
-opponent identity, home/away, and the existing Matchup notation.  Rows that
-cannot join are rejected rather than guessed, and an unavailable or empty
-Event Catalog fails closed as `provider_unavailable`.  The Redis cache policy
+opponent identity, home/away, and the existing Matchup notation.  The live
+per-player rows do not carry `EntityId`/`Name`/`TeamId`: player identity comes
+from the request plus the `single_row_table_data.Name` envelope, and team
+identity is derived exactly from each row's `Team`/`Opponent` tricodes against
+the Event Catalog.  An unavailable or empty Event Catalog fails closed as
+`provider_unavailable`.  The Redis cache policy
 is unchanged (current-season daily, historical 30-day); cache hits and misses
 are attributed to the PBP provider.  A database-served season bypasses Redis
 entirely so cached provider results never shadow fresher stored facts.
@@ -431,7 +434,12 @@ entirely so cached provider results never shadow fresher stored facts.
 canonical PBP game-log mapping shared by the live path and durable ingestion.
 Provider omissions become zero only for a closed list of additive/counting
 box-score fields; identity, game, date, team, opponent, and `MM:SS` minutes
-evidence is malformed rather than zero-filled.  Canonical shooting facts derive
+evidence is malformed rather than zero-filled.  The join is fail-closed: any
+row that cannot join the governed Event Catalog, contradicts its team tricode,
+disagrees with the requested phase, or is missing identity/minutes evidence
+aborts the whole pass with `provider_unavailable`, so neither the live response
+nor a durable game publication ever tolerates a dropped row.  Canonical
+shooting facts derive
 `FGM = FG2M + FG3M` and `FGA = FG2A + FG3A`; PBP reports free-throw points
 rather than made free throws, and a made free throw is exactly one point, so
 the endpoint's canonical `FTM` reads `FtPoints` after that semantic
@@ -440,6 +448,12 @@ computed centrally by `app.services.game_log_frame.derive_game_log_frame` so
 the live PBP and stored read paths can never disagree.  The stored source
 rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
 makes the Stage 3 parity seam a real equivalence check.
+
+Per-game `PlusMinus` is one field PBP's per-game boxscore seam does not expose
+(the per-player seam does).  The durable model therefore stores a nullable
+`plus_minus`: a stored season truthfully reports `+/-` as null and omits the
+`PLUS_MINUS` average rather than inventing a zero, and the parity contract
+scopes that single honest divergence out of the strict comparison.
 
 ### NBA Stats game-log adapter
 
@@ -715,16 +729,21 @@ Refresh.  It requires the same fresh, nonempty Event and Athlete Catalog
 prerequisites, discovers governed completed `Regular Season`/`Playoffs` games
 through the observation time, and requests one PBP per-game player observation
 (`GET /get-game-stats` with `Type=Player`, parsed by
-`PBPGameLogAdapter.parse_game_stats`) per missing game.  Each game's rows flow
-through the same canonical normalization contract, join the fresh Athlete
-Catalog for player identity, must cover both exact event teams with at least
-the configured `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute
-players, and are replaced atomically by `PlayerGameLogRepository.publish_game`
-(game rows plus per-game sync evidence only).  The season sidecar and the
-configured current season's stats-surface observation are advanced once, by
-`PlayerGameLogRepository.advance_season_publication`, only after every target
-game succeeds, so a failed or incomplete refresh preserves the last complete
-publication and never stamps a partial union fresh.  The sidecar
+`PBPGameLogAdapter.parse_game_stats`) per missing game.  The parser flattens
+the nested `stats.Home/Away.FullGame` player arrays, excludes the provider's
+team-summary row (`EntityId == 0`), and attaches game identity from the
+envelope.  Each game's rows flow through the same canonical normalization
+contract, join the fresh Athlete Catalog for player identity (an unjoined
+athlete fails the game, never a dropped row), and must cover both exact event
+teams with at least the configured
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players.
+Every target game is fetched, normalized, and validated before anything is
+written; only then does `PlayerGameLogRepository.publish_refresh` replace all
+staged games' rows, upsert their per-game sync evidence, recompute the season
+sidecar, and advance the configured current season's stats-surface observation
+in one transaction.  A game that fails at any earlier point preserves the exact
+prior fact rows and the last complete publication — a correction staged for one
+game never leaks into published facts when a later game fails.  The sidecar
 `publication_status` is `complete` only when every governed completed event
 carries complete PBP sync evidence; legacy NBA-derived publications stay
 `in_progress` until a real PBP backfill verifies them, so a database-first read

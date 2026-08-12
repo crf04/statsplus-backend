@@ -45,37 +45,42 @@ def _repository(tmp_path) -> PlayerGameLogRepository:
     )
 
 
-def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
+def _game_rows(
+    game_id: str,
+    game_date: str,
+    home_id: int,
+    away_id: int,
+    *,
+    plus_minus: bool = False,
+):
     rows = []
     for index, player_id in enumerate((*AAA_PLAYERS, *BBB_PLAYERS)):
-        team_id = home_id if index < 5 else away_id
-        rows.append(
-            {
-                "EntityId": player_id,
-                "Name": f"Player {player_id}",
-                "GameId": game_id,
-                "Date": game_date,
-                "TeamId": team_id,
-                "Team": "AAA" if index < 5 else "BBB",
-                "Opponent": "BBB" if index < 5 else "AAA",
-                "Minutes": f"{20 + index}:00",
-                "FG2M": 4 + index,
-                "FG2A": 8 + index,
-                "FG3M": index,
-                "FG3A": index + 2,
-                "FtPoints": 2,
-                "FTA": 3,
-                "OffRebounds": 1,
-                "DefRebounds": 3,
-                "Assists": 2 + index,
-                "Turnovers": 1,
-                "Steals": 1,
-                "Blocks": 0,
-                "Fouls": 1,
-                "PlusMinus": 4 - index,
-                "Points": 12 + 2 * index,
-            }
-        )
+        row = {
+            "EntityId": player_id,
+            "Name": f"Player {player_id}",
+            "GameId": game_id,
+            "Date": game_date,
+            "Team": "AAA" if index < 5 else "BBB",
+            "Opponent": "BBB" if index < 5 else "AAA",
+            "Minutes": f"{20 + index}:00",
+            "FG2M": 4 + index,
+            "FG2A": 8 + index,
+            "FG3M": index,
+            "FG3A": index + 2,
+            "FtPoints": 2,
+            "FTA": 3,
+            "OffRebounds": 1,
+            "DefRebounds": 3,
+            "Assists": 2 + index,
+            "Turnovers": 1,
+            "Steals": 1,
+            "Blocks": 0,
+            "Fouls": 1,
+            "Points": 12 + 2 * index,
+        }
+        if plus_minus:
+            row["PlusMinus"] = 4 - index
+        rows.append(row)
     return rows
 
 
@@ -153,7 +158,8 @@ def test_ingest_publishes_each_missing_completed_game_atomically(tmp_path):
     assert rows[0].free_throws_made == 2
     assert rows[0].offensive_rebounds == 1
     assert rows[0].personal_fouls == 1
-    assert rows[0].plus_minus == 4
+    # The per-game boxscore seam exposes no plus/minus evidence.
+    assert rows[0].plus_minus is None
 
     freshness = repository.get_freshness(SEASON)
     assert freshness.publication_status == "complete"
@@ -199,6 +205,43 @@ def test_failed_run_preserves_the_last_complete_publication(tmp_path):
     ).get().last_successful_completion
     assert surface_after == surface_before
     assert repository.list_player_rows(SEASON, 101)
+
+
+def test_failed_reconcile_preserves_exact_prior_rows_and_complete_publication(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    games = _complete_game_logs()
+    provider = FakeGameLogProvider(games)
+    service = _service(repository, provider, reconciliation_days=14)
+
+    service.refresh(SEASON)
+    rows_before = repository.list_player_rows(SEASON, 101)
+
+    # Game 1's facts change upstream; game 2's provider call then fails.  The
+    # staged correction must not leak into the published facts.
+    corrected = games["0022500001"]
+    corrected[0] = {**corrected[0], "Points": 99, "Minutes": "45:00"}
+    provider.games["0022500001"] = _frame(corrected)
+
+    class FailingProvider(FakeGameLogProvider):
+        def fetch_game_player_logs(self, game_id, season, *, season_type):
+            if game_id == "0022500004":
+                raise ProviderUnavailableError("pbp stats down")
+            return super().fetch_game_player_logs(
+                game_id, season, season_type=season_type
+            )
+
+    failing = _service(repository, FailingProvider(games), reconciliation_days=14)
+    with pytest.raises(ProviderUnavailableError):
+        failing.refresh(SEASON)
+
+    # Exact old row equality: game 1's rows are unchanged and the complete
+    # publication still stands.
+    assert repository.list_player_rows(SEASON, 101) == rows_before
+    assert repository.has_complete_publication(SEASON) is True
+    assert repository.get_freshness(SEASON).publication_status == "complete"
 
 
 def test_failed_first_run_advances_no_freshness_and_stores_no_sidecar(tmp_path):
@@ -274,7 +317,7 @@ def test_ingest_rejects_a_game_that_cannot_join_canonical_identity(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
     rows = _game_rows("0022500004", "2026-01-11", 1, 2)
-    rows[0]["TeamId"] = 99
+    rows[0]["Team"] = "ZZZ"
     provider = FakeGameLogProvider(
         {
             "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2),
@@ -282,13 +325,24 @@ def test_ingest_rejects_a_game_that_cannot_join_canonical_identity(tmp_path):
         }
     )
 
-    with pytest.raises(PlayerGameLogIngestError):
+    with pytest.raises(ProviderUnavailableError, match="contradictory team identity"):
         _service(repository, provider).refresh(SEASON)
 
-    # Prior facts for the earlier game survive the failed game, but no season
-    # publication advances until a fully successful refresh.
-    assert "0022500001" in repository.stored_game_ids(SEASON)
-    assert "0022500004" not in repository.stored_game_ids(SEASON)
+    # A failed run publishes nothing: no game rows and no season sidecar.
+    assert repository.stored_game_ids(SEASON) == frozenset()
+    assert repository.get_freshness(SEASON).retrieved_at is None
+
+
+def test_ingest_rejects_a_game_with_an_unjoined_athlete(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    rows = _game_rows("0022500001", "2026-01-02", 1, 2)
+    rows[5] = {**rows[5], "EntityId": 999999}
+    provider = FakeGameLogProvider({"0022500001": rows})
+
+    with pytest.raises(PlayerGameLogIngestError, match="Athlete Catalog"):
+        _service(repository, provider).refresh(SEASON)
+
     assert repository.get_freshness(SEASON).retrieved_at is None
 
 

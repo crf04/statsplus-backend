@@ -28,6 +28,7 @@ from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
+    PlayerGameLogRefreshChange,
     PlayerGameLogRepository,
 )
 from app.utils.telemetry import (
@@ -129,7 +130,7 @@ class PlayerGameLogIngestService:
     def refresh(
         self, season: str, *, now: datetime | None = None
     ) -> PlayerGameLogIngestResult:
-        """Discover missing/reconciliation games and ingest each atomically."""
+        """Stage and atomically publish one run's missing/reconciled games."""
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(now or self._clock())
         events = self._require_complete_event_catalog(canonical_season, retrieved_at)
@@ -150,52 +151,60 @@ class PlayerGameLogIngestService:
             if athlete.get("player_id") is not None
         }
         counts = _AggregatedCounts()
+        changes: list[PlayerGameLogRefreshChange] = []
         games_processed = 0
-        total_rows = 0
         for event in targets:
             try:
-                outcome = self._ingest_game(
+                change = self._stage_game(
                     canonical_season,
                     event,
                     events=events,
                     athlete_map=athlete_map,
-                    retrieved_at=retrieved_at,
                 )
             except SQLAlchemyError:
                 self._emit_telemetry(counts=counts, rejected=1)
                 raise
-            if outcome is None:
+            if change is None:
                 continue
             games_processed += 1
-            total_rows += outcome.row_count
-            counts = self._merge_counts(counts, outcome)
-        # The season publication and current-season freshness advance only
-        # after every target game succeeded, so a failed or incomplete refresh
-        # preserves the last complete publication instead of stamping a partial
-        # union fresh.
-        self.repository.advance_season_publication(
+            changes.append(
+                PlayerGameLogRefreshChange(
+                    game_id=change.game_id,
+                    season_type=change.season_type,
+                    records=change.records,
+                    checksum=change.checksum,
+                )
+            )
+            counts = self._merge_counts(counts, change)
+        # Every target game was fetched, normalized, and validated before this
+        # point, so a single transaction replaces the changed games' rows,
+        # upserts sync evidence, recomputes the season sidecar, and advances
+        # the configured current season's stats-surface observation.  A game
+        # that fails earlier preserves the exact prior fact rows and the last
+        # complete publication.
+        publication = self.repository.publish_refresh(
             canonical_season,
+            changes,
             retrieved_at=retrieved_at,
             source_provider=SOURCE_PROVIDER,
             expected_complete_game_ids=completed_ids,
         )
-        self._emit_telemetry(counts=counts, published=total_rows)
+        self._emit_telemetry(counts=counts, published=publication.row_count)
         return PlayerGameLogIngestResult(
             season=canonical_season,
             games_processed=games_processed,
-            row_count=total_rows,
+            row_count=publication.row_count,
             retrieved_at=retrieved_at.isoformat(),
         )
 
-    def _ingest_game(
+    def _stage_game(
         self,
         season: str,
         event: dict[str, Any],
         *,
         events: list[dict[str, Any]],
         athlete_map: dict[int, dict[str, Any]],
-        retrieved_at: datetime,
-    ) -> _GameOutcome | None:
+    ) -> _GameChange | None:
         game_id = str(event["nba_game_id"])
         season_type = player_game_log_season_type(event)
         if season_type is None:
@@ -217,12 +226,12 @@ class PlayerGameLogIngestService:
             team_mismatch_count=join_counts.team_mismatch_count,
             unsupported_phase_count=join_counts.unsupported_phase_count,
         )
-        if join_counts.source_row_count > 0 and frame.empty:
+        if frame.empty:
             self._reject(
-                "PBP Stats returned no canonically joinable facts for a game",
+                "PBP Stats returned no player facts for a completed game",
                 counts=counts,
             )
-        records, unjoined_athletes, duplicates = self._canonicalize_game(
+        records, duplicates = self._canonicalize_game(
             season,
             frame,
             season_type=season_type,
@@ -231,17 +240,11 @@ class PlayerGameLogIngestService:
         )
         counts = _AggregatedCounts(
             source_row_count=join_counts.source_row_count,
-            unjoined_athlete_count=unjoined_athletes,
             unjoined_event_count=join_counts.unjoined_event_count,
             team_mismatch_count=join_counts.team_mismatch_count,
             unsupported_phase_count=join_counts.unsupported_phase_count,
             duplicate_row_count=duplicates,
         )
-        if not records:
-            self._reject(
-                "a completed game produced no canonical player facts",
-                counts=counts,
-            )
         self._validate_game_coverage(records, event, counts=counts)
         checksum = self.repository.game_checksum(records)
         sync = self.repository.get_sync_status(season, game_id)
@@ -251,17 +254,11 @@ class PlayerGameLogIngestService:
             and sync.checksum == checksum
         ):
             return None
-        publication = self.repository.publish_game(
-            season,
-            game_id,
-            records,
+        return _GameChange(
+            game_id=game_id,
             season_type=season_type,
-            retrieved_at=retrieved_at,
-            source_provider=SOURCE_PROVIDER,
+            records=records,
             checksum=checksum,
-        )
-        return _GameOutcome(
-            row_count=publication.row_count,
             counts=counts,
         )
 
@@ -273,16 +270,19 @@ class PlayerGameLogIngestService:
         season_type: str,
         athlete_map: dict[int, dict[str, Any]],
         event: dict[str, Any],
-    ) -> tuple[tuple[PlayerGameLogRecord, ...], int, int]:
+    ) -> tuple[tuple[PlayerGameLogRecord, ...], int]:
         records: dict[int, PlayerGameLogRecord] = {}
-        unjoined_athlete_count = 0
         duplicate_row_count = 0
         for row in frame.to_dict(orient="records"):
             player_id = int(row["PLAYER_ID"])
             athlete = athlete_map.get(player_id)
             if athlete is None:
-                unjoined_athlete_count += 1
-                continue
+                # Identity evidence is never dropped: an athlete PBP reports
+                # that the governed catalog cannot place fails the whole game
+                # publication rather than publishing a partial box score.
+                raise PlayerGameLogIngestError(
+                    "a player game log cannot join the governed Athlete Catalog"
+                )
             team_id = int(row["TEAM_ID"])
             if team_id == event["home_team_id"]:
                 opponent_team_id = event["away_team_id"]
@@ -295,7 +295,9 @@ class PlayerGameLogIngestService:
                 opponent_team_tricode = event["home_team_tricode"]
                 is_home = False
             else:
-                continue
+                raise PlayerGameLogIngestError(
+                    "a player game log has a contradictory team identity"
+                )
             try:
                 game_date = pd.Timestamp(row["GAME_DATE"]).date()
             except (TypeError, ValueError, OverflowError) as error:
@@ -330,7 +332,11 @@ class PlayerGameLogIngestService:
                 steals=int(row["STL"]),
                 blocks=int(row["BLK"]),
                 personal_fouls=int(row["PF"]),
-                plus_minus=int(row["PLUS_MINUS"]),
+                plus_minus=(
+                    None
+                    if pd.isna(row["PLUS_MINUS"])
+                    else int(row["PLUS_MINUS"])
+                ),
             )
             existing = records.get(player_id)
             if existing is not None:
@@ -341,7 +347,11 @@ class PlayerGameLogIngestService:
                     "conflicting player game log facts share one identity"
                 )
             records[player_id] = record
-        return tuple(records.values()), unjoined_athlete_count, duplicate_row_count
+        if not records:
+            raise PlayerGameLogIngestError(
+                "a completed game produced no canonical player facts"
+            )
+        return tuple(records.values()), duplicate_row_count
 
     def _validate_game_coverage(
         self,
@@ -453,9 +463,9 @@ class PlayerGameLogIngestService:
 
     @staticmethod
     def _merge_counts(
-        counts: _AggregatedCounts, outcome: "_GameOutcome"
+        counts: _AggregatedCounts, change: "_GameChange"
     ) -> _AggregatedCounts:
-        added = outcome.counts
+        added = change.counts
         return _AggregatedCounts(
             source_row_count=counts.source_row_count + added.source_row_count,
             unjoined_athlete_count=(
@@ -513,8 +523,13 @@ class PlayerGameLogIngestService:
 
 
 @dataclass(frozen=True, slots=True)
-class _GameOutcome:
-    row_count: int
+class _GameChange:
+    """One fully validated game staged for the run's atomic publication."""
+
+    game_id: str
+    season_type: str
+    records: tuple[PlayerGameLogRecord, ...]
+    checksum: str
     counts: _AggregatedCounts
 
 

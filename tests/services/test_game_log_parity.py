@@ -35,37 +35,42 @@ AAA_PLAYERS = (101, 103, 104, 105, 106)
 BBB_PLAYERS = (202, 107, 108, 109, 110)
 
 
-def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
+def _game_rows(
+    game_id: str,
+    game_date: str,
+    home_id: int,
+    away_id: int,
+    *,
+    plus_minus: bool = True,
+):
     rows = []
     for index, player_id in enumerate((*AAA_PLAYERS, *BBB_PLAYERS)):
-        team_id = home_id if index < 5 else away_id
-        rows.append(
-            {
-                "EntityId": player_id,
-                "Name": f"Player {player_id}",
-                "GameId": game_id,
-                "Date": game_date,
-                "TeamId": team_id,
-                "Team": "AAA" if index < 5 else "BBB",
-                "Opponent": "BBB" if index < 5 else "AAA",
-                "Minutes": f"{20 + index}:00",
-                "FG2M": 4 + index,
-                "FG2A": 8 + index,
-                "FG3M": index,
-                "FG3A": index + 2,
-                "FtPoints": 2,
-                "FTA": 3,
-                "OffRebounds": 1,
-                "DefRebounds": 3,
-                "Assists": 2 + index,
-                "Turnovers": 1,
-                "Steals": 1,
-                "Blocks": 0,
-                "Fouls": 1,
-                "PlusMinus": 4 - index,
-                "Points": 12 + 2 * index,
-            }
-        )
+        row = {
+            "EntityId": player_id,
+            "Name": f"Player {player_id}",
+            "GameId": game_id,
+            "Date": game_date,
+            "Team": "AAA" if index < 5 else "BBB",
+            "Opponent": "BBB" if index < 5 else "AAA",
+            "Minutes": f"{20 + index}:00",
+            "FG2M": 4 + index,
+            "FG2A": 8 + index,
+            "FG3M": index,
+            "FG3A": index + 2,
+            "FtPoints": 2,
+            "FTA": 3,
+            "OffRebounds": 1,
+            "DefRebounds": 3,
+            "Assists": 2 + index,
+            "Turnovers": 1,
+            "Steals": 1,
+            "Blocks": 0,
+            "Fouls": 1,
+            "Points": 12 + 2 * index,
+        }
+        if plus_minus:
+            row["PlusMinus"] = 4 - index
+        rows.append(row)
     return rows
 
 
@@ -79,10 +84,20 @@ def _frame(rows) -> pd.DataFrame:
 
 
 class PlayerLogProvider:
-    """Serves the per-player view of the same canonical game facts."""
+    """Serves the per-player view of the same canonical game facts.
 
-    def __init__(self, games):
+    The live per-player seam exposes ``PlusMinus`` and returns only the
+    requested Regular Season games; the durable per-game boxscore seam does
+    not expose ``PlusMinus``, which is exactly the truthful wire divergence
+    this parity contract must scope.
+    """
+
+    def __init__(self, games, regular_season_game_ids=None):
         self.games = games
+        self.regular_season_game_ids = (
+            regular_season_game_ids if regular_season_game_ids is not None
+            else frozenset(games)
+        )
 
     def fetch_player_game_logs(self, player_id, season, *, season_type, cache_status):
         rows = [
@@ -90,14 +105,37 @@ class PlayerLogProvider:
             for game_rows in self.games.values()
             for row in game_rows
             if row["EntityId"] == player_id
+            and row["GameId"] in self.regular_season_game_ids
         ]
         return _frame(rows)
 
     def fetch_game_player_logs(self, game_id, season, *, season_type):
-        return _frame(self.games[game_id])
+        rows = [
+            {key: value for key, value in row.items() if key != "PlusMinus"}
+            for row in self.games[game_id]
+        ]
+        return _frame(rows)
 
     def record_cache_hit(self, operation):
         return None
+
+
+def _strip_plus_minus(document):
+    """Remove the plus-minus fields whose durable value is honestly null."""
+    stripped = dict(document)
+    stripped["game_logs"] = [
+        {key: value for key, value in row.items() if key != "+/-"}
+        for row in document["game_logs"]
+    ]
+    stripped["averages"] = [
+        {key: value for key, value in row.items() if key != "PLUS_MINUS"}
+        for row in document["averages"]
+    ]
+    stripped["season_averages"] = [
+        {key: value for key, value in row.items() if key != "PLUS_MINUS"}
+        for row in document["season_averages"]
+    ]
+    return stripped
 
 
 class _EventsFromDb:
@@ -196,9 +234,12 @@ def test_live_and_stored_paths_return_identical_response_documents(durable_world
         "Player One", query
     )
 
-    assert live["game_logs"] == stored["game_logs"]
-    assert live["averages"] == stored["averages"]
-    assert live["season_averages"] == stored["season_averages"]
+    # The live per-player seam carries plus/minus; PBP's per-game boxscore seam
+    # exposes none, so the stored path truthfully reports it null.  Every other
+    # field is identical, and the stored plus/minus is honestly absent.
+    assert _strip_plus_minus(live) == _strip_plus_minus(stored)
+    assert all(row["+/-"] is None for row in stored["game_logs"])
+    assert live["game_logs"][0]["+/-"] == 4
     assert len(stored["game_logs"]) == 2
     assert stored["game_logs"][0]["MATCHUP"] == "AAA vs. BBB"
 
@@ -217,7 +258,7 @@ def test_live_and_stored_paths_agree_under_filters(durable_world):
         "Player One", query
     )
 
-    assert live == stored
+    assert _strip_plus_minus(live) == _strip_plus_minus(stored)
     assert stored["game_logs"]
 
 
@@ -230,7 +271,7 @@ def test_live_and_stored_paths_agree_on_empty_filter_results(durable_world):
         "Player One", query
     )
 
-    assert live == stored
+    assert _strip_plus_minus(live) == _strip_plus_minus(stored)
     assert stored["game_logs"] == []
     assert stored["averages"] == []
 
@@ -244,7 +285,7 @@ def test_live_and_stored_paths_agree_on_recent_game_filter(durable_world):
         "Player One", query
     )
 
-    assert live == stored
+    assert _strip_plus_minus(live) == _strip_plus_minus(stored)
     # game_filter keeps the leading newest-first rows, matching the legacy
     # NBA ordering the head() filter depends on.
     assert stored["game_logs"][0]["GAME_DATE"] == "2026-01-11"
@@ -274,7 +315,8 @@ def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
             "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2),
             "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2),
             "0042500001": _game_rows("0042500001", "2026-01-15", 1, 2),
-        }
+        },
+        regular_season_game_ids={"0022500001", "0022500004"},
     )
     ingest = PlayerGameLogIngestService(
         pbp_provider=provider,
@@ -296,7 +338,7 @@ def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
         "Player One", GameLogQuery(season_filter=SEASON)
     )
 
-    assert live == stored
+    assert _strip_plus_minus(live) == _strip_plus_minus(stored)
     # The playoff game is excluded from both paths, matching the legacy
     # Regular-Season-only request-time contract.
     assert len(stored["game_logs"]) == 2

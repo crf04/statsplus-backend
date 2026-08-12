@@ -1,12 +1,18 @@
 """Canonical PBP game-log normalization shared by live and durable paths.
 
-PBP's wire rows are sparse and encode minutes as ``MM:SS``, so this module is
-the single owned mapping from PBP player-game observations to the canonical
-game-log frame consumed by the game-log service.  The same normalization is
-reused by durable ingestion so the live and stored field mappings cannot
-drift.  Every row must join by canonical game ID to the governed Event Catalog
-to recover team identity, opponent identity, home/away, and the existing
-``TEAM vs. OPP`` / ``TEAM @ OPP`` Matchup notation.
+PBP's wire rows are sparse, encode minutes as ``MM:SS``, and omit the player's
+``TeamId`` (the request-time rows carry only ``Team``/``Opponent`` tricodes).
+This module is the single owned mapping from PBP player-game observations to
+the canonical game-log frame consumed by the game-log service, reused by
+durable ingestion so the live and stored field mappings cannot drift.
+
+Every row must join by canonical game ID to the governed Event Catalog to
+recover team identity, opponent identity, home/away, and the existing
+``TEAM vs. OPP`` / ``TEAM @ OPP`` Matchup notation.  The join is exact and
+fail-closed: an unjoined game, a team tricode that matches neither event side,
+a phase that disagrees with the requested season type, or any malformed
+identity/minute evidence aborts the whole pass rather than serving or
+publishing a partial set.
 """
 
 from __future__ import annotations
@@ -35,14 +41,19 @@ _REQUIRED_ROW_FIELDS = (
     "Name",
     "GameId",
     "Date",
-    "TeamId",
+    "Team",
     "Minutes",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class PBPJoinCounts:
-    """Bounded identity-exclusion counters from one normalization pass."""
+    """Bounded identity-exclusion counters from one normalization pass.
+
+    The join is fail-closed, so a successful pass always reports zero
+    exclusions; the counters are retained so callers observe the input row
+    count without re-reading the provider frame.
+    """
 
     source_row_count: int
     unjoined_event_count: int = 0
@@ -90,6 +101,19 @@ def _signed_value(row: Mapping[str, Any], field: str) -> int:
     return _integer_value(row, field, minimum=None)
 
 
+def _nullable_signed_value(row: Mapping[str, Any], field: str) -> int | None:
+    """Return one signed value, or ``None`` when the provider omits it.
+
+    Plus/minus is a differential, not a counted field: an absent value means
+    the provider exposes no evidence (the per-game boxscore seam), never a
+    fabricated zero.
+    """
+    value = row.get(field)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _integer_value(row, field, minimum=None)
+
+
 def _integer_value(
     row: Mapping[str, Any], field: str, *, minimum: int | None
 ) -> int:
@@ -113,20 +137,15 @@ def _integer_value(
     return int(numeric)
 
 
-def _canonical_identity(row: Mapping[str, Any]) -> tuple[int, str, str, int]:
-    entity_id = _counting_value(row, "EntityId")
-    if entity_id <= 0:
-        raise ProviderUnavailableError(
-            "PBP Stats returned an invalid player identity."
-        )
+def _canonical_identity(row: Mapping[str, Any]) -> tuple[int, str, str]:
+    entity_id = _integer_value(row, "EntityId", minimum=1)
     name = _required_text(row, "Name")
     game_id = _required_text(row, "GameId")
-    team_id = _counting_value(row, "TeamId")
-    if team_id <= 0:
-        raise ProviderUnavailableError(
-            "PBP Stats returned an invalid team identity."
-        )
-    return entity_id, name, game_id, team_id
+    return entity_id, name, game_id
+
+
+def _reject_identity(message: str) -> None:
+    raise ProviderUnavailableError(message)
 
 
 def normalize_pbp_game_logs(
@@ -138,10 +157,12 @@ def normalize_pbp_game_logs(
 ) -> tuple[pd.DataFrame, PBPJoinCounts]:
     """Convert PBP observations into the canonical game-log frame.
 
-    ``events`` is the governed Event Catalog for the requested season.  Rows
-    that cannot join to an event, whose event is not in the requested phase, or
-    whose team contradicts the event are excluded and counted; identity or
-    minutes evidence that is missing is malformed and fails the whole pass.
+    ``events`` is the governed Event Catalog for the requested season.  Team
+    identity is derived exactly from each row's ``Team`` tricode against the
+    event; any row that cannot join, contradicts its team, disagrees with the
+    requested phase, or is missing identity/minutes evidence aborts the whole
+    pass with ``ProviderUnavailableError`` so neither the live response nor a
+    durable game publication ever tolerates a dropped row.
     """
 
     if not isinstance(frame, pd.DataFrame):
@@ -156,7 +177,6 @@ def normalize_pbp_game_logs(
 
     rows = frame.to_dict(orient="records")
     canonical: list[dict[str, Any]] = []
-    counts = PBPJoinCounts(source_row_count=len(rows))
 
     for row in rows:
         for field in _REQUIRED_ROW_FIELDS:
@@ -164,25 +184,31 @@ def normalize_pbp_game_logs(
                 raise ProviderUnavailableError(
                     "PBP Stats returned an invalid game-log schema."
                 )
-        entity_id, name, game_id, team_id = _canonical_identity(row)
+        entity_id, name, game_id = _canonical_identity(row)
         event = event_map.get(game_id)
         if event is None:
-            counts = _bump(counts, "unjoined_event_count")
-            continue
+            _reject_identity(
+                "PBP Stats returned a game log that cannot join the governed Event Catalog."
+            )
         if player_game_log_season_type(event) != season_type:
-            counts = _bump(counts, "unsupported_phase_count")
-            continue
-        if team_id == event["home_team_id"]:
+            _reject_identity(
+                "PBP Stats returned a game log outside the requested phase."
+            )
+        team_tricode = _required_text(row, "Team")
+        if team_tricode == event["home_team_tricode"]:
+            team_id = event["home_team_id"]
             team_tricode = event["home_team_tricode"]
             opponent_tricode = event["away_team_tricode"]
             matchup = f"{team_tricode} vs. {opponent_tricode}"
-        elif team_id == event["away_team_id"]:
+        elif team_tricode == event["away_team_tricode"]:
+            team_id = event["away_team_id"]
             team_tricode = event["away_team_tricode"]
             opponent_tricode = event["home_team_tricode"]
             matchup = f"{team_tricode} @ {opponent_tricode}"
         else:
-            counts = _bump(counts, "team_mismatch_count")
-            continue
+            _reject_identity(
+                "PBP Stats returned a contradictory team identity."
+            )
 
         two_pt_made = _counting_value(row, "FG2M")
         two_pt_attempted = _counting_value(row, "FG2A")
@@ -231,7 +257,7 @@ def normalize_pbp_game_logs(
                 "STL": _counting_value(row, "Steals"),
                 "BLK": _counting_value(row, "Blocks"),
                 "PF": _counting_value(row, "Fouls"),
-                "PLUS_MINUS": _signed_value(row, "PlusMinus"),
+                "PLUS_MINUS": _nullable_signed_value(row, "PlusMinus"),
             }
         )
 
@@ -241,22 +267,7 @@ def normalize_pbp_game_logs(
     )
     return (
         derive_game_log_frame(primitive, round_minutes=round_minutes),
-        counts,
-    )
-
-
-def _bump(counts: PBPJoinCounts, field: str) -> PBPJoinCounts:
-    values = {
-        "unjoined_event_count": counts.unjoined_event_count,
-        "team_mismatch_count": counts.team_mismatch_count,
-        "unsupported_phase_count": counts.unsupported_phase_count,
-    }
-    values[field] += 1
-    return PBPJoinCounts(
-        source_row_count=counts.source_row_count,
-        unjoined_event_count=values["unjoined_event_count"],
-        team_mismatch_count=values["team_mismatch_count"],
-        unsupported_phase_count=values["unsupported_phase_count"],
+        PBPJoinCounts(source_row_count=len(rows)),
     )
 
 

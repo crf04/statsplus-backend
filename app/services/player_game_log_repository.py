@@ -70,7 +70,7 @@ class PlayerGameLogRecord:
     steals: int = 0
     blocks: int = 0
     personal_fouls: int = 0
-    plus_minus: int = 0
+    plus_minus: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +97,16 @@ class PlayerGameLogReadFreshness:
 class PlayerGameLogPublication:
     row_count: int
     recovered_removed_row_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerGameLogRefreshChange:
+    """One game staged for atomic publication by a refresh run."""
+
+    game_id: str
+    season_type: str
+    records: tuple[PlayerGameLogRecord, ...]
+    checksum: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,118 +370,105 @@ class PlayerGameLogRepository:
         )
         return PlayerGameLogReadFreshness(status, publication.retrieved_at)
 
-    def publish_game(
+    def publish_refresh(
         self,
         season: str,
-        game_id: str,
-        records: Iterable[PlayerGameLogRecord],
-        *,
-        season_type: str,
-        retrieved_at: datetime,
-        source_provider: str,
-        checksum: str,
-    ) -> PlayerGameLogPublication:
-        """Atomically replace one game's player facts and its sync evidence.
-
-        A completed game's rows are replaced in one transaction so a reader
-        never observes half of one team's box score.  The season sidecar and
-        stats-surface freshness are deliberately left to
-        :meth:`advance_season_publication`, which the refresh service calls
-        only after every target game succeeds, so a failed or incomplete
-        refresh preserves the last complete publication.
-        """
-        canonical_season = validate_canonical_season(season)
-        validate_player_game_log_season_type(season_type)
-        if not game_id or game_id != game_id.strip():
-            raise ValueError("game_id must be a non-empty canonical value")
-        if not source_provider or source_provider != source_provider.strip():
-            raise ValueError("source_provider must be a non-empty canonical value")
-        if not checksum or checksum != checksum.strip():
-            raise ValueError("checksum must be a non-empty canonical value")
-
-        unique: dict[tuple[int, str], PlayerGameLogRecord] = {}
-        for record in records:
-            if record.season != canonical_season or record.game_id != game_id:
-                raise ValueError(
-                    "every player game log must belong to its game publication"
-                )
-            if record.season_type != season_type:
-                raise ValueError(
-                    "every player game log must match the game's phase"
-                )
-            key = (record.player_id, record.game_id)
-            existing = unique.get(key)
-            if existing is not None and existing != record:
-                raise ValueError(
-                    "conflicting player game log facts share one identity"
-                )
-            unique[key] = record
-        if not unique:
-            raise ValueError("a completed game must publish at least one player fact")
-
-        retrieved = assume_utc(retrieved_at)
-        log_table = PlayerGameLog.__table__
-        sync_table = PlayerGameLogSync.__table__
-        with self.engine.begin() as connection:
-            connection.execute(
-                delete(log_table).where(
-                    log_table.c.season == canonical_season,
-                    log_table.c.game_id == game_id,
-                )
-            )
-            connection.execute(
-                insert(log_table), [asdict(record) for record in unique.values()]
-            )
-            sync_values = {
-                "season": canonical_season,
-                "game_id": game_id,
-                "season_type": season_type,
-                "status": "complete",
-                "checksum": checksum,
-                "row_count": len(unique),
-                "source_provider": source_provider,
-                "retrieved_at": retrieved,
-            }
-            result = connection.execute(
-                update(sync_table)
-                .where(
-                    sync_table.c.season == canonical_season,
-                    sync_table.c.game_id == game_id,
-                )
-                .values(**sync_values)
-            )
-            if result.rowcount == 0:
-                connection.execute(
-                    insert(sync_table).values(**sync_values)
-                )
-        return PlayerGameLogPublication(
-            row_count=len(unique),
-            recovered_removed_row_count=0,
-        )
-
-    def advance_season_publication(
-        self,
-        season: str,
+        changes: Iterable[PlayerGameLogRefreshChange],
         *,
         retrieved_at: datetime,
         source_provider: str,
         expected_complete_game_ids: frozenset[str],
     ) -> PlayerGameLogPublication:
-        """Publish one refresh run's season sidecar and surface freshness.
+        """Atomically publish one refresh run's staged game facts.
 
-        Called once after every target game in a refresh succeeds.  The season
-        row count and publication status are recomputed from the committed
-        game/sync facts and the current season's stats-surface observation is
-        advanced in the same transaction, so freshness can never advance past a
-        failed run.
+        The refresh service collects and fully validates every target game
+        before calling this method, so a single transaction replaces the
+        changed games' player rows, upserts their per-game sync evidence,
+        recomputes the season sidecar, and advances the configured current
+        season's stats-surface observation.  A run that fails before this
+        boundary changes nothing, preserving the exact prior fact rows and the
+        last complete publication.
         """
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
+        staged: dict[str, tuple[str, tuple[PlayerGameLogRecord, ...], str]] = {}
+        for change in changes:
+            if not change.game_id or change.game_id != change.game_id.strip():
+                raise ValueError("game_id must be a non-empty canonical value")
+            if not change.checksum or change.checksum != change.checksum.strip():
+                raise ValueError("checksum must be a non-empty canonical value")
+            validate_player_game_log_season_type(change.season_type)
+            unique: dict[tuple[int, str], PlayerGameLogRecord] = {}
+            for record in change.records:
+                if (
+                    record.season != canonical_season
+                    or record.game_id != change.game_id
+                ):
+                    raise ValueError(
+                        "every player game log must belong to its game publication"
+                    )
+                if record.season_type != change.season_type:
+                    raise ValueError(
+                        "every player game log must match the game's phase"
+                    )
+                key = (record.player_id, record.game_id)
+                existing = unique.get(key)
+                if existing is not None and existing != record:
+                    raise ValueError(
+                        "conflicting player game log facts share one identity"
+                    )
+                unique[key] = record
+            if not unique:
+                raise ValueError(
+                    "a completed game must publish at least one player fact"
+                )
+            staged[change.game_id] = (
+                change.season_type,
+                tuple(unique.values()),
+                change.checksum,
+            )
+
         retrieved = assume_utc(retrieved_at)
         log_table = PlayerGameLog.__table__
         refresh_table = PlayerGameLogRefresh.__table__
+        sync_table = PlayerGameLogSync.__table__
+        published_rows = 0
         with self.engine.begin() as connection:
+            for game_id, (season_type, records, checksum) in staged.items():
+                connection.execute(
+                    delete(log_table).where(
+                        log_table.c.season == canonical_season,
+                        log_table.c.game_id == game_id,
+                    )
+                )
+                connection.execute(
+                    insert(log_table),
+                    [asdict(record) for record in records],
+                )
+                sync_values = {
+                    "season": canonical_season,
+                    "game_id": game_id,
+                    "season_type": season_type,
+                    "status": "complete",
+                    "checksum": checksum,
+                    "row_count": len(records),
+                    "source_provider": source_provider,
+                    "retrieved_at": retrieved,
+                }
+                result = connection.execute(
+                    update(sync_table)
+                    .where(
+                        sync_table.c.season == canonical_season,
+                        sync_table.c.game_id == game_id,
+                    )
+                    .values(**sync_values)
+                )
+                if result.rowcount == 0:
+                    connection.execute(
+                        insert(sync_table).values(**sync_values)
+                    )
+                published_rows += len(records)
             row_count = connection.execute(
                 select(func.count())
                 .select_from(log_table)
@@ -504,7 +501,7 @@ class PlayerGameLogRepository:
                     retrieved, connection=connection
                 )
         return PlayerGameLogPublication(
-            row_count=int(row_count),
+            row_count=published_rows,
             recovered_removed_row_count=0,
         )
 
@@ -817,6 +814,7 @@ __all__ = [
     "PlayerGameLogPublication",
     "PlayerGameLogReadFreshness",
     "PlayerGameLogRecord",
+    "PlayerGameLogRefreshChange",
     "PlayerGameLogRepository",
     "PlayerGameLogSyncStatus",
     "PlayerSeasonLogSummary",

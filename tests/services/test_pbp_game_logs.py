@@ -56,12 +56,14 @@ def _events():
 
 
 def _pbp_row(**overrides):
+    # The live /get-game-logs rows carry no EntityId/Name/TeamId; the canonical
+    # normalization attaches EntityId/Name from the request/envelope and
+    # derives team identity from the Team tricode against the Event Catalog.
     row = {
         "EntityId": 101,
         "Name": "Player One",
         "GameId": "0022500001",
         "Date": "2026-01-02",
-        "TeamId": 1,
         "Team": "AAA",
         "Opponent": "BBB",
         "Minutes": "31:30",
@@ -126,16 +128,25 @@ def test_parse_pbp_minutes_rejects_invalid_evidence(value):
 
 def test_adapter_parse_seams_validate_the_sparse_wire_contract():
     frame = PBPGameLogAdapter.parse_game_logs(
-        {"multi_row_table_data": [_pbp_row(), _pbp_row(GameId="0022500002")]}
+        {"multi_row_table_data": [_pbp_row(), _pbp_row(GameId="0022500002")]},
+        entity_id="101",
+        player_name="Player One",
     )
     assert list(frame.columns) == list(PBP_GAME_LOG_COLUMNS)
     assert len(frame) == 2
     assert frame.loc[0, "Minutes"] == "31:30"
+    assert frame.loc[0, "EntityId"] == "101"
+    assert frame.loc[0, "Name"] == "Player One"
 
     stats = PBPGameLogAdapter.parse_game_stats(
         {
             "stats": {
-                "Home": {"FullGame": [_pbp_row()]},
+                "Home": {
+                    "FullGame": [
+                        {"EntityId": "0", "Name": "Team", "Minutes": "00:00"},
+                        _pbp_row(),
+                    ]
+                },
                 "Away": {"FullGame": []},
             },
             "home_team_abbreviation": "AAA",
@@ -144,6 +155,7 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
         },
         game_id="0022500001",
     )
+    assert len(stats) == 1  # team-summary row excluded
     assert stats.loc[0, "EntityId"] == 101
     assert stats.loc[0, "GameId"] == "0022500001"
     assert stats.loc[0, "Date"] == "2026-01-02"
@@ -155,7 +167,7 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
     "payload",
     [
         {"multi_row_table_data": "nope"},
-        {"multi_row_table_data": [{"EntityId": 101}]},
+        {"multi_row_table_data": [{"GameId": "1"}]},
         {"multi_row_table_data": [None]},
         None,
         {"multi_row_table_data": [_pbp_row(), "string"]},
@@ -163,13 +175,19 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
 )
 def test_adapter_parse_seams_reject_malformed_payloads(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_logs(payload)
+        PBPGameLogAdapter.parse_game_logs(
+            payload, entity_id="101", player_name="Player One"
+        )
     with pytest.raises(telemetry.ProviderResponseError):
         PBPGameLogAdapter.parse_game_stats(payload, game_id="0022500001")
 
 
 def test_adapter_empty_payload_carries_the_declared_schema():
-    frame = PBPGameLogAdapter.parse_game_logs({"multi_row_table_data": []})
+    frame = PBPGameLogAdapter.parse_game_logs(
+        {"multi_row_table_data": []},
+        entity_id="101",
+        player_name="Player One",
+    )
     assert list(frame.columns) == list(PBP_GAME_LOG_COLUMNS)
     assert frame.empty
 
@@ -179,7 +197,10 @@ def test_adapter_fetch_player_game_logs_uses_entity_params_and_telemetry():
 
     class FakeResponse:
         status_code = 200
-        payload = {"multi_row_table_data": [_pbp_row()]}
+        payload = {
+            "single_row_table_data": {"Name": "Player One"},
+            "multi_row_table_data": [_pbp_row()],
+        }
 
         def raise_for_status(self):
             return None
@@ -218,7 +239,8 @@ def test_adapter_fetch_player_game_logs_uses_entity_params_and_telemetry():
         "EntityId": "101",
     }
     assert timeout == (1.0, 2.0)
-    assert frame.loc[0, "EntityId"] == 101
+    assert frame.loc[0, "EntityId"] == "101"
+    assert frame.loc[0, "Name"] == "Player One"
 
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["provider"] == telemetry.PROVIDER_PBP_STATS
@@ -234,7 +256,12 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
         status_code = 200
         payload = {
             "stats": {
-                "Home": {"FullGame": [_pbp_row()]},
+                "Home": {
+                    "FullGame": [
+                        {"EntityId": "0", "Name": "Team", "Minutes": "00:00"},
+                        _pbp_row(),
+                    ]
+                },
                 "Away": {"FullGame": []},
             },
             "home_team_abbreviation": "AAA",
@@ -275,6 +302,7 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
         "GameId": "0022500001",
         "Type": "Player",
     }
+    assert len(frame) == 1  # team-summary row excluded
     assert frame.loc[0, "GameId"] == "0022500001"
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["operation"] == "game_player_stats"
@@ -347,10 +375,11 @@ def test_normalize_pbp_game_logs_builds_the_canonical_frame():
 
 
 def test_normalize_pbp_game_logs_reconstructs_away_matchup():
-    row = _pbp_row(TeamId=2, Date="2026-01-02", Minutes="22:00")
+    row = _pbp_row(Team="BBB", Date="2026-01-02", Minutes="22:00")
     frame, _ = normalize_pbp_game_logs(_pbp_frame(row), _events())
 
     assert frame.iloc[0]["MATCHUP"] == "BBB @ AAA"
+    assert frame.iloc[0]["TEAM_ID"] == 2
     assert frame.iloc[0]["TEAM_ABBREVIATION"] == "BBB"
     assert frame.iloc[0]["MIN"] == 22
 
@@ -373,7 +402,6 @@ def test_normalize_pbp_game_logs_zero_fills_omitted_counting_fields():
         "Steals",
         "Blocks",
         "Fouls",
-        "PlusMinus",
         "Points",
     ):
         del row[field]
@@ -387,50 +415,36 @@ def test_normalize_pbp_game_logs_zero_fills_omitted_counting_fields():
     assert row_out["FG_PCT"] == 0.0
     assert row_out["FT_PCT"] == 0.0
     assert row_out["TOV"] == 0
-    assert row_out["PLUS_MINUS"] == 0
     assert row_out["NBA_FANTASY_PTS"] == 0.0
 
 
-def test_normalize_pbp_game_logs_excludes_unjoined_and_contradictory_rows():
+def test_normalize_pbp_game_logs_treats_absent_plus_minus_as_null_not_zero():
+    row = _pbp_row()
+    del row["PlusMinus"]
+
+    frame, _ = normalize_pbp_game_logs(_pbp_frame(row), _events())
+
+    assert pd.isna(frame.iloc[0]["PLUS_MINUS"])
+    assert pd.isna(frame.iloc[0]["+/-"])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"GameId": "0022999999"},
+        {"Team": "ZZZ"},
+        {"GameId": "0042500002"},
+    ],
+)
+def test_normalize_pbp_game_logs_fails_on_any_unjoined_or_contradictory_row(
+    overrides,
+):
     rows = [
         _pbp_row(),
-        _pbp_row(EntityId=202, GameId="0022999999", Minutes="10:00"),
-        _pbp_row(EntityId=303, TeamId=99, Minutes="10:00"),
+        _pbp_row(EntityId=202, Minutes="10:00", **overrides),
     ]
-    frame, counts = normalize_pbp_game_logs(_pbp_frame(*rows), _events())
-
-    assert len(frame) == 1
-    assert counts.unjoined_event_count == 1
-    assert counts.team_mismatch_count == 1
-
-
-def test_normalize_pbp_game_logs_excludes_out_of_phase_rows():
-    rows = [
-        _pbp_row(),
-        _pbp_row(EntityId=202, GameId="0042500002", Minutes="10:00"),
-    ]
-    events = [
-        *_events(),
-        {
-            "nba_game_id": "0042500002",
-            "season": "2025-26",
-            "home_team_id": 3,
-            "home_team_name": "CCC",
-            "home_team_tricode": "CCC",
-            "away_team_id": 4,
-            "away_team_name": "DDD",
-            "away_team_tricode": "DDD",
-            "classification": "Playoffs",
-            "status_code": 3,
-            "status_text": "Final",
-            "postponed_status": None,
-            "scheduled_at": "2026-04-20T00:00:00+00:00",
-        },
-    ]
-    frame, counts = normalize_pbp_game_logs(_pbp_frame(*rows), events)
-
-    assert len(frame) == 1
-    assert counts.unsupported_phase_count == 1
+    with pytest.raises(ProviderUnavailableError):
+        normalize_pbp_game_logs(_pbp_frame(*rows), _events())
 
 
 def test_normalize_pbp_game_logs_keeps_exact_minutes_without_rounding():
@@ -449,7 +463,6 @@ def test_normalize_pbp_game_logs_keeps_exact_minutes_without_rounding():
         {"Minutes": "not-a-time"},
         {"Minutes": None},
         {"EntityId": 0},
-        {"TeamId": 0},
         {"Name": None},
         {"FG3M": 99},
         {"FtPoints": 99},
@@ -588,8 +601,8 @@ def test_live_source_fetches_and_joins_events():
     assert frame.iloc[0]["MATCHUP"] == "AAA vs. BBB"
 
 
-def test_live_source_fails_closed_when_all_rows_are_unjoinable():
-    provider = FakePBPGameLogs([_pbp_row(GameId="0022999999", Minutes="10:00")])
+def test_live_source_fails_closed_on_any_unjoinable_row():
+    provider = FakePBPGameLogs([_pbp_row(), _pbp_row(EntityId=202, GameId="0022999999", Minutes="10:00")])
     source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
 
     with pytest.raises(ProviderUnavailableError):
@@ -713,7 +726,7 @@ def test_derive_game_log_frame_handles_empty_denominators_and_exact_minutes():
                 "STL": 0,
                 "BLK": 0,
                 "TOV": 0,
-                "PLUS_MINUS": 0,
+                "PLUS_MINUS": None,
             }
         ]
     )
@@ -724,6 +737,7 @@ def test_derive_game_log_frame_handles_empty_denominators_and_exact_minutes():
     assert derived.loc[0, "FG_PCT"] == 0.0
     assert derived.loc[0, "FT_PCT"] == 0.0
     assert derived.loc[0, "NBA_FANTASY_PTS"] == 0.0
+    assert pd.isna(derived.loc[0, "+/-"])
 
 
 def telemetry_pbp_counts(**values):

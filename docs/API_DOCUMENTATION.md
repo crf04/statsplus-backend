@@ -800,14 +800,18 @@ arrays, never JSON strings.
 Provider migration (#66): the request-time game-log source is PBP Stats, not
 `stats.nba.com`. Each row joins the governed Event Catalog by game ID to
 recover team/opponent identity, home/away, and the `TEAM vs. OPP` / `TEAM @ OPP`
-Matchup notation; unjoinable rows are rejected rather than guessed. The HTTP
+Matchup notation; any unjoinable or contradictory row fails the request rather
+than being guessed or dropped. The HTTP
 parameters, success payload, filter vocabulary, authentication, error schema,
 and Redis caching behavior are unchanged, and cache telemetry is attributed to
 PBP Stats. A season with a complete, valid durable publication is served
 database-first from the stored `player_game_logs` facts with identical values;
 any other valid season continues through the cached live PBP path. Both paths
 return the same whole-minute presentation and the same composite/fantasy
-averages.
+averages. Because PBP's per-game boxscore seam exposes no `PlusMinus` (the
+per-player seam does), a database-served season reports `+/-` as null and omits
+the `PLUS_MINUS` average rather than inventing a zero; this single honest
+divergence is scoped out of the cutover parity comparison.
 
 ### Contract and migration note (#9)
 
@@ -945,14 +949,17 @@ game, plus a bounded recent-game reconciliation window
 (`PLAYER_GAME_LOG_RECONCILIATION_DAYS`, default three days) that atomically
 replaces a game's rows when upstream stat corrections change its checksum.
 Each game must cover both exact teams with at least
-`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players and
-is published atomically with per-game synchronization evidence; an unchanged
-game is idempotently skipped. A malformed, incomplete, identity-removing, or
-provider-failed game preserves prior facts and fails the refresh.
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players;
+every target game is fetched, normalized, and validated before anything is
+written, and a single transaction then replaces the staged games' rows and
+advances season publication. An unchanged game is idempotently skipped. A
+malformed, incomplete, identity-removing (including any unjoined athlete or
+contradictory team), or provider-failed game fails the whole refresh, so
+prior fact rows and the last complete publication are preserved exactly.
 The season publication and the configured current season's
-`player_game_logs` stats freshness advance only after every target game in a
-run succeeds, so a failed or incomplete refresh preserves the last complete
-publication instead of stamping a partial union fresh; historical
+`player_game_logs` stats freshness advance only inside that same final
+transaction, so a failed or incomplete refresh never stamps a partial union
+fresh or leaks a staged correction; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. Every result requires a present, fresh, nonempty Event
 Catalog whose freshness count agrees with its actual season rows; a nonempty

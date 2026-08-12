@@ -201,11 +201,19 @@ def test_pbp_fixture_carries_shareable_columns_only():
 
 def test_recorded_pbp_game_logs_parse_through_the_live_path():
     payload = _load("pbp_stats/game_logs.valid.json")
-    frame = PBPGameLogAdapter.parse_game_logs(payload)
+    frame = PBPGameLogAdapter.parse_game_logs(
+        payload,
+        entity_id="2544",
+        player_name="LeBron James",
+    )
 
     assert isinstance(frame, pd.DataFrame)
     assert len(frame) == 2
     assert set(PBP_GAME_LOG_COLUMNS).issubset(frame.columns)
+    # The live per-player rows do not carry player identity on the wire.
+    assert "EntityId" not in payload["multi_row_table_data"][0]
+    assert "Name" not in payload["multi_row_table_data"][0]
+    assert "TeamId" not in payload["multi_row_table_data"][0]
     assert frame.loc[0, "EntityId"] == "2544"
     assert frame.loc[0, "Name"] == "LeBron James"
     assert frame.loc[0, "Minutes"] == "34:12"
@@ -215,17 +223,19 @@ def test_recorded_pbp_game_logs_parse_through_the_live_path():
     assert frame.loc[0, "Date"] == "2024-11-15"
     assert frame.loc[0, "FtPoints"] == 4
     assert frame.loc[0, "FTA"] == 4
-    assert frame.loc[0, "OffRebounds"] == 1
     assert frame.loc[0, "DefRebounds"] == 7
     assert frame.loc[0, "Fouls"] == 2
 
 
-def test_recorded_pbp_game_stats_parse_and_attach_game_identity():
+def test_recorded_pbp_game_stats_parse_exclude_team_summary_and_attach_identity():
     payload = _load("pbp_stats/game_stats.valid.json")
     frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
 
+    # The provider's team-summary row (EntityId 0 / Name Team) is excluded.
     assert len(frame) == 3
+    assert "0" not in set(frame["EntityId"].astype(str))
     assert frame.loc[0, "EntityId"] == "2544"
+    assert frame.loc[0, "Name"] == "LeBron James"
     assert frame.loc[0, "GameId"] == "0022400001"
     assert frame.loc[0, "Date"] == "2024-11-15"
     assert frame.loc[0, "Team"] == "LAL"
@@ -233,13 +243,15 @@ def test_recorded_pbp_game_stats_parse_and_attach_game_identity():
     assert frame.loc[2, "Team"] == "SAS"
     assert frame.loc[2, "Opponent"] == "LAL"
     assert frame.loc[2, "Points"] == 25
+    # The per-game boxscore seam exposes no plus/minus evidence.
+    assert frame.loc[0, "PlusMinus"] is None
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {"multi_row_table_data": "nope"},
-        {"multi_row_table_data": [{"EntityId": "2544"}]},
+        {"multi_row_table_data": [{"GameId": "1"}]},
         {"multi_row_table_data": [None]},
         None,
         {"stats": {"Home": {"FullGame": [None]}, "Away": {"FullGame": []}}},
@@ -248,6 +260,8 @@ def test_recorded_pbp_game_stats_parse_and_attach_game_identity():
 )
 def test_malformed_pbp_game_log_shapes_are_provider_response_error(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_logs(payload)
+        PBPGameLogAdapter.parse_game_logs(
+            payload, entity_id="2544", player_name="LeBron James"
+        )
     with pytest.raises(telemetry.ProviderResponseError):
         PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")

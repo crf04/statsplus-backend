@@ -89,16 +89,12 @@ class LivePBPGameLogsSource:
             season_type="Regular Season",
             cache_status=cache_status,
         )
-        frame, counts = normalize_pbp_game_logs(
+        frame, _counts = normalize_pbp_game_logs(
             observations,
             events,
             season_type="Regular Season",
             round_minutes=True,
         )
-        if counts.source_row_count > 0 and frame.empty:
-            raise ProviderUnavailableError(
-                "PBP Stats returned no canonically joinable game logs."
-            )
         return _recency_frame(frame)
 
     def cached(self, season: str) -> bool:

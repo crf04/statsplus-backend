@@ -3,13 +3,16 @@
     "Home": {
       "FullGame": [
         {
+          "EntityId": "0",
+          "Name": "Team",
+          "Minutes": "00:00",
+          "OffRebounds": 2,
+          "DefRebounds": 0
+        },
+        {
           "EntityId": "2544",
-          "TeamId": "1610612747",
           "Name": "LeBron James",
-          "Season": "2024-25",
-          "TeamAbbreviation": "LAL",
           "Minutes": "34:12",
-          "PlusMinus": 12,
           "FG2M": 6,
           "FG2A": 12,
           "FG3M": 3,
@@ -30,12 +33,8 @@
         },
         {
           "EntityId": "203507",
-          "TeamId": "1610612747",
           "Name": "Austin Reaves",
-          "Season": "2024-25",
-          "TeamAbbreviation": "LAL",
           "Minutes": "28:00",
-          "PlusMinus": 8,
           "FG2M": 4,
           "FG2A": 8,
           "FG3M": 2,
@@ -44,7 +43,7 @@
           "FGA": 13,
           "FtPoints": 1,
           "FTA": 2,
-          "OffRebounds": 0,
+          "OffRebounds": null,
           "DefRebounds": 4,
           "Rebounds": 4,
           "Assists": 5,
@@ -60,12 +59,8 @@
       "FullGame": [
         {
           "EntityId": "201935",
-          "TeamId": "1610612759",
           "Name": "Victor Wembanyama",
-          "Season": "2024-25",
-          "TeamAbbreviation": "SAS",
           "Minutes": "30:30",
-          "PlusMinus": -10,
           "FG2M": 7,
           "FG2A": 13,
           "FG3M": 2,

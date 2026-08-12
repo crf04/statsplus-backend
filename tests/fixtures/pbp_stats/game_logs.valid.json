@@ -1,19 +1,18 @@
 {
   "single_row_table_data": {
-    "EntityId": "2544",
+    "EntityId": null,
     "Name": "LeBron James",
-    "Season": "2024-25",
-    "TeamAbbreviation": "LAL",
+    "TeamId": null,
+    "Team": null,
     "GamesPlayed": 2,
     "Minutes": 66
   },
   "multi_row_table_data": [
     {
-      "EntityId": "2544",
-      "TeamId": "1610612747",
-      "Name": "LeBron James",
-      "Season": "2024-25",
-      "TeamAbbreviation": "LAL",
+      "GameId": "0022400001",
+      "Date": "2024-11-15",
+      "Team": "LAL",
+      "Opponent": "SAS",
       "Minutes": "34:12",
       "PlusMinus": 12,
       "FG2M": 6,
@@ -32,18 +31,13 @@
       "Steals": 2,
       "Blocks": 1,
       "Fouls": 2,
-      "Points": 25,
-      "Date": "2024-11-15",
-      "GameId": "0022400001",
-      "Team": "LAL",
-      "Opponent": "SAS"
+      "Points": 25
     },
     {
-      "EntityId": "2544",
-      "TeamId": "1610612747",
-      "Name": "LeBron James",
-      "Season": "2024-25",
-      "TeamAbbreviation": "LAL",
+      "GameId": "0022400002",
+      "Date": "2024-11-17",
+      "Team": "LAL",
+      "Opponent": "DEN",
       "Minutes": "31:48",
       "PlusMinus": -5,
       "FG2M": 5,
@@ -54,7 +48,7 @@
       "FGA": 15,
       "FtPoints": 2,
       "FTA": 3,
-      "OffRebounds": 0,
+      "OffRebounds": null,
       "DefRebounds": 5,
       "Rebounds": 5,
       "Assists": 6,
@@ -62,11 +56,7 @@
       "Steals": 1,
       "Blocks": 0,
       "Fouls": 3,
-      "Points": 18,
-      "Date": "2024-11-17",
-      "GameId": "0022400002",
-      "Team": "LAL",
-      "Opponent": "DEN"
+      "Points": 18
     }
   ]
 }

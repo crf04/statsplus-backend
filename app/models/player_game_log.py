@@ -49,7 +49,10 @@ class PlayerGameLog(Base):
     steals = Column(Integer, nullable=False)
     blocks = Column(Integer, nullable=False)
     personal_fouls = Column(Integer, nullable=False)
-    plus_minus = Column(Integer, nullable=False)
+    #: PBP's per-game boxscore seam exposes no plus/minus evidence, so the
+    #: durable fact is nullable and honestly absent rather than a fabricated
+    #: zero; the request-time per-player seam does carry it.
+    plus_minus = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
