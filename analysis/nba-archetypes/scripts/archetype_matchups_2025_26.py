@@ -25,14 +25,17 @@ import pandas as pd
 import seaborn as sns
 from nba_api.stats import endpoints
 
+from artifact_persistence import (
+    artifact_manifest,
+    stamp_png_identity,
+    verify_persisted_manifest,
+)
 from matchup_analysis import (
     AnalysisRunBuilder,
     DEFAULT_SETTINGS,
-    artifact_manifest,
     content_hash,
+    fail_if_code_changed,
     spec_from_clustering_metadata,
-    stamp_png_identity,
-    verify_persisted_manifest,
 )
 
 pd.set_option("display.max_columns", 100)
@@ -57,34 +60,6 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 GAME_LOG_CACHE = CACHE_DIR / "player_game_logs_regular_season.csv"
 
 print(f"Season: {SEASON} {SEASON_TYPE}")
-
-# %% [markdown]
-# ## Load classifications and game logs
-
-# %%
-if not ARCHETYPE_PATH.exists():
-    raise FileNotFoundError(
-        f"Run archetypes_fixed.ipynb first; missing {ARCHETYPE_PATH}"
-    )
-if not FEATURES_PATH.exists():
-    raise FileNotFoundError(
-        f"Run archetypes_fixed.ipynb first; missing {FEATURES_PATH}"
-    )
-if not MODEL_MATRIX_PATH.exists():
-    raise FileNotFoundError(
-        f"Run archetypes_fixed.ipynb first; missing {MODEL_MATRIX_PATH}"
-    )
-if not CLUSTERING_METADATA_PATH.exists():
-    raise FileNotFoundError(
-        f"Run archetypes_fixed.ipynb first; missing {CLUSTERING_METADATA_PATH}"
-    )
-
-# ``float_precision="round_trip"`` reads back exactly the values the clustering
-# wrote, so the input-data identity both sides compute covers the exact fitted
-# matrix rather than a precision-truncated serialization.
-archetypes = pd.read_csv(ARCHETYPE_PATH, float_precision="round_trip")
-clustering_features = pd.read_csv(MODEL_MATRIX_PATH, float_precision="round_trip")
-clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
 
 
 def current_code_revision():
@@ -132,6 +107,41 @@ def current_code_revision():
     if tracked_diff or untracked_entries:
         return content_hash(("analysis-code", head, tracked_diff, untracked_entries))
     return head
+
+
+# Capture the code snapshot before any data is loaded or retrieved, so the run
+# id is bound to the exact code that will be loaded rather than to whatever the
+# disk happens to hold after the (potentially long) data fetch. The snapshot is
+# re-checked immediately before publishing, and publication aborts if it moved.
+code_revision = current_code_revision()
+
+# %% [markdown]
+# ## Load classifications and game logs
+
+# %%
+if not ARCHETYPE_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {ARCHETYPE_PATH}"
+    )
+if not FEATURES_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {FEATURES_PATH}"
+    )
+if not MODEL_MATRIX_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {MODEL_MATRIX_PATH}"
+    )
+if not CLUSTERING_METADATA_PATH.exists():
+    raise FileNotFoundError(
+        f"Run archetypes_fixed.ipynb first; missing {CLUSTERING_METADATA_PATH}"
+    )
+
+# ``float_precision="round_trip"`` reads back exactly the values the clustering
+# wrote, so the input-data identity both sides compute covers the exact fitted
+# matrix rather than a precision-truncated serialization.
+archetypes = pd.read_csv(ARCHETYPE_PATH, float_precision="round_trip")
+clustering_features = pd.read_csv(MODEL_MATRIX_PATH, float_precision="round_trip")
+clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
 
 
 def fetch_game_logs(attempts=3):
@@ -197,7 +207,7 @@ run = AnalysisRunBuilder(
     game_logs=game_logs,
     model_spec=model_spec,
     clustering_features=clustering_features,
-    code_revision=current_code_revision(),
+    code_revision=code_revision,
 ).build()
 
 print(f"Analysis Run {run.run_id} of model {run.model_version}")
@@ -328,11 +338,20 @@ save_stamped_png(fig, volume_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close(fig)
 
+# The run id is bound to the code snapshot captured before any data was loaded.
+# The snapshot is re-captured now that every artifact has been computed, and
+# publication aborts if it moved: an edit made while the run was building must
+# not let newer disk code claim an older run's identity.
+fail_if_code_changed(code_revision, current_code_revision())
+
 # Persist one content-addressed identity manifest so every saved artifact is
 # attributable to the exact Analysis Run and archetype model that produced it.
 # Each file is bound to a SHA-256 digest of its persisted bytes and to its own
 # embedded identity, and the manifest is verified before it is written: a file
-# that does not carry this run's identity is rejected rather than blessed.
+# that does not carry this run's identity is rejected rather than blessed. The
+# manifest must cover exactly the required persisted artifact set, and it is
+# published last and atomically, so an interrupted run never leaves a manifest
+# that makes an incomplete set look published.
 saved_paths = {
     "matchup_summary": summary_path,
     "notable_matchups": notable_path,
@@ -349,7 +368,9 @@ saved_paths = {
 run_manifest = artifact_manifest(run, saved_paths)
 verify_persisted_manifest(run_manifest, OUTPUT_DIR)
 manifest_path = OUTPUT_DIR / "run_identity_manifest.json"
-manifest_path.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
+manifest_tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+manifest_tmp.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
+manifest_tmp.replace(manifest_path)
 
 for path in list(saved_paths.values()) + [manifest_path]:
     print(f"Saved {path}")

@@ -16,7 +16,11 @@ runtime code.
   analysis; feeds the builder below and renders its artifacts.
 - `scripts/matchup_analysis.py` — deterministic `AnalysisRunBuilder` that
   assembles the analysis stages (membership loading and validation, prepared
-  outcomes, scoring and volume fits, artifact assembly, dashboard payload).
+  outcomes, scoring and volume fits, artifact assembly, dashboard payload) and
+  the identity value objects.
+- `scripts/artifact_persistence.py` — PNG identity stamping and strict PNG
+  structure verification, self-attributing artifact checks, and the
+  content-addressed persisted-artifact manifest and its verifier.
 - `archetypes_data/<season>/` — cached provider inputs.
 - `archetypes_outputs/<season>/` — assignments, profiles, diagnostics, matchup
   tables, sensitivity tests, and figures.
@@ -82,21 +86,28 @@ sizes, and teammates sharing games. The repository completion gate is
 Each Analysis Run is immutable and belongs to one published archetype model,
 one input-data snapshot, and one Information Cutoff. `AnalysisRunBuilder` now
 requires an `ArchetypeModelSpec` naming the season, feature definition,
-clustering method, cluster count, random seed, and a content-addressed
-`input_data_identity`. The model input snapshot is the exact standardized
-feature matrix the clustering was actually fit on; the clustering notebook
-persists it losslessly as `player_model_matrix.csv` and production hands it to
-the builder as `clustering_features`, so a stale model cannot silently join new
-data. The spec's `version` is a content hash of those six fields, and `build()`
-fails closed at artifact assembly when the input-data identity is missing or
-mismatched, when the spec's `cluster_count` disagrees with the membership's
-actual subtype count, or when the artifact bundle's identity does not match the
-run's.
+clustering method, cluster count, base random seed, top-level cluster count,
+bootstrap count, minimum subtype size, the subtype silhouette and stability
+thresholds, and a content-addressed `input_data_identity`. The model input
+snapshot is the exact standardized feature matrix the clustering was actually
+fit on; the clustering notebook persists it losslessly as
+`player_model_matrix.csv` and production hands it to the builder as
+`clustering_features`, so a stale model cannot silently join new data. The
+spec's `version` is a content hash of those fields, and `build()` fails closed
+at artifact assembly when the input-data identity is missing or mismatched,
+when the spec's `cluster_count` disagrees with the membership's actual subtype
+count, or when the artifact bundle's identity does not match the run's. Two
+clustering executions that differ in any method parameter — including the
+top-level `SELECTED_K`, bootstrap count, minimum subtype size, or the
+silhouette/stability split thresholds — are distinct models with distinct
+versions.
 
 The `input_data_identity` is recorded once, by `archetypes_fixed.ipynb`, as a
 SHA-256 digest over the membership and exact fitted feature matrix it just
-wrote, and is written into `clustering_metadata.json`. Both the notebook and
-the matchup script read the persisted frames with `float_precision="round_trip"`
+wrote, and is written into `clustering_metadata.json` alongside the clustering
+method parameters (`top_level_clusters`, `n_bootstraps`, `min_subtype_size`,
+`subtype_min_silhouette`, `subtype_min_stability`). Both the notebook and the
+matchup script read the persisted frames with `float_precision="round_trip"`
 so the digest covers the exact fitted values rather than a precision-truncated
 serialization. Production reads that recorded digest via
 `spec_from_clustering_metadata` instead of recomputing it from whichever
@@ -118,40 +129,57 @@ production fails closed when the git revision cannot be determined, so distinct
 unversioned code cannot share a run id. The production revision also folds in
 the working-tree state (uncommitted tracked changes and the contents of
 untracked analysis files), so dirty analysis code never receives the clean HEAD
-identity. The generation time defaults to the wall clock but is injectable
-(`generated_at`) so a fully pinned build is reproducible; it never feeds the
-deterministic identity hashes. `clustering_attempt` must be a positive integer
-(booleans, zero, negatives, and strings are rejected).
+identity. The script captures that revision **before** loading or fetching any
+data and re-captures it immediately before persisting; if the code changed
+while the run was being built, publication aborts rather than attribute a newer
+disk snapshot to an older loaded-code identity. The generation time defaults to
+the wall clock but is injectable (`generated_at`) so a fully pinned build is
+reproducible; it never feeds the deterministic identity hashes.
+`clustering_attempt` must be a positive integer (booleans, zero, negatives, and
+strings are rejected).
 
 The artifacts collection and dashboard payload each carry one immutable
 `RunIdentity` value (run id, model version, and stable subtype keys) plus
 content digests for every artifact frame. Each digest is bound to the run id,
-model version, artifact name, and frame content, so two runs with identical
-content still record distinct digests, and dashboard assembly recomputes every
-digest and rejects a frame that was replaced with content assembled under a
-different identity. The expected digest record is an immutable `FrozenDict`
-captured at artifact assembly; replacing it is rejected rather than trusted.
-`AnalysisRun` is a frozen dataclass whose frames, series, and dicts are stored
-as defensive deep copies — including object-valued DataFrame cells — and
-re-exposed as copies, and model-fit objects are pinned read-only at fit time, so
-no post-build mutation can alter a run's captured state. `RunProvenance` and
-`RunIdentity` reject every in-place mutation of their hash maps (including
-`|=`), and `FrozenDict` is a read-only `Mapping` so even base `dict` calls
-cannot rewrite its storage. Stable subtype membership keys are content hashes of
-each subtype's sorted member IDs, so they are invariant under arbitrary
+model version, artifact name, and frame content — including, for heatmaps, the
+display-label index and the color-scale limit that controls the rendered PNG —
+so two runs with identical content still record distinct digests, and dashboard
+assembly recomputes every digest and rejects a frame that was replaced with
+content assembled under a different identity. The expected digest record is an
+immutable `FrozenDict` captured at artifact assembly; replacing it is rejected
+rather than trusted. `AnalysisRun` is a frozen dataclass whose frames, series,
+and dicts are stored as defensive deep copies — including object-valued
+DataFrame cells holding dicts, lists, sets, arrays, or custom Mappings — and
+re-exposed as copies, and published fits are immutable snapshots of the live
+statsmodels results (neither in-place array writes nor attribute reassignment
+can change them), so no post-build mutation can alter a run's captured state.
+`RunProvenance` and `RunIdentity` reject every in-place mutation of their hash
+maps (including `|=`), and `FrozenDict` is a read-only `Mapping` over a
+read-only backing proxy, so even the private `_data` attribute cannot be
+written through. Stable subtype membership keys are content hashes of each
+subtype's sorted member IDs, so they are invariant under arbitrary
 cluster-label permutation; the builder rejects overlapping or colliding
-membership. Matrix dimensions, eligible-cell counts, and subtype labels always
-derive from the run's actual membership and games, never from a fixed cluster
-count.
+membership. Matrix rows and subtype labels always derive from the run's
+complete model membership — a membership subtype with no usable games is still
+an explicit all-missing heatmap row — while eligible-cell counts derive from
+actual game data.
 
 When the matchup script persists artifacts, every CSV is written with `RUN_ID`
 and `MODEL_VERSION` values on every row (including an identity row for
-otherwise-empty outputs) and every PNG embeds the run identity in tEXt chunks,
-so each file is self-attributing. `artifact_manifest()` refuses to bless a file
-that does not carry the run's identity, and `run_identity_manifest.json` records
-a SHA-256 content digest for every saved file (CSV and PNG) in addition to the
-run identity. `verify_persisted_manifest()` then fails closed if any recorded
-file is missing, has been replaced, or no longer embeds the manifest's identity.
+otherwise-empty outputs) and every PNG is structurally validated and embeds the
+run identity in tEXt chunks, so each file is self-attributing.
+`artifact_manifest()` refuses to bless a file that does not carry the run's
+identity, and it requires exactly the complete required persisted artifact set
+— missing, unexpected, or duplicate files are rejected, so an incomplete run
+cannot get a manifest. `run_identity_manifest.json` records a SHA-256 content
+digest for every saved file (CSV and PNG) in addition to the run identity, and
+it is published last and atomically (temp file then rename) so readers only
+ever see either no manifest or a complete verified one.
+`verify_persisted_manifest()` then fails closed if any recorded file is
+missing, has been replaced, no longer embeds the manifest's identity, or if the
+recorded set is partial or contains duplicate filenames. PNG identity parsing
+and the manifest live in `scripts/artifact_persistence.py`, separated from the
+statistical builder in `scripts/matchup_analysis.py`.
 
 ## Modeling boundaries
 

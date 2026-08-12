@@ -14,6 +14,7 @@ import struct
 import sys
 import tempfile
 import zlib
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,12 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from artifact_persistence import (  # noqa: E402
+    artifact_manifest,
+    png_text_entries,
+    stamp_png_identity,
+    verify_persisted_manifest,
+)
 from matchup_analysis import (  # noqa: E402
     AnalysisRunBuilder,
     AnalysisRunSettings,
@@ -34,12 +41,9 @@ from matchup_analysis import (  # noqa: E402
     FrozenDict,
     RunIdentity,
     _defensive_copy,
-    artifact_manifest,
     compute_input_data_identity,
-    png_text_entries,
+    fail_if_code_changed,
     spec_from_clustering_metadata,
-    stamp_png_identity,
-    verify_persisted_manifest,
 )
 
 BASE_DATE = date(2026, 1, 5)
@@ -260,6 +264,11 @@ def make_model_spec(archetypes, game_logs, **overrides):
         "clustering_method": "KMeans",
         "cluster_count": int(archetypes["SUBTYPE_ID"].nunique()),
         "random_seed": 42,
+        "top_level_clusters": 6,
+        "n_bootstraps": 20,
+        "min_subtype_size": 12,
+        "subtype_min_silhouette": 0.10,
+        "subtype_min_stability": 0.65,
         "input_data_identity": compute_input_data_identity(archetypes, game_logs),
     }
     values.update(overrides)
@@ -320,6 +329,37 @@ def write_stamped_png(path, run):
         stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
     )
     return path
+
+
+PERSISTED_CSV_ARTIFACTS = [
+    "matchup_summary",
+    "notable_matchups",
+    "validated_interactions",
+    "watchlist",
+    "player_relative_matchups",
+    "volume_matchup_summary",
+    "validated_volume_interactions",
+    "volume_reliability",
+    "player_relative_volume_matchups",
+]
+PERSISTED_PNG_ARTIFACTS = [
+    "descriptive_pts_per_min_heatmap",
+    "descriptive_volume_interaction_heatmaps",
+]
+PERSISTED_ARTIFACTS = [*PERSISTED_CSV_ARTIFACTS, *PERSISTED_PNG_ARTIFACTS]
+
+
+def write_full_artifact_set(directory, run, empty_csv_names=()):
+    """Write every required persisted artifact into ``directory`` and return paths."""
+    paths = {}
+    for name in PERSISTED_CSV_ARTIFACTS:
+        if name in empty_csv_names:
+            paths[name] = write_empty_attributed_csv(directory / f"{name}.csv", run)
+        else:
+            paths[name] = write_attributed_csv(directory / f"{name}.csv", run)
+    for name in PERSISTED_PNG_ARTIFACTS:
+        paths[name] = write_stamped_png(directory / f"{name}.png", run)
+    return paths
 
 
 def test_fixture_structure_represents_required_shapes():
@@ -476,6 +516,7 @@ def test_artifact_assembly_boundary_exposes_expected_schema():
         "volume_heatmap__FG2A",
         "volume_heatmap__FG3A",
         "volume_heatmap__FTA",
+        "subtype_labels",
     }
     for digest in artifacts["artifact_digests"].values():
         assert re.fullmatch(r"[0-9a-f]{64}", digest)
@@ -587,6 +628,11 @@ def test_model_spec_version_is_content_addressed():
         "clustering_method": "GaussianMixture",
         "cluster_count": base.cluster_count + 1,
         "random_seed": base.random_seed + 1,
+        "top_level_clusters": base.top_level_clusters + 1,
+        "n_bootstraps": base.n_bootstraps + 1,
+        "min_subtype_size": base.min_subtype_size + 1,
+        "subtype_min_silhouette": 0.20,
+        "subtype_min_stability": 0.70,
         "input_data_identity": "0" * 64,
     }
     for field, value in variations.items():
@@ -921,15 +967,8 @@ def test_artifact_manifest_records_content_digests():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
-        summary_path = write_attributed_csv(directory / "matchup_summary.csv", run)
-        heatmap_path = write_stamped_png(directory / "heatmap.png", run)
-        manifest = artifact_manifest(
-            run,
-            {
-                "matchup_summary": summary_path,
-                "pts_per_min_heatmap": heatmap_path,
-            },
-        )
+        paths = write_full_artifact_set(directory, run)
+        manifest = artifact_manifest(run, paths)
         assert manifest["run_id"] == run.run_id
         assert manifest["model_version"] == run.model_version
         assert manifest["stable_subtype_keys"] == {
@@ -938,17 +977,19 @@ def test_artifact_manifest_records_content_digests():
         assert manifest["provenance"] == run.provenance.to_dict()
         assert manifest["artifacts"]["matchup_summary"] == {
             "file": "matchup_summary.csv",
-            "sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(paths["matchup_summary"].read_bytes()).hexdigest(),
         }
-        assert manifest["artifacts"]["pts_per_min_heatmap"] == {
-            "file": "heatmap.png",
-            "sha256": hashlib.sha256(heatmap_path.read_bytes()).hexdigest(),
+        assert manifest["artifacts"]["descriptive_pts_per_min_heatmap"] == {
+            "file": "descriptive_pts_per_min_heatmap.png",
+            "sha256": hashlib.sha256(
+                paths["descriptive_pts_per_min_heatmap"].read_bytes()
+            ).hexdigest(),
         }
         tampered = pd.DataFrame({"a": [9], "b": [9]}).assign(
             RUN_ID=run.run_id, MODEL_VERSION=run.model_version
         )
-        tampered.to_csv(summary_path, index=False)
-        replaced = artifact_manifest(run, {"matchup_summary": summary_path})
+        tampered.to_csv(paths["matchup_summary"], index=False)
+        replaced = artifact_manifest(run, paths)
         assert (
             replaced["artifacts"]["matchup_summary"]["sha256"]
             != manifest["artifacts"]["matchup_summary"]["sha256"]
@@ -958,33 +999,37 @@ def test_artifact_manifest_records_content_digests():
 def test_artifact_manifest_rejects_identity_less_csv():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "matchup_summary.csv"
-        path.write_text("a,b\n1,2\n")
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
+        bad = directory / "matchup_summary.csv"
+        bad.write_text("a,b\n1,2\n")
+        paths["matchup_summary"] = bad
         with pytest.raises(ValueError, match="not self-attributing"):
-            artifact_manifest(run, {"matchup_summary": path})
+            artifact_manifest(run, paths)
 
 
 def test_artifact_manifest_rejects_foreign_csv_identity():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "matchup_summary.csv"
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
         foreign = pd.DataFrame({"a": [1]}).assign(
             RUN_ID="0" * 64, MODEL_VERSION="0" * 64
         )
-        foreign.to_csv(path, index=False)
+        foreign.to_csv(paths["matchup_summary"], index=False)
         with pytest.raises(ValueError, match="does not match this run"):
-            artifact_manifest(run, {"matchup_summary": path})
+            artifact_manifest(run, paths)
 
 
 def test_artifact_manifest_accepts_empty_attributed_csv():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
-        path = write_empty_attributed_csv(Path(tmp) / "watchlist.csv", run)
-        manifest = artifact_manifest(run, {"watchlist": path})
-        frame = pd.read_csv(path)
+        paths = write_full_artifact_set(Path(tmp), run, empty_csv_names={"watchlist"})
+        manifest = artifact_manifest(run, paths)
+        frame = pd.read_csv(paths["watchlist"])
         assert frame["RUN_ID"].tolist() == [run.run_id]
         assert manifest["artifacts"]["watchlist"]["sha256"] == hashlib.sha256(
-            path.read_bytes()
+            paths["watchlist"].read_bytes()
         ).hexdigest()
         verify_persisted_manifest(manifest, Path(tmp))
 
@@ -1001,34 +1046,29 @@ def test_verify_persisted_manifest_rejects_tampered_and_missing():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
-        summary_path = write_attributed_csv(directory / "matchup_summary.csv", run)
-        heatmap_path = write_stamped_png(directory / "heatmap.png", run)
-        manifest = artifact_manifest(
-            run,
-            {"matchup_summary": summary_path, "pts_per_min_heatmap": heatmap_path},
-        )
+        paths = write_full_artifact_set(directory, run)
+        manifest = artifact_manifest(run, paths)
         verify_persisted_manifest(manifest, directory)
 
-        summary_path.write_text("tampered\n1\n")
+        paths["matchup_summary"].write_text("tampered\n1\n")
         with pytest.raises(ValueError, match="does not match its recorded digest"):
             verify_persisted_manifest(manifest, directory)
-        write_attributed_csv(summary_path, run)
+        write_attributed_csv(paths["matchup_summary"], run)
 
-        (directory / "matchup_summary.csv").unlink()
+        paths["matchup_summary"].unlink()
         with pytest.raises(FileNotFoundError, match="is missing"):
             verify_persisted_manifest(manifest, directory)
-        write_attributed_csv(summary_path, run)
+        write_attributed_csv(paths["matchup_summary"], run)
 
         foreign = pd.DataFrame({"a": [1]}).assign(
             RUN_ID="1" * 64, MODEL_VERSION="1" * 64
         )
-        foreign.to_csv(summary_path, index=False)
+        foreign.to_csv(paths["matchup_summary"], index=False)
         crafted = dict(manifest)
-        crafted["artifacts"] = {
-            "matchup_summary": {
-                "file": "matchup_summary.csv",
-                "sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
-            }
+        crafted["artifacts"] = dict(manifest["artifacts"])
+        crafted["artifacts"]["matchup_summary"] = {
+            "file": "matchup_summary.csv",
+            "sha256": hashlib.sha256(paths["matchup_summary"].read_bytes()).hexdigest(),
         }
         with pytest.raises(ValueError, match="embeds identity that does not match"):
             verify_persisted_manifest(crafted, directory)
@@ -1148,6 +1188,11 @@ def test_spec_from_clustering_metadata_requires_recorded_identity():
         "clustering_method": "KMeans",
         "cluster_count": 3,
         "random_seed": 42,
+        "top_level_clusters": 6,
+        "n_bootstraps": 20,
+        "min_subtype_size": 12,
+        "subtype_min_silhouette": 0.10,
+        "subtype_min_stability": 0.65,
     }
     with pytest.raises(ValueError, match="input_data_identity"):
         spec_from_clustering_metadata(metadata)
@@ -1156,6 +1201,11 @@ def test_spec_from_clustering_metadata_requires_recorded_identity():
     assert spec.season == "2025-26"
     assert spec.cluster_count == 3
     assert spec.random_seed == 42
+    assert spec.top_level_clusters == 6
+    assert spec.n_bootstraps == 20
+    assert spec.min_subtype_size == 12
+    assert spec.subtype_min_silhouette == 0.10
+    assert spec.subtype_min_stability == 0.65
     assert spec.input_data_identity == "0" * 64
     assert re.fullmatch(r"[0-9a-f]{64}", spec.version)
     incomplete = {key: value for key, value in metadata.items() if key != "cluster_count"}
@@ -1327,3 +1377,249 @@ def test_golden_comparators_reject_infinity_mismatches():
             heatmap, heatmap.assign(col=[1.0, -np.inf, np.nan]), "probe"
         )
     _assert_heatmap_equivalent(heatmap, heatmap.copy(), "probe")
+
+
+def test_artifact_digests_cover_heatmap_labels_and_limits():
+    archetypes, game_logs = parity_fixture()
+    builder = build_builder(archetypes, game_logs)
+    builder.assemble_artifacts()
+    heatmap = builder._artifacts["pts_per_min_heatmap"]
+    relabeled = heatmap.copy()
+    relabeled.index = heatmap.index[::-1]
+    builder._artifacts["pts_per_min_heatmap"] = relabeled
+    with pytest.raises(ValueError, match="does not match the run's assembled content"):
+        builder.assemble_dashboard_payload()
+
+    builder_volume = build_builder(archetypes, game_logs)
+    builder_volume.assemble_artifacts()
+    builder_volume._artifacts["volume_heatmaps"]["FGA"]["limit"] = 999
+    with pytest.raises(ValueError, match="does not match the run's assembled content"):
+        builder_volume.assemble_dashboard_payload()
+
+    builder_labels = build_builder(archetypes, game_logs)
+    builder_labels.assemble_artifacts()
+    data = builder_labels._artifacts["volume_heatmaps"]["FGA"]["data"]
+    relabeled = data.copy()
+    relabeled.index = data.index[::-1]
+    builder_labels._artifacts["volume_heatmaps"]["FGA"]["data"] = relabeled
+    with pytest.raises(ValueError, match="does not match the run's assembled content"):
+        builder_labels.assemble_dashboard_payload()
+
+
+def test_artifact_digests_cover_subtype_labels():
+    archetypes, game_logs = synthetic_fixture()
+    builder = build_builder(archetypes, game_logs)
+    builder.assemble_artifacts()
+    builder._subtype_labels = builder._subtype_labels.rename(index={100: "999"})
+    with pytest.raises(ValueError, match="does not match the run's assembled content"):
+        builder.assemble_dashboard_payload()
+
+
+def test_published_fit_objects_are_immutable_snapshots():
+    run = build_run()
+    fit = run.scoring_fits["points_fit"]["fit"]
+    with pytest.raises(FrozenInstanceError):
+        fit.params = np.array([9.0, 9.0])
+    with pytest.raises(ValueError):
+        fit.bse[0] = 999
+    run.scoring_fits["points_fit"]["fit"] = None
+    assert run.scoring_fits["points_fit"]["fit"] is not None
+
+
+def test_frozen_dict_backing_mapping_is_not_writable():
+    run = build_run()
+    with pytest.raises(TypeError):
+        run.identity.stable_subtype_keys._data[100] = "0" * 64
+    with pytest.raises(TypeError):
+        run.provenance.input_hashes._data["archetypes"] = "0" * 64
+    assert run.stable_subtype_keys[100] != "0" * 64
+    assert run.provenance.input_hashes["archetypes"] != "0" * 64
+
+
+class _MutableMappingView(Mapping):
+    def __init__(self, items):
+        self._items = dict(items)
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def __setitem__(self, key, value):
+        self._items[key] = value
+
+
+def test_defensive_copy_closes_set_and_custom_mapping_cells():
+    cell_map = _MutableMappingView({"b": 1})
+    source = {
+        "frame": pd.DataFrame(
+            {
+                "tags": [{"a"}, {1, 2}],
+                "meta": [cell_map, {"c": 3}],
+                "value": [1, 2],
+            }
+        )
+    }
+    copied = _defensive_copy(source)
+    copied["frame"].at[0, "tags"].add("leaked")
+    copied["frame"].at[1, "meta"]["c"] = 99
+    assert source["frame"].at[0, "tags"] == {"a"}
+    assert source["frame"].at[1, "meta"] == {"c": 3}
+    copied["frame"].at[0, "meta"]["b"] = 99
+    assert cell_map._items == {"b": 1}
+
+
+def test_fail_if_code_changed_guards_mixed_snapshots():
+    fail_if_code_changed("rev", "rev")
+    with pytest.raises(RuntimeError, match="code"):
+        fail_if_code_changed("rev-a", "rev-b")
+
+
+def test_artifact_manifest_rejects_empty_and_incomplete_graphs():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(ValueError, match="required"):
+            artifact_manifest(run, {})
+        paths = write_full_artifact_set(Path(tmp), run)
+        del paths["watchlist"]
+        with pytest.raises(ValueError, match="missing"):
+            artifact_manifest(run, paths)
+        paths = write_full_artifact_set(Path(tmp), run)
+        paths["sneaky_extra"] = paths["matchup_summary"]
+        with pytest.raises(ValueError, match="unexpected"):
+            artifact_manifest(run, paths)
+
+
+def test_artifact_manifest_rejects_duplicate_files():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = write_full_artifact_set(Path(tmp), run)
+        paths["watchlist"] = paths["matchup_summary"]
+        with pytest.raises(ValueError, match="duplicate"):
+            artifact_manifest(run, paths)
+
+
+def test_verify_persisted_manifest_rejects_partial_and_duplicate_records():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
+        manifest = artifact_manifest(run, paths)
+        verify_persisted_manifest(manifest, directory)
+
+        crafted = dict(manifest)
+        crafted["artifacts"] = dict(manifest["artifacts"])
+        crafted["artifacts"]["watchlist"] = crafted["artifacts"]["matchup_summary"]
+        with pytest.raises(ValueError, match="duplicate"):
+            verify_persisted_manifest(crafted, directory)
+
+        crafted = dict(manifest)
+        crafted["artifacts"] = {
+            name: record
+            for name, record in manifest["artifacts"].items()
+            if name != "watchlist"
+        }
+        with pytest.raises(ValueError, match="missing"):
+            verify_persisted_manifest(crafted, directory)
+
+        crafted = dict(manifest)
+        crafted["artifacts"] = dict(manifest["artifacts"])
+        crafted["artifacts"]["sneaky"] = crafted["artifacts"]["matchup_summary"]
+        with pytest.raises(ValueError, match="unexpected"):
+            verify_persisted_manifest(crafted, directory)
+
+
+def test_artifact_manifest_rejects_header_only_csv():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = write_full_artifact_set(Path(tmp), run)
+        header_only = paths["watchlist"]
+        header_only.write_text("RUN_ID,MODEL_VERSION\n")
+        with pytest.raises(ValueError, match="no rows"):
+            artifact_manifest(run, paths)
+
+
+def test_png_text_entries_rejects_missing_iend():
+    run = build_run()
+    stamped = stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
+    iend_index = stamped.index(b"IEND")
+    mutilated = stamped[: iend_index - 4]
+    with pytest.raises(ValueError, match="IEND"):
+        png_text_entries(mutilated)
+
+
+def test_png_text_entries_rejects_corrupt_crc_and_truncation():
+    run = build_run()
+    stamped = stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
+    idat_index = stamped.index(b"IDAT")
+    corrupt = bytearray(stamped)
+    corrupt[idat_index + 4 + 2] ^= 0xFF
+    with pytest.raises(ValueError, match="CRC"):
+        png_text_entries(bytes(corrupt))
+    with pytest.raises(ValueError, match="end of the file"):
+        png_text_entries(stamped[:-4])
+
+
+def test_stamp_png_identity_rejects_malformed_input():
+    run = build_run()
+    with pytest.raises(ValueError, match="Not a PNG"):
+        stamp_png_identity(b"not a png", run.run_id, run.model_version)
+    no_iend = minimal_png_bytes()[:-12]
+    with pytest.raises(ValueError, match="IEND"):
+        stamp_png_identity(no_iend, run.run_id, run.model_version)
+
+
+def test_model_spec_version_covers_clustering_method_parameters():
+    archetypes, game_logs = synthetic_fixture()
+    base = make_model_spec(archetypes, game_logs)
+    variations = {
+        "top_level_clusters": base.top_level_clusters + 1,
+        "n_bootstraps": base.n_bootstraps + 1,
+        "min_subtype_size": base.min_subtype_size + 1,
+        "subtype_min_silhouette": 0.20,
+        "subtype_min_stability": 0.70,
+    }
+    for field, value in variations.items():
+        changed = make_model_spec(archetypes, game_logs, **{field: value})
+        assert changed.version != base.version, field
+
+
+def test_model_spec_rejects_invalid_clustering_parameters():
+    archetypes, game_logs = synthetic_fixture()
+    for bad in (None, "3", 0, -1, 2.5, True):
+        with pytest.raises(ValueError):
+            make_model_spec(archetypes, game_logs, top_level_clusters=bad)
+        with pytest.raises(ValueError):
+            make_model_spec(archetypes, game_logs, n_bootstraps=bad)
+        with pytest.raises(ValueError):
+            make_model_spec(archetypes, game_logs, min_subtype_size=bad)
+    for bad in (-0.1, 1.5, True, "high"):
+        with pytest.raises(ValueError):
+            make_model_spec(archetypes, game_logs, subtype_min_silhouette=bad)
+        with pytest.raises(ValueError):
+            make_model_spec(archetypes, game_logs, subtype_min_stability=bad)
+
+
+def test_matrix_and_labels_cover_membership_subtypes_without_usable_logs():
+    archetypes, game_logs = synthetic_fixture()
+    subtype_300_players = set(
+        archetypes.loc[archetypes["SUBTYPE_ID"] == 300, "PLAYER_ID"]
+    )
+    filtered = game_logs.loc[~game_logs["PLAYER_ID"].isin(subtype_300_players)].copy()
+    run = build_builder(archetypes, filtered).build()
+    assert run.provenance.cluster_count == 3
+    assert set(run.stable_subtype_keys) == {100, 200, 300}
+    heatmap = run.artifacts["pts_per_min_heatmap"]
+    assert heatmap.shape == (3, 6)
+    assert heatmap.loc["300 \u2014 Quarterback"].isna().all()
+    labels = run.dashboard_payload["subtype_labels"]
+    assert labels.index.tolist() == [100, 200, 300]
+    assert labels.loc[300] == "300 \u2014 Quarterback"
+    for metric in EXPECTED_METRICS:
+        data = run.artifacts["volume_heatmaps"][metric]["data"]
+        assert data.shape == (3, 6)
+        assert data.loc["300 \u2014 Quarterback"].isna().all()

@@ -14,12 +14,10 @@ choice, and effects extraction are deterministic given the input frames.
 import hashlib
 import json
 import re
-import struct
-import zlib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
-from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -112,19 +110,27 @@ def _json_default(value):
     raise TypeError(f"Cannot serialize {type(value).__name__} deterministically")
 
 
-def _frame_canonical_text(frame) -> str:
+def _frame_canonical_text(frame, *, include_index=False) -> str:
     """Canonical, lossless deterministic text form of a frame for content hashing.
 
     Numeric columns keep their exact stored values: integers are serialized as
     JSON integers (so values beyond ``2**53`` remain distinct) and floats use
     Python's shortest round-trip representation instead of pandas' truncated
-    10-digit JSON precision. Column order, row order, and the index are
-    normalized before serialization.
+    10-digit JSON precision. Column order and row order are normalized before
+    serialization. The index is normalized away unless ``include_index`` is
+    set, which artifact digests use for heatmap frames whose index carries the
+    semantic display labels.
     """
     canonical = frame.copy()
     canonical = canonical.reindex(sorted(canonical.columns), axis=1)
+    if include_index:
+        index_name = "_index"
+        while index_name in canonical.columns:
+            index_name = "_" + index_name
+        canonical = canonical.reset_index(names=index_name)
+    else:
+        canonical = canonical.reset_index(drop=True)
     canonical = canonical.sort_values(list(canonical.columns))
-    canonical = canonical.reset_index(drop=True)
     return json.dumps(
         canonical.to_dict(orient="records"),
         sort_keys=True,
@@ -149,13 +155,26 @@ def compute_input_data_identity(archetypes, model_inputs) -> str:
 
 @dataclass(frozen=True)
 class ArchetypeModelSpec:
-    """Content-addressed identity of one published archetype model."""
+    """Content-addressed identity of one published archetype model.
+
+    The identity covers every parameter that determines the published subtype
+    structure: the season, feature definition, clustering method, base random
+    seed, top-level cluster count, bootstrap count, minimum subtype size, the
+    silhouette and stability thresholds gating a parent split, the final
+    subtype count, and the input-data identity. Two clustering executions that
+    differ in any of these values are distinct models.
+    """
 
     season: str
     feature_definition: str
     clustering_method: str
     cluster_count: int
     random_seed: int
+    top_level_clusters: int
+    n_bootstraps: int
+    min_subtype_size: int
+    subtype_min_silhouette: float
+    subtype_min_stability: float
     input_data_identity: str
 
     def __post_init__(self):
@@ -174,6 +193,18 @@ class ArchetypeModelSpec:
             or self.cluster_count < 1
         ):
             raise ValueError("cluster_count must be a positive integer")
+        for name in ("top_level_clusters", "n_bootstraps", "min_subtype_size"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("subtype_min_silhouette", "subtype_min_stability"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"{name} must be a fraction between 0 and 1")
         if isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int):
             raise ValueError("random_seed must be an integer")
 
@@ -187,6 +218,11 @@ class ArchetypeModelSpec:
                 self.clustering_method,
                 self.cluster_count,
                 self.random_seed,
+                self.top_level_clusters,
+                self.n_bootstraps,
+                self.min_subtype_size,
+                self.subtype_min_silhouette,
+                self.subtype_min_stability,
                 self.input_data_identity,
             )
         )
@@ -207,6 +243,11 @@ def spec_from_clustering_metadata(metadata: dict) -> ArchetypeModelSpec:
         "clustering_method",
         "cluster_count",
         "random_seed",
+        "top_level_clusters",
+        "n_bootstraps",
+        "min_subtype_size",
+        "subtype_min_silhouette",
+        "subtype_min_stability",
         "input_data_identity",
     )
     missing = [key for key in required if not str(metadata.get(key, "")).strip()]
@@ -220,142 +261,27 @@ def spec_from_clustering_metadata(metadata: dict) -> ArchetypeModelSpec:
         clustering_method=str(metadata["clustering_method"]),
         cluster_count=int(metadata["cluster_count"]),
         random_seed=int(metadata["random_seed"]),
+        top_level_clusters=int(metadata["top_level_clusters"]),
+        n_bootstraps=int(metadata["n_bootstraps"]),
+        min_subtype_size=int(metadata["min_subtype_size"]),
+        subtype_min_silhouette=float(metadata["subtype_min_silhouette"]),
+        subtype_min_stability=float(metadata["subtype_min_stability"]),
         input_data_identity=str(metadata["input_data_identity"]),
     )
 
 
-_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+def fail_if_code_changed(initial_revision: str, current_revision: str) -> None:
+    """Fail closed when the analysis code snapshot changed during a build.
 
-
-def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
-    return (
-        struct.pack(">I", len(data))
-        + chunk_type
-        + data
-        + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
-    )
-
-
-def stamp_png_identity(png_bytes: bytes, run_id: str, model_version: str) -> bytes:
-    """Return ``png_bytes`` with tEXt chunks binding run/model identity.
-
-    The chunks are inserted immediately after the first (IHDR) chunk so the
-    persisted PNG is self-attributing without disturbing the image data.
+    Production captures ``code_revision`` before loading any data and re-checks
+    it immediately before persisting artifacts. A mismatch means the disk state
+    that would be attributed to the run no longer matches the code that
+    produced it, so publication must abort rather than bless a mixed snapshot.
     """
-    if not png_bytes.startswith(_PNG_SIGNATURE):
-        raise ValueError("Not a PNG file")
-    offset = len(_PNG_SIGNATURE)
-    first_length = struct.unpack(">I", png_bytes[offset : offset + 4])[0]
-    first_chunk_end = offset + 12 + first_length
-    identity_chunks = _png_chunk(
-        b"tEXt", b"run_id\x00" + run_id.encode("utf-8")
-    ) + _png_chunk(
-        b"tEXt", b"model_version\x00" + model_version.encode("utf-8")
-    )
-    return png_bytes[:first_chunk_end] + identity_chunks + png_bytes[first_chunk_end:]
-
-
-def png_text_entries(png_bytes: bytes) -> dict:
-    """Parse the tEXt chunks of a PNG into a ``{keyword: text}`` mapping."""
-    if not png_bytes.startswith(_PNG_SIGNATURE):
-        raise ValueError("Not a PNG file")
-    entries = {}
-    offset = len(_PNG_SIGNATURE)
-    while offset + 8 <= len(png_bytes):
-        length = struct.unpack(">I", png_bytes[offset : offset + 4])[0]
-        chunk_type = png_bytes[offset + 4 : offset + 8]
-        data = png_bytes[offset + 8 : offset + 8 + length]
-        if chunk_type == b"tEXt":
-            keyword, separator, text = data.partition(b"\x00")
-            if separator:
-                entries[keyword.decode("ascii")] = text.decode("utf-8")
-        offset += 12 + length
-    return entries
-
-
-def _verify_artifact_identity(path, run_id, model_version, name):
-    """Fail closed unless a persisted artifact is verifiably attributed to a run.
-
-    CSVs must carry ``RUN_ID``/``MODEL_VERSION`` values equal to the run's on
-    every row (empty CSVs still embed an identity row), and PNGs must embed the
-    run identity in tEXt chunks. A file that cannot be positively attributed is
-    rejected rather than blessed.
-    """
-    suffix = Path(path).suffix.lower()
-    if suffix == ".csv":
-        frame = pd.read_csv(path)
-        if not {"RUN_ID", "MODEL_VERSION"}.issubset(frame.columns):
-            raise ValueError(
-                f"Artifact {name} ({Path(path).name}) is not self-attributing: "
-                "missing RUN_ID/MODEL_VERSION columns"
-            )
-        mismatched = frame.loc[
-            (frame["RUN_ID"].astype(str) != run_id)
-            | (frame["MODEL_VERSION"].astype(str) != model_version)
-        ]
-        if not mismatched.empty:
-            raise ValueError(
-                f"Artifact {name} ({Path(path).name}) embeds identity that does "
-                "not match this run"
-            )
-    elif suffix == ".png":
-        entries = png_text_entries(Path(path).read_bytes())
-        if (
-            entries.get("run_id") != run_id
-            or entries.get("model_version") != model_version
-        ):
-            raise ValueError(
-                f"Artifact {name} ({Path(path).name}) does not embed this run's identity"
-            )
-
-
-def artifact_manifest(run, artifact_paths: dict) -> dict:
-    """Content-addressed manifest attributing persisted artifacts to one run.
-
-    ``artifact_paths`` maps a logical artifact name to the file that was just
-    saved for it. Every CSV must carry the run's own ``RUN_ID``/``MODEL_VERSION``
-    on every row and every PNG must embed them, or the manifest refuses to bless
-    the file; the recorded SHA-256 covers the persisted bytes, so later
-    replacement or an interrupted publication is detectable against the digest.
-    """
-    artifacts = {
-        name: {
-            "file": Path(path).name,
-            "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
-        }
-        for name, path in artifact_paths.items()
-    }
-    for name, path in artifact_paths.items():
-        _verify_artifact_identity(path, run.run_id, run.model_version, name)
-    return {
-        "run_id": run.run_id,
-        "model_version": run.model_version,
-        "stable_subtype_keys": {
-            str(key): value for key, value in run.stable_subtype_keys.items()
-        },
-        "provenance": run.provenance.to_dict(),
-        "artifacts": artifacts,
-    }
-
-
-def verify_persisted_manifest(manifest: dict, output_dir) -> None:
-    """Fail-closed verification that every recorded artifact is still attributable.
-
-    Each artifact must still exist, match its recorded SHA-256, and embed the
-    manifest's run/model identity in its own bytes (CSV identity columns or PNG
-    tEXt chunks). Missing, tampered, or falsely attributed files raise instead
-    of being silently accepted.
-    """
-    directory = Path(output_dir)
-    for name, record in manifest["artifacts"].items():
-        path = directory / record["file"]
-        if not path.exists():
-            raise FileNotFoundError(f"Artifact {name} is missing: {path}")
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != record["sha256"]:
-            raise ValueError(f"Artifact {name} does not match its recorded digest")
-        _verify_artifact_identity(
-            path, manifest["run_id"], manifest["model_version"], name
+    if initial_revision != current_revision:
+        raise RuntimeError(
+            "The analysis code changed while the run was being built; refusing "
+            "to publish a run attributed to a mixed code snapshot"
         )
 
 
@@ -366,13 +292,14 @@ class FrozenDict(Mapping):
     expose mutable hashes, so the identity-carrying dicts they own are frozen at
     construction time. It is a ``Mapping`` rather than a ``dict`` subclass so the
     base ``dict.__setitem__``/``dict.update``/``dict.__ior__`` invocations cannot
-    mutate its storage.
+    mutate its storage, and its backing is a read-only mapping proxy so even the
+    ``_data`` attribute itself cannot be written through.
     """
 
     __slots__ = ("_data",)
 
     def __init__(self, items=(), **kwargs):
-        object.__setattr__(self, "_data", dict(items, **kwargs))
+        object.__setattr__(self, "_data", MappingProxyType(dict(items, **kwargs)))
 
     def __getitem__(self, key):
         return self._data[key]
@@ -468,18 +395,21 @@ class RunIdentity:
         object.__setattr__(self, "stable_subtype_keys", FrozenDict(dict(keys)))
 
 
+def _is_mutable_cell(value):
+    """True for container values that a pandas ``copy(deep=True)`` does not copy."""
+    return isinstance(value, (dict, list, tuple, set, np.ndarray, Mapping))
+
+
 def _copy_container_cells(series):
     """Return ``series`` deep-copied, including any mutable object-dtype cells.
 
     ``pandas`` ``copy(deep=True)`` does not recurse into object-dtype elements,
-    so a dict/list/array stored in a cell would otherwise leak into the run's
-    captured state.
+    so a dict/list/set/array/Mapping stored in a cell would otherwise leak into
+    the run's captured state.
     """
     copied = series.copy(deep=True)
     if copied.dtype == object:
-        mask = copied.map(
-            lambda value: isinstance(value, (dict, list, tuple, set, np.ndarray))
-        )
+        mask = copied.map(_is_mutable_cell)
         if mask.any():
             copied.loc[mask] = copied.loc[mask].map(_defensive_copy)
     return copied
@@ -488,22 +418,18 @@ def _copy_container_cells(series):
 def _defensive_copy(value):
     """Recursively copy mutable containers so callers cannot mutate stored state.
 
-    DataFrames, Series, lists, and dicts are copied; numpy arrays are copied as
-    well where directly reachable. Object-dtype DataFrame/Series cells holding
-    containers are copied too. Immutable value objects (RunIdentity,
-    ArchetypeModelSpec, RunProvenance, FrozenDict) and model-fit results pass
-    through unchanged; model-fit results are frozen read-only at fit time so no
-    mutable fit state is reachable through a published property.
+    DataFrames, Series, lists, dicts, and sets are copied; numpy arrays are
+    copied as well where directly reachable, and object-dtype DataFrame/Series
+    cells holding containers are copied too. Custom mutable Mappings are copied
+    into fresh dicts. Immutable value objects (RunIdentity, ArchetypeModelSpec,
+    RunProvenance, FrozenDict) and immutable fit snapshots pass through
+    unchanged, so no mutable fit state is reachable through a published property.
     """
     if isinstance(value, pd.DataFrame):
         copied = value.copy(deep=True)
         for column in copied.columns:
             if copied[column].dtype == object:
-                mask = copied[column].map(
-                    lambda item: isinstance(
-                        item, (dict, list, tuple, set, np.ndarray)
-                    )
-                )
+                mask = copied[column].map(_is_mutable_cell)
                 if mask.any():
                     copied.loc[mask, column] = copied.loc[mask, column].map(
                         _defensive_copy
@@ -515,8 +441,14 @@ def _defensive_copy(value):
         return value.copy()
     if isinstance(value, dict):
         return {key: _defensive_copy(item) for key, item in value.items()}
+    if isinstance(value, set):
+        return {_defensive_copy(item) for item in value}
     if isinstance(value, (list, tuple)):
         return type(value)(_defensive_copy(item) for item in value)
+    if isinstance(value, Mapping):
+        if isinstance(value, FrozenDict):
+            return value
+        return {key: _defensive_copy(item) for key, item in value.items()}
     return value
 
 
@@ -551,6 +483,69 @@ def _freeze_fit_arrays(value, _seen=None):
     if hasattr(value, "__dict__"):
         for item in vars(value).values():
             _freeze_fit_arrays(item, _seen)
+
+
+@dataclass(frozen=True)
+class FrozenFitResult:
+    """Immutable snapshot of a fitted regression result, safe to publish.
+
+    The live statsmodels result used during a build is replaced by this
+    snapshot when an ``AnalysisRun`` is constructed, so no published property
+    exposes mutable fit state: neither in-place array writes nor attribute
+    reassignment can change a run's recorded fits.
+    """
+
+    params: np.ndarray
+    bse: np.ndarray
+    tvalues: np.ndarray
+    pvalues: np.ndarray
+    resid: np.ndarray
+    fittedvalues: np.ndarray
+    df_resid: float
+    df_model: float
+    nobs: float
+
+    def __post_init__(self):
+        for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+            value = getattr(self, name)
+            if not isinstance(value, np.ndarray):
+                raise ValueError(f"{name} must be a numpy array")
+            frozen = value.copy()
+            frozen.setflags(write=False)
+            object.__setattr__(self, name, frozen)
+        for name in ("df_resid", "df_model", "nobs"):
+            object.__setattr__(self, name, float(getattr(self, name)))
+
+    @classmethod
+    def from_statsmodels(cls, fit):
+        return cls(
+            params=np.asarray(fit.params),
+            bse=np.asarray(fit.bse),
+            tvalues=np.asarray(fit.tvalues),
+            pvalues=np.asarray(fit.pvalues),
+            resid=np.asarray(fit.resid),
+            fittedvalues=np.asarray(fit.fittedvalues),
+            df_resid=fit.df_resid,
+            df_model=fit.df_model,
+            nobs=fit.nobs,
+        )
+
+
+def _snapshot_fit_results(scoring_fits):
+    """Replace live statsmodels fits in a scoring-fits mapping with snapshots.
+
+    Only entries that actually carry a ``fit`` key (the per-outcome fit models)
+    are converted; the mapping's other entries (summary, eligible mask,
+    diagnostics, scalars) pass through untouched.
+    """
+    return {
+        name: (
+            {**entry, "fit": FrozenFitResult.from_statsmodels(entry["fit"])}
+            if isinstance(entry, dict) and "fit" in entry
+            else entry
+        )
+        for name, entry in scoring_fits.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -593,6 +588,9 @@ class AnalysisRun:
             "_dashboard_payload",
         ):
             object.__setattr__(self, name, _defensive_copy(getattr(self, name)))
+        # The live statsmodels results are replaced by immutable snapshots so a
+        # published fit cannot be rewritten or have its arrays changed.
+        object.__setattr__(self, "_scoring_fits", _snapshot_fit_results(self._scoring_fits))
 
     @property
     def membership(self) -> pd.DataFrame:
@@ -1845,9 +1843,15 @@ class AnalysisRunBuilder:
             volume_matchup_summary["INTERACTION_NOTABLE"]
         ].sort_values(["METRIC", "INTERACTION_Q_BY"])
 
+        # Matrix rows and display labels derive from the complete model
+        # membership, not from whichever subtypes happen to have usable game
+        # logs: a membership subtype with no eligible cells is still an explicit
+        # all-missing row so the matrix always agrees with the run's recorded
+        # cluster count and stable subtype keys.
+        membership_subtypes = sorted(self._membership["SUBTYPE_ID"].unique())
         subtype_labels = (
-            matchup_summary[["SUBTYPE_ID", "SUBTYPE_ARCHETYPE"]]
-            .drop_duplicates()
+            self._membership[["SUBTYPE_ID", "SUBTYPE_ARCHETYPE"]]
+            .drop_duplicates("SUBTYPE_ID")
             .assign(
                 DISPLAY_LABEL=lambda frame: (
                     frame["SUBTYPE_ID"].astype(str)
@@ -1856,6 +1860,7 @@ class AnalysisRunBuilder:
                 )
             )
             .set_index("SUBTYPE_ID")["DISPLAY_LABEL"]
+            .reindex(membership_subtypes)
         )
         tau_ppm = self._scoring["tau_ppm"]
         heatmap_data = matchup_summary.assign(
@@ -1863,9 +1868,9 @@ class AnalysisRunBuilder:
                 frame["ELIGIBLE_FOR_INFERENCE"]
             )
         ).pivot(index="SUBTYPE_ID", columns="OPP_TEAM", values="DISPLAY_VALUE")
-        heatmap_data = heatmap_data.loc[
-            sorted(heatmap_data.index), sorted(heatmap_data.columns)
-        ]
+        heatmap_data = heatmap_data.reindex(
+            index=membership_subtypes, columns=sorted(heatmap_data.columns)
+        )
         heatmap_data.index = heatmap_data.index.map(subtype_labels)
         heatmap_limit = max(2 * tau_ppm / league_average_ppm * 100, 1.0)
 
@@ -1879,9 +1884,9 @@ class AnalysisRunBuilder:
                     "SHRUNK_INTERACTION_VS_LEAGUE_AVG_PCT"
                 ].where(frame["ELIGIBLE_FOR_INFERENCE"])
             ).pivot(index="SUBTYPE_ID", columns="OPP_TEAM", values="DISPLAY_VALUE")
-            metric_heatmap = metric_heatmap.loc[
-                sorted(metric_heatmap.index), sorted(metric_heatmap.columns)
-            ]
+            metric_heatmap = metric_heatmap.reindex(
+                index=membership_subtypes, columns=sorted(metric_heatmap.columns)
+            )
             metric_heatmap.index = metric_heatmap.index.map(subtype_labels)
             finite_values = np.abs(metric_heatmap.to_numpy())
             finite_values = finite_values[np.isfinite(finite_values)]
@@ -1911,39 +1916,68 @@ class AnalysisRunBuilder:
             "volume_heatmaps": volume_heatmaps,
             "identity": self._run_identity,
         }
+        self._pts_per_min_heatmap_limit = heatmap_limit
+        self._subtype_labels = subtype_labels
         # Every artifact frame is attributed to this exact run and model by a
         # content digest bound to the run/model identity, so artifact assembly
         # and dashboard assembly reject a frame that was replaced with content
-        # assembled under a different run identity.
+        # assembled under a different run identity. Heatmap digests cover the
+        # display-label index and the limit that controls the rendered PNG, so
+        # relabeling a heatmap or changing its limit after assembly is caught.
         artifact_digests = {
-            name: content_hash(
-                (
-                    "artifact",
-                    self._run_id,
-                    self._model_version,
-                    name,
-                    _frame_canonical_text(frame),
-                )
-            )
-            for name, frame in self._artifacts.items()
-            if isinstance(frame, pd.DataFrame)
+            name: self._expected_artifact_digest(name)
+            for name in self._artifacts
+            if isinstance(self._artifacts[name], pd.DataFrame)
         }
-        for metric, heatmap in self._artifacts["volume_heatmaps"].items():
-            digest_name = f"volume_heatmap__{metric}"
-            artifact_digests[digest_name] = content_hash(
-                (
-                    "artifact",
-                    self._run_id,
-                    self._model_version,
-                    digest_name,
-                    _frame_canonical_text(heatmap["data"]),
-                )
+        for metric in self._artifacts["volume_heatmaps"]:
+            artifact_digests[f"volume_heatmap__{metric}"] = self._expected_artifact_digest(
+                f"volume_heatmap__{metric}"
             )
+        artifact_digests["subtype_labels"] = self._expected_artifact_digest(
+            "subtype_labels"
+        )
         self._artifact_digests = FrozenDict(artifact_digests)
         self._artifacts["artifact_digests"] = self._artifact_digests
-        self._pts_per_min_heatmap_limit = heatmap_limit
-        self._subtype_labels = subtype_labels
         return self._artifacts
+
+    def _expected_artifact_digest(self, name) -> str:
+        """The run-bound content digest expected for the named artifact.
+
+        Heatmap digests also cover the display-label index and the heatmap
+        limit, because both are artifact semantics: the index is the rendered
+        row labels and the limit is the color scale bounds used when the PNG is
+        drawn. ``subtype_labels`` (the payload's label mapping) is bound by its
+        own digest so a relabeling cannot silently diverge from the heatmaps.
+        """
+        if name == "subtype_labels":
+            frame = self._subtype_labels.to_frame(name="DISPLAY_LABEL")
+            limit = None
+            include_index = True
+        elif name.startswith("volume_heatmap__"):
+            heatmap = self._artifacts["volume_heatmaps"][
+                name.removeprefix("volume_heatmap__")
+            ]
+            frame = heatmap["data"]
+            limit = heatmap["limit"]
+            include_index = True
+        elif name == "pts_per_min_heatmap":
+            frame = self._artifacts[name]
+            limit = self._pts_per_min_heatmap_limit
+            include_index = True
+        else:
+            frame = self._artifacts[name]
+            limit = None
+            include_index = False
+        parts = [
+            "artifact",
+            self._run_id,
+            self._model_version,
+            name,
+            _frame_canonical_text(frame, include_index=include_index),
+        ]
+        if limit is not None:
+            parts.append(limit)
+        return content_hash(tuple(parts))
 
     def assemble_dashboard_payload(self):
         if self._dashboard_payload is not None:
@@ -1968,21 +2002,7 @@ class AnalysisRunBuilder:
         # under another run: each artifact is bound to this run and model by its
         # recorded content digest.
         for name, expected in self._artifact_digests.items():
-            if name.startswith("volume_heatmap__"):
-                frame = artifacts["volume_heatmaps"][
-                    name.removeprefix("volume_heatmap__")
-                ]["data"]
-            else:
-                frame = artifacts[name]
-            observed = content_hash(
-                (
-                    "artifact",
-                    self._run_id,
-                    self._model_version,
-                    name,
-                    _frame_canonical_text(frame),
-                )
-            )
+            observed = self._expected_artifact_digest(name)
             if observed != expected:
                 raise ValueError(
                     f"Artifact {name} does not match the run's assembled content"
