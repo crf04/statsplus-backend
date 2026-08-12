@@ -12,8 +12,11 @@ runtime code.
 - `notebooks/archetypes_fixed.ipynb` — cleaned, reproducible clustering
   workflow.
 - `notebooks/archetype_matchups_2025_26.ipynb` — interactive matchup analysis.
-- `scripts/archetype_matchups_2025_26.py` — script version of the matchup
-  analysis.
+- `scripts/archetype_matchups_2025_26.py` — data/IO shell of the matchup
+  analysis; feeds the builder below and renders its artifacts.
+- `scripts/matchup_analysis.py` — deterministic `AnalysisRunBuilder` that
+  assembles the analysis stages (membership loading and validation, prepared
+  outcomes, scoring and volume fits, artifact assembly, dashboard payload).
 - `archetypes_data/<season>/` — cached provider inputs.
 - `archetypes_outputs/<season>/` — assignments, profiles, diagnostics, matchup
   tables, sensitivity tests, and figures.
@@ -52,6 +55,24 @@ python scripts/archetype_matchups_2025_26.py
 Cached inputs make the existing outputs reproducible without downloading a new
 snapshot. Set the notebook's refresh option only when deliberately updating the
 season data.
+
+## Analysis Run builder and tests
+
+The matchup generation stages live in `scripts/matchup_analysis.py` under
+`AnalysisRunBuilder`, which accepts in-memory archetype membership and game-log
+frames so the complete current path runs deterministically from a compact
+synthetic fixture without provider or cache access. Statistical thresholds are
+`DEFAULT_SETTINGS` (`AnalysisRunSettings`), defined once in the builder. Run the
+focused behavioral tests from the repository root with:
+
+```bash
+.venv/bin/pytest -q tests/test_nba_archetype_analysis_run.py
+```
+
+The tests assert observable artifacts and arithmetic (not source text or
+dataframe implementations) and exercise repeated players, unequal archetype
+sizes, and teammates sharing games. The repository completion gate is
+`./scripts/check.sh` from the repository root.
 
 ## Modeling boundaries
 
