@@ -26,8 +26,8 @@ from nba_api.stats import endpoints
 from matchup_analysis import (
     AnalysisRunBuilder,
     DEFAULT_SETTINGS,
-    ArchetypeModelSpec,
-    compute_input_data_identity,
+    artifact_manifest,
+    spec_from_clustering_metadata,
 )
 
 pd.set_option("display.max_columns", 100)
@@ -76,7 +76,12 @@ clustering_metadata = json.loads(CLUSTERING_METADATA_PATH.read_text())
 
 
 def current_code_revision():
-    """Current git revision of the analysis code, or ``unknown`` when unavailable."""
+    """Current git revision of the analysis code; fail closed when unavailable.
+
+    A run cannot be attributed to its exact code without a revision, so an
+    undeterminable revision aborts instead of silently recording ``unknown``
+    and letting distinct code share one run id.
+    """
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -84,8 +89,11 @@ def current_code_revision():
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-    except Exception:
-        return "unknown"
+    except Exception as error:
+        raise RuntimeError(
+            "Could not determine the analysis code revision; refusing to build "
+            "an unattributable run"
+        ) from error
 
 
 def fetch_game_logs(attempts=3):
@@ -141,16 +149,11 @@ print(
 # The model specification is read from the clustering notebook's written
 # metadata so the archetype-model identity reflects the clustering that actually
 # ran (feature definition, two-stage conditional KMeans, base seed, subtype
-# count) rather than a hard-coded approximation. The input-data identity binds
-# the membership to the clustering input snapshot, not to the matchup logs.
-model_spec = ArchetypeModelSpec(
-    season=clustering_metadata["season"],
-    feature_definition=clustering_metadata["feature_definition"],
-    clustering_method=clustering_metadata["clustering_method"],
-    cluster_count=int(clustering_metadata["cluster_count"]),
-    random_seed=int(clustering_metadata["random_seed"]),
-    input_data_identity=compute_input_data_identity(archetypes, clustering_features),
-)
+# count). The input-data identity is the digest the clustering execution
+# recorded over its own membership and feature snapshots — not a digest
+# recomputed from whatever files happen to coexist — so a stale or mixed model
+# cannot silently pass the builder's fail-closed guard.
+model_spec = spec_from_clustering_metadata(clustering_metadata)
 run = AnalysisRunBuilder(
     archetypes=archetypes,
     game_logs=game_logs,
@@ -201,15 +204,30 @@ volume_summary_path = OUTPUT_DIR / "volume_matchup_summary.csv"
 validated_volume_path = OUTPUT_DIR / "validated_volume_interactions.csv"
 volume_reliability_path = OUTPUT_DIR / "volume_split_half_reliability.csv"
 player_volume_path = OUTPUT_DIR / "player_relative_volume_matchups.csv"
-artifacts["matchup_summary"].to_csv(summary_path, index=False)
-artifacts["notable_matchups"].to_csv(notable_path, index=False)
-artifacts["validated_interactions"].to_csv(validated_path, index=False)
-artifacts["watchlist"].to_csv(watchlist_path, index=False)
-artifacts["player_relative_matchups"].to_csv(player_relative_path, index=False)
-artifacts["volume_matchup_summary"].to_csv(volume_summary_path, index=False)
-artifacts["validated_volume_interactions"].to_csv(validated_volume_path, index=False)
-artifacts["volume_reliability"].to_csv(volume_reliability_path, index=False)
-artifacts["player_relative_volume_matchups"].to_csv(player_volume_path, index=False)
+# Every persisted CSV carries the run and model identifiers that produced it so
+# a later reader can attribute the file without trusting the sibling manifest.
+identity_columns = {"RUN_ID": run.run_id, "MODEL_VERSION": run.model_version}
+artifacts["matchup_summary"].assign(**identity_columns).to_csv(summary_path, index=False)
+artifacts["notable_matchups"].assign(**identity_columns).to_csv(notable_path, index=False)
+artifacts["validated_interactions"].assign(**identity_columns).to_csv(
+    validated_path, index=False
+)
+artifacts["watchlist"].assign(**identity_columns).to_csv(watchlist_path, index=False)
+artifacts["player_relative_matchups"].assign(**identity_columns).to_csv(
+    player_relative_path, index=False
+)
+artifacts["volume_matchup_summary"].assign(**identity_columns).to_csv(
+    volume_summary_path, index=False
+)
+artifacts["validated_volume_interactions"].assign(**identity_columns).to_csv(
+    validated_volume_path, index=False
+)
+artifacts["volume_reliability"].assign(**identity_columns).to_csv(
+    volume_reliability_path, index=False
+)
+artifacts["player_relative_volume_matchups"].assign(**identity_columns).to_csv(
+    player_volume_path, index=False
+)
 
 heatmap_data = artifacts["pts_per_min_heatmap"]
 heatmap_limit = payload["pts_per_min_heatmap_limit"]
@@ -262,34 +280,29 @@ fig.savefig(volume_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close(fig)
 
-# Persist one identity manifest so every saved artifact is attributable to the
-# exact Analysis Run and archetype model that produced it.
-saved_paths = [
-    summary_path,
-    notable_path,
-    validated_path,
-    watchlist_path,
-    player_relative_path,
-    volume_summary_path,
-    validated_volume_path,
-    volume_reliability_path,
-    player_volume_path,
-    descriptive_heatmap_path,
-    volume_heatmap_path,
-]
-run_manifest = {
-    "run_id": run.run_id,
-    "model_version": run.model_version,
-    "stable_subtype_keys": {
-        str(key): value for key, value in run.stable_subtype_keys.items()
-    },
-    "provenance": run.provenance.to_dict(),
-    "artifacts": [path.name for path in saved_paths],
+# Persist one content-addressed identity manifest so every saved artifact is
+# attributable to the exact Analysis Run and archetype model that produced it.
+# Each file is bound to a SHA-256 digest of its persisted bytes, so later
+# replacement of a file, or an interrupted publication that leaves older files
+# behind, is detectable against the recorded manifest.
+saved_paths = {
+    "matchup_summary": summary_path,
+    "notable_matchups": notable_path,
+    "validated_interactions": validated_path,
+    "watchlist": watchlist_path,
+    "player_relative_matchups": player_relative_path,
+    "volume_matchup_summary": volume_summary_path,
+    "validated_volume_interactions": validated_volume_path,
+    "volume_reliability": volume_reliability_path,
+    "player_relative_volume_matchups": player_volume_path,
+    "descriptive_pts_per_min_heatmap": descriptive_heatmap_path,
+    "descriptive_volume_interaction_heatmaps": volume_heatmap_path,
 }
+run_manifest = artifact_manifest(run, saved_paths)
 manifest_path = OUTPUT_DIR / "run_identity_manifest.json"
 manifest_path.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
 
-for path in saved_paths + [manifest_path]:
+for path in list(saved_paths.values()) + [manifest_path]:
     print(f"Saved {path}")
 
 # %% [markdown]

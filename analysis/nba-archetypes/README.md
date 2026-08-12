@@ -82,39 +82,56 @@ Each Analysis Run is immutable and belongs to one published archetype model,
 one input-data snapshot, and one Information Cutoff. `AnalysisRunBuilder` now
 requires an `ArchetypeModelSpec` naming the season, feature definition,
 clustering method, cluster count, random seed, and a content-addressed
-`input_data_identity` (computed with `compute_input_data_identity` over the
-membership and the model's input-data snapshot). The model input snapshot is the
-data the clustering was actually fit on; production hands it to the builder as
-`clustering_features`, so a stale model cannot silently join new data. The
-spec's `version` is a content hash of those six fields, and `build()` fails
-closed at artifact assembly when the input-data identity is missing or
-mismatched, when the spec's `cluster_count` disagrees with the membership's
-actual subtype count, or when the artifact bundle's identity does not match the
-run's.
+`input_data_identity`. The model input snapshot is the data the clustering was
+actually fit on; production hands it to the builder as `clustering_features`,
+so a stale model cannot silently join new data. The spec's `version` is a
+content hash of those six fields, and `build()` fails closed at artifact
+assembly when the input-data identity is missing or mismatched, when the spec's
+`cluster_count` disagrees with the membership's actual subtype count, or when
+the artifact bundle's identity does not match the run's.
 
-The matchup script derives the spec from `clustering_metadata.json`, written by
-`archetypes_fixed.ipynb` beside the membership and feature snapshots, so the
-feature definition, two-stage conditional clustering method, base random seed,
-and subtype count recorded in the model identity are the ones the clustering
-actually used — not a hard-coded approximation. It also records the current git
-revision as the run's `code_revision` and writes a `run_identity_manifest.json`
-next to the saved artifacts so every persisted CSV/PNG is attributable to the
-exact run and model.
+The `input_data_identity` is recorded once, by `archetypes_fixed.ipynb`, as a
+SHA-256 digest over the membership and feature snapshots it just wrote, and is
+written into `clustering_metadata.json`. Production reads that recorded digest
+via `spec_from_clustering_metadata` instead of recomputing it from whichever
+membership/features files happen to coexist, so mixed outputs from different
+clustering executions cannot pass the guard just because their subtype counts
+match. The matchup script derives the rest of the spec from the same metadata
+(feature definition, two-stage conditional clustering method, base random seed,
+and subtype count), so the model identity reflects the clustering that actually
+ran — not a hard-coded approximation.
 
 Every run records a `RunProvenance` (Information Cutoff, per-input hashes, code
 revision, UTC generation time, cluster count, and clustering-attempt number) and
-derives one deterministic `run_id` from the model version, code revision, and
-Information Cutoff. The generation time defaults to the wall clock but is
-injectable (`generated_at`) so a fully pinned build is reproducible; it never
-feeds the deterministic identity hashes. The artifacts collection and dashboard
-payload each carry one immutable `RunIdentity` value (run id, model version,
-and stable subtype keys) instead of three loose fields. `AnalysisRun` is a
-frozen dataclass, `RunProvenance` and `RunIdentity` reject mutation of their
-hash maps, and stable subtype membership keys are content hashes of each
-subtype's sorted member IDs, so they are invariant under arbitrary cluster-label
-permutation; the builder rejects overlapping or colliding membership. Matrix
-dimensions, eligible-cell counts, and subtype labels always derive from the
-run's actual membership and games, never from a fixed cluster count.
+derives one deterministic `run_id` from the model version, code revision,
+Information Cutoff, and the recorded input hashes, so a changed data snapshot
+with an unchanged cutoff/model/code still produces a distinct run id.
+`code_revision` is required: the builder rejects an empty revision and
+production fails closed when the git revision cannot be determined, so distinct
+unversioned code cannot share a run id. The generation time defaults to the wall
+clock but is injectable (`generated_at`) so a fully pinned build is
+reproducible; it never feeds the deterministic identity hashes.
+
+The artifacts collection and dashboard payload each carry one immutable
+`RunIdentity` value (run id, model version, and stable subtype keys) plus
+content digests for every artifact frame; dashboard assembly re-verifies those
+digests and rejects any frame replaced with content from a different run.
+`AnalysisRun` is a frozen dataclass whose frames, series, and dicts are stored
+as defensive deep copies and re-exposed as copies, so no post-build mutation can
+alter a run's captured state. `RunProvenance` and `RunIdentity` reject every
+in-place mutation of their hash maps (including `|=`), and stable subtype
+membership keys are content hashes of each subtype's sorted member IDs, so they
+are invariant under arbitrary cluster-label permutation; the builder rejects
+overlapping or colliding membership. Matrix dimensions, eligible-cell counts,
+and subtype labels always derive from the run's actual membership and games,
+never from a fixed cluster count.
+
+When the matchup script persists artifacts, every CSV is written with `RUN_ID`
+and `MODEL_VERSION` columns so each file is self-attributing, and
+`run_identity_manifest.json` records a SHA-256 content digest for every saved
+file (CSV and PNG) in addition to the run identity. A file that is later
+replaced, or an interrupted publication that leaves older files behind, no
+longer matches the recorded digests.
 
 ## Modeling boundaries
 

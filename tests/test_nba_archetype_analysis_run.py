@@ -7,9 +7,11 @@ and teammates sharing games. They assert observable artifacts and arithmetic
 instead of source text or dataframe implementations.
 """
 
+import hashlib
 import json
 import re
 import sys
+import tempfile
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +29,9 @@ from matchup_analysis import (  # noqa: E402
     AnalysisRunBuilder,
     ArchetypeModelSpec,
     RunIdentity,
+    artifact_manifest,
     compute_input_data_identity,
+    spec_from_clustering_metadata,
 )
 
 BASE_DATE = date(2026, 1, 5)
@@ -256,6 +260,7 @@ def make_model_spec(archetypes, game_logs, **overrides):
 
 def build_builder(archetypes, game_logs, **builder_kwargs):
     model_spec = make_model_spec(archetypes, game_logs)
+    builder_kwargs.setdefault("code_revision", "test-revision")
     return AnalysisRunBuilder(
         archetypes=archetypes,
         game_logs=game_logs,
@@ -401,7 +406,26 @@ def test_artifact_assembly_boundary_exposes_expected_schema():
         "pts_per_min_heatmap",
         "volume_heatmaps",
         "identity",
+        "artifact_digests",
     }
+    assert set(artifacts["artifact_digests"]) == {
+        "matchup_summary",
+        "notable_matchups",
+        "validated_interactions",
+        "watchlist",
+        "player_relative_matchups",
+        "volume_matchup_summary",
+        "validated_volume_interactions",
+        "volume_reliability",
+        "player_relative_volume_matchups",
+        "pts_per_min_heatmap",
+        "volume_heatmap__FGA",
+        "volume_heatmap__FG2A",
+        "volume_heatmap__FG3A",
+        "volume_heatmap__FTA",
+    }
+    for digest in artifacts["artifact_digests"].values():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest)
     summary = artifacts["matchup_summary"]
     assert summary["SUBTYPE_ID"].is_monotonic_increasing or summary["OPP_TEAM"].is_monotonic_increasing
     player_relative = artifacts["player_relative_matchups"]
@@ -459,6 +483,8 @@ def test_dashboard_payload_boundary_exposes_expected_payload():
     assert payload["identity"] == run.identity
     assert payload["identity"].run_id == run.run_id
     assert set(payload["identity"].stable_subtype_keys) == {100, 200, 300}
+    assert payload["artifact_digests"] == run.artifacts["artifact_digests"]
+    assert re.fullmatch(r"[0-9a-f]{64}", payload["artifact_digests"]["matchup_summary"])
     assert set(payload["provenance"]) == {
         "information_cutoff",
         "input_hashes",
@@ -594,7 +620,9 @@ def test_overlapping_membership_rejected_as_key_collision():
 
 def test_missing_model_spec_is_rejected_at_artifact_assembly():
     archetypes, game_logs = synthetic_fixture()
-    builder = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs)
+    builder = AnalysisRunBuilder(
+        archetypes=archetypes, game_logs=game_logs, code_revision="test-revision"
+    )
     with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
         builder.assemble_artifacts()
     with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
@@ -607,7 +635,10 @@ def test_mismatched_input_data_identity_is_rejected():
     model_spec = make_model_spec(other_archetypes, other_logs)
     with pytest.raises(ValueError, match="Input data identity does not match"):
         AnalysisRunBuilder(
-            archetypes=archetypes, game_logs=game_logs, model_spec=model_spec
+            archetypes=archetypes,
+            game_logs=game_logs,
+            model_spec=model_spec,
+            code_revision="test-revision",
         ).build()
 
 
@@ -623,6 +654,62 @@ def test_run_identity_is_deterministic_across_builds():
     assert run_a.model_version == run_b.model_version
     assert run_a.provenance.input_hashes == run_b.provenance.input_hashes
     assert run_a.provenance.information_cutoff == run_b.provenance.information_cutoff
+
+
+def test_code_revision_is_required():
+    archetypes, game_logs = synthetic_fixture()
+    spec = make_model_spec(archetypes, game_logs)
+    for missing in (None, "", "   "):
+        with pytest.raises(ValueError, match="code_revision"):
+            AnalysisRunBuilder(
+                archetypes=archetypes,
+                game_logs=game_logs,
+                model_spec=spec,
+                code_revision=missing,
+            )
+    run_a = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=spec,
+        code_revision="rev-a",
+    ).build()
+    run_b = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=spec,
+        code_revision="rev-b",
+    ).build()
+    assert run_a.run_id != run_b.run_id
+
+
+def test_run_id_is_versioned_by_data_snapshot():
+    archetypes, game_logs = synthetic_fixture()
+    clustering_snapshot = game_logs[["PLAYER_ID", "MIN"]].copy()
+    spec = make_model_spec(
+        archetypes,
+        game_logs,
+        input_data_identity=compute_input_data_identity(archetypes, clustering_snapshot),
+    )
+    run_a = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=spec,
+        clustering_features=clustering_snapshot,
+        code_revision="rev-1",
+    ).build()
+    tweaked_logs = game_logs.copy()
+    tweaked_logs.loc[tweaked_logs.index[0], "PTS"] += 1
+    run_b = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=tweaked_logs,
+        model_spec=spec,
+        clustering_features=clustering_snapshot,
+        code_revision="rev-1",
+    ).build()
+    assert run_a.model_version == run_b.model_version
+    assert run_a.provenance.information_cutoff == run_b.provenance.information_cutoff
+    assert run_a.provenance.input_hashes != run_b.provenance.input_hashes
+    assert run_a.run_id != run_b.run_id
 
 
 def test_input_data_identity_preserves_full_numeric_precision():
@@ -650,7 +737,10 @@ def test_spec_cluster_count_must_match_actual_membership():
     spec = make_model_spec(archetypes, game_logs, cluster_count=999)
     with pytest.raises(ValueError, match="cluster_count"):
         AnalysisRunBuilder(
-            archetypes=archetypes, game_logs=game_logs, model_spec=spec
+            archetypes=archetypes,
+            game_logs=game_logs,
+            model_spec=spec,
+            code_revision="test-revision",
         ).build()
 
 
@@ -662,6 +752,38 @@ def test_analysis_run_and_identity_are_immutable():
         run.provenance.input_hashes["archetypes"] = "0" * 64
     with pytest.raises(TypeError, match="immutable"):
         run.stable_subtype_keys[100] = "0" * 64
+    with pytest.raises(TypeError, match="immutable"):
+        run.stable_subtype_keys |= {100: "0" * 64}
+    with pytest.raises(TypeError, match="immutable"):
+        run.provenance.input_hashes |= {"archetypes": "0" * 64}
+
+
+def test_analysis_run_exposes_only_defensive_copies():
+    run = build_run()
+    original_summary = run.matchup_summary.copy()
+    summary = run.matchup_summary
+    summary.loc[summary.index[0], "PPM_INTERACTION_EFFECT"] = 999
+    pd.testing.assert_frame_equal(run.matchup_summary, original_summary)
+
+    original_logs = run.logs.copy()
+    logs = run.logs
+    logs.loc[logs.index[0], "PTS"] = 999
+    pd.testing.assert_frame_equal(run.logs, original_logs)
+
+    original_artifact = run.artifacts["matchup_summary"].copy()
+    artifact = run.artifacts["matchup_summary"]
+    artifact.iloc[0, 0] = 999
+    pd.testing.assert_frame_equal(run.artifacts["matchup_summary"], original_artifact)
+
+    run.artifacts.pop("matchup_summary")
+    run.artifacts["identity"] = None
+    assert "matchup_summary" in run.artifacts
+    assert run.artifacts["identity"] == run.identity
+
+    run.dashboard_payload["identity"] = None
+    run.dashboard_payload.pop("provenance")
+    assert run.dashboard_payload["identity"] == run.identity
+    assert "provenance" in run.dashboard_payload
 
 
 def test_run_identity_value_object_validates_and_equals():
@@ -702,6 +824,7 @@ def test_model_identity_uses_clustering_inputs_not_game_logs():
         game_logs=game_logs,
         model_spec=spec,
         clustering_features=clustering_snapshot,
+        code_revision="test-revision",
     ).build()
     assert run.model_version == spec.version
     with pytest.raises(ValueError, match="Input data identity does not match"):
@@ -710,6 +833,7 @@ def test_model_identity_uses_clustering_inputs_not_game_logs():
             game_logs=game_logs,
             model_spec=spec,
             clustering_features=game_logs,
+            code_revision="test-revision",
         ).build()
 
 
@@ -722,6 +846,81 @@ def test_dashboard_assembly_rejects_missing_bundle_identity():
     builder._artifacts["identity"] = None
     with pytest.raises(ValueError, match="Artifact bundle identity"):
         builder.assemble_dashboard_payload()
+
+
+def test_dashboard_assembly_rejects_cross_run_artifact():
+    # An artifact frame replaced with one from a different run must be rejected
+    # at dashboard assembly, not silently mixed into the payload.
+    archetypes, game_logs = synthetic_fixture()
+    builder_a = build_builder(archetypes, game_logs)
+    builder_a.assemble_artifacts()
+
+    other_archetypes, other_logs = parity_fixture()
+    builder_b = build_builder(other_archetypes, other_logs)
+    builder_b.assemble_artifacts()
+
+    builder_a._artifacts["matchup_summary"] = builder_b._artifacts["matchup_summary"]
+    with pytest.raises(ValueError, match="does not match the run's assembled content"):
+        builder_a.assemble_dashboard_payload()
+
+
+def test_artifact_manifest_records_content_digests():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        summary_path = directory / "matchup_summary.csv"
+        summary_path.write_text("a,b\n1,2\n")
+        heatmap_path = directory / "heatmap.png"
+        heatmap_path.write_bytes(b"\x89PNG-fake")
+        manifest = artifact_manifest(
+            run,
+            {
+                "matchup_summary": summary_path,
+                "pts_per_min_heatmap": heatmap_path,
+            },
+        )
+        assert manifest["run_id"] == run.run_id
+        assert manifest["model_version"] == run.model_version
+        assert manifest["stable_subtype_keys"] == {
+            str(key): value for key, value in run.stable_subtype_keys.items()
+        }
+        assert manifest["provenance"] == run.provenance.to_dict()
+        assert manifest["artifacts"]["matchup_summary"] == {
+            "file": "matchup_summary.csv",
+            "sha256": hashlib.sha256(b"a,b\n1,2\n").hexdigest(),
+        }
+        assert manifest["artifacts"]["pts_per_min_heatmap"] == {
+            "file": "heatmap.png",
+            "sha256": hashlib.sha256(b"\x89PNG-fake").hexdigest(),
+        }
+        summary_path.write_text("a,b\n9,9\n")
+        replaced = artifact_manifest(run, {"matchup_summary": summary_path})
+        assert (
+            replaced["artifacts"]["matchup_summary"]["sha256"]
+            != manifest["artifacts"]["matchup_summary"]["sha256"]
+        )
+
+
+def test_spec_from_clustering_metadata_requires_recorded_identity():
+    metadata = {
+        "season": "2025-26",
+        "feature_definition": "some feature definition",
+        "clustering_method": "KMeans",
+        "cluster_count": 3,
+        "random_seed": 42,
+    }
+    with pytest.raises(ValueError, match="input_data_identity"):
+        spec_from_clustering_metadata(metadata)
+    metadata["input_data_identity"] = "0" * 64
+    spec = spec_from_clustering_metadata(metadata)
+    assert spec.season == "2025-26"
+    assert spec.cluster_count == 3
+    assert spec.random_seed == 42
+    assert spec.input_data_identity == "0" * 64
+    assert re.fullmatch(r"[0-9a-f]{64}", spec.version)
+    incomplete = {key: value for key, value in metadata.items() if key != "cluster_count"}
+    with pytest.raises(ValueError, match="cluster_count"):
+        spec_from_clustering_metadata(incomplete)
 
 
 def test_matrix_dimensions_and_labels_derive_from_run_data():

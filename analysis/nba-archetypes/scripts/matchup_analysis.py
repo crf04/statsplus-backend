@@ -16,6 +16,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -186,6 +187,65 @@ class ArchetypeModelSpec:
         )
 
 
+def spec_from_clustering_metadata(metadata: dict) -> ArchetypeModelSpec:
+    """Build the archetype-model spec from the clustering notebook's metadata.
+
+    The model input identity must have been recorded by the clustering
+    execution that produced the membership and feature snapshots; production
+    reads that recorded digest so the stale-model guard is not a self-fulfilling
+    comparison against whatever files happen to coexist. ``metadata`` without a
+    recorded ``input_data_identity`` is rejected.
+    """
+    required = (
+        "season",
+        "feature_definition",
+        "clustering_method",
+        "cluster_count",
+        "random_seed",
+        "input_data_identity",
+    )
+    missing = [key for key in required if not str(metadata.get(key, "")).strip()]
+    if missing:
+        raise ValueError(
+            "clustering metadata is missing required keys: " + ", ".join(missing)
+        )
+    return ArchetypeModelSpec(
+        season=str(metadata["season"]),
+        feature_definition=str(metadata["feature_definition"]),
+        clustering_method=str(metadata["clustering_method"]),
+        cluster_count=int(metadata["cluster_count"]),
+        random_seed=int(metadata["random_seed"]),
+        input_data_identity=str(metadata["input_data_identity"]),
+    )
+
+
+def artifact_manifest(run, artifact_paths: dict) -> dict:
+    """Content-addressed manifest attributing persisted artifacts to one run.
+
+    ``artifact_paths`` maps a logical artifact name to the file that was just
+    saved for it. The manifest records the run identity plus a SHA-256 content
+    digest of every persisted file, so later replacement of a file, or an
+    interrupted publication that leaves older files behind, is detectable
+    against the recorded digests.
+    """
+    artifacts = {
+        name: {
+            "file": Path(path).name,
+            "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        }
+        for name, path in artifact_paths.items()
+    }
+    return {
+        "run_id": run.run_id,
+        "model_version": run.model_version,
+        "stable_subtype_keys": {
+            str(key): value for key, value in run.stable_subtype_keys.items()
+        },
+        "provenance": run.provenance.to_dict(),
+        "artifacts": artifacts,
+    }
+
+
 class FrozenDict(dict):
     """A dict that rejects every in-place mutation after construction.
 
@@ -204,6 +264,7 @@ class FrozenDict(dict):
     popitem = _immutable
     setdefault = _immutable
     update = _immutable
+    __ior__ = _immutable
 
     def __hash__(self):
         return hash(frozenset(self.items()))
@@ -265,24 +326,111 @@ class RunIdentity:
         object.__setattr__(self, "stable_subtype_keys", FrozenDict(dict(keys)))
 
 
+def _defensive_copy(value):
+    """Recursively copy mutable containers so callers cannot mutate stored state.
+
+    DataFrames, Series, lists, and dicts are copied; numpy arrays are copied as
+    well where directly reachable. Immutable value objects (RunIdentity,
+    ArchetypeModelSpec, RunProvenance) and opaque model-fit results pass through
+    unchanged.
+    """
+    if isinstance(value, pd.DataFrame):
+        return value.copy(deep=True)
+    if isinstance(value, pd.Series):
+        return value.copy(deep=True)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if isinstance(value, dict):
+        return {key: _defensive_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_defensive_copy(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class AnalysisRun:
-    """Immutable result of one Analysis Run build."""
+    """Immutable result of one Analysis Run build.
 
-    membership: pd.DataFrame
-    logs: pd.DataFrame
-    coverage: pd.Series
-    scoring_fits: dict
-    matchup_summary: pd.DataFrame
-    volume_fits: dict
-    volume_matchup_summary: pd.DataFrame
-    volume_reliability: pd.DataFrame
-    volume_shrinkage_summary: pd.DataFrame
-    artifacts: dict
-    dashboard_payload: dict
+    Mutable containers are stored privately as defensive deep copies and
+    re-exposed through read-only properties that return fresh copies, so a
+    post-build mutation of any returned frame, series, or dict cannot alter the
+    run's captured state.
+    """
+
+    _membership: pd.DataFrame = field(repr=False)
+    _logs: pd.DataFrame = field(repr=False)
+    _coverage: pd.Series = field(repr=False)
+    _scoring_fits: dict = field(repr=False)
+    _matchup_summary: pd.DataFrame = field(repr=False)
+    _volume_fits: dict = field(repr=False)
+    _volume_matchup_summary: pd.DataFrame = field(repr=False)
+    _volume_reliability: pd.DataFrame = field(repr=False)
+    _volume_shrinkage_summary: pd.DataFrame = field(repr=False)
+    _artifacts: dict = field(repr=False)
+    _dashboard_payload: dict = field(repr=False)
     identity: RunIdentity
     model_spec: ArchetypeModelSpec
     provenance: RunProvenance
+
+    def __post_init__(self):
+        for name in (
+            "_membership",
+            "_logs",
+            "_coverage",
+            "_scoring_fits",
+            "_matchup_summary",
+            "_volume_fits",
+            "_volume_matchup_summary",
+            "_volume_reliability",
+            "_volume_shrinkage_summary",
+            "_artifacts",
+            "_dashboard_payload",
+        ):
+            object.__setattr__(self, name, _defensive_copy(getattr(self, name)))
+
+    @property
+    def membership(self) -> pd.DataFrame:
+        return _defensive_copy(self._membership)
+
+    @property
+    def logs(self) -> pd.DataFrame:
+        return _defensive_copy(self._logs)
+
+    @property
+    def coverage(self) -> pd.Series:
+        return _defensive_copy(self._coverage)
+
+    @property
+    def scoring_fits(self) -> dict:
+        return _defensive_copy(self._scoring_fits)
+
+    @property
+    def matchup_summary(self) -> pd.DataFrame:
+        return _defensive_copy(self._matchup_summary)
+
+    @property
+    def volume_fits(self) -> dict:
+        return _defensive_copy(self._volume_fits)
+
+    @property
+    def volume_matchup_summary(self) -> pd.DataFrame:
+        return _defensive_copy(self._volume_matchup_summary)
+
+    @property
+    def volume_reliability(self) -> pd.DataFrame:
+        return _defensive_copy(self._volume_reliability)
+
+    @property
+    def volume_shrinkage_summary(self) -> pd.DataFrame:
+        return _defensive_copy(self._volume_shrinkage_summary)
+
+    @property
+    def artifacts(self) -> dict:
+        return _defensive_copy(self._artifacts)
+
+    @property
+    def dashboard_payload(self) -> dict:
+        return _defensive_copy(self._dashboard_payload)
 
     @property
     def run_id(self) -> str:
@@ -538,6 +686,8 @@ class AnalysisRunBuilder:
         generated_at=None,
         clustering_features=None,
     ):
+        if not isinstance(code_revision, str) or not code_revision.strip():
+            raise ValueError("code_revision must be a non-empty string")
         self.archetypes = archetypes
         self.game_logs = game_logs
         self.model_spec = model_spec
@@ -613,12 +763,18 @@ class AnalysisRunBuilder:
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError("An ArchetypeModelSpec is required to record provenance")
         self.prepare_logs()
+        # The run is versioned by its exact archetype model, code revision,
+        # Information Cutoff, and the data snapshot it was built from. The
+        # per-input hashes are recorded here so changing game points with an
+        # unchanged cutoff/model/code still yields a distinct run id.
         self._run_id = content_hash(
             (
                 "analysis-run",
                 self._model_version,
-                self.code_revision or "",
+                self.code_revision,
                 self._information_cutoff.isoformat(),
+                self._input_hashes["archetypes"],
+                self._input_hashes["game_logs"],
             )
         )
         generated_at = self.generated_at
@@ -1537,6 +1693,21 @@ class AnalysisRunBuilder:
             "volume_heatmaps": volume_heatmaps,
             "identity": self._run_identity,
         }
+        # Every artifact frame is attributed to the run by content digest so
+        # artifact assembly and dashboard assembly reject a frame that was
+        # replaced with content from a different run.
+        artifact_digests = {
+            name: content_hash(("artifact", name, _frame_canonical_text(frame)))
+            for name, frame in self._artifacts.items()
+            if isinstance(frame, pd.DataFrame)
+        }
+        for metric, heatmap in self._artifacts["volume_heatmaps"].items():
+            digest_name = f"volume_heatmap__{metric}"
+            artifact_digests[digest_name] = content_hash(
+                ("artifact", digest_name, _frame_canonical_text(heatmap["data"]))
+            )
+        self._artifact_digests = FrozenDict(artifact_digests)
+        self._artifacts["artifact_digests"] = self._artifact_digests
         self._pts_per_min_heatmap_limit = heatmap_limit
         self._subtype_labels = subtype_labels
         return self._artifacts
@@ -1553,6 +1724,20 @@ class AnalysisRunBuilder:
             raise ValueError(
                 "Artifact bundle identity is missing or does not match the run identity"
             )
+        # Reject any artifact frame that was replaced with content from another
+        # run: each artifact is bound to this run by its recorded content digest.
+        for name, expected in self._artifact_digests.items():
+            if name.startswith("volume_heatmap__"):
+                frame = artifacts["volume_heatmaps"][
+                    name.removeprefix("volume_heatmap__")
+                ]["data"]
+            else:
+                frame = artifacts[name]
+            observed = content_hash(("artifact", name, _frame_canonical_text(frame)))
+            if observed != expected:
+                raise ValueError(
+                    f"Artifact {name} does not match the run's assembled content"
+                )
 
         validated_interactions = artifacts["validated_interactions"]
         validated_volume_interactions = artifacts["validated_volume_interactions"]
@@ -1575,6 +1760,7 @@ class AnalysisRunBuilder:
             ],
             "volume_reliability_display": volume_reliability.round(3),
             "identity": self._run_identity,
+            "artifact_digests": self._artifact_digests,
             "provenance": self._provenance.to_dict(),
         }
         self._dashboard_payload = payload
@@ -1590,17 +1776,17 @@ class AnalysisRunBuilder:
         scoring = self._scoring
         volume = self._volume
         return AnalysisRun(
-            membership=self._membership,
-            logs=self._logs,
-            coverage=self._coverage,
-            scoring_fits=scoring,
-            matchup_summary=scoring["summary"],
-            volume_fits=volume,
-            volume_matchup_summary=volume["summary"],
-            volume_reliability=volume["volume_reliability"],
-            volume_shrinkage_summary=volume["volume_shrinkage_summary"],
-            artifacts=self._artifacts,
-            dashboard_payload=self._dashboard_payload,
+            _membership=self._membership,
+            _logs=self._logs,
+            _coverage=self._coverage,
+            _scoring_fits=scoring,
+            _matchup_summary=scoring["summary"],
+            _volume_fits=volume,
+            _volume_matchup_summary=volume["summary"],
+            _volume_reliability=volume["volume_reliability"],
+            _volume_shrinkage_summary=volume["volume_shrinkage_summary"],
+            _artifacts=self._artifacts,
+            _dashboard_payload=self._dashboard_payload,
             identity=self._run_identity,
             model_spec=self.model_spec,
             provenance=self._provenance,
