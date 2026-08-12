@@ -3427,3 +3427,44 @@ def test_cached_stage_rejects_temporary_settings_poisoning():
     pd.testing.assert_frame_equal(
         run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
     )
+
+
+# --- Round-11 regression tests (issue 71 final convergence) ------------------
+
+
+def test_cached_stage_rejects_pre_provenance_settings_poisoning():
+    # Reproduction of the convergence finding: swapping ``_settings`` through
+    # the instance dict to B, calling a stage that derives (and caches) data,
+    # and restoring A BEFORE provenance was recorded let the stage cache
+    # B-derived scoring/artifacts under what later became A's run id, because
+    # ``_settings_hash`` was only captured at provenance. The settings snapshot
+    # identity is now captured at construction, so every cache-producing or
+    # cache-returning stage validates against it even before provenance.
+    archetypes, game_logs = synthetic_fixture()
+    settings_a = AnalysisRunSettings()
+    builder = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings_a
+    )
+    settings_b = AnalysisRunSettings(
+        min_cell_players=1,
+        min_cell_games=1,
+        min_cell_offensive_teams=1,
+    )
+    builder.__dict__["_settings"] = settings_b
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.prepare_logs()
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.fit_scoring()
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.fit_volume()
+
+    builder.__dict__["_settings"] = settings_a
+    run = builder.build()
+    control = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings_a
+    ).build()
+    assert run.run_id == control.run_id
+    pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
+    pd.testing.assert_frame_equal(
+        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
+    )

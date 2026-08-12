@@ -950,10 +950,11 @@ class AnalysisRunBuilder:
 
     # Identity-bearing state is written exactly once at construction: the model
     # spec the run is versioned against, the model version digest derived from
-    # it, and the deep-frozen settings snapshot. Reassigning any of these after
-    # provenance is recorded could desynchronize the cached run id from the
-    # artifacts a later stage would assemble, so the private slots are one-shot
-    # (public reassignment is already blocked by the read-only properties).
+    # it, the deep-frozen settings snapshot, and the settings digest derived
+    # from that snapshot. Reassigning any of these after construction could
+    # desynchronize the cached run id from the artifacts a later stage would
+    # assemble, so the private slots are one-shot (public reassignment is
+    # already blocked by the read-only properties).
     _IDENTITY_BEARING_SLOTS = frozenset(
         {"_settings", "_model_spec", "_model_version", "_settings_hash"}
     )
@@ -999,6 +1000,12 @@ class AnalysisRunBuilder:
         # to, and ``builder.settings`` itself cannot be reassigned (it is a
         # read-only property with no setter).
         self._settings = copy.deepcopy(provided_settings)
+        # Capture the settings identity at construction, before provenance:
+        # every cache-producing or cache-returning stage validates against this
+        # construction-time hash, so a temporary settings swap that precedes
+        # ``record_provenance()`` is rejected instead of poisoning the derived
+        # caches under a run id that will only later be recorded.
+        self._settings_hash = content_hash(("settings", asdict(self.settings)))
         self.clustering_attempt = clustering_attempt
         self.code_revision = code_revision
         self.generated_at = generated_at
@@ -1109,8 +1116,9 @@ class AnalysisRunBuilder:
         # Information Cutoff, analysis settings, and the data snapshot it was
         # built from. The per-input hashes are recorded here so changing game
         # points with an unchanged cutoff/model/code still yields a distinct run
-        # id, and so do different thresholds on identical data.
-        self._settings_hash = content_hash(("settings", asdict(self.settings)))
+        # id, and so do different thresholds on identical data. The settings
+        # hash is the one-shot construction-time identity captured in
+        # ``__init__``; the run id is versioned against that same snapshot.
         self._run_id = content_hash(
             (
                 "analysis-run",
@@ -1150,12 +1158,16 @@ class AnalysisRunBuilder:
         dict, even when the stage would otherwise return cached state: a
         temporarily desynchronized model spec or settings snapshot would
         otherwise compute and cache derived data under a run id it does not
-        belong to. Before provenance is recorded (the ``_settings_hash`` slot
-        is still unset) there is no recorded identity to be consistent with,
-        so the check is skipped.
+        belong to. The settings identity is captured at construction, so every
+        stage can validate against it even before provenance is recorded; the
+        model-identity checks only apply once a run identity is recorded.
         """
-        settings_hash = getattr(self, "_settings_hash", None)
-        if settings_hash is None:
+        if content_hash(("settings", asdict(self.settings))) != self._settings_hash:
+            raise ValueError(
+                "Analysis settings changed after construction; refusing to derive "
+                "artifacts under a different settings snapshot"
+            )
+        if self._provenance is None:
             return
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError(
@@ -1166,11 +1178,6 @@ class AnalysisRunBuilder:
             raise ValueError(
                 "The model spec changed after construction; refusing to derive "
                 "artifacts attributed to a different model"
-            )
-        if content_hash(("settings", asdict(self.settings))) != settings_hash:
-            raise ValueError(
-                "Analysis settings changed after construction; refusing to derive "
-                "artifacts under a different settings snapshot"
             )
 
     def _require_identity(self):
