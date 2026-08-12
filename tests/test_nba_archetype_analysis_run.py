@@ -8,15 +8,18 @@ instead of source text or dataframe implementations.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
 import pickle
+import py_compile
 import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zlib
 from collections.abc import Mapping
@@ -33,6 +36,7 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import artifact_persistence as artifact_persistence_module  # noqa: E402
 from artifact_persistence import (  # noqa: E402
     PERSISTED_ARTIFACT_FILENAMES,
     artifact_manifest,
@@ -48,6 +52,7 @@ from matchup_analysis import (  # noqa: E402
     FrozenDict,
     FrozenFitResult,
     RunIdentity,
+    VOLUME_METRICS,
     compute_input_data_identity,
     fail_if_code_changed,
     spec_from_clustering_metadata,
@@ -1088,6 +1093,28 @@ def test_png_identity_stamping_roundtrips():
     assert entries["model_version"] == run.model_version
 
 
+def test_png_rejects_duplicate_and_conflicting_identity_chunks():
+    # Reproduction of the round-7 finding: a double-stamped PNG embedding a
+    # foreign identity first and the expected identity later silently overwrote
+    # the earlier value, so both identities were present but verification
+    # passed. Duplicate tEXt keywords now fail closed, so a conflicting
+    # double-stamped image can never be blessed.
+    run = build_run()
+    foreign = "ab12" * 16
+    double = stamp_png_identity(
+        stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version),
+        foreign,
+        "cd34" * 16,
+    )
+    with pytest.raises(ValueError, match="duplicate tEXt"):
+        png_text_entries(double)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = write_full_artifact_set(Path(tmp), run)
+        paths["descriptive_pts_per_min_heatmap"].write_bytes(double)
+        with pytest.raises(ValueError, match="duplicate tEXt"):
+            artifact_manifest(run, paths)
+
+
 def test_verify_persisted_manifest_rejects_tampered_and_missing():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
@@ -1135,6 +1162,35 @@ def test_run_id_is_versioned_by_analysis_settings():
     ).build()
     assert defaults.run_id != tight.run_id
     assert defaults.model_version == tight.model_version
+
+
+def test_nested_settings_cannot_desync_run_id_and_artifacts():
+    # Reproduction of the round-7 finding: a frozen settings value owning a
+    # mutable nested volume_metrics dict could be mutated after provenance was
+    # recorded, so the run id kept the original metrics while the artifacts were
+    # assembled from the mutated subset. The nested mapping is deep-frozen at
+    # construction and every identity/artifact stage reads the same snapshot.
+    archetypes, game_logs = synthetic_fixture()
+    settings = AnalysisRunSettings()
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings)
+    builder.record_provenance()
+    for mutator in (
+        lambda: settings.volume_metrics.pop("FTA"),
+        lambda: settings.volume_metrics.__setitem__("FTA", "tampered"),
+        lambda: settings.volume_metrics.update({"FTA": "tampered"}),
+    ):
+        with pytest.raises(TypeError):
+            mutator()
+    run = builder.build()
+    assert set(run.artifacts["volume_matchup_summary"]["METRIC"].unique()) == set(
+        VOLUME_METRICS
+    )
+    assert set(
+        run.dashboard_payload["volume_reliability_display"]["METRIC"].unique()
+    ) == set(VOLUME_METRICS)
+    # A caller constructing their own settings object cannot mutate it either.
+    with pytest.raises(TypeError):
+        AnalysisRunSettings(volume_metrics=dict(VOLUME_METRICS)).volume_metrics.pop("FTA")
 
 
 def test_artifact_digests_are_bound_to_run_identity():
@@ -1852,6 +1908,30 @@ def test_frozen_fit_snapshot_exposes_no_mutable_base_backing():
             array.setflags(write=True)
 
 
+def test_deserialized_fit_arrays_cannot_be_mutated_via_base_methods():
+    # Reproduction of the round-7 finding: pickling the immutable snapshot
+    # recreated owning writable storage, and re-pinning only set the flag on the
+    # view, so the base ``np.ndarray.setflags``/``np.ndarray.__setitem__``
+    # invocations could mutate the returned snapshot. Deserialized arrays are
+    # now rebuilt over immutable bytes, so even base-class method calls fail.
+    run = build_run()
+    for fit in [
+        entry["fit"] for entry in run.scoring_fits.values()
+        if isinstance(entry, dict) and "fit" in entry
+    ]:
+        for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+            array = getattr(fit, name)
+            original = array.copy()
+            with pytest.raises(ValueError):
+                np.ndarray.setflags(array, write=True)
+            with pytest.raises(ValueError):
+                np.ndarray.__setitem__(array, 0, 999)
+            with pytest.raises(ValueError):
+                array += 1
+            np.testing.assert_array_equal(getattr(fit, name), original)
+            _assert_base_chain_cannot_be_made_writable(array, name)
+
+
 def test_run_private_backing_state_is_immutable_serialized_bytes():
     run = build_run()
     backing_fields = (
@@ -1997,6 +2077,173 @@ def test_publish_artifact_set_rejects_real_directory_target():
         write_staged_set(staging, run)
         with pytest.raises(ValueError, match="real directory"):
             publish_artifact_set(staging, output)
+
+
+def test_concurrent_publishers_cannot_delete_a_pending_version(tmp_path):
+    # Reproduction of the round-7 finding: publisher B installs its version and
+    # pauses before flipping the pointer, then publisher A's garbage collection
+    # deletes B's pending version, so B flips the live pointer onto a deleted
+    # directory — both calls return successfully and the live pointer is broken.
+    # Publication is now serialized by a cross-process lock held from version
+    # install through pointer flip and garbage collection, so B's pending
+    # version always survives A's concurrent publication.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    run_c = build_builder(*synthetic_fixture(), code_revision="rev-c").build()
+    root = Path(tmp_path)
+    output = root / "matchups"
+
+    staging_a = root / "stage_a"
+    staging_a.mkdir()
+    write_staged_set(staging_a, run_a)
+    publish_artifact_set(staging_a, output)
+
+    sync = root / "sync"
+    sync.mkdir()
+    staging_b = root / "stage_b"
+    staging_b.mkdir()
+    write_staged_set(staging_b, run_b)
+    child = root / "publisher_b.py"
+    child.write_text(
+        "import os, sys, time\n"
+        f"sys.path.insert(0, {str(SCRIPTS_DIR)!r})\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
+        "import artifact_persistence as ap\n"
+        "SYNC = os.environ['SYNC']\n"
+        "def pause():\n"
+        "    open(os.path.join(SYNC, 'installed.marker'), 'w').write('x')\n"
+        "    deadline = time.time() + 60\n"
+        "    while not os.path.exists(os.path.join(SYNC, 'proceed')):\n"
+        "        if time.time() > deadline: raise RuntimeError('timeout')\n"
+        "        time.sleep(0.02)\n"
+        "ap._PUBLISH_HOOKS['before_pointer_flip'] = pause\n"
+        f"ap.publish_artifact_set({str(staging_b)!r}, {str(output)!r})\n"
+        "print('B_DONE')\n"
+    )
+    env = dict(os.environ, SYNC=str(sync))
+    proc = subprocess.Popen(
+        [sys.executable, str(child)],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    _wait_for(sync / "installed.marker")
+
+    # Publisher C (in this process, on a worker thread) publishes while B holds
+    # the lock and its pending version exists.
+    staging_c = root / "stage_c"
+    staging_c.mkdir()
+    manifest_c = write_staged_set(staging_c, run_c)
+    results = {}
+
+    def publish_c():
+        try:
+            publish_artifact_set(staging_c, output)
+            results["ok"] = True
+        except Exception as error:  # pragma: no cover - failure path
+            results["ok"] = False
+            results["error"] = repr(error)
+
+    thread = threading.Thread(target=publish_c)
+    thread.start()
+    # Let C reach the lock, then confirm B's pending version directory survived.
+    time.sleep(0.5)
+    versioned_root = root / "matchups-runs"
+    b_pending = versioned_root / f"{run_b.run_id}~1"
+    assert b_pending.is_dir(), "a concurrent publisher deleted B's pending version"
+
+    (sync / "proceed").write_text("go")
+    thread.join(timeout=60)
+    out, _ = proc.communicate(timeout=90)
+    assert "B_DONE" in out, out
+    assert results["ok"], results.get("error")
+
+    sets = [entry for entry in versioned_root.iterdir() if entry.is_dir()]
+    assert len(sets) == 1, [entry.name for entry in versioned_root.iterdir()]
+    assert output.resolve() == sets[0].resolve()
+    persisted = json.loads((output / "run_identity_manifest.json").read_text())
+    assert persisted["run_id"] == run_c.run_id
+    verify_persisted_manifest(manifest_c, output)
+
+
+def test_publish_durability_barriers_precede_garbage_collection(monkeypatch):
+    # Reproduction of the round-7 finding: the new set and pointer were never
+    # fsynced before the prior immutable set was deleted, so power loss could
+    # lose the new contents or pointer after the old set was removed. Every
+    # artifact file is now flushed, then the versioned directory and the
+    # pointer's parent directory, before any garbage collection runs.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+
+        order = []
+
+        def fsync_path(path):
+            order.append(("file", Path(path).name))
+
+        def fsync_directory(path):
+            order.append(("dir", Path(path).name))
+
+        def gc(versioned_root, target):
+            order.append(("gc", Path(target).name))
+
+        monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
+        monkeypatch.setattr(
+            artifact_persistence_module, "_fsync_directory", fsync_directory
+        )
+        monkeypatch.setattr(
+            artifact_persistence_module, "_gc_published_runs", gc
+        )
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        write_staged_set(staging_b, run_b)
+        publish_artifact_set(staging_b, output)
+
+        file_indices = [i for i, (kind, _) in enumerate(order) if kind == "file"]
+        dir_indices = [i for i, (kind, _) in enumerate(order) if kind == "dir"]
+        gc_index = order.index(("gc", "matchups"))
+        assert file_indices, "no artifact file was fsynced before garbage collection"
+        assert dir_indices, "no directory was fsynced before garbage collection"
+        assert max(file_indices) < min(dir_indices)
+        assert max(dir_indices) < gc_index
+
+
+def test_publish_retains_prior_set_when_durability_cannot_be_confirmed(monkeypatch):
+    # If a durability barrier cannot be completed (for example a filesystem that
+    # rejects directory fsync), the prior immutable set must be retained rather
+    # than risked: garbage collection only runs after the new set and pointer
+    # are durably committed.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+
+        def broken_fsync(path):
+            raise OSError("directory fsync is not supported")
+
+        monkeypatch.setattr(artifact_persistence_module, "_fsync_directory", broken_fsync)
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        manifest_b = write_staged_set(staging_b, run_b)
+        publish_artifact_set(staging_b, output)
+
+        versioned_root = root / "matchups-runs"
+        sets = [entry for entry in versioned_root.iterdir() if entry.is_dir()]
+        assert len(sets) == 2, [entry.name for entry in versioned_root.iterdir()]
+        verify_persisted_manifest(manifest_b, output)
 
 
 def _crafted_manifest(run_id, model_version, file_map):
@@ -2204,11 +2451,25 @@ def _format_root_sync(root, sync, template):
 
 LAUNCHER_TEMPLATE = """
 import os
-from code_revision import current_code_revision
+from code_revision import begin_load_proof, current_code_revision
 ROOT = os.path.dirname(os.path.abspath(__file__))
+begin_load_proof(ROOT, launcher_file=os.path.abspath(__file__))
 os.environ["STATSPLUS_ANALYSIS_CODE_REVISION"] = current_code_revision(ROOT)
 import archetype_matchups_2025_26
 """
+
+
+def _run_launcher(root, env=None):
+    """Run the launcher via ``python -m`` from ``root`` so its own loaded code
+    is provable; returns the ``Popen`` child."""
+    return subprocess.Popen(
+        [sys.executable, "-m", "run_matchup_analysis"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
 
 
 def test_loaded_code_verification_passes_when_entry_runs_via_launcher(tmp_path):
@@ -2218,13 +2479,7 @@ def test_loaded_code_verification_passes_when_entry_runs_via_launcher(tmp_path):
     )
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
-    proc = subprocess.Popen(
-        [sys.executable, str(root / "run_matchup_analysis.py")],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    proc = _run_launcher(root)
     _wait_for(sync / "loaded.marker")
     (sync / "proceed").write_text("go")
     out, _ = proc.communicate(timeout=90)
@@ -2257,21 +2512,16 @@ def test_loaded_code_verification_fails_when_entry_runs_directly(tmp_path):
 def test_loaded_code_provenance_race_fails_closed(tmp_path):
     # Reproduction of the bootstrap race: the entry script is already loaded
     # (v1) and its disk source is then edited to v2 before verification. Both
-    # a disk-only snapshot pair would agree on v2; the loaded-code proof must
-    # still fail closed instead of attributing the run to code it did not load.
+    # a disk-only snapshot pair would agree on v2; the import-time loaded-code
+    # proof must still fail closed instead of attributing the run to code it
+    # did not load.
     root, sync = _write_temp_analysis_root(tmp_path)
     entry_source = _format_root_sync(root, sync, ENTRY_TEMPLATE)
     (root / "archetype_matchups_2025_26.py").write_text(entry_source)
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
 
-    proc = subprocess.Popen(
-        [sys.executable, str(root / "run_matchup_analysis.py")],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    proc = _run_launcher(root)
     _wait_for(sync / "loaded.marker")
     (root / "archetype_matchups_2025_26.py").write_text(
         entry_source + "\nMARKER = 'v2'\n"
@@ -2282,27 +2532,131 @@ def test_loaded_code_provenance_race_fails_closed(tmp_path):
     assert "does not match its current disk source" in out
 
 
-def test_loaded_code_verification_fails_closed_without_bytecode_cache(tmp_path):
+def test_loaded_code_verification_does_not_need_a_later_cache_read(tmp_path):
+    # Import-time in-memory evidence proves the loaded code, so verification
+    # never re-reads a shared __pycache__ file after the fact: deleting the
+    # entry's bytecode cache after load still verifies.
     root, sync = _write_temp_analysis_root(tmp_path)
     (root / "archetype_matchups_2025_26.py").write_text(
         _format_root_sync(root, sync, ENTRY_TEMPLATE)
     )
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    proc = subprocess.Popen(
-        [sys.executable, str(root / "run_matchup_analysis.py")],
-        cwd=root,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    proc = _run_launcher(root)
+    _wait_for(sync / "loaded.marker")
+    shutil.rmtree(root / "__pycache__", ignore_errors=True)
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" in out, out
+
+
+def test_launcher_loaded_code_proof_fails_closed_on_post_load_edit(tmp_path):
+    # Reproduction of the round-7 finding: the launcher was skipped by the
+    # verifier, so editing the launcher after load but before revision capture
+    # executed v1 while the disk and revision said v2 and verification passed.
+    # The launcher's own loaded code is captured at bootstrap and proven against
+    # its disk source like every analysis module, so the mixed snapshot fails
+    # closed.
+    root, sync = _write_temp_analysis_root(tmp_path)
+    launcher_source = (
+        "import os, sys, time, pathlib\n"
+        "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+        "from code_revision import begin_load_proof, current_code_revision\n"
+        "SYNC = pathlib.Path(" + repr(str(sync)) + ")\n"
+        "ROOT = pathlib.Path(__file__).resolve().parent\n"
+        "begin_load_proof(ROOT, launcher_file=os.path.abspath(__file__))\n"
+        "(SYNC / 'launcher_loaded.marker').write_text('x')\n"
+        "deadline = time.time() + 60\n"
+        "while not (SYNC / 'launcher_proceed').exists():\n"
+        "    if time.time() > deadline: raise RuntimeError('timeout')\n"
+        "    time.sleep(0.02)\n"
+        "os.environ['STATSPLUS_ANALYSIS_CODE_REVISION'] = current_code_revision(ROOT)\n"
+        "import archetype_matchups_2025_26\n"
     )
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    (root / "run_matchup_analysis.py").write_text(launcher_source)
+    _commit_all(root)
+
+    proc = _run_launcher(root)
+    _wait_for(sync / "launcher_loaded.marker")
+    (root / "run_matchup_analysis.py").write_text(launcher_source + "\nMARKER = 'v2'\n")
+    (sync / "launcher_proceed").write_text("go")
     _wait_for(sync / "loaded.marker")
     (sync / "proceed").write_text("go")
     out, _ = proc.communicate(timeout=90)
     assert "VERIFY_PASSED" not in out
-    assert "no bytecode cache" in out
+    assert "does not match its current disk source" in out
+
+
+def test_loaded_code_proof_rejects_replaced_shared_cache(tmp_path):
+    # Reproduction of the round-7 finding: the entry is loaded from a crafted
+    # bytecode cache whose code differs from disk (v2), then disk and cache are
+    # restored to v1 before verification. A later read of the restored shared
+    # cache would agree with disk and pass; the import-time, in-process evidence
+    # still proves v2 executed, so verification fails closed.
+    root, sync = _write_temp_analysis_root(tmp_path)
+    entry_v1 = _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    entry_v2 = entry_v1.replace(
+        '(SYNC / "loaded.marker").write_text("loaded\\n")',
+        '(SYNC / "loaded.marker").write_text("v2\\n")',
+    )
+    assert "v2" in entry_v2 and "loaded" in entry_v2
+    (root / "archetype_matchups_2025_26.py").write_text(entry_v1)
+    (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
+    _commit_all(root)
+
+    cache_dir = root / "__pycache__"
+    cache_dir.mkdir()
+    pyc_path = Path(
+        importlib.util.cache_from_source(str(root / "archetype_matchups_2025_26.py"))
+    )
+    tmp_v2 = root / "v2_src.py"
+    tmp_v2.write_text(entry_v2)
+    py_compile.compile(
+        str(tmp_v2),
+        cfile=str(pyc_path),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+    )
+    data = bytearray(pyc_path.read_bytes())
+    data[8:16] = importlib.util.source_hash(entry_v1.encode("utf-8"))
+    pyc_path.write_bytes(bytes(data))
+    tmp_v2.unlink()
+
+    env = dict(os.environ, SOURCE_DATE_EPOCH="0")
+    proc = _run_launcher(root, env=env)
+    _wait_for(sync / "loaded.marker")
+    assert (sync / "loaded.marker").read_text().strip() == "v2"
+    py_compile.compile(
+        str(root / "archetype_matchups_2025_26.py"),
+        cfile=str(pyc_path),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+    )
+    (sync / "proceed").write_text("go")
+    out, _ = proc.communicate(timeout=90)
+    assert "VERIFY_PASSED" not in out
+    assert "does not match its current disk source" in out
+
+
+def test_launcher_run_as_plain_script_is_rejected_before_analysis(tmp_path):
+    root, sync = _write_temp_analysis_root(tmp_path)
+    (root / "archetype_matchups_2025_26.py").write_text(
+        _format_root_sync(root, sync, ENTRY_TEMPLATE)
+    )
+    (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
+    _commit_all(root)
+    proc = subprocess.run(
+        [sys.executable, str(root / "run_matchup_analysis.py")],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert "VERIFY_PASSED" not in proc.stdout
+    assert "python -m run_matchup_analysis" in proc.stdout
 
 
 def test_code_objects_equal_is_semantic_not_byte_serialization():

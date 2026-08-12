@@ -11,6 +11,7 @@ Statistical behavior matches the current script. Sorting, reference-opponent
 choice, and effects extraction are deterministic given the input frames.
 """
 
+import copy
 import hashlib
 import json
 import pickle
@@ -73,6 +74,60 @@ VOLUME_DISPLAY_COLUMNS = [
 ]
 
 
+class FrozenDict(Mapping):
+    """An immutable read-only mapping.
+
+    ``AnalysisRun`` is frozen and ``RunProvenance``/``RunIdentity`` must not
+    expose mutable hashes, so the identity-carrying dicts they own are frozen at
+    construction time. It is a ``Mapping`` rather than a ``dict`` subclass so the
+    base ``dict.__setitem__``/``dict.update``/``dict.__ior__`` invocations cannot
+    mutate its storage, and its backing is a read-only mapping proxy so even the
+    ``_data`` attribute itself cannot be written through.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, items=(), **kwargs):
+        object.__setattr__(self, "_data", MappingProxyType(dict(items, **kwargs)))
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+    def __repr__(self):
+        return f"FrozenDict({self._data!r})"
+
+    def __hash__(self):
+        return hash(frozenset(self._data.items()))
+
+    def copy(self):
+        return FrozenDict(self._data)
+
+    def __getstate__(self):
+        return dict(self._data)
+
+    def __setstate__(self, state):
+        object.__setattr__(self, "_data", MappingProxyType(state))
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("This mapping is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+    __or__ = _immutable
+
+
 @dataclass(frozen=True)
 class AnalysisRunSettings:
     min_cell_players: int = MIN_CELL_PLAYERS
@@ -82,6 +137,13 @@ class AnalysisRunSettings:
     min_notable_pct: float = MIN_NOTABLE_PCT
     min_notable_pts_per_min: float = MIN_NOTABLE_PTS_PER_MIN
     volume_metrics: dict = field(default_factory=lambda: dict(VOLUME_METRICS))
+
+    def __post_init__(self):
+        # The volume_metrics mapping is deep-frozen at construction: a run id is
+        # derived from the settings snapshot and every artifact stage reads the
+        # same mapping, so a mutable nested dict must not be able to desynchronize
+        # the run id from the artifacts it is attributed to.
+        object.__setattr__(self, "volume_metrics", FrozenDict(dict(self.volume_metrics)))
 
 
 DEFAULT_SETTINGS = AnalysisRunSettings()
@@ -286,60 +348,6 @@ def fail_if_code_changed(initial_revision: str, current_revision: str) -> None:
         )
 
 
-class FrozenDict(Mapping):
-    """An immutable read-only mapping.
-
-    ``AnalysisRun`` is frozen and ``RunProvenance``/``RunIdentity`` must not
-    expose mutable hashes, so the identity-carrying dicts they own are frozen at
-    construction time. It is a ``Mapping`` rather than a ``dict`` subclass so the
-    base ``dict.__setitem__``/``dict.update``/``dict.__ior__`` invocations cannot
-    mutate its storage, and its backing is a read-only mapping proxy so even the
-    ``_data`` attribute itself cannot be written through.
-    """
-
-    __slots__ = ("_data",)
-
-    def __init__(self, items=(), **kwargs):
-        object.__setattr__(self, "_data", MappingProxyType(dict(items, **kwargs)))
-
-    def __getitem__(self, key):
-        return self._data[key]
-
-    def __iter__(self):
-        return iter(self._data)
-
-    def __len__(self):
-        return len(self._data)
-
-    def __repr__(self):
-        return f"FrozenDict({self._data!r})"
-
-    def __hash__(self):
-        return hash(frozenset(self._data.items()))
-
-    def copy(self):
-        return FrozenDict(self._data)
-
-    def __getstate__(self):
-        return dict(self._data)
-
-    def __setstate__(self, state):
-        object.__setattr__(self, "_data", MappingProxyType(state))
-
-    def _immutable(self, *args, **kwargs):
-        raise TypeError("This mapping is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-    __or__ = _immutable
-
-
 @dataclass(frozen=True)
 class RunProvenance:
     """Immutable provenance recorded for one Analysis Run."""
@@ -511,6 +519,23 @@ class FrozenFitResult:
             )
         for name in ("df_resid", "df_model", "nobs"):
             object.__setattr__(self, name, float(getattr(self, name)))
+
+    def __setstate__(self, state):
+        # Pickle reconstructs ndarray subclasses with owned writable storage and
+        # re-enabling writes through the base ``np.ndarray.setflags`` would then
+        # succeed, so every deserialized array is rebuilt over immutable bytes:
+        # the published snapshot stays intrinsically non-writable even through
+        # base-class methods.
+        for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+            value = state.get(name)
+            if isinstance(value, np.ndarray):
+                object.__setattr__(
+                    self, name, _immutable_ndarray(value).view(_ImmutableArray)
+                )
+            else:
+                object.__setattr__(self, name, value)
+        for name in ("df_resid", "df_model", "nobs"):
+            object.__setattr__(self, name, state.get(name))
 
     @classmethod
     def from_statsmodels(cls, fit):
@@ -938,7 +963,15 @@ class AnalysisRunBuilder:
         self.archetypes = archetypes
         self.game_logs = game_logs
         self.model_spec = model_spec
-        self.settings = settings or DEFAULT_SETTINGS
+        provided_settings = settings if settings is not None else DEFAULT_SETTINGS
+        if not isinstance(provided_settings, AnalysisRunSettings):
+            raise ValueError("settings must be an AnalysisRunSettings instance")
+        # Deep-freeze the settings snapshot at construction: the run id is
+        # versioned against this snapshot and every artifact stage reads the
+        # same immutable mapping, so a caller mutating (or replacing members of)
+        # their own settings object after construction can never desynchronize
+        # the run id from the artifacts it is attributed to.
+        self.settings = copy.deepcopy(provided_settings)
         self.clustering_attempt = clustering_attempt
         self.code_revision = code_revision
         self.generated_at = generated_at

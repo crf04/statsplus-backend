@@ -9,6 +9,7 @@ and atomic staged publication of a verified artifact set.
 module; the production script and the manifest callers are its only users.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -135,13 +136,25 @@ def stamp_png_identity(png_bytes: bytes, run_id: str, model_version: str) -> byt
 
 
 def png_text_entries(png_bytes: bytes) -> dict:
-    """Parse the tEXt chunks of a structurally valid PNG into a mapping."""
+    """Parse the tEXt chunks of a structurally valid PNG into a mapping.
+
+    A keyword may appear at most once: a double-stamped image that embeds a
+    foreign identity chunk before the expected one would otherwise silently
+    overwrite the earlier value and pass verification, so a duplicate tEXt
+    keyword fails closed instead of resolving to whichever chunk came last.
+    """
     entries = {}
     for chunk_type, data in _parse_png_chunks(png_bytes):
         if chunk_type == b"tEXt":
             keyword, separator, text = data.partition(b"\x00")
             if separator:
-                entries[keyword.decode("ascii")] = text.decode("utf-8")
+                key = keyword.decode("ascii")
+                if key in entries:
+                    raise ValueError(
+                        f"PNG embeds duplicate tEXt keyword {key!r}; refusing to "
+                        "attribute a run to conflicting identity chunks"
+                    )
+                entries[key] = text.decode("utf-8")
     return entries
 
 
@@ -337,12 +350,95 @@ def _next_publication_sequence(versioned_root, run_id) -> int:
     return sequence
 
 
+# Deterministic test seams: production never sets these, tests install them to
+# pause publication at a specific point or to observe durability ordering.
+_PUBLISH_HOOKS = {}
+
+
+def _run_publish_hook(name) -> None:
+    hook = _PUBLISH_HOOKS.get(name)
+    if hook is not None:
+        hook()
+
+
+class _PublicationLock:
+    """Cross-process exclusive lock serializing publication and garbage collection.
+
+    Without synchronization, one publisher's garbage collection can delete
+    another publisher's pending (installed but not yet live) version directory,
+    and the second publisher then flips the live pointer onto the deleted
+    directory — both calls return successfully while the published path is
+    broken. Every publication holds this lock from version install through
+    pointer flip and garbage collection, so no publisher ever removes a set
+    another publisher is about to make live. ``flock`` is advisory but every
+    publisher in this code base honors it, which is sufficient because
+    publication is only ever performed by this module.
+    """
+
+    def __init__(self, versioned_root):
+        # Sibling of the versioned namespace, not inside it, so the namespace
+        # keeps containing exactly the immutable version directories.
+        self._path = Path(str(versioned_root) + ".publication.lock")
+
+    def __enter__(self):
+        self._file = open(self._path, "w")
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+        _run_publish_hook("after_lock")
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        self._file.close()
+        return False
+
+
+def _fsync_path(path) -> None:
+    """Flush ``path``'s file contents to durable storage."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path) -> None:
+    """Flush ``path``'s directory entries (names and renames) to durable storage."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _durability_barriers(versioned, versioned_root, target) -> bool:
+    """Fsync the new set and pointer before any prior set may be removed.
+
+    Ordering: every artifact file's contents are flushed first, then the
+    versioned root (persisting the renamed immutable set), then the published
+    pointer's parent (persisting the flipped symlink). Only after all barriers
+    succeed may the superseded immutable sets be garbage-collected; if any
+    barrier cannot be confirmed (for example on a filesystem that does not
+    support directory fsync), the prior set is retained rather than risked.
+    """
+    try:
+        for path in versioned.iterdir():
+            if path.is_file():
+                _fsync_path(path)
+        _fsync_directory(versioned_root)
+        _fsync_directory(target.parent)
+    except OSError:
+        return False
+    return True
+
+
 def _gc_published_runs(versioned_root, target) -> None:
     """Best-effort removal of superseded immutable sets, keeping the live one.
 
-    Runs only after the pointer has been flipped, so a crash during garbage
-    collection can strand unreachable sets but can never remove the set the
-    published pointer resolves to.
+    Runs only after the pointer has been flipped, while holding the publication
+    lock, and only after the new set and pointer have been durably committed, so
+    a crash during garbage collection can strand unreachable sets but can never
+    remove the set the published pointer resolves to or lose the new set before
+    it is durable.
     """
     try:
         current = Path(target).resolve()
@@ -369,13 +465,16 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     staging directory raises and leaves ``output_dir`` untouched.
 
     Publication uses immutable versioned directories plus an atomically replaced
-    pointer. The verified set is first moved into an immutable, run-addressed
-    versioned directory (a sibling ``<name>-runs`` namespace); the externally
-    observed ``output_dir`` is a symlink whose target is swapped in one atomic
-    ``os.replace``. A crash before the swap leaves the previous set fully live;
-    a crash after the swap publishes the new set; the old set survives until a
-    post-swap garbage collection, so SIGKILL or power loss can never leave the
-    publication path absent or expose a partially replaced set.
+    pointer, serialized across publishers by a cross-process lock. The verified
+    set is first moved into an immutable, run-addressed versioned directory (a
+    sibling ``<name>-runs`` namespace); the externally observed ``output_dir`` is
+    a symlink whose target is swapped in one atomic ``os.replace``. A crash
+    before the swap leaves the previous set fully live; a crash after the swap
+    publishes the new set. The old set survives until the new set and pointer
+    are durably committed (every artifact file, the versioned directory, and the
+    pointer's parent directory are fsynced) and the lock is still held, so SIGKILL
+    or power loss can never leave the publication path absent, expose a partially
+    replaced set, or delete the live set while another publisher is mid-swap.
     """
     staging = Path(staging_dir)
     target = Path(output_dir)
@@ -394,24 +493,36 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
         )
     versioned_root = target.with_name(target.name + "-runs")
     versioned_root.mkdir(parents=True, exist_ok=True)
-    run_id = manifest["run_id"]
-    sequence = _next_publication_sequence(versioned_root, run_id)
-    versioned = versioned_root / f"{run_id}~{sequence}"
-    # Atomic move of the fully verified set into the immutable versioned
-    # namespace. Until the pointer swap below, the published path still resolves
-    # to the previous set.
-    os.replace(staging, versioned)
-    try:
-        pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
-        os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
+    _run_publish_hook("before_lock")
+    with _PublicationLock(versioned_root):
+        run_id = manifest["run_id"]
+        sequence = _next_publication_sequence(versioned_root, run_id)
+        versioned = versioned_root / f"{run_id}~{sequence}"
+        _run_publish_hook("before_version_install")
+        # Atomic move of the fully verified set into the immutable versioned
+        # namespace. Until the pointer swap below, the published path still
+        # resolves to the previous set.
+        os.replace(staging, versioned)
+        _run_publish_hook("after_version_install")
         try:
-            # Atomic pointer flip: the externally observed path switches from the
-            # old set to the new set in a single rename.
-            os.replace(pointer_tmp, target)
+            pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
+            os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
+            _run_publish_hook("before_pointer_flip")
+            try:
+                # Atomic pointer flip: the externally observed path switches from
+                # the old set to the new set in a single rename.
+                os.replace(pointer_tmp, target)
+            except BaseException:
+                pointer_tmp.unlink(missing_ok=True)
+                raise
+            _run_publish_hook("after_pointer_flip")
         except BaseException:
-            pointer_tmp.unlink(missing_ok=True)
+            shutil.rmtree(versioned, ignore_errors=True)
             raise
-    except BaseException:
-        shutil.rmtree(versioned, ignore_errors=True)
-        raise
-    _gc_published_runs(versioned_root, target)
+        _run_publish_hook("before_gc")
+        # Retain the prior immutable set until the new set and pointer are
+        # durably committed; only then may the superseded sets be removed.
+        durable = _durability_barriers(versioned, versioned_root, target)
+        _run_publish_hook("after_durability")
+        if durable:
+            _gc_published_runs(versioned_root, target)

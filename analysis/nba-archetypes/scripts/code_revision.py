@@ -1,19 +1,30 @@
-"""Code-revision snapshot for one Analysis Run.
+"""Code-revision snapshot and import-time loaded-code proof for one Analysis Run.
 
 The matchup script must bind a run id to the exact analysis code Python
 actually loaded. A disk-only git snapshot cannot prove that: the entry script
 and ``code_revision`` itself are already loaded before any snapshot can be
 taken, so a post-load edit would let both snapshots identify newer disk content
 while older bytecode executes. The launcher therefore establishes a pre-load
-snapshot and, immediately before publication, this module fails closed unless
-the bytecode actually loaded for every analysis module provably matches the
-disk source it is attributed to (via the ``__pycache__`` bytecode cache written
-when each module was imported). This module is deliberately stdlib-only and
-free of any analysis code, so importing it can never load the modules whose
-revision it records.
+snapshot and calls ``begin_load_proof`` before importing any analysis module;
+immediately before publication the script calls
+``verify_loaded_code_matches_disk``, which fails closed unless the code every
+analysis module actually executed (recorded in-process at import time) provably
+matches the current disk source it is attributed to.
+
+Loaded-code evidence is process-local and captured at import time: an import
+finder installed by ``begin_load_proof`` records each analysis module's executed
+code object in memory the moment it is imported, and the already-loaded launcher
+and this module have their evidence captured from the bytecode cache their own
+imports just wrote, before any analysis work happens. Verification never reads a
+shared ``__pycache__`` file after the fact, so another process replacing a cache
+file cannot make different loaded code look like the disk source. This module is
+deliberately stdlib-only and free of any analysis code, so importing it can
+never load the modules whose revision it records.
 """
 
 import hashlib
+import importlib.abc
+import importlib.machinery
 import json
 import marshal
 import subprocess
@@ -157,24 +168,198 @@ def _code_objects_equal(a, b) -> bool:
     )
 
 
+# Process-local evidence of the code each analysis module actually executed.
+# ``name -> code object``: recorded by the proof finder at the moment a module
+# is imported (the entry and its imports), or captured from the bytecode cache
+# their own imports just wrote when ``begin_load_proof`` runs (the launcher and
+# this module, which are already loaded). Verification reads only this in-memory
+# evidence; it never re-reads a shared ``__pycache__`` file another process could
+# replace after the fact.
+_LOADED_CODE: dict = {}
+_LAUNCHER_FILE: Path | None = None
+_LAUNCHER_KEY: str | None = None
+_PROOF_BEGUN = False
+
+
+class _RecordingLoader(importlib.abc.Loader):
+    """Loader wrapper that records the code object a module actually executed.
+
+    All other loader behavior is delegated to the wrapped loader, so wrapping
+    never changes what gets imported; only the executed code object is captured
+    (in process-local memory, at import time) for later verification.
+    """
+
+    def __init__(self, loader, record):
+        object.__setattr__(self, "_loader", loader)
+        object.__setattr__(self, "_record", record)
+
+    def __getattr__(self, name):
+        return getattr(self._loader, name)
+
+    def create_module(self, spec):
+        create = getattr(self._loader, "create_module", None)
+        return create(spec) if create is not None else None
+
+    def exec_module(self, module):
+        # Record the code object that is about to execute *before* exec runs:
+        # the module's own top level may verify its loaded code (the analysis
+        # entry script does), and its evidence must already be available then.
+        try:
+            code = self._loader.get_code(module.__name__)
+        except Exception:
+            code = None
+        self._record(module.__name__, code)
+        self._loader.exec_module(module)
+
+
+class _LoadProofFinder(importlib.abc.MetaPathFinder):
+    """Import finder that wraps analysis modules to record their loaded code.
+
+    Only modules whose source lives under the analysis root are wrapped; every
+    other import (third-party libraries, stdlib) is returned untouched. The
+    recorder is installed by ``begin_load_proof`` before the entry script is
+    imported, so every analysis module's executed code object is captured at the
+    moment it is imported, synchronously in this process.
+    """
+
+    def __init__(self, root, record):
+        self._root = root
+        self._record = record
+
+    def find_spec(self, fullname, path=None, target=None):
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is None or spec.origin is None:
+            return spec
+        origin = Path(spec.origin).resolve()
+        if not (origin == self._root or self._root in origin.parents):
+            return spec
+        loader = getattr(spec, "loader", None)
+        if loader is None or not hasattr(loader, "exec_module") or not hasattr(
+            loader, "get_code"
+        ):
+            return spec
+        spec.loader = _RecordingLoader(loader, self._record)
+        return spec
+
+
+def _evidence_key(module) -> str:
+    """The key a module's loaded-code evidence is recorded under.
+
+    Under ``python -m`` the launcher is executed as ``__main__`` but was
+    imported under its real name, so the module's ``__spec__.name`` is the
+    import name the bytecode cache and evidence are keyed by; a directly
+    executed script has no spec and falls back to its module name.
+    """
+    spec = getattr(module, "__spec__", None)
+    if spec is not None and spec.name:
+        return spec.name
+    return module.__name__
+
+
+def _find_loaded_module(path) -> object | None:
+    """The loaded module whose source file is ``path``, if any."""
+    for module in list(sys.modules.values()):
+        source = getattr(module, "__file__", None)
+        if source and Path(source).resolve() == path:
+            return module
+    return None
+
+
+def _capture_loaded_code(module, *, require_cache=False) -> None:
+    """Record the code object a module that is already loaded actually executed.
+
+    The bytecode cache this module's own import just wrote holds the loaded
+    code even if the disk source has since been edited, so it is the only
+    trustworthy evidence for a bootstrap module. When ``require_cache`` is set
+    (the launcher), its absence fails closed: recompiling the current disk
+    source would prove whatever the disk now holds rather than what loaded, and
+    the launcher is precisely the module whose loaded code must be proven.
+    """
+    name = _evidence_key(module)
+    code = None
+    cached = getattr(module, "__cached__", None)
+    if cached and Path(cached).exists():
+        try:
+            code = _code_from_bytecode_cache(Path(cached))
+        except (OSError, ValueError, SyntaxError, UnicodeError):
+            code = None
+    if code is None and not require_cache:
+        loader = getattr(module, "__loader__", None)
+        if loader is not None and hasattr(loader, "get_code"):
+            try:
+                code = loader.get_code(name)
+            except Exception:
+                code = None
+    if code is None:
+        raise RuntimeError(
+            f"Cannot prove the loaded code of {module.__name__}: no loaded-code "
+            "evidence is recoverable for the launcher bootstrap; run the "
+            "analysis as ``python -m run_matchup_analysis`` so its own loaded "
+            "code is provable"
+        )
+    _LOADED_CODE[name] = code
+
+
+def _record_loaded_code(name, code) -> None:
+    if code is not None:
+        _LOADED_CODE[name] = code
+
+
+def begin_load_proof(analysis_dir, launcher_file=None) -> None:
+    """Establish process-local loaded-code evidence before analysis imports.
+
+    Called by the launcher as its first action, before any analysis
+    implementation module is imported. The launcher and this module (already
+    loaded) have their evidence captured now, while the disk still holds what
+    was loaded; every later analysis import is recorded in-memory by the proof
+    finder at import time. Idempotent, so the ``-m`` launcher re-execution
+    cannot double-install the finder.
+    """
+    global _PROOF_BEGUN, _LAUNCHER_FILE, _LAUNCHER_KEY
+    if _PROOF_BEGUN:
+        return
+    root = Path(analysis_dir).resolve()
+    if launcher_file is not None:
+        _LAUNCHER_FILE = Path(launcher_file).resolve()
+        launcher = _find_loaded_module(_LAUNCHER_FILE)
+        if launcher is None:
+            raise RuntimeError(
+                "Cannot locate the loaded launcher module; refusing to build "
+                "an unattributable run"
+            )
+        # The launcher's loaded code must be proven from its own bytecode cache,
+        # not recompiled from whatever the disk holds now; a plain ``python
+        # run_matchup_analysis.py`` has no recoverable evidence and fails closed.
+        _capture_loaded_code(launcher, require_cache=True)
+        _LAUNCHER_KEY = next(
+            (key for key, module in sys.modules.items() if module is launcher),
+            None,
+        )
+    this_module = sys.modules.get(__name__)
+    if this_module is not None:
+        _capture_loaded_code(this_module)
+    sys.meta_path.insert(0, _LoadProofFinder(root, _record_loaded_code))
+    _PROOF_BEGUN = True
+
+
 def _verify_module_loaded_code_matches_disk(module) -> None:
     """Fail closed unless a loaded analysis module provably matches its disk source.
 
-    The module's bytecode cache holds the code object that was actually loaded;
-    if the disk source has been edited since load, recompiling it now yields a
-    different code object and the comparison fails.
+    The module's code object was recorded in this process at import time; if the
+    disk source has since been edited (or another process swapped the shared
+    bytecode cache), recompiling the current disk source yields a different code
+    object and the comparison fails.
     """
-    cached = module.__cached__
-    if not cached or not Path(cached).exists():
-        raise RuntimeError(
-            f"Cannot prove the loaded code of {module.__name__}: no bytecode "
-            "cache was written for it; refusing to attribute a run to "
-            "unprovable code"
-        )
     source_file = Path(module.__file__)
     try:
-        loaded_code = _code_from_bytecode_cache(Path(cached))
+        loaded_code = _LOADED_CODE[_evidence_key(module)]
         disk_code = _code_from_source_file(source_file)
+    except KeyError as error:
+        raise RuntimeError(
+            f"Cannot prove the loaded code of {module.__name__}: no import-time "
+            "evidence was captured for it; refusing to attribute a run to "
+            "unprovable code"
+        ) from error
     except (OSError, ValueError, SyntaxError, UnicodeError) as error:
         raise RuntimeError(
             f"Cannot prove the loaded code of {module.__name__} against disk"
@@ -189,13 +374,14 @@ def _verify_module_loaded_code_matches_disk(module) -> None:
 def verify_loaded_code_matches_disk(analysis_dir=None) -> None:
     """Fail closed unless the loaded analysis code provably matches the disk.
 
-    The analysis entry script must be loaded as a module (through the launcher)
-    rather than executed directly as ``__main__``: ``__main__`` bytecode is not
-    recoverable, so a directly executed entry script could not be proven against
-    the disk it would be attributed to. Every analysis module loaded from under
-    the analysis root is then checked module by module, and any module whose
-    loaded bytecode cannot be proven to equal its current disk source aborts
-    publication.
+    The analysis entry script must be loaded as a module through the launcher
+    (``python -m run_matchup_analysis``), which establishes import-time,
+    process-local evidence for its own loaded code and every analysis module it
+    imports. Every analysis module loaded from under the analysis root is then
+    checked module by module against the code this process actually executed,
+    and any module whose loaded code cannot be proven to equal its current disk
+    source (including the launcher itself, whose evidence was captured at
+    bootstrap) aborts publication.
     """
     root = (
         Path(analysis_dir).resolve()
@@ -213,23 +399,26 @@ def verify_loaded_code_matches_disk(analysis_dir=None) -> None:
             f"loaded code is provable; {_ANALYSIS_ENTRY_MODULE} is not loaded "
             "as a module from the analysis root"
         )
+    if not _PROOF_BEGUN:
+        raise RuntimeError(
+            "No import-time loaded-code proof was established; the analysis "
+            "entry script must run through its launcher so its loaded code is "
+            "provable"
+        )
     checked = []
     for name, module in list(sys.modules.items()):
         source = getattr(module, "__file__", None)
-        # The entry mechanism's own ``__main__`` is the thin launcher; its
-        # loaded bytecode is not recoverable and it carries no analysis logic.
-        # Match on ``module.__name__`` because ``__mp_main__`` aliases the
-        # launcher's module object under a different sys.modules key.
-        if source is None or module.__name__ == "__main__":
+        if source is None:
             continue
         source_path = Path(source).resolve()
         if root not in source_path.parents and source_path != root:
             continue
         _verify_module_loaded_code_matches_disk(module)
         checked.append(name)
-    missing = [
-        name for name in (_ANALYSIS_ENTRY_MODULE, "code_revision") if name not in checked
-    ]
+    required = [_ANALYSIS_ENTRY_MODULE, "code_revision"]
+    if _LAUNCHER_KEY is not None:
+        required.append(_LAUNCHER_KEY)
+    missing = [name for name in required if name not in checked]
     if missing:
         raise RuntimeError(
             "Cannot prove the loaded code of: "

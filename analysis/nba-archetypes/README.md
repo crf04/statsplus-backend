@@ -13,8 +13,10 @@ runtime code.
   workflow; writes `clustering_metadata.json` describing the model that ran.
 - `notebooks/archetype_matchups_2025_26.ipynb` — interactive matchup analysis.
 - `scripts/run_matchup_analysis.py` — production entry point; captures the
-  code revision before any analysis module is loaded, then imports the matchup
-  script as a module so its loaded bytecode is provable against disk.
+  code revision before any analysis module is loaded, establishes the
+  import-time loaded-code proof, then imports the matchup script as a module so
+  its loaded code is provable against disk. Must be run as
+  `python -m run_matchup_analysis`.
 - `scripts/archetype_matchups_2025_26.py` — data/IO shell of the matchup
   analysis; feeds the builder below and renders its artifacts.
 - `scripts/matchup_analysis.py` — deterministic `AnalysisRunBuilder` that
@@ -25,9 +27,11 @@ runtime code.
   structure verification, self-attributing artifact checks, the
   content-addressed persisted-artifact manifest and its verifier, and
   crash-safe staged publication of a verified artifact set through an atomic
-  versioned pointer.
+  versioned pointer serialized by a cross-process lock with durability barriers
+  before garbage collection.
 - `scripts/code_revision.py` — stdlib-only code-revision snapshot and the
-  fail-closed loaded-code verification that proves the bytecode actually loaded
+  fail-closed loaded-code verification that proves, from process-local
+  import-time evidence, that the code each analysis module actually executed
   matches the disk code it is attributed to.
 - `archetypes_data/<season>/` — cached provider inputs.
 - `archetypes_outputs/<season>/` — assignments, profiles, diagnostics, matchup
@@ -62,19 +66,20 @@ Run notebooks with this directory as the working directory so their relative
 `archetypes_data` and `archetypes_outputs` paths resolve correctly.
 
 Production runs go through the launcher, which must be run from the scripts
-directory so the analysis modules are imported as modules (whose loaded
-bytecode the provenance proof can verify) rather than executed as `__main__`:
+directory with the `-m` form so the analysis modules are imported as modules
+(whose loaded code the provenance proof can verify) rather than executed as
+`__main__`, and so the launcher's own loaded code is provable:
 
 ```bash
 cd analysis/nba-archetypes/scripts
 python -m run_matchup_analysis
 ```
 
-(`python run_matchup_analysis.py` from the same directory also works; the
-`-m` form additionally makes the launcher's own loaded code provable.) Running
-`archetype_matchups_2025_26.py` directly is rejected before publication because
-a directly executed entry script's loaded bytecode cannot be proven against
-disk.
+Running `run_matchup_analysis.py` as a plain script is rejected before any
+analysis work, and running `archetype_matchups_2025_26.py` directly is rejected
+before publication: the loaded bytecode of a directly executed entry script (or
+a plain-script launcher) cannot be proven against disk, so no run would be
+attributable to its exact code.
 
 Cached inputs make the existing outputs reproducible without downloading a new
 snapshot. Set the notebook's refresh option only when deliberately updating the
@@ -152,14 +157,18 @@ taken. The launcher therefore captures the revision **before importing any
 analysis module** (binding the run id to the disk state the code is about to be
 loaded from) and re-captures it immediately before persisting, aborting if the
 code changed during the build; immediately before publication the script also
-calls `verify_loaded_code_matches_disk()`, which fails closed unless the
-bytecode actually loaded for every analysis module (recovered from its
-`__pycache__` cache) structurally equals the disk source it is attributed to —
-so a post-load edit can never attribute a run to code it did not execute. The
-generation time defaults to the wall clock but is injectable (`generated_at`)
-so a fully pinned build is reproducible; it never feeds the deterministic
-identity hashes. `clustering_attempt` must be a positive integer (booleans,
-zero, negatives, and strings are rejected).
+calls `verify_loaded_code_matches_disk()`. Loaded-code evidence is process-local
+and captured at import time: `begin_load_proof` records the launcher's own
+loaded bytecode (and `code_revision`'s) at bootstrap and installs an import
+finder that records every analysis module's executed code object in memory the
+moment it is imported. Verification compares that in-memory evidence against
+the current disk source and never re-reads a shared `__pycache__` file after
+the fact, so a post-load edit — to the entry, its imports, `code_revision`, or
+the launcher itself — or a replaced shared bytecode cache can never attribute a
+run to code it did not execute. The generation time defaults to the wall clock
+but is injectable (`generated_at`) so a fully pinned build is reproducible; it
+never feeds the deterministic identity hashes. `clustering_attempt` must be a
+positive integer (booleans, zero, negatives, and strings are rejected).
 
 The artifacts collection and dashboard payload each carry one immutable
 `RunIdentity` value (run id, model version, and stable subtype keys) plus
@@ -177,10 +186,16 @@ field cannot mutate the run graph: each read-only property deserializes a fresh
 object that no caller can write back through. Published fits are immutable
 snapshots of the live statsmodels results whose arrays are backed by immutable
 `bytes` buffers — neither the array, nor any `.base` reached from it, nor
-re-enabling writes (`setflags(write=True)`) can change a run's recorded fits.
-`RunProvenance` and `RunIdentity` reject every in-place mutation of their
-hash maps (including `|=`), and `FrozenDict` is a read-only `Mapping` over a
-read-only backing proxy, so even the private `_data` attribute cannot be
+re-enabling writes (`setflags(write=True)`), nor the base-class
+`np.ndarray.setflags`/`np.ndarray.__setitem__` invocations after a pickle
+round-trip can change a run's recorded fits (deserialized arrays are rebuilt
+over immutable bytes by `FrozenFitResult.__setstate__`). `AnalysisRunSettings`
+deep-freezes its nested `volume_metrics` mapping at construction and the
+builder snapshots the settings, so mutating a caller's settings after
+construction cannot desynchronize the run id from the artifacts it is
+attributed to. `RunProvenance` and `RunIdentity` reject every in-place mutation
+of their hash maps (including `|=`), and `FrozenDict` is a read-only `Mapping`
+over a read-only backing proxy, so even the private `_data` attribute cannot be
 written through. Stable subtype membership keys are content hashes of each
 subtype's sorted member IDs, so they are invariant under arbitrary
 cluster-label permutation; the builder rejects overlapping, colliding, or
@@ -193,7 +208,9 @@ from actual game data.
 When the matchup script persists artifacts, every CSV is written with `RUN_ID`
 and `MODEL_VERSION` values on every row (including an identity row for
 otherwise-empty outputs) and every PNG is structurally validated and embeds the
-run identity in tEXt chunks, so each file is self-attributing.
+run identity in tEXt chunks, so each file is self-attributing. A PNG that
+embeds the same tEXt keyword twice (for example a conflicting double-stamped
+identity) is rejected rather than resolved to whichever chunk came last.
 `artifact_manifest()` refuses to bless a file that does not carry the run's
 identity, and it requires exactly the complete required persisted artifact set
 — missing, unexpected, or duplicate files are rejected, so an incomplete run
@@ -210,7 +227,13 @@ run-addressed versioned directory and the externally observed `matchups`
 directory is a symlink whose target is swapped in one atomic rename, so a crash
 (or SIGKILL or power loss) at any point either leaves the previous set fully
 live or publishes the new set — never an absent publication path or a partially
-replaced set — and old sets are garbage-collected only after a successful swap.
+replaced set. Publication is serialized across processes by a cross-process
+lock held from version install through pointer flip and garbage collection, so
+a concurrent publisher can never delete another publisher's pending (not yet
+live) version; and the prior set survives until the new set and pointer are
+durably committed (every artifact file, the versioned directory, and the
+pointer's parent directory are fsynced), so old sets are garbage-collected only
+after the new set is durable.
 `verify_persisted_manifest()` then fails closed if any recorded file is
 missing, has been replaced, resolves outside the artifact directory, no longer
 embeds the manifest's identity, is bound to a non-canonical name, or if the
