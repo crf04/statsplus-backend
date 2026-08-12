@@ -19,8 +19,6 @@ MarkupSafe==3.0.2
 nba_api==1.11.4
 numpy==1.26.4
 pandas==2.2.2
-scipy==1.17.1
-statsmodels==0.14.6
 PyJWT==2.13.0
 pymongo==4.17.0
 python-dateutil==2.9.0.post0

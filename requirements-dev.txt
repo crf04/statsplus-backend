@@ -1,4 +1,5 @@
 -r requirements.txt
+-r analysis/nba-archetypes/requirements.txt
 
 pytest==9.1.1
 pytest-cov==6.0.0

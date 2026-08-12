@@ -1,0 +1,17 @@
+{
+  "diagnostics": {
+    "eligible_cells": 18,
+    "interaction_findings": 0,
+    "split_half_cells": 18,
+    "total_rate_findings": 0
+  },
+  "mean_shrinkage": 0.2310087012539891,
+  "pearson_reliability": -0.14691811707637414,
+  "spearman_reliability": -0.04024767801857585,
+  "subtype_labels": {
+    "100": "100 \u2014 Rim Pressure",
+    "200": "200 \u2014 Tertiary Shot Creator",
+    "300": "300 \u2014 Quarterback"
+  },
+  "tau_ppm": 0.033963927709923084
+}
