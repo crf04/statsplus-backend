@@ -469,18 +469,14 @@ def _assert_frame_equivalent(actual, golden, label):
         if pd.api.types.is_numeric_dtype(got.dtype):
             got_arr = got.to_numpy(dtype=float)
             exp_arr = exp.to_numpy(dtype=float)
-            np.testing.assert_array_equal(
-                np.isnan(got_arr),
-                np.isnan(exp_arr),
-                err_msg=f"{label}.{column}: NaN pattern differs",
-            )
-            finite = np.isfinite(got_arr) & np.isfinite(exp_arr)
-            assert np.allclose(
-                got_arr[finite],
-                exp_arr[finite],
+            np.testing.assert_allclose(
+                got_arr,
+                exp_arr,
                 rtol=GOLDEN_RTOL,
                 atol=GOLDEN_ATOL,
-            ), f"{label}.{column}: values differ beyond tolerance"
+                equal_nan=True,
+                err_msg=f"{label}.{column}: values differ",
+            )
         else:
             got_missing = got.isna()
             exp_missing = exp.isna()
@@ -497,13 +493,14 @@ def _assert_heatmap_equivalent(actual, golden, label):
     assert list(actual.columns) == list(golden.columns), f"{label}: column labels differ"
     got = actual.to_numpy(dtype=float)
     exp = golden.to_numpy(dtype=float)
-    np.testing.assert_array_equal(
-        np.isnan(got), np.isnan(exp), err_msg=f"{label}: NaN pattern differs"
+    np.testing.assert_allclose(
+        got,
+        exp,
+        rtol=GOLDEN_RTOL,
+        atol=GOLDEN_ATOL,
+        equal_nan=True,
+        err_msg=f"{label}: values differ",
     )
-    finite = np.isfinite(got) & np.isfinite(exp)
-    assert np.allclose(
-        got[finite], exp[finite], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
-    ), f"{label}: values differ beyond tolerance"
 
 
 def test_parity_fixture_cells_exceed_eligibility_thresholds():
@@ -584,3 +581,22 @@ def test_heatmaps_match_pre_refactor_goldens():
         assert np.isclose(
             heatmap["limit"], limits[metric], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
         )
+
+
+def test_golden_comparators_reject_infinity_mismatches():
+    frame = pd.DataFrame(
+        {"ID": [1, 2, 3, 4], "VALUE": [1.0, np.inf, -np.inf, np.nan]}
+    )
+    sign_flip = frame.assign(VALUE=[1.0, -np.inf, np.inf, np.nan])
+    finite_to_inf = frame.assign(VALUE=[1.0, 5.0, -np.inf, np.nan])
+    for mismatched in (sign_flip, finite_to_inf):
+        with pytest.raises(AssertionError):
+            _assert_frame_equivalent(frame, mismatched, "probe")
+    _assert_frame_equivalent(frame, frame.copy(), "probe")
+
+    heatmap = pd.DataFrame({"col": [1.0, np.inf, np.nan]})
+    with pytest.raises(AssertionError):
+        _assert_heatmap_equivalent(
+            heatmap, heatmap.assign(col=[1.0, -np.inf, np.nan]), "probe"
+        )
+    _assert_heatmap_equivalent(heatmap, heatmap.copy(), "probe")
