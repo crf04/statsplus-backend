@@ -1147,6 +1147,54 @@ def test_verify_persisted_manifest_rejects_tampered_and_missing():
             verify_persisted_manifest(crafted, directory)
 
 
+def test_verify_rejects_duplicate_and_mangled_csv_identity_columns():
+    # Reproduction of the round-8 finding: pandas silently renames a repeated
+    # header field to ``RUN_ID.1``/``MODEL_VERSION.1`` while the verifier
+    # checked only the first identity column, so a conflicting second identity
+    # slipped past the value check. The raw header is now parsed before any
+    # values are trusted, and a duplicate identity field (in any case) or any
+    # pandas-mangled ``.N`` variant of an identity field fails closed.
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        paths = write_full_artifact_set(directory, run)
+        manifest = artifact_manifest(run, paths)
+
+        for header, message in (
+            ("RUN_ID,RUN_ID", "repeats the RUN_ID identity column"),
+            ("RUN_ID,MODEL_VERSION,RUN_ID,MODEL_VERSION",
+             "repeats the RUN_ID identity column"),
+            ("run_id,run_id", "repeats the RUN_ID identity column"),
+            ("RUN_ID,RUN_ID.1", "mangled identity column"),
+            ("MODEL_VERSION.1,RUN_ID,MODEL_VERSION", "mangled identity column"),
+        ):
+            width = len(header.split(","))
+            csv_path = directory / "matchup_summary.csv"
+            csv_path.write_text(
+                header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n"
+            )
+            crafted = dict(manifest)
+            crafted["artifacts"] = dict(manifest["artifacts"])
+            crafted["artifacts"]["matchup_summary"] = {
+                "file": "matchup_summary.csv",
+                "sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+            }
+            with pytest.raises(ValueError, match=message):
+                verify_persisted_manifest(crafted, directory)
+
+        # The manifest-building seam rejects the same ambiguous raw headers
+        # before any values are read.
+        for header in ("RUN_ID,RUN_ID", "RUN_ID,RUN_ID.1"):
+            width = len(header.split(","))
+            csv_path = directory / "matchup_summary.csv"
+            csv_path.write_text(
+                header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n"
+            )
+            paths["matchup_summary"] = csv_path
+            with pytest.raises(ValueError, match="identity column"):
+                artifact_manifest(run, paths)
+
+
 def test_run_id_is_versioned_by_analysis_settings():
     archetypes, game_logs = synthetic_fixture()
     defaults = build_builder(archetypes, game_logs, code_revision="rev-1").build()
@@ -1191,6 +1239,51 @@ def test_nested_settings_cannot_desync_run_id_and_artifacts():
     # A caller constructing their own settings object cannot mutate it either.
     with pytest.raises(TypeError):
         AnalysisRunSettings(volume_metrics=dict(VOLUME_METRICS)).volume_metrics.pop("FTA")
+
+
+def test_builder_settings_cannot_be_reassigned_and_frozen_setstate_is_one_shot():
+    # Reproduction of the round-8 finding: ``builder.settings`` was a plain
+    # writable attribute, so a later stage could read a different settings
+    # object than the one the run id was versioned against, and ``FrozenDict``'s
+    # public ``__setstate__`` was an unrestricted mutator that could rewrite a
+    # built identity/settings mapping. The snapshot is now a private read-only
+    # property with no setter, and ``__setstate__`` only ever initializes a
+    # freshly unpickled object.
+    archetypes, game_logs = synthetic_fixture()
+    settings = AnalysisRunSettings()
+    builder = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings
+    )
+    builder.record_provenance()
+    with pytest.raises(AttributeError, match="no setter"):
+        builder.settings = AnalysisRunSettings()
+    with pytest.raises(TypeError, match="immutable"):
+        builder.settings.volume_metrics.__setstate__(
+            dict(builder.settings.volume_metrics)
+        )
+    with pytest.raises(TypeError, match="immutable"):
+        settings.volume_metrics.__setstate__(dict(settings.volume_metrics))
+
+    # A live FrozenDict anywhere cannot be rewritten through __setstate__.
+    frozen = FrozenDict({"a": 1})
+    with pytest.raises(TypeError, match="immutable"):
+        frozen.__setstate__({"a": 2})
+    assert frozen == {"a": 1}
+
+    # Pickle reconstruction still works: __setstate__ initializes the fresh
+    # object exactly once, and the restored object is immutable again.
+    restored = pickle.loads(pickle.dumps(frozen))
+    assert restored == {"a": 1}
+    with pytest.raises(TypeError, match="immutable"):
+        restored.__setstate__({"a": 2})
+    assert restored == {"a": 1}
+
+    # The run identity stays consistent: a control builder built from the same
+    # settings snapshot produces the same run id despite the tampering attempts.
+    control = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings
+    ).build()
+    assert builder.build().run_id == control.run_id
 
 
 def test_artifact_digests_are_bound_to_run_identity():
@@ -2079,6 +2172,82 @@ def test_publish_artifact_set_rejects_real_directory_target():
             publish_artifact_set(staging, output)
 
 
+def test_publish_rejects_mutation_after_version_install_and_preserves_previous(tmp_path):
+    # Reproduction of the round-8 TOCTOU finding: the old publication verified
+    # the shared staging directory before locking and then moved it without
+    # revalidation, so another process could replace the staged bytes after
+    # verification and get unverified content installed. The staged set is now
+    # moved into the private immutable versioned namespace first and verified
+    # there under the publication lock, so a mutation of the moved set (or of
+    # the now-consumed staging path) fails closed and leaves the published path
+    # on the previous set.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    root = Path(tmp_path)
+    output = root / "matchups"
+    staging_a = root / "stage_a"
+    staging_a.mkdir()
+    manifest_a = write_staged_set(staging_a, run_a)
+    publish_artifact_set(staging_a, output)
+
+    staging_b = root / "stage_b"
+    staging_b.mkdir()
+    write_staged_set(staging_b, run_b)
+
+    def tamper_moved_set():
+        versioned_root = root / "matchups-runs"
+        moved = next(
+            entry
+            for entry in versioned_root.iterdir()
+            if entry.is_dir() and entry.name.startswith(run_b.run_id + "~")
+        )
+        (moved / "matchup_summary.csv").write_text("tampered\n")
+
+    artifact_persistence_module._PUBLISH_HOOKS["after_version_install"] = tamper_moved_set
+    try:
+        with pytest.raises(ValueError, match="does not match its recorded digest"):
+            publish_artifact_set(staging_b, output)
+    finally:
+        artifact_persistence_module._PUBLISH_HOOKS.clear()
+
+    verify_persisted_manifest(manifest_a, output)
+    versioned_root = root / "matchups-runs"
+    sets = [entry for entry in versioned_root.iterdir() if entry.is_dir()]
+    assert len(sets) == 1 and output.resolve() == sets[0].resolve()
+
+
+def test_publish_installs_the_verified_moved_set_not_a_recreated_staging_path(tmp_path):
+    # The bytes that are verified are exactly the bytes installed: after the
+    # staged set is moved into the private versioned namespace and verified
+    # under the lock, a concurrent process recreating the (now consumed)
+    # staging path with junk cannot change what gets published. The published
+    # set still matches the verified moved bytes and the recreated staging
+    # path is never consulted.
+    run = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    root = Path(tmp_path)
+    output = root / "matchups"
+    staging = root / "stage"
+    staging.mkdir()
+    manifest = write_staged_set(staging, run)
+
+    def recreate_staging_with_junk():
+        if not staging.exists():
+            staging.mkdir()
+        (staging / "matchup_summary.csv").write_text("UNVERIFIED_JUNK\n")
+
+    artifact_persistence_module._PUBLISH_HOOKS["after_verify"] = recreate_staging_with_junk
+    try:
+        publish_artifact_set(staging, output)
+    finally:
+        artifact_persistence_module._PUBLISH_HOOKS.clear()
+
+    verify_persisted_manifest(manifest, output)
+    assert (staging / "matchup_summary.csv").read_text() == "UNVERIFIED_JUNK\n"
+    versioned_root = root / "matchups-runs"
+    installed = next(entry for entry in versioned_root.iterdir() if entry.is_dir())
+    assert (installed / "run_identity_manifest.json").exists()
+
+
 def test_concurrent_publishers_cannot_delete_a_pending_version(tmp_path):
     # Reproduction of the round-7 finding: publisher B installs its version and
     # pauses before flipping the pointer, then publisher A's garbage collection
@@ -2244,6 +2413,56 @@ def test_publish_retains_prior_set_when_durability_cannot_be_confirmed(monkeypat
         sets = [entry for entry in versioned_root.iterdir() if entry.is_dir()]
         assert len(sets) == 2, [entry.name for entry in versioned_root.iterdir()]
         verify_persisted_manifest(manifest_b, output)
+
+
+def test_durability_barriers_fsync_versioned_directory_before_pointer_parent(tmp_path, monkeypatch):
+    # Reproduction of the round-8 finding: artifact files and their parent
+    # directories were fsynced, but not the installed version directory itself,
+    # so the directory entries naming the artifacts could be lost on power loss
+    # after the pointer flip. The installed version directory is now fsynced
+    # after every artifact file and before the versioned root and the pointer's
+    # parent directory.
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    root = Path(tmp_path)
+    output = root / "matchups"
+    versioned_root = root / "matchups-runs"
+    staging_a = root / "stage_a"
+    staging_a.mkdir()
+    write_staged_set(staging_a, run_a)
+    publish_artifact_set(staging_a, output)
+
+    order = []
+
+    def fsync_path(path):
+        order.append(("file", Path(path)))
+
+    def fsync_directory(path):
+        order.append(("dir", Path(path)))
+
+    def gc(versioned_root_arg, target):
+        order.append(("gc", Path(target)))
+
+    monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
+    monkeypatch.setattr(
+        artifact_persistence_module, "_fsync_directory", fsync_directory
+    )
+    monkeypatch.setattr(artifact_persistence_module, "_gc_published_runs", gc)
+
+    staging_b = root / "stage_b"
+    staging_b.mkdir()
+    write_staged_set(staging_b, run_b)
+    publish_artifact_set(staging_b, output)
+
+    versioned_dir = versioned_root / f"{run_b.run_id}~1"
+    file_count = sum(1 for kind, _ in order if kind == "file")
+    kinds = [kind for kind, _ in order]
+    assert kinds == ["file"] * file_count + ["dir", "dir", "dir", "gc"]
+    dir_targets = [path for kind, path in order if kind == "dir"]
+    assert dir_targets[0] == versioned_dir, "the installed version directory must be fsynced"
+    assert dir_targets[1] == versioned_root
+    assert dir_targets[2] == root  # the pointer's parent directory
+    assert order[-1] == ("gc", output)
 
 
 def _crafted_manifest(run_id, model_version, file_map):
@@ -2451,11 +2670,38 @@ def _format_root_sync(root, sync, template):
 
 LAUNCHER_TEMPLATE = """
 import os
-from code_revision import begin_load_proof, current_code_revision
-ROOT = os.path.dirname(os.path.abspath(__file__))
-begin_load_proof(ROOT, launcher_file=os.path.abspath(__file__))
-os.environ["STATSPLUS_ANALYSIS_CODE_REVISION"] = current_code_revision(ROOT)
-import archetype_matchups_2025_26
+import sys
+from pathlib import Path
+
+import code_revision as _code_revision
+
+_LAUNCHER_FILE = Path(__file__).resolve()
+
+if globals().get("__launcher_bootstrapped__") is None:
+    globals()["__launcher_bootstrapped__"] = True
+    if getattr(globals().get("__spec__"), "name", None) != "run_matchup_analysis":
+        raise RuntimeError(
+            "The analysis launcher must run as ``python -m run_matchup_analysis`` "
+            "so its trusted bootstrap records and executes one code object; "
+            "running it as a plain script cannot prove which code ran"
+        )
+    _bootstrap_source = _LAUNCHER_FILE.read_bytes()
+    _bootstrap_code = compile(
+        _bootstrap_source,
+        str(_LAUNCHER_FILE),
+        "exec",
+        dont_inherit=True,
+        optimize=sys.flags.optimize,
+    )
+    _code_revision.record_bootstrap_code("run_matchup_analysis", _bootstrap_code)
+    exec(_bootstrap_code, globals())
+else:
+    from code_revision import begin_load_proof, current_code_revision
+
+    ANALYSIS_ROOT = _LAUNCHER_FILE.parent
+    begin_load_proof(ANALYSIS_ROOT, launcher_file=_LAUNCHER_FILE)
+    os.environ["STATSPLUS_ANALYSIS_CODE_REVISION"] = current_code_revision(ANALYSIS_ROOT)
+    import archetype_matchups_2025_26
 """
 
 
@@ -2558,20 +2804,41 @@ def test_launcher_loaded_code_proof_fails_closed_on_post_load_edit(tmp_path):
     # its disk source like every analysis module, so the mixed snapshot fails
     # closed.
     root, sync = _write_temp_analysis_root(tmp_path)
+    # The launcher exercises the same trusted bootstrap as production: it reads
+    # its own source once, compiles it once, records the exact code object, and
+    # then executes that same object, so the attributable body below provably
+    # runs from the recorded code and a post-load disk edit fails closed.
     launcher_source = (
         "import os, sys, time, pathlib\n"
         "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
-        "from code_revision import begin_load_proof, current_code_revision\n"
-        "SYNC = pathlib.Path(" + repr(str(sync)) + ")\n"
-        "ROOT = pathlib.Path(__file__).resolve().parent\n"
-        "begin_load_proof(ROOT, launcher_file=os.path.abspath(__file__))\n"
-        "(SYNC / 'launcher_loaded.marker').write_text('x')\n"
-        "deadline = time.time() + 60\n"
-        "while not (SYNC / 'launcher_proceed').exists():\n"
-        "    if time.time() > deadline: raise RuntimeError('timeout')\n"
-        "    time.sleep(0.02)\n"
-        "os.environ['STATSPLUS_ANALYSIS_CODE_REVISION'] = current_code_revision(ROOT)\n"
-        "import archetype_matchups_2025_26\n"
+        "import code_revision as _code_revision\n"
+        "_LAUNCHER_FILE = pathlib.Path(__file__).resolve()\n"
+        "if globals().get('__launcher_bootstrapped__') is None:\n"
+        "    globals()['__launcher_bootstrapped__'] = True\n"
+        "    if getattr(globals().get('__spec__'), 'name', None) != 'run_matchup_analysis':\n"
+        "        raise RuntimeError(\n"
+        "            'The analysis launcher must run as ``python -m run_matchup_analysis`` '\n"
+        "            'so its trusted bootstrap records and executes one code object'\n"
+        "        )\n"
+        "    _bootstrap_source = _LAUNCHER_FILE.read_bytes()\n"
+        "    _bootstrap_code = compile(\n"
+        "        _bootstrap_source, str(_LAUNCHER_FILE), 'exec',\n"
+        "        dont_inherit=True, optimize=sys.flags.optimize,\n"
+        "    )\n"
+        "    _code_revision.record_bootstrap_code('run_matchup_analysis', _bootstrap_code)\n"
+        "    exec(_bootstrap_code, globals())\n"
+        "else:\n"
+        "    from code_revision import begin_load_proof, current_code_revision\n"
+        "    SYNC = pathlib.Path(" + repr(str(sync)) + ")\n"
+        "    ROOT = pathlib.Path(__file__).resolve().parent\n"
+        "    begin_load_proof(ROOT, launcher_file=os.path.abspath(__file__))\n"
+        "    (SYNC / 'launcher_loaded.marker').write_text('x')\n"
+        "    deadline = time.time() + 60\n"
+        "    while not (SYNC / 'launcher_proceed').exists():\n"
+        "        if time.time() > deadline: raise RuntimeError('timeout')\n"
+        "        time.sleep(0.02)\n"
+        "    os.environ['STATSPLUS_ANALYSIS_CODE_REVISION'] = current_code_revision(ROOT)\n"
+        "    import archetype_matchups_2025_26\n"
     )
     (root / "archetype_matchups_2025_26.py").write_text(
         _format_root_sync(root, sync, ENTRY_TEMPLATE)
@@ -2676,34 +2943,89 @@ def test_code_objects_equal_is_semantic_not_byte_serialization():
         assert not _code_objects_equal(first, _code_from_source_file(path))
 
 
-def test_bytecode_cache_parsing_handles_both_timestamp_and_hash_headers():
-    import py_compile
+def test_recording_loader_records_and_executes_the_exact_code_object():
+    # Reproduction of the round-8 finding: the old loader wrapper called
+    # ``get_code`` once to record evidence and then delegated to the wrapped
+    # ``exec_module``, which fetched ``get_code`` again — so a cache swap
+    # between the two calls could record v1, execute v2, and pass verification.
+    # The proof loader now calls ``get_code`` exactly once, records that object,
+    # and executes that same object, never invoking the wrapped ``exec_module``.
+    import importlib.abc
+    import types as _types
 
-    from code_revision import _code_from_bytecode_cache, _code_objects_equal, _code_from_source_file
+    from code_revision import _RecordingLoader
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        src = root / "probe.py"
-        src.write_text("VALUE = 1\n\ndef f(x):\n    return x + VALUE\n")
-        disk_code = _code_from_source_file(src)
+    get_code_calls = []
+    versions = iter(
+        [
+            compile("EXECUTED = 'recorded_v1'\n", "<probe>", "exec"),
+            compile("EXECUTED = 'swapped_v2'\n", "<probe>", "exec"),
+        ]
+    )
 
-        timestamp_cache = root / "probe.timestamp.pyc"
-        py_compile.compile(
-            str(src), cfile=str(timestamp_cache), doraise=True
-        )
-        loaded = _code_from_bytecode_cache(timestamp_cache)
-        assert _code_objects_equal(loaded, disk_code)
+    class FakeLoader(importlib.abc.Loader):
+        def get_code(self, fullname):
+            get_code_calls.append(fullname)
+            return next(versions)
 
-        hash_cache = root / "probe.hash.pyc"
-        py_compile.compile(
-            str(src),
-            cfile=str(hash_cache),
-            doraise=True,
-            invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
-        )
-        loaded = _code_from_bytecode_cache(hash_cache)
-        assert _code_objects_equal(loaded, disk_code)
-        truncated = root / "truncated.pyc"
-        truncated.write_bytes(b"\x00" * 8)
-        with pytest.raises(ValueError):
-            _code_from_bytecode_cache(truncated)
+        def exec_module(self, module):
+            # A second loader fetch with swapped content; must never run.
+            exec(compile("EXECUTED = 'wrapped_v2'\n", "<probe>", "exec"), module.__dict__)
+
+    recorded = {}
+    module = _types.ModuleType("probe_module")
+    _RecordingLoader(
+        FakeLoader(), lambda name, code: recorded.__setitem__(name, code)
+    ).exec_module(module)
+
+    # Exactly one loader fetch, and the module ran from the recorded object,
+    # not from any second (swapped) fetch or from the wrapped loader.
+    assert get_code_calls == ["probe_module"]
+    assert list(recorded) == ["probe_module"]
+    assert recorded["probe_module"].co_code == compile(
+        "EXECUTED = 'recorded_v1'\n", "<probe>", "exec"
+    ).co_code
+    assert module.EXECUTED == "recorded_v1"
+
+
+def test_begin_load_proof_fails_closed_without_bootstrap_records(tmp_path):
+    # Reproduction of the round-8 finding: launcher/code_revision evidence was
+    # inferred from the shared bytecode cache after the code was already
+    # executing, so a concurrent cache replacement could present v2 cache/disk
+    # as what v1 ran. Evidence is now captured by a trusted bootstrap as the
+    # immutable process-local code object each module executes, and
+    # ``begin_load_proof`` fails closed when that evidence was not recorded
+    # before attributable logic began.
+    import importlib.util
+    import types as _types
+
+    import code_revision as cr
+
+    root = Path(tmp_path) / "analysis"
+    root.mkdir()
+    saved = dict(cr._LOADED_CODE)
+    try:
+        cr._LOADED_CODE.pop("code_revision", None)
+        with pytest.raises(RuntimeError, match="trusted bootstrap did not record"):
+            cr.begin_load_proof(str(root))
+    finally:
+        cr._LOADED_CODE.clear()
+        cr._LOADED_CODE.update(saved)
+        cr._PROOF_BEGUN = False
+
+    launcher = root / "run_matchup_analysis.py"
+    launcher.write_text("X = 1\n")
+    launcher_module = _types.ModuleType("run_matchup_analysis")
+    launcher_module.__file__ = str(launcher)
+    launcher_module.__spec__ = importlib.util.spec_from_loader(
+        "run_matchup_analysis", loader=None
+    )
+    sys.modules["run_matchup_analysis"] = launcher_module
+    try:
+        with pytest.raises(RuntimeError, match="trusted bootstrap records"):
+            cr.begin_load_proof(str(root), launcher_file=str(launcher))
+    finally:
+        sys.modules.pop("run_matchup_analysis", None)
+        cr._LOADED_CODE.clear()
+        cr._LOADED_CODE.update(saved)
+        cr._PROOF_BEGUN = False

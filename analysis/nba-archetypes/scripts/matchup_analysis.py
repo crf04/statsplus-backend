@@ -112,6 +112,14 @@ class FrozenDict(Mapping):
         return dict(self._data)
 
     def __setstate__(self, state):
+        # Pickle reconstructs a fresh instance (``__new__`` only, never
+        # ``__init__``) whose ``_data`` slot is unset; ``__setstate__`` restores
+        # state onto that fresh object. Calling it on a live, already-built
+        # value would be a public unrestricted mutator that could rewrite the
+        # built identity/settings mappings, so it is a one-shot that only ever
+        # initializes a newly unpickled object.
+        if hasattr(self, "_data"):
+            raise TypeError("This mapping is immutable")
         object.__setattr__(self, "_data", MappingProxyType(state))
 
     def _immutable(self, *args, **kwargs):
@@ -966,12 +974,14 @@ class AnalysisRunBuilder:
         provided_settings = settings if settings is not None else DEFAULT_SETTINGS
         if not isinstance(provided_settings, AnalysisRunSettings):
             raise ValueError("settings must be an AnalysisRunSettings instance")
-        # Deep-freeze the settings snapshot at construction: the run id is
-        # versioned against this snapshot and every artifact stage reads the
-        # same immutable mapping, so a caller mutating (or replacing members of)
-        # their own settings object after construction can never desynchronize
-        # the run id from the artifacts it is attributed to.
-        self.settings = copy.deepcopy(provided_settings)
+        # Deep-freeze the settings snapshot into a private immutable slot at
+        # construction: the run id is versioned against this snapshot and every
+        # artifact stage reads the same immutable mapping, so a caller mutating
+        # (or replacing members of) their own settings object after construction
+        # can never desynchronize the run id from the artifacts it is attributed
+        # to, and ``builder.settings`` itself cannot be reassigned (it is a
+        # read-only property with no setter).
+        self._settings = copy.deepcopy(provided_settings)
         self.clustering_attempt = clustering_attempt
         self.code_revision = code_revision
         self.generated_at = generated_at
@@ -994,6 +1004,16 @@ class AnalysisRunBuilder:
         self._run_id = None
         self._run_identity = None
         self._provenance = None
+
+    @property
+    def settings(self) -> AnalysisRunSettings:
+        """The immutable settings snapshot this run is versioned and built from.
+
+        Read-only: the snapshot is a private deep copy captured at construction,
+        and the attribute cannot be reassigned, so later stages can never read a
+        different settings object than the one the run id was derived from.
+        """
+        return self._settings
 
     def load_membership(self):
         if self._membership is not None:

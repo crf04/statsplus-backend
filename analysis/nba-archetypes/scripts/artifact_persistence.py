@@ -9,6 +9,7 @@ and atomic staged publication of a verified artifact set.
 module; the production script and the manifest callers are its only users.
 """
 
+import csv
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,9 @@ import pandas as pd
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
+# pandas silently renames a repeated header field to ``NAME.1``/``NAME.2``; a
+# CSV carrying that mangled form has an ambiguous identity header.
+_MANGLED_IDENTITY_COLUMN = re.compile(r"^(run_id|model_version)\.[0-9]+$", re.IGNORECASE)
 
 # The exact persisted artifact set a published run must contain. A manifest is
 # the publication marker for a complete run, so blessing anything short of this
@@ -158,6 +162,39 @@ def png_text_entries(png_bytes: bytes) -> dict:
     return entries
 
 
+def _reject_ambiguous_csv_identity_header(path) -> None:
+    """Fail closed when a CSV's raw header has duplicate or mangled identity fields.
+
+    pandas silently renames a repeated header field to ``NAME.1``/``NAME.2``, so
+    a CSV carrying two ``RUN_ID`` or ``MODEL_VERSION`` columns would otherwise
+    read only the first while a conflicting second identity (``RUN_ID.1``)
+    slipped past the value check. The raw header is parsed before any values are
+    trusted and rejected when an identity field appears more than once (in any
+    case), or when a pandas-mangled ``.N`` variant of an identity field is
+    present at all.
+    """
+    with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+        try:
+            header = next(csv.reader(handle))
+        except StopIteration:
+            raise ValueError(
+                f"{Path(path).name} is not self-attributing: the CSV has no header"
+            )
+    normalized = [token.upper() for token in header]
+    for identity in ("RUN_ID", "MODEL_VERSION"):
+        if normalized.count(identity) > 1:
+            raise ValueError(
+                f"{Path(path).name} repeats the {identity} identity column; "
+                "refusing to attribute a run to an ambiguous identity header"
+            )
+    for token in header:
+        if _MANGLED_IDENTITY_COLUMN.fullmatch(token):
+            raise ValueError(
+                f"{Path(path).name} carries a mangled identity column {token!r}; "
+                "refusing to attribute a run to an ambiguous identity header"
+            )
+
+
 def _verify_artifact_identity(path, run_id, model_version, name):
     """Fail closed unless a persisted artifact is verifiably attributed to a run.
 
@@ -179,6 +216,7 @@ def _verify_artifact_identity(path, run_id, model_version, name):
         )
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
+        _reject_ambiguous_csv_identity_header(path)
         frame = pd.read_csv(path)
         if not {"RUN_ID", "MODEL_VERSION"}.issubset(frame.columns):
             raise ValueError(
@@ -414,16 +452,18 @@ def _durability_barriers(versioned, versioned_root, target) -> bool:
     """Fsync the new set and pointer before any prior set may be removed.
 
     Ordering: every artifact file's contents are flushed first, then the
-    versioned root (persisting the renamed immutable set), then the published
-    pointer's parent (persisting the flipped symlink). Only after all barriers
-    succeed may the superseded immutable sets be garbage-collected; if any
-    barrier cannot be confirmed (for example on a filesystem that does not
+    installed version directory itself (persisting its artifact entries), then
+    the versioned root (persisting the renamed immutable set), then the
+    published pointer's parent (persisting the flipped symlink). Only after all
+    barriers succeed may the superseded immutable sets be garbage-collected; if
+    any barrier cannot be confirmed (for example on a filesystem that does not
     support directory fsync), the prior set is retained rather than risked.
     """
     try:
         for path in versioned.iterdir():
             if path.is_file():
                 _fsync_path(path)
+        _fsync_directory(versioned)
         _fsync_directory(versioned_root)
         _fsync_directory(target.parent)
     except OSError:
@@ -458,23 +498,27 @@ def _gc_published_runs(versioned_root, target) -> None:
 def publish_artifact_set(staging_dir, output_dir) -> None:
     """Crash-safely replace a published artifact set with a verified staged set.
 
-    ``staging_dir`` must contain every required persisted artifact plus the
-    ``run_identity_manifest.json`` written by ``artifact_manifest``. The staged
-    set is verified here exactly as ``verify_persisted_manifest`` would verify
-    the published directory, so an incomplete, tampered, or falsely attributed
-    staging directory raises and leaves ``output_dir`` untouched.
+    ``staging_dir`` must be a unique per-run/per-process directory containing
+    every required persisted artifact plus the ``run_identity_manifest.json``
+    written by ``artifact_manifest``. The staged set is verified only after it
+    has been moved into the immutable, run-addressed versioned namespace while
+    the publication lock is held, so the bytes that are verified are exactly the
+    bytes that will be installed — no other publisher can reach the moved set to
+    replace it, and a staging path that was mutated by another process fails the
+    post-move verification and leaves ``output_dir`` untouched.
 
     Publication uses immutable versioned directories plus an atomically replaced
-    pointer, serialized across publishers by a cross-process lock. The verified
-    set is first moved into an immutable, run-addressed versioned directory (a
-    sibling ``<name>-runs`` namespace); the externally observed ``output_dir`` is
-    a symlink whose target is swapped in one atomic ``os.replace``. A crash
-    before the swap leaves the previous set fully live; a crash after the swap
+    pointer, serialized across publishers by a cross-process lock. The staged
+    set is first moved into an immutable versioned directory (a sibling
+    ``<name>-runs`` namespace); the externally observed ``output_dir`` is a
+    symlink whose target is swapped in one atomic ``os.replace``. A crash before
+    the swap leaves the previous set fully live; a crash after the swap
     publishes the new set. The old set survives until the new set and pointer
-    are durably committed (every artifact file, the versioned directory, and the
-    pointer's parent directory are fsynced) and the lock is still held, so SIGKILL
-    or power loss can never leave the publication path absent, expose a partially
-    replaced set, or delete the live set while another publisher is mid-swap.
+    are durably committed (every artifact file, the installed version directory,
+    the versioned root, and the pointer's parent directory are fsynced) and the
+    lock is still held, so SIGKILL or power loss can never leave the publication
+    path absent, expose a partially replaced set, or delete the live set while
+    another publisher is mid-swap.
     """
     staging = Path(staging_dir)
     target = Path(output_dir)
@@ -483,9 +527,6 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     manifest_path = staging / "run_identity_manifest.json"
     if not manifest_path.exists():
         raise ValueError(f"Staging is missing the run identity manifest: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text())
-    verify_persisted_manifest(manifest, staging)
-
     if target.exists() and not target.is_symlink():
         raise ValueError(
             f"{target} is a real directory, not a versioned pointer; move it "
@@ -495,16 +536,22 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     versioned_root.mkdir(parents=True, exist_ok=True)
     _run_publish_hook("before_lock")
     with _PublicationLock(versioned_root):
+        manifest = json.loads(manifest_path.read_text())
         run_id = manifest["run_id"]
         sequence = _next_publication_sequence(versioned_root, run_id)
         versioned = versioned_root / f"{run_id}~{sequence}"
         _run_publish_hook("before_version_install")
-        # Atomic move of the fully verified set into the immutable versioned
-        # namespace. Until the pointer swap below, the published path still
-        # resolves to the previous set.
+        # Atomic move of the staged set into the private immutable versioned
+        # namespace, then verification of the moved set under the lock: another
+        # process mutating the staging path after this point cannot inject
+        # unverified bytes, because the moved set is unique to this publication
+        # and unreachable through any shared path. Until the pointer swap below,
+        # the published path still resolves to the previous set.
         os.replace(staging, versioned)
         _run_publish_hook("after_version_install")
         try:
+            verify_persisted_manifest(manifest, versioned)
+            _run_publish_hook("after_verify")
             pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
             os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
             _run_publish_hook("before_pointer_flip")
