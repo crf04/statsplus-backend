@@ -11,13 +11,23 @@
 # `scripts/matchup_analysis.py`; this script is the data/IO shell that feeds it
 # the membership and game-log frames and renders its artifacts.
 
+# ruff: noqa: E402  # the code-revision capture must precede implementation imports
+
 # %%
-import hashlib
 import io
 import json
 from pathlib import Path
-import subprocess
+import shutil
 import time
+
+from code_revision import current_code_revision
+
+# Capture the code snapshot before the implementation modules are imported, so
+# the run id is bound to the exact code Python is about to load rather than to
+# whatever the disk happens to hold after the (potentially long) data fetch or
+# after a later edit. The snapshot is re-checked immediately before publishing,
+# and publication aborts if it moved.
+code_revision = current_code_revision()
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,13 +37,13 @@ from nba_api.stats import endpoints
 
 from artifact_persistence import (
     artifact_manifest,
+    publish_artifact_set,
     stamp_png_identity,
     verify_persisted_manifest,
 )
 from matchup_analysis import (
     AnalysisRunBuilder,
     DEFAULT_SETTINGS,
-    content_hash,
     fail_if_code_changed,
     spec_from_clustering_metadata,
 )
@@ -61,59 +71,6 @@ GAME_LOG_CACHE = CACHE_DIR / "player_game_logs_regular_season.csv"
 
 print(f"Season: {SEASON} {SEASON_TYPE}")
 
-
-def current_code_revision():
-    """Current git revision of the analysis code, including working-tree state.
-
-    A run cannot be attributed to its exact code without a revision, so an
-    undeterminable revision aborts instead of silently recording ``unknown``
-    and letting distinct code share one run id. Uncommitted changes to tracked
-    files and the contents of untracked analysis files also feed the revision,
-    so dirty analysis code never receives the clean HEAD identity.
-    """
-    try:
-        head = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=ROOT,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        tracked_diff = subprocess.check_output(
-            ["git", "diff", "HEAD", "--", "."],
-            cwd=ROOT,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        untracked = subprocess.check_output(
-            ["git", "ls-files", "--others", "--exclude-standard", "."],
-            cwd=ROOT,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except Exception as error:
-        raise RuntimeError(
-            "Could not determine the analysis code revision; refusing to build "
-            "an unattributable run"
-        ) from error
-    untracked_entries = []
-    for relative in untracked.splitlines():
-        path = ROOT / relative
-        try:
-            untracked_entries.append(
-                (relative, hashlib.sha256(path.read_bytes()).hexdigest())
-            )
-        except OSError:
-            untracked_entries.append((relative, "unreadable"))
-    if tracked_diff or untracked_entries:
-        return content_hash(("analysis-code", head, tracked_diff, untracked_entries))
-    return head
-
-
-# Capture the code snapshot before any data is loaded or retrieved, so the run
-# id is bound to the exact code that will be loaded rather than to whatever the
-# disk happens to hold after the (potentially long) data fetch. The snapshot is
-# re-checked immediately before publishing, and publication aborts if it moved.
-code_revision = current_code_revision()
 
 # %% [markdown]
 # ## Load classifications and game logs
@@ -243,15 +200,26 @@ print(payload["validated_volume_interactions"].round(3).to_string(index=False))
 # %%
 artifacts = run.artifacts
 
-summary_path = OUTPUT_DIR / "matchup_summary.csv"
-notable_path = OUTPUT_DIR / "notable_pts_per_min_matchups.csv"
-validated_path = OUTPUT_DIR / "validated_pts_per_min_interactions.csv"
-watchlist_path = OUTPUT_DIR / "descriptive_pts_per_min_watchlist.csv"
-player_relative_path = OUTPUT_DIR / "player_relative_matchups.csv"
-volume_summary_path = OUTPUT_DIR / "volume_matchup_summary.csv"
-validated_volume_path = OUTPUT_DIR / "validated_volume_interactions.csv"
-volume_reliability_path = OUTPUT_DIR / "volume_split_half_reliability.csv"
-player_volume_path = OUTPUT_DIR / "player_relative_volume_matchups.csv"
+# The full artifact set is rendered into a private staging directory and only
+# swapped into place after the code-race check and a complete set verification,
+# so a failure mid-render or a concurrent edit never destroys an
+# already-published run's artifact set or leaves a new manifest beside partially
+# replaced files. The staging directory is a sibling of the published directory
+# so the final swap is an atomic rename.
+staging_dir = OUTPUT_DIR.with_name(OUTPUT_DIR.name + ".staging")
+if staging_dir.exists():
+    shutil.rmtree(staging_dir)
+staging_dir.mkdir(parents=True)
+
+summary_path = staging_dir / "matchup_summary.csv"
+notable_path = staging_dir / "notable_pts_per_min_matchups.csv"
+validated_path = staging_dir / "validated_pts_per_min_interactions.csv"
+watchlist_path = staging_dir / "descriptive_pts_per_min_watchlist.csv"
+player_relative_path = staging_dir / "player_relative_matchups.csv"
+volume_summary_path = staging_dir / "volume_matchup_summary.csv"
+validated_volume_path = staging_dir / "validated_volume_interactions.csv"
+volume_reliability_path = staging_dir / "volume_split_half_reliability.csv"
+player_volume_path = staging_dir / "player_relative_volume_matchups.csv"
 # Every persisted CSV carries the run and model identifiers that produced it on
 # every row, including an identity row for otherwise-empty outputs, so a later
 # reader or the persisted verifier can attribute the file without trusting a
@@ -305,7 +273,9 @@ plt.title(f"{SEASON} shrunken PTS/MIN subtype interactions by opponent")
 plt.xlabel("Opponent")
 plt.ylabel("Scoring subtype")
 plt.tight_layout()
-descriptive_heatmap_path = OUTPUT_DIR / "descriptive_pts_per_min_interaction_heatmap.png"
+descriptive_heatmap_path = (
+    staging_dir / "descriptive_pts_per_min_interaction_heatmap.png"
+)
 save_stamped_png(plt.gcf(), descriptive_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close()
@@ -333,25 +303,25 @@ for axis, (metric, metric_spec) in zip(
     axis.set_ylabel("Scoring subtype")
 fig.suptitle(f"{SEASON} shrunken archetype volume interactions", y=1.01)
 fig.tight_layout()
-volume_heatmap_path = OUTPUT_DIR / "descriptive_volume_interaction_heatmaps.png"
+volume_heatmap_path = staging_dir / "descriptive_volume_interaction_heatmaps.png"
 save_stamped_png(fig, volume_heatmap_path, dpi=180, bbox_inches="tight")
 plt.show()
 plt.close(fig)
 
-# The run id is bound to the code snapshot captured before any data was loaded.
-# The snapshot is re-captured now that every artifact has been computed, and
-# publication aborts if it moved: an edit made while the run was building must
-# not let newer disk code claim an older run's identity.
+# The run id is bound to the code snapshot captured before the implementation
+# modules were imported. The snapshot is re-captured now that every artifact has
+# been computed, and publication aborts if it moved: an edit made while the run
+# was building must not let newer disk code claim an older run's identity.
 fail_if_code_changed(code_revision, current_code_revision())
 
 # Persist one content-addressed identity manifest so every saved artifact is
 # attributable to the exact Analysis Run and archetype model that produced it.
 # Each file is bound to a SHA-256 digest of its persisted bytes and to its own
-# embedded identity, and the manifest is verified before it is written: a file
-# that does not carry this run's identity is rejected rather than blessed. The
-# manifest must cover exactly the required persisted artifact set, and it is
-# published last and atomically, so an interrupted run never leaves a manifest
-# that makes an incomplete set look published.
+# embedded identity, and the staged set is verified before it is published: a
+# file that does not carry this run's identity is rejected rather than blessed.
+# The manifest must cover exactly the required persisted artifact set, and the
+# verified staging directory is swapped in atomically, so an interrupted or
+# failed run never leaves the old manifest beside mixed/new files.
 saved_paths = {
     "matchup_summary": summary_path,
     "notable_matchups": notable_path,
@@ -366,14 +336,15 @@ saved_paths = {
     "descriptive_volume_interaction_heatmaps": volume_heatmap_path,
 }
 run_manifest = artifact_manifest(run, saved_paths)
-verify_persisted_manifest(run_manifest, OUTPUT_DIR)
-manifest_path = OUTPUT_DIR / "run_identity_manifest.json"
-manifest_tmp = manifest_path.with_name(manifest_path.name + ".tmp")
-manifest_tmp.write_text(json.dumps(run_manifest, indent=2, sort_keys=True))
-manifest_tmp.replace(manifest_path)
+verify_persisted_manifest(run_manifest, staging_dir)
+(staging_dir / "run_identity_manifest.json").write_text(
+    json.dumps(run_manifest, indent=2, sort_keys=True)
+)
+publish_artifact_set(staging_dir, OUTPUT_DIR)
 
-for path in list(saved_paths.values()) + [manifest_path]:
-    print(f"Saved {path}")
+for name, path in saved_paths.items():
+    print(f"Saved {OUTPUT_DIR / Path(path).name}")
+print(f"Saved {OUTPUT_DIR / 'run_identity_manifest.json'}")
 
 # %% [markdown]
 # ## Interpretation guardrails

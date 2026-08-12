@@ -485,14 +485,39 @@ def _freeze_fit_arrays(value, _seen=None):
             _freeze_fit_arrays(item, _seen)
 
 
+class _ImmutableArray(np.ndarray):
+    """Read-only numpy array that cannot be made writable again.
+
+    numpy's ``writeable`` flag alone is not enough for a published snapshot: a
+    caller can re-enable writes with ``setflags(write=True)`` and mutate the
+    stored data in place. This subclass rejects re-enabling writes and direct
+    element writes, so a ``FrozenFitResult`` array stays unchanged however it
+    is reached. Read operations (indexing, arithmetic, copies, pandas
+    conversion) behave exactly like a plain read-only array.
+    """
+
+    __slots__ = ()
+
+    def __array_finalize__(self, obj):
+        pass
+
+    def setflags(self, write=None, align=None, uic=None):
+        if write is True:
+            raise ValueError("This array is read-only")
+        return np.ndarray.setflags(self, write=write, align=align, uic=uic)
+
+    def __setitem__(self, key, value):
+        raise ValueError("This array is read-only")
+
+
 @dataclass(frozen=True)
 class FrozenFitResult:
     """Immutable snapshot of a fitted regression result, safe to publish.
 
     The live statsmodels result used during a build is replaced by this
     snapshot when an ``AnalysisRun`` is constructed, so no published property
-    exposes mutable fit state: neither in-place array writes nor attribute
-    reassignment can change a run's recorded fits.
+    exposes mutable fit state: neither in-place array writes, nor re-enabling
+    array writes, nor attribute reassignment can change a run's recorded fits.
     """
 
     params: np.ndarray
@@ -512,7 +537,7 @@ class FrozenFitResult:
                 raise ValueError(f"{name} must be a numpy array")
             frozen = value.copy()
             frozen.setflags(write=False)
-            object.__setattr__(self, name, frozen)
+            object.__setattr__(self, name, frozen.view(_ImmutableArray))
         for name in ("df_resid", "df_model", "nobs"):
             object.__setattr__(self, name, float(getattr(self, name)))
 
@@ -932,6 +957,14 @@ class AnalysisRunBuilder:
     def load_membership(self):
         if self._membership is not None:
             return self._membership
+        if self.archetypes["PLAYER_ID"].isna().any() or self.archetypes[
+            "SUBTYPE_ID"
+        ].isna().any():
+            raise ValueError(
+                "Each classified player must carry a non-null PLAYER_ID and "
+                "SUBTYPE_ID; a null identifier would violate complete "
+                "exactly-once membership"
+            )
         if self.archetypes["PLAYER_ID"].duplicated().any():
             raise ValueError(
                 "Stable subtype membership keys would collide: each classified player "

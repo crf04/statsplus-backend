@@ -2,13 +2,17 @@
 
 This module owns everything the Analysis Run persistence path needs that is
 not statistical modeling or identity construction: PNG identity stamping and
-strict PNG structure verification, self-attributing CSV/PNG checks, and the
-content-addressed persisted-artifact manifest plus its fail-closed verifier.
+strict PNG structure verification, self-attributing CSV/PNG checks, the
+content-addressed persisted-artifact manifest plus its fail-closed verifier,
+and atomic staged publication of a verified artifact set.
 ``AnalysisRunBuilder`` in ``matchup_analysis.py`` does not reach into this
 module; the production script and the manifest callers are its only users.
 """
 
 import hashlib
+import json
+import os
+import shutil
 import struct
 import zlib
 from pathlib import Path
@@ -126,8 +130,8 @@ def _verify_artifact_identity(path, run_id, model_version, name):
     CSVs must be non-empty and carry ``RUN_ID``/``MODEL_VERSION`` values equal
     to the run's on every row (empty CSVs still embed an identity row), and
     PNGs must be structurally valid and embed the run identity in tEXt chunks.
-    A file that cannot be positively attributed is rejected rather than
-    blessed.
+    Any other file type cannot carry run identity and is rejected, so a
+    misnamed or identity-less file is never silently blessed.
     """
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
@@ -160,6 +164,11 @@ def _verify_artifact_identity(path, run_id, model_version, name):
             raise ValueError(
                 f"Artifact {name} ({Path(path).name}) does not embed this run's identity"
             )
+    else:
+        raise ValueError(
+            f"Artifact {name} ({Path(path).name}) is not a supported artifact "
+            "type: only .csv and .png files can carry run identity"
+        )
 
 
 def artifact_manifest(run, artifact_paths: dict) -> dict:
@@ -254,3 +263,42 @@ def verify_persisted_manifest(manifest: dict, output_dir) -> None:
         _verify_artifact_identity(
             path, manifest["run_id"], manifest["model_version"], name
         )
+
+
+def publish_artifact_set(staging_dir, output_dir) -> None:
+    """Atomically replace a published artifact set with a verified staged set.
+
+    ``staging_dir`` must contain every required persisted artifact plus the
+    ``run_identity_manifest.json`` written by ``artifact_manifest``. The staged
+    set is verified here exactly as ``verify_persisted_manifest`` would verify
+    the published directory, so an incomplete, tampered, or falsely attributed
+    staging directory raises and leaves ``output_dir`` untouched. Only a fully
+    verified set is then swapped in atomically: the previously published set
+    stays intact until the swap, so an aborted publication never leaves the old
+    manifest beside a partially replaced file set, and the manifest (the
+    publication marker) is swapped with the set rather than written over a
+    partially replaced directory.
+    """
+    staging = Path(staging_dir)
+    target = Path(output_dir)
+    if not staging.is_dir():
+        raise FileNotFoundError(f"Staging directory is missing: {staging}")
+    manifest_path = staging / "run_identity_manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(f"Staging is missing the run identity manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    verify_persisted_manifest(manifest, staging)
+
+    backup = target.with_name(target.name + ".previous")
+    if backup.exists():
+        shutil.rmtree(backup)
+    if target.exists():
+        os.replace(target, backup)
+    try:
+        os.replace(staging, target)
+    except BaseException:
+        if backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)

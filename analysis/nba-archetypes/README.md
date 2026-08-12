@@ -19,8 +19,11 @@ runtime code.
   outcomes, scoring and volume fits, artifact assembly, dashboard payload) and
   the identity value objects.
 - `scripts/artifact_persistence.py` — PNG identity stamping and strict PNG
-  structure verification, self-attributing artifact checks, and the
-  content-addressed persisted-artifact manifest and its verifier.
+  structure verification, self-attributing artifact checks, the
+  content-addressed persisted-artifact manifest and its verifier, and atomic
+  staged publication of a verified artifact set.
+- `scripts/code_revision.py` — stdlib-only code-revision snapshot that the
+  matchup script captures before importing the implementation modules.
 - `archetypes_data/<season>/` — cached provider inputs.
 - `archetypes_outputs/<season>/` — assignments, profiles, diagnostics, matchup
   tables, sensitivity tests, and figures.
@@ -129,10 +132,12 @@ production fails closed when the git revision cannot be determined, so distinct
 unversioned code cannot share a run id. The production revision also folds in
 the working-tree state (uncommitted tracked changes and the contents of
 untracked analysis files), so dirty analysis code never receives the clean HEAD
-identity. The script captures that revision **before** loading or fetching any
-data and re-captures it immediately before persisting; if the code changed
-while the run was being built, publication aborts rather than attribute a newer
-disk snapshot to an older loaded-code identity. The generation time defaults to
+identity. The script captures that revision **before importing the
+implementation modules** — so the recorded revision always matches the exact
+code Python loaded, not whatever the disk holds after a later edit — and
+re-captures it immediately before persisting; if the code changed while the run
+was being built, publication aborts rather than attribute a newer disk snapshot
+to an older loaded-code identity. The generation time defaults to
 the wall clock but is injectable (`generated_at`) so a fully pinned build is
 reproducible; it never feeds the deterministic identity hashes.
 `clustering_attempt` must be a positive integer (booleans, zero, negatives, and
@@ -151,18 +156,20 @@ rather than trusted. `AnalysisRun` is a frozen dataclass whose frames, series,
 and dicts are stored as defensive deep copies — including object-valued
 DataFrame cells holding dicts, lists, sets, arrays, or custom Mappings — and
 re-exposed as copies, and published fits are immutable snapshots of the live
-statsmodels results (neither in-place array writes nor attribute reassignment
-can change them), so no post-build mutation can alter a run's captured state.
-`RunProvenance` and `RunIdentity` reject every in-place mutation of their hash
-maps (including `|=`), and `FrozenDict` is a read-only `Mapping` over a
+statsmodels results whose arrays cannot be re-enabled for writing
+(`setflags(write=True)` is rejected), so neither in-place array writes, nor
+attribute reassignment, nor re-enabling writes can change a run's recorded
+fits. `RunProvenance` and `RunIdentity` reject every in-place mutation of their
+hash maps (including `|=`), and `FrozenDict` is a read-only `Mapping` over a
 read-only backing proxy, so even the private `_data` attribute cannot be
 written through. Stable subtype membership keys are content hashes of each
 subtype's sorted member IDs, so they are invariant under arbitrary
-cluster-label permutation; the builder rejects overlapping or colliding
-membership. Matrix rows and subtype labels always derive from the run's
-complete model membership — a membership subtype with no usable games is still
-an explicit all-missing heatmap row — while eligible-cell counts derive from
-actual game data.
+cluster-label permutation; the builder rejects overlapping, colliding, or
+null-identified membership (a classified player must carry a non-null
+`PLAYER_ID` and `SUBTYPE_ID`). Matrix rows and subtype labels always derive from
+the run's complete model membership — a membership subtype with no usable games
+is still an explicit all-missing heatmap row — while eligible-cell counts derive
+from actual game data.
 
 When the matchup script persists artifacts, every CSV is written with `RUN_ID`
 and `MODEL_VERSION` values on every row (including an identity row for
@@ -171,11 +178,15 @@ run identity in tEXt chunks, so each file is self-attributing.
 `artifact_manifest()` refuses to bless a file that does not carry the run's
 identity, and it requires exactly the complete required persisted artifact set
 — missing, unexpected, or duplicate files are rejected, so an incomplete run
-cannot get a manifest. `run_identity_manifest.json` records a SHA-256 content
-digest for every saved file (CSV and PNG) in addition to the run identity, and
-it is published last and atomically (temp file then rename) so readers only
-ever see either no manifest or a complete verified one.
-`verify_persisted_manifest()` then fails closed if any recorded file is
+cannot get a manifest. Only `.csv` and `.png` files can carry run identity; any
+other file type is rejected rather than silently accepted.
+`run_identity_manifest.json` records a SHA-256 content digest for every saved
+file (CSV and PNG) in addition to the run identity. The whole set is rendered
+into a private staging directory, verified there, and swapped into the
+published directory atomically (`publish_artifact_set()`), so a failure during
+rendering or a concurrent code edit never destroys an already-published run's
+artifact set and the old manifest is never left beside partially replaced
+files. `verify_persisted_manifest()` then fails closed if any recorded file is
 missing, has been replaced, no longer embeds the manifest's identity, or if the
 recorded set is partial or contains duplicate filenames. PNG identity parsing
 and the manifest live in `scripts/artifact_persistence.py`, separated from the

@@ -10,7 +10,9 @@ instead of source text or dataframe implementations.
 import hashlib
 import json
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import zlib
@@ -31,6 +33,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from artifact_persistence import (  # noqa: E402
     artifact_manifest,
     png_text_entries,
+    publish_artifact_set,
     stamp_png_identity,
     verify_persisted_manifest,
 )
@@ -396,6 +399,37 @@ def test_membership_boundary_rejects_ambiguous_subtype_name():
     builder = build_builder(broken, game_logs)
     with pytest.raises(ValueError):
         builder.build()
+
+
+def test_membership_rejects_null_player_identifier():
+    archetypes, game_logs = synthetic_fixture()
+    incomplete = pd.concat(
+        [
+            archetypes,
+            pd.DataFrame(
+                [
+                    {
+                        "PLAYER_ID": None,
+                        "PLAYER_NAME": "Ghost Player",
+                        "ARCHETYPE": "Finisher",
+                        "SUBTYPE_ID": 100,
+                        "SUBTYPE_ARCHETYPE": "Rim Pressure",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="PLAYER_ID"):
+        build_builder(incomplete, game_logs).build()
+
+
+def test_membership_rejects_null_subtype_assignment():
+    archetypes, game_logs = synthetic_fixture()
+    incomplete = archetypes.copy()
+    incomplete.loc[incomplete["PLAYER_ID"] == "P001", "SUBTYPE_ID"] = None
+    with pytest.raises(ValueError, match="SUBTYPE_ID"):
+        build_builder(incomplete, game_logs).build()
 
 
 def test_prepared_logs_derive_exact_outcomes():
@@ -1132,6 +1166,21 @@ def test_fit_objects_published_by_analysis_run_are_immutable():
     )
 
 
+def test_published_fit_arrays_cannot_be_made_writable_again():
+    run = build_run()
+    fit = run.scoring_fits["points_fit"]["fit"]
+    for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
+        array = getattr(fit, name)
+        original = array.copy()
+        with pytest.raises(ValueError):
+            array.setflags(write=True)
+        with pytest.raises(ValueError):
+            array[0] = 999
+        with pytest.raises(ValueError):
+            array += 1
+        np.testing.assert_array_equal(getattr(fit, name), original)
+
+
 def test_defensive_copy_closes_object_valued_cells():
     source = {
         "frame": pd.DataFrame({"notes": [["a"], {"b": 1}], "value": [1, 2]})
@@ -1479,6 +1528,48 @@ def test_fail_if_code_changed_guards_mixed_snapshots():
         fail_if_code_changed("rev-a", "rev-b")
 
 
+def test_code_revision_is_a_stable_digest_of_analysis_disk_state(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git is not available")
+    from code_revision import current_code_revision
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "analysis_code.txt"
+    tracked.write_text("v1\n")
+    subprocess.run(["git", "add", "analysis_code.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    baseline = current_code_revision(tmp_path)
+    assert re.fullmatch(r"[0-9a-f]{40}", baseline)
+    assert current_code_revision(tmp_path) == baseline
+
+    tracked.write_text("v1\nv2\n")
+    dirty = current_code_revision(tmp_path)
+    assert dirty != baseline
+    assert re.fullmatch(r"[0-9a-f]{64}", dirty)
+    subprocess.run(["git", "checkout", "-q", "--", "."], cwd=tmp_path, check=True)
+    assert current_code_revision(tmp_path) == baseline
+
+    untracked = tmp_path / "untracked_inputs.csv"
+    untracked.write_text("a,b\n1,2\n")
+    assert current_code_revision(tmp_path) != baseline
+    untracked.unlink()
+    assert current_code_revision(tmp_path) == baseline
+
+
 def test_artifact_manifest_rejects_empty_and_incomplete_graphs():
     run = build_run()
     with tempfile.TemporaryDirectory() as tmp:
@@ -1541,6 +1632,110 @@ def test_artifact_manifest_rejects_header_only_csv():
         header_only.write_text("RUN_ID,MODEL_VERSION\n")
         with pytest.raises(ValueError, match="no rows"):
             artifact_manifest(run, paths)
+
+
+def write_staged_set(staging_dir, run):
+    """Stage a complete verified artifact set plus its identity manifest."""
+    paths = write_full_artifact_set(staging_dir, run)
+    manifest = artifact_manifest(run, paths)
+    (staging_dir / "run_identity_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True)
+    )
+    return manifest
+
+
+def test_publish_artifact_set_swaps_verified_staged_set():
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    assert run_a.run_id != run_b.run_id
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        manifest_a = write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+        verify_persisted_manifest(manifest_a, output)
+        assert (output / "run_identity_manifest.json").exists()
+
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        manifest_b = write_staged_set(staging_b, run_b)
+        publish_artifact_set(staging_b, output)
+        verify_persisted_manifest(manifest_b, output)
+        persisted = json.loads((output / "run_identity_manifest.json").read_text())
+        assert persisted["run_id"] == run_b.run_id
+
+
+def test_publish_artifact_set_preserves_previous_set_when_staging_fails():
+    run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
+    run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "matchups"
+        staging_a = root / "stage_a"
+        staging_a.mkdir()
+        manifest_a = write_staged_set(staging_a, run_a)
+        publish_artifact_set(staging_a, output)
+
+        staging_b = root / "stage_b"
+        staging_b.mkdir()
+        write_staged_set(staging_b, run_b)
+        (staging_b / "matchup_summary.csv").write_text("tampered\n1\n")
+        with pytest.raises(ValueError, match="does not match its recorded digest"):
+            publish_artifact_set(staging_b, output)
+        verify_persisted_manifest(manifest_a, output)
+        assert (output / "run_identity_manifest.json").read_text() == json.dumps(
+            manifest_a, indent=2, sort_keys=True
+        )
+
+
+def test_publish_artifact_set_rejects_missing_manifest():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        staging = root / "stage"
+        staging.mkdir()
+        write_full_artifact_set(staging, run)
+        with pytest.raises(ValueError, match="manifest"):
+            publish_artifact_set(staging, root / "matchups")
+
+
+def test_artifact_manifest_rejects_unsupported_file_types():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        paths = {}
+        for name in PERSISTED_ARTIFACTS:
+            path = directory / f"{name}.bin"
+            path.write_bytes(b"not a csv or png")
+            paths[name] = path
+        with pytest.raises(ValueError, match="supported"):
+            artifact_manifest(run, paths)
+
+
+def test_verify_persisted_manifest_rejects_unsupported_file_types():
+    run = build_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        crafted = {
+            "run_id": run.run_id,
+            "model_version": run.model_version,
+            "stable_subtype_keys": {
+                str(key): value for key, value in run.stable_subtype_keys.items()
+            },
+            "provenance": run.provenance.to_dict(),
+            "artifacts": {},
+        }
+        for name in PERSISTED_ARTIFACTS:
+            path = directory / f"{name}.bin"
+            path.write_bytes(b"not a csv or png")
+            crafted["artifacts"][name] = {
+                "file": f"{name}.bin",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        with pytest.raises(ValueError, match="supported"):
+            verify_persisted_manifest(crafted, directory)
 
 
 def test_png_text_entries_rejects_missing_iend():
