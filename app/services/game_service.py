@@ -150,6 +150,7 @@ class GameService:
         redis_client=None,
         settings: RuntimeSettings | None = None,
         nba_stats_adapter: NBAStatsProvider | None = None,
+        game_logs_source=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -158,6 +159,11 @@ class GameService:
         # Synchronous provider adapter that bounds concurrent stats.nba.com
         # calls with the configured NBA_STATS_MAX_CONCURRENCY limit (#10).
         self.nba_stats = nba_stats_adapter or NBAStatsAdapter(settings=self.settings)
+
+        # Request-time game-log source.  Production injects the PBP-backed or
+        # database-first source; tests may leave it unset to exercise the
+        # legacy NBA fallback path.
+        self.game_logs_source = game_logs_source
 
         # Initialize cache
         if redis_client is None:
@@ -188,8 +194,18 @@ class GameService:
         return self.cache.cache_daily_nba_data()
 
     def _get_game_logs(self, player_name, season=None):
-        """Get game logs with daily caching - only hits NBA API once per day"""
+        """Get game logs with daily caching - only hits the source once per day"""
         season = season or self.settings.nba.current_season
+        if self.game_logs_source is not None and not self.game_logs_source.cached(
+            season
+        ):
+            # A durably complete season is served straight from the database;
+            # Redis caching would only shadow the fresher stored facts.
+            return self._fetch_game_logs_from_api(
+                player_name,
+                season,
+                cache_status=CACHE_DISABLED,
+            )
         cache_status = (
             CACHE_DISABLED
             if not self.cache or not self.cache.enabled
@@ -222,12 +238,15 @@ class GameService:
             # Check cache first
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
-                logger.debug(f"Cache hit for player logs: {player_name}, {season} (avoiding NBA API call)")
-                self.nba_stats.record_cache_hit("player_game_logs")
+                logger.debug(f"Cache hit for player logs: {player_name}, {season} (avoiding provider call)")
+                if self.game_logs_source is not None:
+                    self.game_logs_source.record_cache_hit("player_game_logs")
+                else:
+                    self.nba_stats.record_cache_hit("player_game_logs")
                 return cached_result
 
-            # Cache miss - make NBA API call
-            logger.info(f"Cache miss for player logs: {player_name}, {season} - making NBA API call")
+            # Cache miss - make provider call
+            logger.info(f"Cache miss for player logs: {player_name}, {season} - making provider call")
             result = self._fetch_game_logs_from_api(
                 player_name, season, cache_status=CACHE_MISS
             )
@@ -257,7 +276,12 @@ class GameService:
         self, player_name, season=None, *, cache_status=CACHE_DISABLED
     ):
         season = season or self.settings.nba.current_season
-        player_id = self.get_player_id(player_name)
+        player_id = int(self.get_player_id(player_name))
+
+        if self.game_logs_source is not None:
+            return self.game_logs_source.get_player_logs(
+                player_id, season, cache_status=cache_status
+            ), None
 
         if hasattr(self.nba_stats, "fetch_player_game_logs"):
             gamelogs = self.nba_stats.fetch_player_game_logs(
@@ -432,7 +456,7 @@ class GameService:
         if not full_game_logs.empty:
             season_averages = full_game_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
-        filtered_logs.drop(['PLAYER_NAME', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
+        filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
 
         result = GameLogResponse(

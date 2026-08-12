@@ -20,12 +20,13 @@ from app.config.settings import load_settings  # noqa: E402
 from app.domain.freshness import time_window_timedelta  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
 from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
+from app.providers.pbp_game_logs import PBPGameLogAdapter  # noqa: E402
 from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
 from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
+from app.services.player_game_log_ingest import PlayerGameLogIngestService  # noqa: E402
 from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
-from app.services.player_game_log_service import PlayerGameLogService  # noqa: E402
 from app.services.player_diet import PlayerDietService  # noqa: E402
 from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
 from app.services.stats_freshness_repository import (  # noqa: E402
@@ -116,13 +117,16 @@ def _run(database_url: str) -> int:
                 field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
             ),
         )
-        player_game_log_service = PlayerGameLogService(
-            nba_stats_provider=provider,
+        player_game_log_ingest_service = PlayerGameLogIngestService(
+            pbp_provider=PBPGameLogAdapter(settings=settings),
             repository=player_game_log_repository,
             athlete_catalog=athlete_service,
             event_catalog=event_service,
             minimum_active_players_per_team_game=(
                 settings.catalog.player_game_log_min_active_players_per_team_game
+            ),
+            reconciliation_days=(
+                settings.catalog.player_game_log_reconciliation_days
             ),
         )
         player_diet_service = PlayerDietService(
@@ -146,7 +150,7 @@ def _run(database_url: str) -> int:
                 settings.nba.current_season
             ).status
             == "succeeded",
-            refresh_player_game_logs=lambda: player_game_log_service.refresh(
+            refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(
                 settings.nba.current_season
             ),
             refresh_player_diets=lambda: player_diet_service.refresh(

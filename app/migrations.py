@@ -278,6 +278,56 @@ def _share_injury_source_snapshots(connection: Connection) -> None:
         )
 
 
+def _upgrade_player_game_log_primitives(connection: Connection) -> None:
+    """Expand durable game logs to the full legacy primitive set (#66).
+
+    Migration 011 created the player-game facts with the subset the Matchups
+    surface consumed.  The staged PBP migration adds every primitive the legacy
+    endpoint needs, plus per-game synchronization evidence and an explicit
+    complete/in-progress publication status on the season sidecar.  Existing
+    rows are retained with zero counts for the new fields; a fresh database
+    already carries the full model schema and skips the additions.
+    """
+    from app.models.player_game_log import PlayerGameLogSync
+
+    PlayerGameLogSync.__table__.create(connection, checkfirst=True)
+    preparer = connection.dialect.identifier_preparer
+    logs_table = preparer.quote("player_game_logs")
+    existing_logs = {
+        column["name"]
+        for column in inspect(connection).get_columns("player_game_logs")
+    }
+    additions = {
+        "free_throws_made": "INTEGER NOT NULL DEFAULT 0",
+        "free_throws_attempted": "INTEGER NOT NULL DEFAULT 0",
+        "offensive_rebounds": "INTEGER NOT NULL DEFAULT 0",
+        "defensive_rebounds": "INTEGER NOT NULL DEFAULT 0",
+        "personal_fouls": "INTEGER NOT NULL DEFAULT 0",
+        "plus_minus": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, type_sql in additions.items():
+        if name in existing_logs:
+            continue
+        connection.execute(
+            text(
+                f"ALTER TABLE {logs_table} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            )
+        )
+    refreshes_table = preparer.quote("player_game_log_refreshes")
+    existing_refreshes = {
+        column["name"]
+        for column in inspect(connection).get_columns("player_game_log_refreshes")
+    }
+    if "publication_status" not in existing_refreshes:
+        connection.execute(
+            text(
+                f"ALTER TABLE {refreshes_table} ADD COLUMN "
+                "publication_status VARCHAR(16) NOT NULL DEFAULT 'complete'"
+            )
+        )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -298,6 +348,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(13, "013_create_player_diet_facts", _create_player_diet_fact_tables),
     Migration(14, "014_create_injury_snapshots", _create_injury_snapshot_table),
     Migration(15, "015_share_injury_source_snapshots", _share_injury_source_snapshots),
+    Migration(
+        16,
+        "016_pbp_game_log_primitives",
+        _upgrade_player_game_log_primitives,
+    ),
 )
 
 

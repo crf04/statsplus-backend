@@ -13,6 +13,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     calls = []
     provider = object()
     pbp_provider = object()
+    pbp_log_provider = object()
     catalog = object()
     stats_freshness = object()
     player_log_repository = object()
@@ -47,6 +48,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         catalog=SimpleNamespace(
             player_game_log_max_age_hours=30,
             player_game_log_min_active_players_per_team_game=5,
+            player_game_log_reconciliation_days=3,
         ),
     )
 
@@ -83,13 +85,14 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         }
         return player_log_repository
 
-    def build_log_service(**kwargs):
+    def build_ingest_service(**kwargs):
         assert kwargs == {
-            "nba_stats_provider": provider,
+            "pbp_provider": pbp_log_provider,
             "repository": player_log_repository,
             "athlete_catalog": athlete_service,
             "event_catalog": event_service,
             "minimum_active_players_per_team_game": 5,
+            "reconciliation_days": 3,
         }
         return player_log_service
 
@@ -124,6 +127,9 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         nightly_refresh, "PBPStatsAdapter", lambda **kwargs: pbp_provider
     )
     monkeypatch.setattr(
+        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider
+    )
+    monkeypatch.setattr(
         nightly_refresh,
         "StatsFreshnessRepository",
         lambda actual_engine: stats_freshness,
@@ -139,8 +145,8 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     )
     monkeypatch.setattr(
         nightly_refresh,
-        "PlayerGameLogService",
-        build_log_service,
+        "PlayerGameLogIngestService",
+        build_ingest_service,
     )
     monkeypatch.setattr(
         nightly_refresh,

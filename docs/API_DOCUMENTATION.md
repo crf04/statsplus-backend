@@ -797,6 +797,18 @@ array contains one object per game, and `averages` / `season_averages` are
 arrays holding a single averages object; all three fields are ordinary JSON
 arrays, never JSON strings.
 
+Provider migration (#66): the request-time game-log source is PBP Stats, not
+`stats.nba.com`. Each row joins the governed Event Catalog by game ID to
+recover team/opponent identity, home/away, and the `TEAM vs. OPP` / `TEAM @ OPP`
+Matchup notation; unjoinable rows are rejected rather than guessed. The HTTP
+parameters, success payload, filter vocabulary, authentication, error schema,
+and Redis caching behavior are unchanged, and cache telemetry is attributed to
+PBP Stats. A season with a complete, valid durable publication is served
+database-first from the stored `player_game_logs` facts with identical values;
+any other valid season continues through the cached live PBP path. Both paths
+return the same whole-minute presentation and the same composite/fantasy
+averages.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
@@ -926,15 +938,26 @@ The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
 endpoint. It refreshes the stats tables, current-season Event Catalog,
 current-season Athlete Catalog, durable current-season player game logs,
 Season player Diet facts, and then team matchup facts,
-retrying that ordered unit once. The player-log step uses exactly two
-season-wide provider reads—one `Regular Season`, one `Playoffs`—and publishes
-their normalized player/game facts plus the season sidecar as one transaction.
-For the configured current season, that transaction
+retrying that ordered unit once. The player-log step uses the PBP-based
+incremental ingestion: it discovers governed completed `Regular Season` and
+`Playoffs` games and requests one PBP per-game player observation per missing
+game, plus a bounded recent-game reconciliation window
+(`PLAYER_GAME_LOG_RECONCILIATION_DAYS`, default three days) that atomically
+replaces a game's rows when upstream stat corrections change its checksum.
+Each game must cover both exact teams with at least
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players and
+is published atomically with per-game synchronization evidence; an unchanged
+game is idempotently skipped. A malformed, incomplete, identity-removing, or
+provider-failed game preserves prior facts and fails the refresh.
+For the configured current season, every game publication
 also advances the named `player_game_logs` stats freshness; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. Every result requires a present, fresh, nonempty Event
 Catalog whose freshness count agrees with its actual season rows; a nonempty
 result also requires a present, fresh, nonempty Athlete Catalog.
+The season sidecar carries an explicit `complete`/`in_progress`
+`publication_status`; a season serves database-first game-log reads only when
+its publication is complete and valid.
 `update_database` does not
 publish the season-owned Athlete Catalog or its freshness, so Nightly's named
 Athlete Catalog step is required. Schedule precedes that step, so an Athlete
