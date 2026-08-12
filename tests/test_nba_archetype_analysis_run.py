@@ -2385,11 +2385,13 @@ def test_publish_durability_barriers_precede_garbage_collection(monkeypatch):
         assert max(dir_indices) < gc_index
 
 
-def test_publish_retains_prior_set_when_durability_cannot_be_confirmed(monkeypatch):
-    # If a durability barrier cannot be completed (for example a filesystem that
-    # rejects directory fsync), the prior immutable set must be retained rather
-    # than risked: garbage collection only runs after the new set and pointer
-    # are durably committed.
+def test_publish_aborts_when_set_durability_cannot_be_confirmed(monkeypatch):
+    # Reproduction of the round-10 finding: when a durability barrier could not
+    # be completed (for example a filesystem that rejects directory fsync),
+    # ``_fsync_artifact_set`` reported ``False`` but publication still flipped
+    # the pointer onto the non-durable set. Publication now aborts before the
+    # pointer is created or flipped: the old live pointer is preserved, the
+    # non-durable installed set is removed, and no garbage collection runs.
     run_a = build_builder(*synthetic_fixture(), code_revision="rev-a").build()
     run_b = build_builder(*synthetic_fixture(), code_revision="rev-b").build()
     with tempfile.TemporaryDirectory() as tmp:
@@ -2397,7 +2399,7 @@ def test_publish_retains_prior_set_when_durability_cannot_be_confirmed(monkeypat
         output = root / "matchups"
         staging_a = root / "stage_a"
         staging_a.mkdir()
-        write_staged_set(staging_a, run_a)
+        manifest_a = write_staged_set(staging_a, run_a)
         publish_artifact_set(staging_a, output)
 
         def broken_fsync(path):
@@ -2406,13 +2408,17 @@ def test_publish_retains_prior_set_when_durability_cannot_be_confirmed(monkeypat
         monkeypatch.setattr(artifact_persistence_module, "_fsync_directory", broken_fsync)
         staging_b = root / "stage_b"
         staging_b.mkdir()
-        manifest_b = write_staged_set(staging_b, run_b)
-        publish_artifact_set(staging_b, output)
+        write_staged_set(staging_b, run_b)
+        with pytest.raises(OSError, match="durability could not be confirmed"):
+            publish_artifact_set(staging_b, output)
 
+        # The old live pointer is preserved and points at the one surviving
+        # immutable set; the aborted set was removed and nothing was GC'd.
+        verify_persisted_manifest(manifest_a, output)
         versioned_root = root / "matchups-runs"
         sets = [entry for entry in versioned_root.iterdir() if entry.is_dir()]
-        assert len(sets) == 2, [entry.name for entry in versioned_root.iterdir()]
-        verify_persisted_manifest(manifest_b, output)
+        assert len(sets) == 1, [entry.name for entry in versioned_root.iterdir()]
+        assert output.resolve() == sets[0].resolve()
 
 
 def test_durability_barriers_fsync_versioned_directory_before_pointer_parent(tmp_path, monkeypatch):
@@ -3345,3 +3351,79 @@ def test_publish_rejects_escaped_run_id_before_any_movement(tmp_path):
     assert not output.exists()
     versioned_root = root / "matchups-runs"
     assert list(versioned_root.iterdir()) == []
+
+
+# --- Round-10 regression tests (issue 71 final review convergence) -----------
+
+
+def test_rebuild_after_cached_artifacts_rejects_model_spec_swap():
+    # Reproduction of the round-10 finding: after a first build, replacing
+    # ``_model_spec`` through the instance dict and building again returned the
+    # cached artifacts before ``_require_identity``, producing
+    # ``run.model_version != run.model_spec.version``. Every build now
+    # validates final identity consistency before combining any cached state,
+    # so the swap is rejected even though every stage would return cached data.
+    archetypes, game_logs = synthetic_fixture()
+    model_spec = make_model_spec(archetypes, game_logs)
+    builder = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        code_revision="rev-1",
+    )
+    first = builder.build()
+    assert first.model_spec is model_spec
+    assert first.model_version == model_spec.version
+    control = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        code_revision="rev-1",
+    ).build()
+    assert builder.build().run_id == control.run_id
+
+    other_spec = make_model_spec(archetypes, game_logs, season="2024-25")
+    builder.__dict__["_model_spec"] = other_spec
+    with pytest.raises(ValueError, match="changed after construction"):
+        builder.build()
+
+
+def test_cached_stage_rejects_temporary_settings_poisoning():
+    # Reproduction of the round-10 finding: recording provenance under settings
+    # A, swapping ``_settings`` through the instance dict to B, calling a stage
+    # that derives (and caches) data, then restoring A let the final settings
+    # hash pass while the cached scoring/artifacts reflected B under A's run id.
+    # Every stage that can compute/cache derived data now checks the immutable
+    # identity state first, so the temporary mismatch fails immediately and
+    # cannot poison the caches.
+    archetypes, game_logs = synthetic_fixture()
+    settings_a = AnalysisRunSettings()
+    builder = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings_a
+    )
+    builder.record_provenance()
+    expected_run_id = builder._run_id
+    settings_b = AnalysisRunSettings(
+        min_cell_players=1,
+        min_cell_games=1,
+        min_cell_offensive_teams=1,
+    )
+    builder.__dict__["_settings"] = settings_b
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.prepare_logs()
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.fit_scoring()
+    with pytest.raises(ValueError, match="settings changed after construction"):
+        builder.fit_volume()
+
+    builder.__dict__["_settings"] = settings_a
+    run = builder.build()
+    assert run.run_id == expected_run_id
+    control = build_builder(
+        archetypes, game_logs, code_revision="rev-1", settings=settings_a
+    ).build()
+    assert run.run_id == control.run_id
+    pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
+    pd.testing.assert_frame_equal(
+        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
+    )

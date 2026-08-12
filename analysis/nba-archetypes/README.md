@@ -126,7 +126,12 @@ count, or when the artifact bundle's identity does not match the run's. Two
 clustering executions that differ in any method parameter — including the
 top-level `SELECTED_K`, bootstrap count, minimum subtype size, or the
 silhouette/stability split thresholds — are distinct models with distinct
-versions.
+versions. Every build validates final identity consistency before combining
+any cached stage state, and every stage that derives (and caches) data checks
+the immutable identity state first, so a temporarily desynchronized model spec
+or settings snapshot fails immediately even when the stage would otherwise
+return cached data — a tampered identity can never poison a cache under the
+wrong run id.
 
 The `input_data_identity` is recorded once, by `archetypes_fixed.ipynb`, as a
 SHA-256 digest over the membership and exact fitted feature matrix it just
@@ -239,7 +244,10 @@ a concurrent publisher can never delete another publisher's pending (not yet
 live) version; and the prior set survives until the new set and pointer are
 durably committed (every artifact file, the versioned directory, and the
 pointer's parent directory are fsynced), so old sets are garbage-collected only
-after the new set is durable.
+after the new set is durable. If the new set's durability cannot be confirmed,
+publication aborts before the pointer is created or flipped: the old live
+pointer is preserved and the non-durable installed set is removed rather than
+published.
 `verify_persisted_manifest()` then fails closed if any recorded file is
 missing, has been replaced, resolves outside the artifact directory, no longer
 embeds the manifest's identity, is bound to a non-canonical name, or if the

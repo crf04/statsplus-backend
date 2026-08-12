@@ -1142,6 +1142,37 @@ class AnalysisRunBuilder:
         )
         return self._provenance
 
+    def _require_identity_state(self):
+        """Validate the immutable identity slots before a stage derives data.
+
+        Every stage that computes (and caches) derived data must fail fast if
+        the one-shot identity slots were tampered with through the instance
+        dict, even when the stage would otherwise return cached state: a
+        temporarily desynchronized model spec or settings snapshot would
+        otherwise compute and cache derived data under a run id it does not
+        belong to. Before provenance is recorded (the ``_settings_hash`` slot
+        is still unset) there is no recorded identity to be consistent with,
+        so the check is skipped.
+        """
+        settings_hash = getattr(self, "_settings_hash", None)
+        if settings_hash is None:
+            return
+        if not isinstance(self.model_spec, ArchetypeModelSpec):
+            raise ValueError(
+                "An ArchetypeModelSpec is required to derive artifacts under a "
+                "recorded run identity"
+            )
+        if self._model_version != self.model_spec.version:
+            raise ValueError(
+                "The model spec changed after construction; refusing to derive "
+                "artifacts attributed to a different model"
+            )
+        if content_hash(("settings", asdict(self.settings))) != settings_hash:
+            raise ValueError(
+                "Analysis settings changed after construction; refusing to derive "
+                "artifacts under a different settings snapshot"
+            )
+
     def _require_identity(self):
         if not isinstance(self.model_spec, ArchetypeModelSpec):
             raise ValueError("An ArchetypeModelSpec is required to assemble artifacts")
@@ -1182,6 +1213,7 @@ class AnalysisRunBuilder:
             )
 
     def prepare_logs(self):
+        self._require_identity_state()
         if self._logs is not None:
             return self._logs.copy()
         membership = self.load_membership()
@@ -1281,6 +1313,7 @@ class AnalysisRunBuilder:
         return self._logs.copy()
 
     def fit_scoring(self):
+        self._require_identity_state()
         if self._scoring is not None:
             return self._scoring["summary"]
         logs = self.prepare_logs()
@@ -1577,6 +1610,7 @@ class AnalysisRunBuilder:
         return matchup_summary
 
     def fit_volume(self):
+        self._require_identity_state()
         if self._volume is not None:
             return self._volume["summary"]
         logs = self.prepare_logs()
@@ -1819,6 +1853,7 @@ class AnalysisRunBuilder:
         return volume_matchup_summary
 
     def assemble_artifacts(self):
+        self._require_identity_state()
         if self._artifacts is not None:
             return self._artifacts
         self._require_identity()
@@ -2126,6 +2161,7 @@ class AnalysisRunBuilder:
         return content_hash(tuple(parts))
 
     def assemble_dashboard_payload(self):
+        self._require_identity_state()
         if self._dashboard_payload is not None:
             return self._dashboard_payload
         self.fit_scoring()
@@ -2182,6 +2218,10 @@ class AnalysisRunBuilder:
         return payload
 
     def build(self):
+        # Every build validates final identity consistency before combining any
+        # cached stage state, so a tampered identity slot is rejected even when
+        # all derived data (scoring, volume, artifacts, payload) is cached.
+        self._require_identity_state()
         self.load_membership()
         self.prepare_logs()
         self.fit_scoring()

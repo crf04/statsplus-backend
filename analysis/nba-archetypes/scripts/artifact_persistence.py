@@ -469,8 +469,8 @@ def _fsync_artifact_set(versioned, versioned_root) -> bool:
     succeed may the pointer be flipped, so the externally observed publication
     never points at set contents or directory entries that could be lost on
     power failure. A filesystem that cannot confirm a barrier reports ``False``
-    and publication proceeds without garbage collection rather than removing
-    the prior set.
+    and publication aborts before the pointer is created or flipped: the old
+    live pointer is preserved and no garbage collection runs.
     """
     try:
         for path in versioned.iterdir():
@@ -545,7 +545,9 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
     durable (its parent directory is fsynced), all while the lock is still held,
     so SIGKILL or power loss can never leave the publication path absent, expose
     a partially replaced set, or delete the live set while another publisher is
-    mid-swap.
+    mid-swap. If the set's durability cannot be confirmed, publication aborts
+    before the pointer is created or flipped: the old live pointer is preserved
+    and the non-durable installed set is removed rather than published.
     """
     staging = Path(staging_dir)
     target = Path(output_dir)
@@ -593,6 +595,11 @@ def publish_artifact_set(staging_dir, output_dir) -> None:
             # flipped.
             set_durable = _fsync_artifact_set(versioned, versioned_root)
             _run_publish_hook("after_set_durable")
+            if not set_durable:
+                raise OSError(
+                    "Artifact set durability could not be confirmed; aborting "
+                    "publication before the pointer is flipped"
+                )
             pointer_tmp = versioned_root / f".current-{run_id}~{sequence}-{os.getpid()}"
             os.symlink(os.path.relpath(versioned, target.parent), pointer_tmp)
             _run_publish_hook("before_pointer_flip")
