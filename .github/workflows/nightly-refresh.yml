@@ -1,0 +1,141 @@
+name: Nightly refresh
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/nightly-refresh.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Probe NBA Stats egress or run the production refresh
+        required: true
+        default: probe
+        type: choice
+        options:
+          - probe
+          - refresh
+  schedule:
+    - cron: "0 10 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  probe-nba-stats:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'probe')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: nightly-refresh-probe-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Bootstrap environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Probe the first nightly NBA Stats request
+        env:
+          NBA_STATS_TIMEOUT_SECONDS: "30"
+        run: |
+          .venv/bin/python - <<'PY'
+          import json
+
+          from app.config.settings import load_settings
+          from app.providers.nba_stats import NBAStatsAdapter
+
+          adapter = NBAStatsAdapter(settings=load_settings())
+          frame = adapter.fetch_opponent_team_stats(
+              None,
+              per_mode_detailed="Per48",
+              league_id="00",
+          )
+          print(
+              json.dumps(
+                  {
+                      "status": "succeeded",
+                      "http_status": adapter.last_status_code,
+                      "row_count": len(frame),
+                  }
+              )
+          )
+          PY
+
+  refresh-production:
+    if: >-
+      (github.event_name == 'schedule' &&
+      vars.NIGHTLY_REFRESH_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'refresh')
+    runs-on: ubuntu-latest
+    # Leave room for both complete passes performed by nightly_refresh.py.
+    timeout-minutes: 300
+    concurrency:
+      group: nightly-refresh-production
+      cancel-in-progress: false
+    env:
+      DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      # The batch command has no HTTP/auth surface. Production settings require
+      # Firebase and CORS values that only the web process uses.
+      FLASK_ENV: development
+      NBA_STATS_TIMEOUT_SECONDS: "30"
+
+    steps:
+      - name: Verify production database secret
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import parse_qs, urlsplit
+
+          parsed = urlsplit(os.environ.get("DATABASE_URL", ""))
+          sslmode = parse_qs(parsed.query).get("sslmode", [None])[-1]
+          if parsed.scheme not in {"postgres", "postgresql"}:
+              raise SystemExit("PRODUCTION_DATABASE_URL must be a PostgreSQL URL")
+          if sslmode != "require":
+              raise SystemExit(
+                  "PRODUCTION_DATABASE_URL must set sslmode=require"
+              )
+          PY
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Bootstrap environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Run the production nightly refresh
+        run: .venv/bin/python scripts/nightly_refresh.py

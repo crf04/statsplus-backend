@@ -141,20 +141,43 @@ timer. Set `EVENT_CATALOG_MAX_AGE_HOURS` to change the default 72-hour
 freshness window. For offline verification, pass `--fixture` with a recorded
 `ScheduleLeagueV2` JSON payload.
 
-### Railway Nightly Refresh
+### GitHub Actions Nightly Refresh
 
-Configure a separate Railway cron service from this repository with the same
-`DATABASE_URL` as the API and this start command:
+The `Nightly refresh` GitHub Actions workflow is the sole production scheduler.
+Configure its `PRODUCTION_DATABASE_URL` repository secret with the public
+PostgreSQL URL for the API database and append `sslmode=require` as a query
+parameter; never use Railway's private-network URL. Railway's database
+certificate cannot pass `verify-full` from a hosted runner, so the workflow
+requires encrypted transport without certificate verification. It runs this
+command:
 
 ```bash
 python scripts/nightly_refresh.py
 ```
 
-Set its Cron Schedule to `0 10 * * *`. Railway evaluates cron expressions in
-UTC, so this runs at about 5:00 AM Eastern during standard time and 6:00 AM
-during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
-instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
-standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
+Its `0 10 * * *` schedule is evaluated in UTC, so it runs at about 5:00 AM
+Eastern during standard time and 6:00 AM during daylight time. Before enabling
+this schedule, open a pull request containing the workflow change and require
+its credential-free `probe-nba-stats` job to pass. That verifies that a
+GitHub-hosted runner can reach NBA Stats before the workflow is present on the
+default branch. Then configure the database secret and merge the pull request
+while leaving the repository variable `NIGHTLY_REFRESH_ENABLED` unset. Run the
+workflow manually in `refresh` mode at an off-schedule time to verify the
+public database connection and the complete production refresh. Only after it
+passes, disable every Railway cron that runs the same command and set
+`NIGHTLY_REFRESH_ENABLED=true` to hand schedule ownership to GitHub Actions.
+Use the workflow's `probe` mode for later egress checks.
+
+Before retiring another scheduler, compare its environment-variable names with
+the workflow and carry forward every batch-relevant override. Web-process-only
+Firebase, CORS, and DFS exposure settings are intentionally absent here. The
+NBA Stats timeout is explicitly set to 30 seconds.
+
+GitHub automatically disables scheduled workflows after 60 days without
+repository activity. If that happens, re-enable the workflow in the Actions
+tab before the next expected run. Repository maintainers must enable Actions
+failure notifications and investigate a failed `Nightly refresh` run before
+the next scheduled run; the command also names its failed step in the job log.
 
 The process runs six named current-season steps in this exact order: stats
 tables, Event Catalog schedule, Athlete Catalog, durable player game logs,
