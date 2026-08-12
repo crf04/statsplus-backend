@@ -74,6 +74,28 @@ dataframe implementations) and exercise repeated players, unequal archetype
 sizes, and teammates sharing games. The repository completion gate is
 `./scripts/check.sh` from the repository root.
 
+### Analysis Run and archetype-model identity
+
+Each Analysis Run is immutable and belongs to one published archetype model,
+one input-data snapshot, and one Information Cutoff. `AnalysisRunBuilder` now
+requires an `ArchetypeModelSpec` naming the season, feature definition,
+clustering method, cluster count, random seed, and a content-addressed
+`input_data_identity` (computed with `compute_input_data_identity` over the
+membership and game-log frames). The spec's `version` is a content hash of
+those six fields, and `build()` rejects a missing or mismatched input-data
+identity at artifact assembly so a stale model cannot silently join new data.
+
+Every run records a `RunProvenance` (Information Cutoff, per-input hashes,
+code revision, UTC generation time, cluster count, and clustering-attempt
+number), derives one deterministic `run_id` from the model version, code
+revision, and Information Cutoff, and stamps the artifacts collection and
+dashboard payload with the matching `run_id` and `model_version`. Stable
+subtype membership keys are content hashes of each subtype's sorted member
+IDs, so they are invariant under arbitrary cluster-label permutation; the
+builder rejects overlapping or colliding membership. Matrix dimensions,
+eligible-cell counts, and subtype labels always derive from the run's actual
+membership and games, never from a fixed cluster count.
+
 ## Modeling boundaries
 
 The archetypes describe scoring style and volume. Shooting efficiency, height,

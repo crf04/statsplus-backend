@@ -21,7 +21,12 @@ import pandas as pd
 import seaborn as sns
 from nba_api.stats import endpoints
 
-from matchup_analysis import AnalysisRunBuilder, DEFAULT_SETTINGS
+from matchup_analysis import (
+    AnalysisRunBuilder,
+    DEFAULT_SETTINGS,
+    ArchetypeModelSpec,
+    compute_input_data_identity,
+)
 
 pd.set_option("display.max_columns", 100)
 sns.set_theme(style="whitegrid", context="notebook")
@@ -30,6 +35,11 @@ SEASON = "2025-26"
 SEASON_TYPE = "Regular Season"
 REFRESH_DATA = False
 MAX_CACHE_AGE_DAYS = 2
+CLUSTERING_METHOD = "KMeans"
+RANDOM_STATE = 42
+FEATURE_DEFINITION = (
+    "play-type and shot-zone composition shares with centered log-ratio, weighted"
+)
 
 ROOT = Path(__file__).resolve().parents[1] if "__file__" in globals() else Path.cwd()
 SEASON_KEY = SEASON.replace("-", "_")
@@ -104,8 +114,19 @@ print(
 # thresholds are the builder's defaults, mirrored nowhere in this script.
 
 # %%
-run = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
+model_spec = ArchetypeModelSpec(
+    season=SEASON,
+    feature_definition=FEATURE_DEFINITION,
+    clustering_method=CLUSTERING_METHOD,
+    cluster_count=int(archetypes["SUBTYPE_ID"].nunique()),
+    random_seed=RANDOM_STATE,
+    input_data_identity=compute_input_data_identity(archetypes, game_logs),
+)
+run = AnalysisRunBuilder(
+    archetypes=archetypes, game_logs=game_logs, model_spec=model_spec
+).build()
 
+print(f"Analysis Run {run.run_id} of model {run.model_version}")
 coverage = run.coverage
 print(coverage.to_string())
 

@@ -8,8 +8,9 @@ instead of source text or dataframe implementations.
 """
 
 import json
+import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,11 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from matchup_analysis import AnalysisRunBuilder  # noqa: E402
+from matchup_analysis import (  # noqa: E402
+    AnalysisRunBuilder,
+    ArchetypeModelSpec,
+    compute_input_data_identity,
+)
 
 BASE_DATE = date(2026, 1, 5)
 TEAMS = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
@@ -220,9 +225,41 @@ def parity_fixture():
     return parity_membership(), parity_game_logs()
 
 
+def merged_subtype_fixture():
+    archetypes, game_logs = synthetic_fixture()
+    merged = archetypes.copy()
+    merged_away = merged["SUBTYPE_ID"] == 300
+    merged.loc[merged_away, "SUBTYPE_ID"] = 200
+    merged.loc[merged_away, "SUBTYPE_ARCHETYPE"] = "Tertiary Shot Creator"
+    return merged, game_logs
+
+
 def build_run():
     archetypes, game_logs = synthetic_fixture()
-    return AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
+    return build_builder(archetypes, game_logs).build()
+
+
+def make_model_spec(archetypes, game_logs, **overrides):
+    values = {
+        "season": "2025-26",
+        "feature_definition": "play-type and shot-zone composition shares (CLR)",
+        "clustering_method": "KMeans",
+        "cluster_count": int(archetypes["SUBTYPE_ID"].nunique()),
+        "random_seed": 42,
+        "input_data_identity": compute_input_data_identity(archetypes, game_logs),
+    }
+    values.update(overrides)
+    return ArchetypeModelSpec(**values)
+
+
+def build_builder(archetypes, game_logs, **builder_kwargs):
+    model_spec = make_model_spec(archetypes, game_logs)
+    return AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        **builder_kwargs,
+    )
 
 
 def test_fixture_structure_represents_required_shapes():
@@ -239,7 +276,7 @@ def test_fixture_structure_represents_required_shapes():
 
 def test_membership_boundary_validates_and_deduplicates():
     archetypes, game_logs = synthetic_fixture()
-    builder = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs)
+    builder = build_builder(archetypes, game_logs)
     membership = builder.load_membership()
     assert set(membership.columns) == {
         "PLAYER_ID",
@@ -256,7 +293,7 @@ def test_membership_boundary_rejects_ambiguous_subtype_name():
     archetypes, game_logs = synthetic_fixture()
     broken = archetypes.copy()
     broken.loc[broken["PLAYER_ID"] == "P001", "SUBTYPE_ARCHETYPE"] = "Imposter Role"
-    builder = AnalysisRunBuilder(archetypes=broken, game_logs=game_logs)
+    builder = build_builder(broken, game_logs)
     with pytest.raises(ValueError):
         builder.build()
 
@@ -361,6 +398,9 @@ def test_artifact_assembly_boundary_exposes_expected_schema():
         "player_relative_volume_matchups",
         "pts_per_min_heatmap",
         "volume_heatmaps",
+        "run_id",
+        "model_version",
+        "stable_subtype_keys",
     }
     summary = artifacts["matchup_summary"]
     assert summary["SUBTYPE_ID"].is_monotonic_increasing or summary["OPP_TEAM"].is_monotonic_increasing
@@ -416,11 +456,22 @@ def test_dashboard_payload_boundary_exposes_expected_payload():
         payload["volume_reliability_display"]
     )
     assert {"pearson_reliability", "spearman_reliability"} <= set(payload)
+    assert payload["run_id"] == run.run_id
+    assert payload["model_version"] == run.model_version
+    assert set(payload["stable_subtype_keys"]) == {100, 200, 300}
+    assert set(payload["provenance"]) == {
+        "information_cutoff",
+        "input_hashes",
+        "code_revision",
+        "generated_at",
+        "cluster_count",
+        "clustering_attempt",
+    }
 
 
 def test_boundary_methods_compose_from_fixture():
     archetypes, game_logs = synthetic_fixture()
-    builder = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs)
+    builder = build_builder(archetypes, game_logs)
     assert len(builder.load_membership()) == 18
     assert len(builder.prepare_logs()) == 216
     assert len(builder.fit_scoring()) == 18
@@ -434,8 +485,8 @@ def test_boundary_methods_compose_from_fixture():
 
 def test_analysis_run_is_deterministic_and_repeatable():
     archetypes, game_logs = synthetic_fixture()
-    run_a = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
-    run_b = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
+    run_a = build_builder(archetypes, game_logs).build()
+    run_b = build_builder(archetypes, game_logs).build()
     pd.testing.assert_frame_equal(run_a.logs, run_b.logs)
     pd.testing.assert_frame_equal(run_a.matchup_summary, run_b.matchup_summary)
     pd.testing.assert_frame_equal(
@@ -447,9 +498,146 @@ def test_analysis_run_is_deterministic_and_repeatable():
     )
 
 
+def test_model_spec_version_is_content_addressed():
+    archetypes, game_logs = synthetic_fixture()
+    base = make_model_spec(archetypes, game_logs)
+    assert re.fullmatch(r"[0-9a-f]{64}", base.version)
+    variations = {
+        "season": "2024-25",
+        "feature_definition": "a different feature definition",
+        "clustering_method": "GaussianMixture",
+        "cluster_count": base.cluster_count + 1,
+        "random_seed": base.random_seed + 1,
+        "input_data_identity": "0" * 64,
+    }
+    for field, value in variations.items():
+        changed = make_model_spec(archetypes, game_logs, **{field: value})
+        assert changed.version != base.version, field
+    other_archetypes, other_logs = parity_fixture()
+    other_data = make_model_spec(other_archetypes, other_logs)
+    assert other_data.version != base.version
+
+
+def test_run_records_provenance_and_carries_matching_identity():
+    archetypes, game_logs = synthetic_fixture()
+    model_spec = make_model_spec(archetypes, game_logs)
+    builder = AnalysisRunBuilder(
+        archetypes=archetypes,
+        game_logs=game_logs,
+        model_spec=model_spec,
+        clustering_attempt=3,
+        code_revision="abc123",
+    )
+    run = builder.build()
+    assert run.model_spec is model_spec
+    assert run.model_version == model_spec.version
+    assert re.fullmatch(r"[0-9a-f]{64}", run.run_id)
+    provenance = run.provenance
+    assert provenance.information_cutoff == date(2026, 2, 25)
+    assert provenance.cluster_count == model_spec.cluster_count
+    assert provenance.clustering_attempt == 3
+    assert provenance.code_revision == "abc123"
+    assert provenance.generated_at.tzinfo is not None
+    assert isinstance(provenance.generated_at, datetime)
+    assert set(provenance.input_hashes) == {"archetypes", "game_logs"}
+    for digest in provenance.input_hashes.values():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    payload = run.dashboard_payload
+    assert payload["run_id"] == run.run_id
+    assert payload["model_version"] == run.model_version
+    assert payload["stable_subtype_keys"] == run.stable_subtype_keys
+    assert payload["provenance"] == provenance.to_dict()
+    assert payload["provenance"]["clustering_attempt"] == 3
+
+
+def test_artifacts_carry_matching_run_and_model_identifiers():
+    run = build_run()
+    assert run.artifacts["run_id"] == run.run_id
+    assert run.artifacts["model_version"] == run.model_version
+    assert run.artifacts["stable_subtype_keys"] == run.stable_subtype_keys
+
+
+def test_stable_subtype_keys_invariant_under_label_permutation():
+    archetypes, game_logs = synthetic_fixture()
+    baseline = build_run()
+    permuted = archetypes.copy()
+    permuted["SUBTYPE_ID"] = permuted["SUBTYPE_ID"].map({100: 200, 200: 300, 300: 100})
+    permuted_run = build_builder(permuted, game_logs).build()
+
+    def keys_by_members(run):
+        keys = {}
+        for subtype_id, group in run.membership.groupby("SUBTYPE_ID"):
+            members = frozenset(group["PLAYER_ID"].astype(str))
+            keys[members] = run.stable_subtype_keys[subtype_id]
+        return keys
+
+    assert keys_by_members(baseline) == keys_by_members(permuted_run)
+    assert set(baseline.stable_subtype_keys) == {100, 200, 300}
+    assert set(permuted_run.stable_subtype_keys) == {200, 300, 100}
+
+
+def test_overlapping_membership_rejected_as_key_collision():
+    archetypes, game_logs = synthetic_fixture()
+    overlapping = pd.concat(
+        [
+            archetypes,
+            archetypes.loc[archetypes["PLAYER_ID"] == "P001"].assign(
+                SUBTYPE_ID=200, SUBTYPE_ARCHETYPE="Tertiary Shot Creator"
+            ),
+        ],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError):
+        build_builder(overlapping, game_logs).build()
+
+
+def test_missing_model_spec_is_rejected_at_artifact_assembly():
+    archetypes, game_logs = synthetic_fixture()
+    builder = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs)
+    with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
+        builder.assemble_artifacts()
+    with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
+        builder.build()
+
+
+def test_mismatched_input_data_identity_is_rejected():
+    archetypes, game_logs = synthetic_fixture()
+    other_archetypes, other_logs = parity_fixture()
+    model_spec = make_model_spec(other_archetypes, other_logs)
+    with pytest.raises(ValueError, match="Input data identity does not match"):
+        AnalysisRunBuilder(
+            archetypes=archetypes, game_logs=game_logs, model_spec=model_spec
+        ).build()
+
+
+def test_run_identity_is_deterministic_across_builds():
+    archetypes, game_logs = synthetic_fixture()
+    run_a = build_builder(
+        archetypes, game_logs, code_revision="rev-1", clustering_attempt=1
+    ).build()
+    run_b = build_builder(
+        archetypes, game_logs, code_revision="rev-1", clustering_attempt=1
+    ).build()
+    assert run_a.run_id == run_b.run_id
+    assert run_a.model_version == run_b.model_version
+    assert run_a.provenance.input_hashes == run_b.provenance.input_hashes
+    assert run_a.provenance.information_cutoff == run_b.provenance.information_cutoff
+
+
+def test_matrix_dimensions_and_labels_derive_from_run_data():
+    archetypes, game_logs = merged_subtype_fixture()
+    assert archetypes["SUBTYPE_ID"].nunique() == 2
+    run = build_builder(archetypes, game_logs).build()
+    assert run.matchup_summary["SUBTYPE_ID"].nunique() == 2
+    assert len(run.matchup_summary) == 12
+    assert run.artifacts["pts_per_min_heatmap"].shape == (2, 6)
+    assert set(run.stable_subtype_keys) == {100, 200}
+    assert run.dashboard_payload["subtype_labels"].index.tolist() == [100, 200]
+
+
 def build_parity_run():
     archetypes, game_logs = parity_fixture()
-    return AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs).build()
+    return build_builder(archetypes, game_logs).build()
 
 
 def _canonical_frame(frame):
