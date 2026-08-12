@@ -14,7 +14,7 @@ The model is intentionally grouped by responsibility:
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `FeatureSettings` | `dfs_board_enabled` and `injury_report_enabled` exposure gates | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED` (both default `false`) |
-| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
+| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_STATS_MIN_INTERVAL_SECONDS`, `NBA_STATS_RETRY_ATTEMPTS`, `NBA_STATS_RETRY_BACKOFF_SECONDS`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -31,6 +31,14 @@ and `LOG_LEVEL`.
 is not a cross-process lock, so the maximum simultaneous calls the whole
 application can make is
 `workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
+
+`NBA_STATS_MIN_INTERVAL_SECONDS` (default `0`) spaces attempts through a
+process-shared reservation clock. `NBA_STATS_RETRY_ATTEMPTS` (default `1`) is
+the total attempt budget for timeouts, connection/truncated-transfer failures,
+and malformed provider responses; `NBA_STATS_RETRY_BACKOFF_SECONDS` (default
+`0`) is the cooldown before each retry. HTTP errors are not retried by this
+policy. Health probes remain single-attempt and unpaced. The defaults keep
+request behavior unchanged unless an operator explicitly opts into pacing.
 
 Season player Diet collection uses the same NBA Stats timeout/concurrency and
 PBP Stats transport settings as the other Nightly provider calls. It has no

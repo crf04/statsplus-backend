@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -52,6 +53,7 @@ from app.utils.telemetry import (
     NBA_STATS_OPERATIONS,
     PROVIDER_NBA_STATS,
     ProviderResponseError,
+    increment_retry_count,
     provider_call,
     record_cached_provider_event,
 )
@@ -409,6 +411,10 @@ def parse_recorded_schedule(payload: dict[str, Any], *, season: str) -> pd.DataF
 
 _bound_lock = threading.Lock()
 _shared_bounds: dict[int, threading.BoundedSemaphore] = {}
+_pacer_lock = threading.Lock()
+_shared_next_request_at: dict[float, float] = {}
+_pacer_monotonic = time.monotonic
+_pacer_sleep = time.sleep
 
 
 def _shared_concurrency_bound(limit: int) -> threading.BoundedSemaphore:
@@ -426,6 +432,26 @@ def _shared_concurrency_bound(limit: int) -> threading.BoundedSemaphore:
             bound = threading.BoundedSemaphore(limit)
             _shared_bounds[limit] = bound
         return bound
+
+
+def _wait_for_request_slot(min_interval_seconds: float) -> float:
+    """Reserve one process-shared provider slot and wait until it opens."""
+
+    if min_interval_seconds <= 0:
+        return 0.0
+    with _pacer_lock:
+        now = _pacer_monotonic()
+        scheduled_at = max(
+            now,
+            _shared_next_request_at.get(min_interval_seconds, now),
+        )
+        _shared_next_request_at[min_interval_seconds] = (
+            scheduled_at + min_interval_seconds
+        )
+    delay = scheduled_at - now
+    if delay > 0:
+        _pacer_sleep(delay)
+    return delay
 
 
 def _validate_frame(
@@ -647,6 +673,13 @@ class NBAStatsAdapter:
         self.timeout = get_nba_stats_timeout(self.settings)
         self._concurrency_limit = self.settings.providers.nba_stats_max_concurrency
         self._bound = _shared_concurrency_bound(self._concurrency_limit)
+        self._min_interval_seconds = (
+            self.settings.providers.nba_stats_min_interval_seconds
+        )
+        self._retry_attempts = self.settings.providers.nba_stats_retry_attempts
+        self._retry_backoff_seconds = (
+            self.settings.providers.nba_stats_retry_backoff_seconds
+        )
         self._last_status_code: int | None = None
         # The optional constructor seam is used by recorded/offline schedule
         # tests.  Existing game-log helpers construct their own endpoint and
@@ -674,6 +707,7 @@ class NBAStatsAdapter:
         cache_status: str = CACHE_DISABLED,
         required_columns: Iterable[str] = (),
         validator: Callable[[pd.DataFrame], Any] | None = None,
+        apply_resilience_policy: bool = True,
     ) -> pd.DataFrame | None:
         """Run one typed ``nba_api`` endpoint under the bound and telemetry.
 
@@ -694,62 +728,108 @@ class NBAStatsAdapter:
                 f"expected one of {sorted(NBA_STATS_OPERATIONS)}."
             )
 
-        # Avoid exposing a previous call's status when a new request times
-        # out before ``nba_api`` creates its response object.
-        self._last_status_code = None
         with self._bound:
             with provider_call(
                 PROVIDER_NBA_STATS,
                 operation,
                 cache_status=cache_status,
             ) as tracker:
-                try:
-                    endpoint = build(self.timeout)
-                except ProviderResponseError:
-                    raise
-                except (
-                    AttributeError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                ) as error:
-                    raise ProviderResponseError(
-                        "NBA Stats returned a response with an invalid schema."
-                    ) from error
-                if endpoint is None:
-                    raise ProviderResponseError(
-                        "NBA Stats returned an invalid endpoint response."
-                    )
-                tracker.status_code = _response_status(endpoint)
-                self._last_status_code = tracker.status_code
-                if (
-                    tracker.status_code is not None
-                    and tracker.status_code >= 400
-                ):
-                    raise requests.exceptions.HTTPError(
-                        f"{operation} responded {tracker.status_code}"
-                    )
-                try:
-                    frames = endpoint.get_data_frames()
-                    frame = frames[frame_index]
-                except ProviderResponseError:
-                    raise
-                except (
-                    AttributeError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                ) as error:
-                    raise ProviderResponseError(
-                        "NBA Stats returned a response with an invalid schema."
-                    ) from error
-                return _validate_frame(
-                    frame,
-                    required_columns=required_columns,
-                    validator=validator,
+                retry_attempts = (
+                    self._retry_attempts if apply_resilience_policy else 1
                 )
+                min_interval_seconds = (
+                    self._min_interval_seconds if apply_resilience_policy else 0.0
+                )
+                retry_backoff_seconds = (
+                    self._retry_backoff_seconds if apply_resilience_policy else 0.0
+                )
+                for attempt in range(retry_attempts):
+                    if attempt > 0:
+                        increment_retry_count()
+                        if retry_backoff_seconds > 0:
+                            _pacer_sleep(retry_backoff_seconds)
+                            tracker.exclude_duration(retry_backoff_seconds)
+                    pacing_delay = _wait_for_request_slot(min_interval_seconds)
+                    tracker.exclude_duration(pacing_delay)
+                    # Avoid exposing a previous call's status when a new
+                    # request times out before ``nba_api`` creates a response.
+                    self._last_status_code = None
+                    tracker.status_code = None
+                    try:
+                        return self._run_endpoint_attempt(
+                            build,
+                            operation=operation,
+                            tracker=tracker,
+                            frame_index=frame_index,
+                            required_columns=required_columns,
+                            validator=validator,
+                        )
+                    except (
+                        ProviderResponseError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.ChunkedEncodingError,
+                        requests.exceptions.ContentDecodingError,
+                    ):
+                        if attempt + 1 >= retry_attempts:
+                            raise
+
+    def _run_endpoint_attempt(
+        self,
+        build: Callable[[float], object],
+        *,
+        operation: str,
+        tracker: Any,
+        frame_index: int,
+        required_columns: Iterable[str],
+        validator: Callable[[pd.DataFrame], Any] | None,
+    ) -> pd.DataFrame:
+        """Execute and validate one provider attempt inside shared telemetry."""
+
+        try:
+            endpoint = build(self.timeout)
+        except ProviderResponseError:
+            raise
+        except (
+            AttributeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+        ) as error:
+            raise ProviderResponseError(
+                "NBA Stats returned a response with an invalid schema."
+            ) from error
+        if endpoint is None:
+            raise ProviderResponseError(
+                "NBA Stats returned an invalid endpoint response."
+            )
+        tracker.status_code = _response_status(endpoint)
+        self._last_status_code = tracker.status_code
+        if tracker.status_code is not None and tracker.status_code >= 400:
+            raise requests.exceptions.HTTPError(
+                f"{operation} responded {tracker.status_code}"
+            )
+        try:
+            frames = endpoint.get_data_frames()
+            frame = frames[frame_index]
+        except ProviderResponseError:
+            raise
+        except (
+            AttributeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+        ) as error:
+            raise ProviderResponseError(
+                "NBA Stats returned a response with an invalid schema."
+            ) from error
+        return _validate_frame(
+            frame,
+            required_columns=required_columns,
+            validator=validator,
+        )
 
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a game served without a provider call."""
@@ -1190,6 +1270,7 @@ class NBAStatsAdapter:
                 timeout=timeout,
             ),
             required_columns=("TEAM_ID", "TEAM_NAME"),
+            apply_resilience_policy=False,
         )
 
     def get_player_roster(self, *, season: str) -> pd.DataFrame:

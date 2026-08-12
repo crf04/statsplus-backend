@@ -944,12 +944,22 @@ class ProviderTracker:
     def __enter__(self) -> "ProviderTracker":
         reset_retry_count()
         self.status_code = None
+        self._excluded_duration_seconds = 0.0
         self._started = _monotonic()
         self._started_at = _now_iso()
         return self
 
+    def exclude_duration(self, seconds: float) -> None:
+        """Exclude deliberate caller-side waiting from provider latency."""
+
+        self._excluded_duration_seconds += max(0.0, seconds)
+
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        duration_ms = (_monotonic() - self._started) * 1000.0
+        elapsed_seconds = _monotonic() - self._started
+        duration_ms = max(
+            0.0,
+            elapsed_seconds - self._excluded_duration_seconds,
+        ) * 1000.0
         outcome = OUTCOME_SUCCESS
         if exc is not None:
             if isinstance(exc, ProviderResponseError):

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 import requests
+import app.services.nba_stats_adapter as nba_stats_adapter_module
 from nba_api.stats import endpoints
 from nba_api.stats.endpoints.playergamelogs import PlayerGameLogs
 from sqlalchemy import create_engine
@@ -54,6 +55,15 @@ PLAYOFF_FIXTURE_PATH = (
 PLAYER_SHOT_ZONE_FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "player_diets" / "shot_zones.json"
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_request_pacer():
+    with nba_stats_adapter_module._pacer_lock:
+        nba_stats_adapter_module._shared_next_request_at.clear()
+    yield
+    with nba_stats_adapter_module._pacer_lock:
+        nba_stats_adapter_module._shared_next_request_at.clear()
 
 
 def _recorded_provider_frame() -> pd.DataFrame:
@@ -121,12 +131,22 @@ def _probe_endpoint(probe):
     return _ProbePlayerGameLogs
 
 
-def _settings(max_concurrency: int, timeout: float = 1.0) -> RuntimeSettings:
+def _settings(
+    max_concurrency: int,
+    timeout: float = 1.0,
+    *,
+    min_interval: float = 0.0,
+    retry_attempts: int = 1,
+    retry_backoff: float = 0.0,
+) -> RuntimeSettings:
     return RuntimeSettings(
         environment="testing",
         providers=ProviderSettings(
             nba_stats_timeout_seconds=timeout,
             nba_stats_max_concurrency=max_concurrency,
+            nba_stats_min_interval_seconds=min_interval,
+            nba_stats_retry_attempts=retry_attempts,
+            nba_stats_retry_backoff_seconds=retry_backoff,
         ),
     )
 
@@ -136,6 +156,203 @@ def test_adapter_exposes_configured_bound():
 
     assert adapter.max_concurrency == 3
     assert adapter.timeout == 1.0
+
+
+def test_adapter_paces_calls_across_instances(monkeypatch):
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return now[0]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(nba_stats_adapter_module, "_pacer_monotonic", monotonic)
+    monkeypatch.setattr(nba_stats_adapter_module, "_pacer_sleep", sleep)
+    settings = _settings(max_concurrency=1, min_interval=7.125)
+    adapters = [
+        NBAStatsAdapter(settings=settings),
+        NBAStatsAdapter(settings=settings),
+    ]
+
+    class Endpoint:
+        def get_data_frames(self):
+            return [pd.DataFrame({"TEAM_ID": [1]})]
+
+    for adapter in adapters:
+        adapter.run_endpoint(
+            "league_opponent_team_stats",
+            lambda timeout: Endpoint(),
+            required_columns=("TEAM_ID",),
+        )
+
+    assert sleeps == [7.125]
+
+
+@pytest.mark.parametrize(
+    "first_error",
+    [
+        requests.exceptions.ReadTimeout("provider timed out"),
+        requests.exceptions.ConnectionError("provider disconnected"),
+        requests.exceptions.ChunkedEncodingError("provider response truncated"),
+        requests.exceptions.ContentDecodingError("provider response corrupt"),
+        nba_stats_adapter_module.ProviderResponseError("provider schema malformed"),
+    ],
+)
+def test_adapter_retries_transient_provider_failures_after_backoff(
+    monkeypatch, first_error
+):
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        nba_stats_adapter_module,
+        "_pacer_sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+    adapter = NBAStatsAdapter(
+        settings=_settings(
+            max_concurrency=1,
+            retry_attempts=2,
+            retry_backoff=5.0,
+        )
+    )
+    calls = 0
+
+    class Endpoint:
+        def get_data_frames(self):
+            return [pd.DataFrame({"TEAM_ID": [1]})]
+
+    def build(timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise first_error
+        return Endpoint()
+
+    frame = adapter.run_endpoint(
+        "league_opponent_team_stats",
+        build,
+        required_columns=("TEAM_ID",),
+    )
+
+    assert list(frame["TEAM_ID"]) == [1]
+    assert calls == 2
+    assert sleeps == [5.0]
+
+
+def test_adapter_paces_retry_attempt_after_backoff(monkeypatch):
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        nba_stats_adapter_module,
+        "_pacer_monotonic",
+        lambda: now[0],
+    )
+    monkeypatch.setattr(nba_stats_adapter_module, "_pacer_sleep", sleep)
+    adapter = NBAStatsAdapter(
+        settings=_settings(
+            max_concurrency=1,
+            min_interval=7.0,
+            retry_attempts=2,
+            retry_backoff=5.0,
+        )
+    )
+    calls = 0
+
+    class Endpoint:
+        def get_data_frames(self):
+            return [pd.DataFrame({"TEAM_ID": [1]})]
+
+    def build(timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise requests.exceptions.ReadTimeout("provider timed out")
+        return Endpoint()
+
+    adapter.run_endpoint(
+        "league_opponent_team_stats",
+        build,
+        required_columns=("TEAM_ID",),
+    )
+
+    assert sleeps == [5.0, 2.0]
+
+
+def test_retry_clears_prior_attempt_status_from_terminal_timeout():
+    from app.utils import telemetry
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1, retry_attempts=2)
+    )
+    calls = 0
+
+    class MalformedEndpoint:
+        nba_response = SimpleNamespace(status_code=200)
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"WRONG": [1]})]
+
+    def build(timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return MalformedEndpoint()
+        raise requests.exceptions.ReadTimeout("provider timed out")
+
+    telemetry.clear_recorded_provider_events()
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        adapter.run_endpoint(
+            "league_opponent_team_stats",
+            build,
+            required_columns=("TEAM_ID",),
+        )
+
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["outcome"] == telemetry.OUTCOME_TIMEOUT
+    assert event["status_code"] is None
+    assert event["retry_count"] == 1
+
+
+def test_health_probe_remains_unpaced_and_single_attempt(monkeypatch):
+    sleeps: list[float] = []
+    calls = 0
+    monkeypatch.setattr(
+        nba_stats_adapter_module,
+        "_pacer_sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    def timed_out_endpoint(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise requests.exceptions.ReadTimeout("provider timed out")
+
+    monkeypatch.setattr(
+        endpoints,
+        "LeagueDashTeamStats",
+        timed_out_endpoint,
+    )
+    adapter = NBAStatsAdapter(
+        settings=_settings(
+            max_concurrency=1,
+            min_interval=15.0,
+            retry_attempts=3,
+            retry_backoff=60.0,
+        )
+    )
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        adapter.health_probe()
+
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_adapter_enforces_concurrency_bound_with_concurrent_calls(monkeypatch):
@@ -395,9 +612,14 @@ def test_cache_aware_calls_record_explicit_miss_and_hit(monkeypatch):
 def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
     import requests
 
-    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1, retry_attempts=3)
+    )
+    calls = 0
 
     def error_endpoint(**kwargs):
+        nonlocal calls
+        calls += 1
         return _StatusResponse(503)
 
     monkeypatch.setattr(
@@ -415,6 +637,8 @@ def test_adapter_classifies_non_2xx_status_as_http_error(monkeypatch):
     events = telemetry.get_recorded_provider_events()
     assert events[-1]["status_code"] == 503
     assert events[-1]["outcome"] == telemetry.OUTCOME_HTTP_ERROR
+    assert events[-1]["retry_count"] == 0
+    assert calls == 1
 
 
 @pytest.mark.parametrize(

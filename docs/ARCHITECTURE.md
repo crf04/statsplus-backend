@@ -2039,8 +2039,11 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   provider calls go through `NBAStatsAdapter`, which applies a
   process-shared `threading.BoundedSemaphore` sized by
   `NBA_STATS_MAX_CONCURRENCY` (default 10) and shares the provider timeout from
-  `NBA_STATS_TIMEOUT_SECONDS`.  All adapter instances using the same configured
-  limit in one worker reuse that gate.
+  `NBA_STATS_TIMEOUT_SECONDS`. Optional `NBA_STATS_MIN_INTERVAL_SECONDS` pacing
+  and the `NBA_STATS_RETRY_ATTEMPTS` / `NBA_STATS_RETRY_BACKOFF_SECONDS`
+  transient-failure policy are also process-shared at this seam. All adapter
+  instances using the same configured limit and interval in one worker reuse
+  those gates; defaults remain unpaced and single-attempt.
 - The `NBA_STATS_MAX_CONCURRENCY` bound is per worker **process**, not global:
   all adapters in each worker share one gate, so worst-case provider
   concurrency is `workers × NBA_STATS_MAX_CONCURRENCY` (4 × 10 = 40 with the

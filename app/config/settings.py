@@ -160,6 +160,9 @@ class ProviderSettings(BaseModel):
 
     nba_stats_timeout_seconds: float = Field(default=10.0, gt=0)
     nba_stats_max_concurrency: int = Field(default=10, ge=1, le=100)
+    nba_stats_min_interval_seconds: float = Field(default=0.0, ge=0, le=300)
+    nba_stats_retry_attempts: int = Field(default=1, ge=1, le=5)
+    nba_stats_retry_backoff_seconds: float = Field(default=0.0, ge=0, le=300)
     pbp_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     pbp_read_timeout_seconds: float = Field(default=30.0, gt=0)
     pbp_max_retries: int = Field(default=3, ge=0)
@@ -663,6 +666,13 @@ def _build_settings(
         ProviderSettings,
         nba_stats_timeout_seconds=reader.decimal("NBA_STATS_TIMEOUT_SECONDS", 10.0),
         nba_stats_max_concurrency=reader.integer("NBA_STATS_MAX_CONCURRENCY", 10),
+        nba_stats_min_interval_seconds=reader.decimal(
+            "NBA_STATS_MIN_INTERVAL_SECONDS", 0.0
+        ),
+        nba_stats_retry_attempts=reader.integer("NBA_STATS_RETRY_ATTEMPTS", 1),
+        nba_stats_retry_backoff_seconds=reader.decimal(
+            "NBA_STATS_RETRY_BACKOFF_SECONDS", 0.0
+        ),
         pbp_connect_timeout_seconds=reader.decimal("NBA_API_TIMEOUT_CONNECT", 10.0),
         pbp_read_timeout_seconds=reader.decimal("NBA_API_TIMEOUT_READ", 30.0),
         pbp_max_retries=reader.integer("NBA_API_MAX_RETRIES", 3),

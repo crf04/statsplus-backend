@@ -71,6 +71,9 @@ the most important variables:
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
+| `NBA_STATS_MIN_INTERVAL_SECONDS` | No | `0`; process-shared minimum delay between NBA Stats attempts |
+| `NBA_STATS_RETRY_ATTEMPTS` | No | `1`; total attempts for timeout, connection, or malformed-response failures |
+| `NBA_STATS_RETRY_BACKOFF_SECONDS` | No | `0`; cooldown before each NBA Stats retry |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
@@ -345,6 +348,14 @@ each Gunicorn worker has its own gate. The maximum calls the whole application
 can issue at once is workers × `NBA_STATS_MAX_CONCURRENCY` (the Procfile runs
 4 workers, so up to 4 × the bound). This is a per-process bound, not a
 cluster-global lock.
+
+`NBA_STATS_MIN_INTERVAL_SECONDS` reserves process-shared request slots across
+all adapters in one worker. `NBA_STATS_RETRY_ATTEMPTS` retries only timeouts,
+connection/truncated-transfer failures, and malformed provider responses; each retry waits
+`NBA_STATS_RETRY_BACKOFF_SECONDS` before reserving its next paced slot. Defaults
+preserve the existing single-attempt, unpaced request behavior. Batch runners
+on rate-sensitive egress can opt into conservative pacing without slowing the
+web deployment. Health probes remain single-attempt and unpaced.
 
 Application failures use a documented structured JSON error response with
 stable category codes, including `invalid_input`, `resource_not_found`,

@@ -161,6 +161,23 @@ def test_deterministic_clock_injection():
         )
 
 
+def test_provider_tracker_excludes_deliberate_wait_from_latency():
+    fixed_monotonic = iter([10.0, 26.0])
+    telemetry.set_clock(monotonic=lambda: next(fixed_monotonic))
+    try:
+        with telemetry.provider_call(
+            telemetry.PROVIDER_NBA_STATS, "paced_call"
+        ) as tracker:
+            tracker.exclude_duration(15.0)
+
+        event = telemetry.get_recorded_provider_events()[0]
+        assert event["duration_ms"] == 1000.0
+    finally:
+        import time as _time
+
+        telemetry.set_clock(monotonic=_time.monotonic)
+
+
 def test_buffer_is_bounded_and_thread_safe():
     for index in range(telemetry.EVENT_BUFFER_CAPACITY + 500):
         telemetry.record_provider_event(

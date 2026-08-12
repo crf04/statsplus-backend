@@ -397,6 +397,9 @@ def test_settings_parse_env_values(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
     monkeypatch.setenv("ENABLE_CACHE", "off")
     monkeypatch.setenv("NBA_STATS_TIMEOUT_SECONDS", "4.5")
+    monkeypatch.setenv("NBA_STATS_MIN_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("NBA_STATS_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("NBA_STATS_RETRY_BACKOFF_SECONDS", "60")
     monkeypatch.setenv("NBA_API_TIMEOUT_CONNECT", "2")
     monkeypatch.setenv("NBA_API_TIMEOUT_READ", "6")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.25")
@@ -409,6 +412,9 @@ def test_settings_parse_env_values(monkeypatch):
     assert settings.database.url == "postgresql://example/db"
     assert settings.cache.enabled is False
     assert settings.providers.nba_stats_timeout_seconds == 4.5
+    assert settings.providers.nba_stats_min_interval_seconds == 15.0
+    assert settings.providers.nba_stats_retry_attempts == 3
+    assert settings.providers.nba_stats_retry_backoff_seconds == 60.0
     assert settings.providers.pbp_connect_timeout_seconds == 2.0
     assert settings.providers.pbp_read_timeout_seconds == 6.0
     assert settings.llm.temperature == 0.25
