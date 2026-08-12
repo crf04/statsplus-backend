@@ -86,10 +86,11 @@ class PlayerGameLogRefresh(Base):
     source_row_count = Column(Integer, nullable=False)
     identity_source_row_count = Column(Integer, nullable=False)
     #: ``complete`` means every governed completed event through the observation
-    #: time is durably covered; anything less stays ``in_progress`` so a
-    #: database-first read never mistakes a partial season for a complete one.
+    #: time is durably covered by PBP-derived facts; anything else — including
+    #: legacy NBA-derived publications — stays ``in_progress`` so a
+    #: database-first read never mistakes unverified data for a complete one.
     publication_status = Column(
-        String(16), nullable=False, server_default="complete"
+        String(16), nullable=False, server_default="in_progress"
     )
 
     __table_args__ = (

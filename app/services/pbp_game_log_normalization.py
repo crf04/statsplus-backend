@@ -21,7 +21,7 @@ import pandas as pd
 from app.domain.nba_events import player_game_log_season_type
 from app.errors import ProviderUnavailableError
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS
-from app.services.game_log_frame import derive_game_log_frame
+from app.services.game_log_frame import GAME_LOG_FRAME_COLUMNS, derive_game_log_frame
 
 #: The closed additive/counting fields for which PBP omits observed zeros.
 #: Identity, game, date, team, opponent, and minutes evidence is never
@@ -184,12 +184,15 @@ def normalize_pbp_game_logs(
             counts = _bump(counts, "team_mismatch_count")
             continue
 
-        two_pt_made = _counting_value(row, "Fg2M")
-        two_pt_attempted = _counting_value(row, "Fg2A")
-        three_pt_made = _counting_value(row, "Fg3M")
-        three_pt_attempted = _counting_value(row, "Fg3A")
-        free_throws_made = _counting_value(row, "FtM")
-        free_throws_attempted = _counting_value(row, "FtA")
+        two_pt_made = _counting_value(row, "FG2M")
+        two_pt_attempted = _counting_value(row, "FG2A")
+        three_pt_made = _counting_value(row, "FG3M")
+        three_pt_attempted = _counting_value(row, "FG3A")
+        # PBP reports free-throw points rather than made free throws; a made
+        # free throw is exactly one point, so the two are semantically equal
+        # for the endpoint's canonical FTM/FT_PCT presentation.
+        free_throws_made = _counting_value(row, "FtPoints")
+        free_throws_attempted = _counting_value(row, "FTA")
         field_goals_made = two_pt_made + three_pt_made
         field_goals_attempted = two_pt_attempted + three_pt_attempted
         if (
@@ -200,8 +203,8 @@ def normalize_pbp_game_logs(
             raise ProviderUnavailableError(
                 "PBP Stats returned inconsistent shooting facts."
             )
-        offensive_rebounds = _counting_value(row, "OffReb")
-        defensive_rebounds = _counting_value(row, "DefReb")
+        offensive_rebounds = _counting_value(row, "OffRebounds")
+        defensive_rebounds = _counting_value(row, "DefRebounds")
         minutes = parse_pbp_minutes(row["Minutes"])
         canonical.append(
             {
@@ -227,47 +230,19 @@ def normalize_pbp_game_logs(
                 "TOV": _counting_value(row, "Turnovers"),
                 "STL": _counting_value(row, "Steals"),
                 "BLK": _counting_value(row, "Blocks"),
-                "PF": _counting_value(row, "PersonalFouls"),
+                "PF": _counting_value(row, "Fouls"),
                 "PLUS_MINUS": _signed_value(row, "PlusMinus"),
             }
         )
 
     primitive = pd.DataFrame(
         canonical,
-        columns=_CANONICAL_PRIMITIVE_COLUMNS,
+        columns=GAME_LOG_FRAME_COLUMNS,
     )
     return (
         derive_game_log_frame(primitive, round_minutes=round_minutes),
         counts,
     )
-
-
-_CANONICAL_PRIMITIVE_COLUMNS = (
-    "PLAYER_ID",
-    "PLAYER_NAME",
-    "GAME_ID",
-    "GAME_DATE",
-    "MATCHUP",
-    "TEAM_ID",
-    "TEAM_ABBREVIATION",
-    "MIN",
-    "PTS",
-    "REB",
-    "AST",
-    "FGM",
-    "FGA",
-    "FG3M",
-    "FG3A",
-    "FTM",
-    "FTA",
-    "OREB",
-    "DREB",
-    "TOV",
-    "STL",
-    "BLK",
-    "PF",
-    "PLUS_MINUS",
-)
 
 
 def _bump(counts: PBPJoinCounts, field: str) -> PBPJoinCounts:

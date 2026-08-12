@@ -323,7 +323,7 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
         connection.execute(
             text(
                 f"ALTER TABLE {refreshes_table} ADD COLUMN "
-                "publication_status VARCHAR(16) NOT NULL DEFAULT 'complete'"
+                "publication_status VARCHAR(16) NOT NULL DEFAULT 'in_progress'"
             )
         )
 

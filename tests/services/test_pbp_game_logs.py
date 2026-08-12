@@ -62,20 +62,25 @@ def _pbp_row(**overrides):
         "GameId": "0022500001",
         "Date": "2026-01-02",
         "TeamId": 1,
+        "Team": "AAA",
+        "Opponent": "BBB",
         "Minutes": "31:30",
-        "Fg2M": 6,
-        "Fg2A": 11,
-        "Fg3M": 3,
-        "Fg3A": 7,
-        "FtM": 3,
-        "FtA": 4,
-        "OffReb": 2,
-        "DefReb": 6,
+        "FG2M": 6,
+        "FG2A": 11,
+        "FG3M": 3,
+        "FG3A": 7,
+        "FGM": 9,
+        "FGA": 18,
+        "FtPoints": 3,
+        "FTA": 4,
+        "OffRebounds": 2,
+        "DefRebounds": 6,
+        "Rebounds": 8,
         "Assists": 6,
         "Turnovers": 3,
         "Steals": 2,
         "Blocks": 1,
-        "PersonalFouls": 2,
+        "Fouls": 2,
         "PlusMinus": 5,
         "Points": 24,
     }
@@ -120,16 +125,30 @@ def test_parse_pbp_minutes_rejects_invalid_evidence(value):
 
 
 def test_adapter_parse_seams_validate_the_sparse_wire_contract():
-    frame = PBPGameLogAdapter.parse_player_game_logs(
+    frame = PBPGameLogAdapter.parse_game_logs(
         {"multi_row_table_data": [_pbp_row(), _pbp_row(GameId="0022500002")]}
     )
     assert list(frame.columns) == list(PBP_GAME_LOG_COLUMNS)
     assert len(frame) == 2
     assert frame.loc[0, "Minutes"] == "31:30"
 
-    assert PBPGameLogAdapter.parse_game_player_logs(
-        {"multi_row_table_data": [_pbp_row()]}
-    ).loc[0, "EntityId"] == 101
+    stats = PBPGameLogAdapter.parse_game_stats(
+        {
+            "stats": {
+                "Home": {"FullGame": [_pbp_row()]},
+                "Away": {"FullGame": []},
+            },
+            "home_team_abbreviation": "AAA",
+            "away_team_abbreviation": "BBB",
+            "date": "2026-01-02",
+        },
+        game_id="0022500001",
+    )
+    assert stats.loc[0, "EntityId"] == 101
+    assert stats.loc[0, "GameId"] == "0022500001"
+    assert stats.loc[0, "Date"] == "2026-01-02"
+    assert stats.loc[0, "Team"] == "AAA"
+    assert stats.loc[0, "Opponent"] == "BBB"
 
 
 @pytest.mark.parametrize(
@@ -144,13 +163,13 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
 )
 def test_adapter_parse_seams_reject_malformed_payloads(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_player_game_logs(payload)
+        PBPGameLogAdapter.parse_game_logs(payload)
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_player_logs(payload)
+        PBPGameLogAdapter.parse_game_stats(payload, game_id="0022500001")
 
 
 def test_adapter_empty_payload_carries_the_declared_schema():
-    frame = PBPGameLogAdapter.parse_player_game_logs({"multi_row_table_data": []})
+    frame = PBPGameLogAdapter.parse_game_logs({"multi_row_table_data": []})
     assert list(frame.columns) == list(PBP_GAME_LOG_COLUMNS)
     assert frame.empty
 
@@ -191,10 +210,11 @@ def test_adapter_fetch_player_game_logs_uses_entity_params_and_telemetry():
     frame = adapter.fetch_player_game_logs(101, "2025-26")
 
     url, params, timeout = session.calls[0]
-    assert url == adapter.player_game_logs_url
+    assert url == adapter.game_logs_url
     assert params == {
         "Season": "2025-26",
         "SeasonType": "Regular+Season",
+        "EntityType": "Player",
         "EntityId": "101",
     }
     assert timeout == (1.0, 2.0)
@@ -212,7 +232,15 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
 
     class FakeResponse:
         status_code = 200
-        payload = {"multi_row_table_data": [_pbp_row()]}
+        payload = {
+            "stats": {
+                "Home": {"FullGame": [_pbp_row()]},
+                "Away": {"FullGame": []},
+            },
+            "home_team_abbreviation": "AAA",
+            "away_team_abbreviation": "BBB",
+            "date": "2026-01-02",
+        }
 
         def raise_for_status(self):
             return None
@@ -239,15 +267,15 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
         ),
         session=session,
     )
-    adapter.fetch_game_player_logs("0022500001", "2025-26", season_type="Playoffs")
+    frame = adapter.fetch_game_player_logs("0022500001", "2025-26")
 
     url, params, timeout = session.calls[0]
-    assert url == adapter.game_player_stats_url
+    assert url == adapter.game_stats_url
     assert params == {
-        "Season": "2025-26",
-        "SeasonType": "Playoffs",
         "GameId": "0022500001",
+        "Type": "Player",
     }
+    assert frame.loc[0, "GameId"] == "0022500001"
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["operation"] == "game_player_stats"
 
@@ -299,7 +327,7 @@ def test_normalize_pbp_game_logs_builds_the_canonical_frame():
     assert row["FG_PCT"] == pytest.approx(0.5)
     assert row["FG3M"] == 3
     assert row["FG3A"] == 7
-    assert row["FTM"] == 3
+    assert row["FTM"] == 3  # free-throw points == made free throws
     assert row["FTA"] == 4
     assert row["FT_PCT"] == pytest.approx(0.75)
     assert row["OREB"] == 2
@@ -330,19 +358,21 @@ def test_normalize_pbp_game_logs_reconstructs_away_matchup():
 def test_normalize_pbp_game_logs_zero_fills_omitted_counting_fields():
     row = _pbp_row(Minutes="12:00")
     for field in (
-        "Fg2M",
-        "Fg2A",
-        "Fg3M",
-        "Fg3A",
-        "FtM",
-        "FtA",
-        "OffReb",
-        "DefReb",
+        "FG2M",
+        "FG2A",
+        "FG3M",
+        "FG3A",
+        "FGM",
+        "FGA",
+        "FtPoints",
+        "FTA",
+        "OffRebounds",
+        "DefRebounds",
         "Assists",
         "Turnovers",
         "Steals",
         "Blocks",
-        "PersonalFouls",
+        "Fouls",
         "PlusMinus",
         "Points",
     ):
@@ -421,8 +451,8 @@ def test_normalize_pbp_game_logs_keeps_exact_minutes_without_rounding():
         {"EntityId": 0},
         {"TeamId": 0},
         {"Name": None},
-        {"Fg3M": 99},
-        {"FtM": 99},
+        {"FG3M": 99},
+        {"FtPoints": 99},
         {"Points": 12.5},
     ],
 )
@@ -519,9 +549,6 @@ def test_game_service_cache_keeps_historical_expiration_for_pbp(monkeypatch, moc
     assert provider.hits == ["player_game_logs"]
 
 
-# --------------------------------------------------------- database router
-
-
 class FakePBPGameLogs:
     def __init__(self, rows):
         self.rows = rows
@@ -530,6 +557,10 @@ class FakePBPGameLogs:
 
     def fetch_player_game_logs(self, player_id, season, *, season_type, cache_status):
         self.calls.append((player_id, season, season_type, cache_status))
+        return _pbp_frame(*self.rows)
+
+    def fetch_game_player_logs(self, game_id, season, *, season_type):
+        self.calls.append((game_id, season, season_type))
         return _pbp_frame(*self.rows)
 
     def record_cache_hit(self, operation):

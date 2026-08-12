@@ -1,0 +1,114 @@
+{
+  "stats": {
+    "Home": {
+      "FullGame": [
+        {
+          "EntityId": "2544",
+          "TeamId": "1610612747",
+          "Name": "LeBron James",
+          "Season": "2024-25",
+          "TeamAbbreviation": "LAL",
+          "Minutes": "34:12",
+          "PlusMinus": 12,
+          "FG2M": 6,
+          "FG2A": 12,
+          "FG3M": 3,
+          "FG3A": 7,
+          "FGM": 9,
+          "FGA": 19,
+          "FtPoints": 4,
+          "FTA": 4,
+          "OffRebounds": 1,
+          "DefRebounds": 7,
+          "Rebounds": 8,
+          "Assists": 8,
+          "Turnovers": 3,
+          "Steals": 2,
+          "Blocks": 1,
+          "Fouls": 2,
+          "Points": 25
+        },
+        {
+          "EntityId": "203507",
+          "TeamId": "1610612747",
+          "Name": "Austin Reaves",
+          "Season": "2024-25",
+          "TeamAbbreviation": "LAL",
+          "Minutes": "28:00",
+          "PlusMinus": 8,
+          "FG2M": 4,
+          "FG2A": 8,
+          "FG3M": 2,
+          "FG3A": 5,
+          "FGM": 6,
+          "FGA": 13,
+          "FtPoints": 1,
+          "FTA": 2,
+          "OffRebounds": 0,
+          "DefRebounds": 4,
+          "Rebounds": 4,
+          "Assists": 5,
+          "Turnovers": 1,
+          "Steals": 1,
+          "Blocks": 0,
+          "Fouls": 1,
+          "Points": 15
+        }
+      ]
+    },
+    "Away": {
+      "FullGame": [
+        {
+          "EntityId": "201935",
+          "TeamId": "1610612759",
+          "Name": "Victor Wembanyama",
+          "Season": "2024-25",
+          "TeamAbbreviation": "SAS",
+          "Minutes": "30:30",
+          "PlusMinus": -10,
+          "FG2M": 7,
+          "FG2A": 13,
+          "FG3M": 2,
+          "FG3A": 6,
+          "FGM": 9,
+          "FGA": 19,
+          "FtPoints": 5,
+          "FTA": 6,
+          "OffRebounds": 3,
+          "DefRebounds": 8,
+          "Rebounds": 11,
+          "Assists": 3,
+          "Turnovers": 4,
+          "Steals": 1,
+          "Blocks": 3,
+          "Fouls": 2,
+          "Points": 25
+        }
+      ]
+    }
+  },
+  "team_results": {
+    "Home": {
+      "FullGame": {
+        "TeamId": "1610612747",
+        "Name": "LAL",
+        "Points": 112
+      }
+    },
+    "Away": {
+      "FullGame": {
+        "TeamId": "1610612759",
+        "Name": "SAS",
+        "Points": 105
+      }
+    }
+  },
+  "home_team_abbreviation": "LAL",
+  "away_team_abbreviation": "SAS",
+  "home_team_id": "1610612747",
+  "away_team_id": "1610612759",
+  "date": "2024-11-15",
+  "league": "nba",
+  "season": "2024-25",
+  "season_type": "Regular Season"
+}

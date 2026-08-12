@@ -416,7 +416,8 @@ The request-time player-game-log source is one injected seam
 `player_game_logs` facts only when the season has a complete, valid
 publication; every other valid season falls through to the cached
 `LivePBPGameLogsSource`.  The live source replaces the request-time NBA Stats
-call: it requests one PBP per-player season game-log observation through
+call: it requests one PBP per-player season game-log observation
+(`GET /get-game-logs/nba` with `EntityType=Player` and `EntityId`) through
 `PBPGameLogAdapter`, normalizes it through the shared canonical contract, and
 joins every row to the governed Event Catalog by game ID to recover team and
 opponent identity, home/away, and the existing Matchup notation.  Rows that
@@ -431,7 +432,10 @@ canonical PBP game-log mapping shared by the live path and durable ingestion.
 Provider omissions become zero only for a closed list of additive/counting
 box-score fields; identity, game, date, team, opponent, and `MM:SS` minutes
 evidence is malformed rather than zero-filled.  Canonical shooting facts derive
-`FGM = FG2M + FG3M` and `FGA = FG2A + FG3A`; composite and fantasy values are
+`FGM = FG2M + FG3M` and `FGA = FG2A + FG3A`; PBP reports free-throw points
+rather than made free throws, and a made free throw is exactly one point, so
+the endpoint's canonical `FTM` reads `FtPoints` after that semantic
+equivalence; composite and fantasy values are
 computed centrally by `app.services.game_log_frame.derive_game_log_frame` so
 the live PBP and stored read paths can never disagree.  The stored source
 rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
@@ -710,17 +714,21 @@ adds `free_throws_made`, `free_throws_attempted`, `offensive_rebounds`,
 Refresh.  It requires the same fresh, nonempty Event and Athlete Catalog
 prerequisites, discovers governed completed `Regular Season`/`Playoffs` games
 through the observation time, and requests one PBP per-game player observation
-(`PBPGameLogAdapter.fetch_game_player_logs`) per missing game.  Each game's
-rows flow through the same canonical normalization contract, join the fresh
-Athlete Catalog for player identity, must cover both exact event teams with at
-least the configured `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME`
-positive-minute players, and are replaced atomically by
-`PlayerGameLogRepository.publish_game`.  `publish_game` recomputes the season
-row count and sets the sidecar `publication_status` to `complete` only when
-every governed completed game carries complete sync evidence; anything less
-stays `in_progress`, so a database-first read never mistakes a partial season
-for a complete one.  The same transaction advances the configured current
-season's stats-surface observation.
+(`GET /get-game-stats` with `Type=Player`, parsed by
+`PBPGameLogAdapter.parse_game_stats`) per missing game.  Each game's rows flow
+through the same canonical normalization contract, join the fresh Athlete
+Catalog for player identity, must cover both exact event teams with at least
+the configured `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute
+players, and are replaced atomically by `PlayerGameLogRepository.publish_game`
+(game rows plus per-game sync evidence only).  The season sidecar and the
+configured current season's stats-surface observation are advanced once, by
+`PlayerGameLogRepository.advance_season_publication`, only after every target
+game succeeds, so a failed or incomplete refresh preserves the last complete
+publication and never stamps a partial union fresh.  The sidecar
+`publication_status` is `complete` only when every governed completed event
+carries complete PBP sync evidence; legacy NBA-derived publications stay
+`in_progress` until a real PBP backfill verifies them, so a database-first read
+never mistakes unverified data for a complete publication.
 
 A bounded recent-game reconciliation window
 (`PLAYER_GAME_LOG_RECONCILIATION_DAYS`, default three days) re-fetches recent
@@ -2090,7 +2098,7 @@ used to repair the fixture.
 - Route/service interaction: replace methods on the dependency graph supplied
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
-- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`, `PBPGameLogAdapter.parse_player_game_logs`, `PBPGameLogAdapter.parse_game_player_logs`) with no network.
+- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`, `PBPGameLogAdapter.parse_game_logs`, `PBPGameLogAdapter.parse_game_stats`) with no network.
 - Player Diet provider contracts: run `tests/fixtures/player_diets/` through
   `parse_recorded_player_diet` and
   `PBPTotalsAdapter.parse_player_diet_totals`; these fixtures pin canonical

@@ -309,17 +309,14 @@ def build_dependencies(
     live_game_logs_source = LivePBPGameLogsSource(
         pbp_game_logs_provider,
         event_catalog_service,
-        settings=settings,
     )
     stored_game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
-        settings=settings,
     )
     game_logs_source = DatabaseFirstGameLogsSource(
         live_game_logs_source,
         stored_game_logs_source,
         player_game_log_repository,
-        settings=settings,
     )
     game_service = GameService(
         engine,

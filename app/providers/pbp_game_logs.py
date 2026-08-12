@@ -3,10 +3,21 @@
 The application depends on :class:`PBPGameLogProvider`.  The concrete adapter
 keeps the PBP game-log endpoints, request parameters, shared HTTP session,
 timeouts, telemetry, response validation, and provider error translation in
-one place.  Callers receive the PBP-shaped observation rows through the
-production parse seams; canonical game-log normalization lives beside the
-service consumers so the same mapping serves both the live request path and
-durable ingestion.
+one place.  Callers receive PBP-shaped observation rows through the production
+parse seams; canonical game-log normalization lives beside the service
+consumers so the same mapping serves both the live request path and durable
+ingestion.
+
+The wire contract mirrors the reviewed PBP Stats OpenAPI:
+
+* ``GET /get-game-logs/{league}`` with ``Season``, ``SeasonType``,
+  ``EntityType=Player``, and ``EntityId`` returns flat ``multi_row_table_data``
+  rows whose identity block is ``EntityId``/``TeamId``/``Name``/``Date``/
+  ``GameId``/``Team``/``Opponent`` and whose minutes are an ``MM:SS`` string.
+* ``GET /get-game-stats`` with ``GameId`` and ``Type=Player`` returns nested
+  ``stats.Home/Away.FullGame`` arrays of flat ``BoxscoreItem`` rows; game
+  identity (``GameId``, ``Date``, ``Team``, ``Opponent``) is attached from the
+  request and the response envelope so both seams share one observation shape.
 """
 
 from __future__ import annotations
@@ -30,8 +41,8 @@ from app.utils.telemetry import (
     record_cached_provider_event,
 )
 
-PBP_PLAYER_GAME_LOGS_URL = "https://api.pbpstats.com/get-player-game-logs/nba"
-PBP_GAME_PLAYER_STATS_URL = "https://api.pbpstats.com/get-game-player-stats/nba"
+PBP_GAME_LOGS_URL = "https://api.pbpstats.com/get-game-logs/nba"
+PBP_GAME_STATS_URL = "https://api.pbpstats.com/get-game-stats"
 
 #: The strict identity/minute columns every PBP game-log row must carry.
 #: PBP omits observed-zero counting fields, so the remaining box-score columns
@@ -44,25 +55,30 @@ PBP_GAME_LOG_REQUIRED_COLUMNS: tuple[str, ...] = (
     "TeamId",
     "Minutes",
 )
+#: Matchup-tricode evidence retained beside the canonical Event Catalog join.
+PBP_GAME_LOG_EVIDENCE_COLUMNS: tuple[str, ...] = ("Team", "Opponent")
 PBP_GAME_LOG_COUNTING_COLUMNS: tuple[str, ...] = (
-    "Fg2M",
-    "Fg2A",
-    "Fg3M",
-    "Fg3A",
-    "FtM",
-    "FtA",
-    "OffReb",
-    "DefReb",
+    "FG2M",
+    "FG2A",
+    "FG3M",
+    "FG3A",
+    "FGM",
+    "FGA",
+    "FtPoints",
+    "FTA",
+    "OffRebounds",
+    "DefRebounds",
     "Assists",
     "Turnovers",
     "Steals",
     "Blocks",
-    "PersonalFouls",
+    "Fouls",
     "PlusMinus",
     "Points",
 )
 PBP_GAME_LOG_COLUMNS: tuple[str, ...] = (
     *PBP_GAME_LOG_REQUIRED_COLUMNS,
+    *PBP_GAME_LOG_EVIDENCE_COLUMNS,
     *PBP_GAME_LOG_COUNTING_COLUMNS,
 )
 
@@ -102,8 +118,8 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
     """Concrete PBP game-log adapter backed by the shared retrying session."""
 
     PROVIDER_NAME = "PBP Stats"
-    player_game_logs_url = PBP_PLAYER_GAME_LOGS_URL
-    game_player_stats_url = PBP_GAME_PLAYER_STATS_URL
+    game_logs_url = PBP_GAME_LOGS_URL
+    game_stats_url = PBP_GAME_STATS_URL
 
     def __init__(
         self,
@@ -149,15 +165,16 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         params = {
             "Season": season,
             "SeasonType": _provider_season_type(season_type),
+            "EntityType": "Player",
             "EntityId": str(player_id),
         }
         with self._request_game_logs(
             "player_game_logs",
-            self.player_game_logs_url,
+            self.game_logs_url,
             params,
             cache_status=cache_status,
         ) as response:
-            return type(self).parse_player_game_logs(_json_payload(response))
+            return type(self).parse_game_logs(_json_payload(response))
 
     def fetch_game_player_logs(
         self,
@@ -167,17 +184,20 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         season_type: str = "Regular Season",
     ) -> pd.DataFrame:
         """Fetch and validate one game's participating player observations."""
+        del season, season_type
         params = {
-            "Season": season,
-            "SeasonType": _provider_season_type(season_type),
             "GameId": str(game_id),
+            "Type": "Player",
         }
         with self._request_game_logs(
             "game_player_stats",
-            self.game_player_stats_url,
+            self.game_stats_url,
             params,
         ) as response:
-            return type(self).parse_game_player_logs(_json_payload(response))
+            return type(self).parse_game_stats(
+                _json_payload(response),
+                game_id=str(game_id),
+            )
 
     def record_cache_hit(self, operation: str) -> None:
         """Record a cache-hit event for a PBP game-log operation."""
@@ -189,14 +209,64 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         record_cached_provider_event(PROVIDER_PBP_STATS, operation)
 
     @staticmethod
-    def parse_player_game_logs(payload: Any) -> pd.DataFrame:
-        """Validate and normalize a recorded PBP per-player game-log payload."""
+    def parse_game_logs(payload: Any) -> pd.DataFrame:
+        """Validate and normalize a recorded ``/get-game-logs`` payload."""
         return _parse_game_log_rows(payload)
 
     @staticmethod
-    def parse_game_player_logs(payload: Any) -> pd.DataFrame:
-        """Validate and normalize a recorded PBP per-game player payload."""
-        return _parse_game_log_rows(payload)
+    def parse_game_stats(payload: Any, *, game_id: str) -> pd.DataFrame:
+        """Validate and normalize a recorded ``/get-game-stats`` payload.
+
+        The nested ``stats.Home/Away.FullGame`` player arrays are flattened and
+        the game identity from the response envelope (``date``, home/away
+        abbreviations) plus the requested ``game_id`` is attached so the rows
+        share one observation vocabulary with game logs.
+        """
+        if not isinstance(payload, dict):
+            raise ProviderResponseError(
+                "PBP Stats game-stats payload is missing an object."
+            )
+        stats = payload.get("stats")
+        if not isinstance(stats, dict) or not all(
+            side in stats for side in ("Home", "Away")
+        ):
+            raise ProviderResponseError(
+                "PBP Stats game-stats payload has an invalid stats shape."
+            )
+        game_date = payload.get("date")
+        if not game_date:
+            raise ProviderResponseError(
+                "PBP Stats game-stats payload is missing a game date."
+            )
+        sides = {
+            "Home": (
+                payload.get("home_team_abbreviation"),
+                payload.get("away_team_abbreviation"),
+            ),
+            "Away": (
+                payload.get("away_team_abbreviation"),
+                payload.get("home_team_abbreviation"),
+            ),
+        }
+        rows: list[dict[str, Any]] = []
+        for side, (team, opponent) in sides.items():
+            period = stats[side].get("FullGame") if isinstance(stats[side], dict) else None
+            if not isinstance(period, list):
+                raise ProviderResponseError(
+                    "PBP Stats game-stats payload has an invalid FullGame list."
+                )
+            if not all(isinstance(row, dict) for row in period):
+                raise ProviderResponseError(
+                    "PBP Stats game-stats payload contains malformed rows."
+                )
+            for row in period:
+                row = dict(row)
+                row["GameId"] = game_id
+                row["Date"] = str(game_date)
+                row["Team"] = team
+                row["Opponent"] = opponent
+                rows.append(row)
+        return _project_game_log_rows(rows)
 
 
 def _provider_season_type(season_type: str) -> str:
@@ -217,7 +287,7 @@ def _json_payload(response: requests.Response) -> Any:
 
 
 def _parse_game_log_rows(payload: Any) -> pd.DataFrame:
-    """Validate one PBP game-log wire payload into a sparse row frame.
+    """Validate one ``/get-game-logs`` wire payload into a sparse row frame.
 
     Every row must carry the strict identity and minutes columns; the counting
     columns are sparse and materialized as missing values so canonicalization
@@ -234,6 +304,11 @@ def _parse_game_log_rows(payload: Any) -> pd.DataFrame:
         )
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
+    return _project_game_log_rows(rows)
+
+
+def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Project validated game-log rows onto the declared sparse vocabulary."""
     for row in rows:
         missing = [
             column
@@ -259,9 +334,10 @@ def _parse_game_log_rows(payload: Any) -> pd.DataFrame:
 __all__ = [
     "PBP_GAME_LOG_COLUMNS",
     "PBP_GAME_LOG_COUNTING_COLUMNS",
+    "PBP_GAME_LOG_EVIDENCE_COLUMNS",
     "PBP_GAME_LOG_REQUIRED_COLUMNS",
-    "PBP_GAME_PLAYER_STATS_URL",
-    "PBP_PLAYER_GAME_LOGS_URL",
+    "PBP_GAME_LOGS_URL",
+    "PBP_GAME_STATS_URL",
     "PBPGameLogAdapter",
     "PBPGameLogProvider",
 ]

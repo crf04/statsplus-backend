@@ -19,6 +19,10 @@ from app.services.player_game_log_ingest import (
 )
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import (
+    PLAYER_GAME_LOG_SURFACE,
+    StatsFreshnessRepository,
+)
 from tests.services.test_player_game_logs import (
     RETRIEVED_AT,
     SEASON,
@@ -52,20 +56,22 @@ def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
                 "GameId": game_id,
                 "Date": game_date,
                 "TeamId": team_id,
+                "Team": "AAA" if index < 5 else "BBB",
+                "Opponent": "BBB" if index < 5 else "AAA",
                 "Minutes": f"{20 + index}:00",
-                "Fg2M": 4 + index,
-                "Fg2A": 8 + index,
-                "Fg3M": index,
-                "Fg3A": index + 2,
-                "FtM": 2,
-                "FtA": 3,
-                "OffReb": 1,
-                "DefReb": 3,
+                "FG2M": 4 + index,
+                "FG2A": 8 + index,
+                "FG3M": index,
+                "FG3A": index + 2,
+                "FtPoints": 2,
+                "FTA": 3,
+                "OffRebounds": 1,
+                "DefRebounds": 3,
                 "Assists": 2 + index,
                 "Turnovers": 1,
                 "Steals": 1,
                 "Blocks": 0,
-                "PersonalFouls": 1,
+                "Fouls": 1,
                 "PlusMinus": 4 - index,
                 "Points": 12 + 2 * index,
             }
@@ -160,9 +166,42 @@ def test_ingest_publishes_each_missing_completed_game_atomically(tmp_path):
     assert len(sync.checksum) == 64
 
 
-def test_failed_second_game_preserves_first_publication_and_stays_in_progress(
-    tmp_path,
-):
+def test_failed_run_preserves_the_last_complete_publication(tmp_path):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    games = _complete_game_logs()
+    provider = FakeGameLogProvider(games)
+    service = _service(repository, provider, reconciliation_days=14)
+
+    service.refresh(SEASON)
+    assert repository.has_complete_publication(SEASON) is True
+    surface_before = StatsFreshnessRepository(
+        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
+    ).get().last_successful_completion
+
+    class FailingProvider(FakeGameLogProvider):
+        def fetch_game_player_logs(self, game_id, season, *, season_type):
+            if game_id == "0022500004":
+                raise ProviderUnavailableError("pbp stats down")
+            return super().fetch_game_player_logs(
+                game_id, season, season_type=season_type
+            )
+
+    failing = _service(repository, FailingProvider(games), reconciliation_days=14)
+    with pytest.raises(ProviderUnavailableError):
+        failing.refresh(SEASON)
+
+    # The last complete publication is preserved and its freshness never moved.
+    assert repository.has_complete_publication(SEASON) is True
+    assert repository.get_freshness(SEASON).publication_status == "complete"
+    surface_after = StatsFreshnessRepository(
+        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
+    ).get().last_successful_completion
+    assert surface_after == surface_before
+    assert repository.list_player_rows(SEASON, 101)
+
+
+def test_failed_first_run_advances_no_freshness_and_stores_no_sidecar(tmp_path):
     repository = _repository(tmp_path)
     _seed_identities(repository)
 
@@ -179,9 +218,10 @@ def test_failed_second_game_preserves_first_publication_and_stays_in_progress(
     with pytest.raises(ProviderUnavailableError):
         _service(repository, provider).refresh(SEASON)
 
-    # The first game's atomic publication survives the second game's failure.
-    assert repository.list_player_rows(SEASON, 101)
-    assert repository.get_freshness(SEASON).publication_status == "in_progress"
+    assert repository.get_freshness(SEASON).retrieved_at is None
+    assert StatsFreshnessRepository(
+        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
+    ).get().last_successful_completion is None
     assert repository.has_complete_publication(SEASON) is False
 
 
@@ -245,9 +285,11 @@ def test_ingest_rejects_a_game_that_cannot_join_canonical_identity(tmp_path):
     with pytest.raises(PlayerGameLogIngestError):
         _service(repository, provider).refresh(SEASON)
 
-    # Prior facts for the earlier game survive the failed game.
-    assert repository.list_player_rows(SEASON, 101)
-    assert repository.get_freshness(SEASON).publication_status == "in_progress"
+    # Prior facts for the earlier game survive the failed game, but no season
+    # publication advances until a fully successful refresh.
+    assert "0022500001" in repository.stored_game_ids(SEASON)
+    assert "0022500004" not in repository.stored_game_ids(SEASON)
+    assert repository.get_freshness(SEASON).retrieved_at is None
 
 
 def test_ingest_rejects_incomplete_team_coverage(tmp_path):

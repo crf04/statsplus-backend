@@ -159,7 +159,6 @@ class PlayerGameLogIngestService:
                     event,
                     events=events,
                     athlete_map=athlete_map,
-                    completed_ids=completed_ids,
                     retrieved_at=retrieved_at,
                 )
             except SQLAlchemyError:
@@ -170,6 +169,16 @@ class PlayerGameLogIngestService:
             games_processed += 1
             total_rows += outcome.row_count
             counts = self._merge_counts(counts, outcome)
+        # The season publication and current-season freshness advance only
+        # after every target game succeeded, so a failed or incomplete refresh
+        # preserves the last complete publication instead of stamping a partial
+        # union fresh.
+        self.repository.advance_season_publication(
+            canonical_season,
+            retrieved_at=retrieved_at,
+            source_provider=SOURCE_PROVIDER,
+            expected_complete_game_ids=completed_ids,
+        )
         self._emit_telemetry(counts=counts, published=total_rows)
         return PlayerGameLogIngestResult(
             season=canonical_season,
@@ -185,7 +194,6 @@ class PlayerGameLogIngestService:
         *,
         events: list[dict[str, Any]],
         athlete_map: dict[int, dict[str, Any]],
-        completed_ids: frozenset[str],
         retrieved_at: datetime,
     ) -> _GameOutcome | None:
         game_id = str(event["nba_game_id"])
@@ -251,7 +259,6 @@ class PlayerGameLogIngestService:
             retrieved_at=retrieved_at,
             source_provider=SOURCE_PROVIDER,
             checksum=checksum,
-            expected_complete_game_ids=completed_ids,
         )
         return _GameOutcome(
             row_count=publication.row_count,
@@ -432,6 +439,7 @@ class PlayerGameLogIngestService:
                 source_provider=SOURCE_PROVIDER,
                 source_row_count=0,
                 allow_empty=True,
+                publication_status="complete",
             )
         except ValueError:
             self._emit_telemetry(rejected=1)

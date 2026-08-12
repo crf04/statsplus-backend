@@ -949,15 +949,18 @@ Each game must cover both exact teams with at least
 is published atomically with per-game synchronization evidence; an unchanged
 game is idempotently skipped. A malformed, incomplete, identity-removing, or
 provider-failed game preserves prior facts and fails the refresh.
-For the configured current season, every game publication
-also advances the named `player_game_logs` stats freshness; historical
+The season publication and the configured current season's
+`player_game_logs` stats freshness advance only after every target game in a
+run succeeds, so a failed or incomplete refresh preserves the last complete
+publication instead of stamping a partial union fresh; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. Every result requires a present, fresh, nonempty Event
 Catalog whose freshness count agrees with its actual season rows; a nonempty
 result also requires a present, fresh, nonempty Athlete Catalog.
 The season sidecar carries an explicit `complete`/`in_progress`
-`publication_status`; a season serves database-first game-log reads only when
-its publication is complete and valid.
+`publication_status`; legacy NBA-derived publications remain `in_progress`
+until real PBP backfill verifies them, and a season serves database-first
+game-log reads only when its publication is complete and valid.
 `update_database` does not
 publish the season-owned Athlete Catalog or its freshness, so Nightly's named
 Athlete Catalog step is required. Schedule precedes that step, so an Athlete

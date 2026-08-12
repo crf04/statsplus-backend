@@ -81,7 +81,10 @@ class PlayerGameLogFreshness:
     row_count: int
     source_row_count: int
     identity_source_row_count: int
-    publication_status: str = "complete"
+    #: Nothing is treated as a complete publication without PBP-derived,
+    #: parity-checked evidence; the safe default for any legacy/NBA-derived or
+    #: unknown state is ``in_progress``.
+    publication_status: str = "in_progress"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,10 +178,15 @@ class PlayerGameLogRepository:
         source_row_count: int,
         identity_source_row_count: int | None = None,
         allow_empty: bool = False,
+        publication_status: str = "in_progress",
         current_catalog_game_ids: frozenset[str] | None = None,
         recoverable_game_ids: frozenset[str] = frozenset(),
     ) -> PlayerGameLogPublication:
         canonical_season = validate_canonical_season(season)
+        if publication_status not in {"complete", "in_progress"}:
+            raise ValueError(
+                "publication_status must be complete or in_progress"
+            )
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
         if (
@@ -272,7 +280,7 @@ class PlayerGameLogRepository:
                 "row_count": len(unique),
                 "source_row_count": source_row_count,
                 "identity_source_row_count": identity_source_row_count,
-                "publication_status": "complete",
+                "publication_status": publication_status,
             }
             result = connection.execute(
                 update(refresh_table)
@@ -362,14 +370,15 @@ class PlayerGameLogRepository:
         retrieved_at: datetime,
         source_provider: str,
         checksum: str,
-        expected_complete_game_ids: frozenset[str],
     ) -> PlayerGameLogPublication:
         """Atomically replace one game's player facts and its sync evidence.
 
         A completed game's rows are replaced in one transaction so a reader
-        never observes half of one team's box score.  The season sidecar row
-        count and its complete/in-progress publication status are recomputed
-        from the stored union in the same transaction.
+        never observes half of one team's box score.  The season sidecar and
+        stats-surface freshness are deliberately left to
+        :meth:`advance_season_publication`, which the refresh service calls
+        only after every target game succeeds, so a failed or incomplete
+        refresh preserves the last complete publication.
         """
         canonical_season = validate_canonical_season(season)
         validate_player_game_log_season_type(season_type)
@@ -402,7 +411,6 @@ class PlayerGameLogRepository:
 
         retrieved = assume_utc(retrieved_at)
         log_table = PlayerGameLog.__table__
-        refresh_table = PlayerGameLogRefresh.__table__
         sync_table = PlayerGameLogSync.__table__
         with self.engine.begin() as connection:
             connection.execute(
@@ -436,6 +444,34 @@ class PlayerGameLogRepository:
                 connection.execute(
                     insert(sync_table).values(**sync_values)
                 )
+        return PlayerGameLogPublication(
+            row_count=len(unique),
+            recovered_removed_row_count=0,
+        )
+
+    def advance_season_publication(
+        self,
+        season: str,
+        *,
+        retrieved_at: datetime,
+        source_provider: str,
+        expected_complete_game_ids: frozenset[str],
+    ) -> PlayerGameLogPublication:
+        """Publish one refresh run's season sidecar and surface freshness.
+
+        Called once after every target game in a refresh succeeds.  The season
+        row count and publication status are recomputed from the committed
+        game/sync facts and the current season's stats-surface observation is
+        advanced in the same transaction, so freshness can never advance past a
+        failed run.
+        """
+        canonical_season = validate_canonical_season(season)
+        if not source_provider or source_provider != source_provider.strip():
+            raise ValueError("source_provider must be a non-empty canonical value")
+        retrieved = assume_utc(retrieved_at)
+        log_table = PlayerGameLog.__table__
+        refresh_table = PlayerGameLogRefresh.__table__
+        with self.engine.begin() as connection:
             row_count = connection.execute(
                 select(func.count())
                 .select_from(log_table)
@@ -468,7 +504,7 @@ class PlayerGameLogRepository:
                     retrieved, connection=connection
                 )
         return PlayerGameLogPublication(
-            row_count=len(unique),
+            row_count=int(row_count),
             recovered_removed_row_count=0,
         )
 

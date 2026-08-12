@@ -29,6 +29,36 @@ CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS = (
     "MIN",
 )
 
+#: The one canonical frame vocabulary every PBP-based source produces before
+#: derivation.  The live normalization and the stored-source rebuild share this
+#: single definition so the two paths cannot drift.
+GAME_LOG_FRAME_COLUMNS = (
+    "PLAYER_ID",
+    "PLAYER_NAME",
+    "GAME_ID",
+    "GAME_DATE",
+    "MATCHUP",
+    "TEAM_ID",
+    "TEAM_ABBREVIATION",
+    "MIN",
+    "PTS",
+    "REB",
+    "AST",
+    "FGM",
+    "FGA",
+    "FG3M",
+    "FG3A",
+    "FTM",
+    "FTA",
+    "OREB",
+    "DREB",
+    "TOV",
+    "STL",
+    "BLK",
+    "PF",
+    "PLUS_MINUS",
+)
+
 #: Derived columns added by :func:`derive_game_log_frame`.
 DERIVED_GAME_LOG_COLUMNS = (
     "NBA_FANTASY_PTS",
@@ -46,12 +76,9 @@ DERIVED_GAME_LOG_COLUMNS = (
 )
 
 
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    """Return ``numerator/denominator`` or zero for an empty denominator."""
-
-    if not denominator:
-        return 0.0
-    return numerator / denominator
+def _safe_ratio_series(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    nonzero = denominator != 0
+    return numerator.div(denominator).where(nonzero, 0.0)
 
 
 def derive_game_log_frame(
@@ -104,13 +131,9 @@ def derive_game_log_frame(
     return derived
 
 
-def _safe_ratio_series(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    nonzero = denominator != 0
-    return numerator.div(denominator).where(nonzero, 0.0)
-
-
 __all__ = [
     "CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS",
     "DERIVED_GAME_LOG_COLUMNS",
+    "GAME_LOG_FRAME_COLUMNS",
     "derive_game_log_frame",
 ]

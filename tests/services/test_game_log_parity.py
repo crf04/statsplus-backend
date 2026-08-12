@@ -46,20 +46,22 @@ def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
                 "GameId": game_id,
                 "Date": game_date,
                 "TeamId": team_id,
+                "Team": "AAA" if index < 5 else "BBB",
+                "Opponent": "BBB" if index < 5 else "AAA",
                 "Minutes": f"{20 + index}:00",
-                "Fg2M": 4 + index,
-                "Fg2A": 8 + index,
-                "Fg3M": index,
-                "Fg3A": index + 2,
-                "FtM": 2,
-                "FtA": 3,
-                "OffReb": 1,
-                "DefReb": 3,
+                "FG2M": 4 + index,
+                "FG2A": 8 + index,
+                "FG3M": index,
+                "FG3A": index + 2,
+                "FtPoints": 2,
+                "FTA": 3,
+                "OffRebounds": 1,
+                "DefRebounds": 3,
                 "Assists": 2 + index,
                 "Turnovers": 1,
                 "Steals": 1,
                 "Blocks": 0,
-                "PersonalFouls": 1,
+                "Fouls": 1,
                 "PlusMinus": 4 - index,
                 "Points": 12 + 2 * index,
             }
@@ -174,16 +176,14 @@ def _service(engine, source):
 def _live_service(engine, provider):
     return _service(
         engine,
-        LivePBPGameLogsSource(
-            provider, _EventsFromDb(engine), settings=_settings()
-        ),
+        LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
     )
 
 
 def _stored_service(engine, repository):
     return _service(
         engine,
-        StoredGameLogsSource(repository, settings=_settings()),
+        StoredGameLogsSource(repository),
     )
 
 
@@ -233,6 +233,21 @@ def test_live_and_stored_paths_agree_on_empty_filter_results(durable_world):
     assert live == stored
     assert stored["game_logs"] == []
     assert stored["averages"] == []
+
+
+def test_live_and_stored_paths_agree_on_recent_game_filter(durable_world):
+    engine, repository, provider, _games = durable_world
+    query = GameLogQuery(season_filter=SEASON, game_filter=1)
+
+    live = _live_service(engine, provider).get_filtered_logs("Player One", query)
+    stored = _stored_service(engine, repository).get_filtered_logs(
+        "Player One", query
+    )
+
+    assert live == stored
+    # game_filter keeps the leading newest-first rows, matching the legacy
+    # NBA ordering the head() filter depends on.
+    assert stored["game_logs"][0]["GAME_DATE"] == "2026-01-11"
 
 
 def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
@@ -291,15 +306,14 @@ def test_database_first_router_serves_a_complete_season_from_storage(durable_wor
     engine, repository, provider, _games = durable_world
     router = DatabaseFirstGameLogsSource(
         _live_service(engine, provider).game_logs_source,
-        StoredGameLogsSource(repository, settings=_settings()),
+        StoredGameLogsSource(repository),
         repository,
-        settings=_settings(),
     )
 
     assert router.cached(SEASON) is False
     frame = router.get_player_logs(101, SEASON)
     assert len(frame) == 2
-    assert frame.iloc[0]["GAME_ID"] == "0022500001"  # chronological order
+    assert frame.iloc[0]["GAME_ID"] == "0022500004"  # newest first
 
 
 def test_database_first_router_falls_back_to_live_before_complete_publication(
@@ -321,17 +335,14 @@ def test_database_first_router_falls_back_to_live_before_complete_publication(
             "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2),
         }
     )
-    live = LivePBPGameLogsSource(
-        provider, _EventsFromDb(engine), settings=_settings()
-    )
+    live = LivePBPGameLogsSource(provider, _EventsFromDb(engine))
     router = DatabaseFirstGameLogsSource(
         live,
-        StoredGameLogsSource(repository, settings=_settings()),
+        StoredGameLogsSource(repository),
         repository,
-        settings=_settings(),
     )
 
     assert router.cached(SEASON) is True
     frame = router.get_player_logs(101, SEASON)
     assert len(frame) == 2
-    assert frame.iloc[0]["GAME_ID"] == "0022500001"
+    assert frame.iloc[0]["GAME_ID"] == "0022500004"

@@ -18,6 +18,10 @@ import pandas as pd
 import pytest
 
 from app.providers.nba_stats import REQUIRED_GAME_LOG_COLUMNS
+from app.providers.pbp_game_logs import (
+    PBPGameLogAdapter,
+    PBP_GAME_LOG_COLUMNS,
+)
 from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 from app.utils import telemetry
@@ -36,6 +40,8 @@ def _load(name: str) -> dict:
         "nba_stats/game_logs.valid.json",
         "nba_stats/player_game_logs.playoffs.json",
         "pbp_stats/totals.valid.json",
+        "pbp_stats/game_logs.valid.json",
+        "pbp_stats/game_stats.valid.json",
     ],
 )
 def test_recorded_fixtures_have_the_documented_shape(fixture):
@@ -191,3 +197,57 @@ def test_pbp_fixture_carries_shareable_columns_only():
         "ShortMidRangeAssists",
         "LongMidRangeAssists",
     }
+
+
+def test_recorded_pbp_game_logs_parse_through_the_live_path():
+    payload = _load("pbp_stats/game_logs.valid.json")
+    frame = PBPGameLogAdapter.parse_game_logs(payload)
+
+    assert isinstance(frame, pd.DataFrame)
+    assert len(frame) == 2
+    assert set(PBP_GAME_LOG_COLUMNS).issubset(frame.columns)
+    assert frame.loc[0, "EntityId"] == "2544"
+    assert frame.loc[0, "Name"] == "LeBron James"
+    assert frame.loc[0, "Minutes"] == "34:12"
+    assert frame.loc[0, "Team"] == "LAL"
+    assert frame.loc[0, "Opponent"] == "SAS"
+    assert frame.loc[0, "GameId"] == "0022400001"
+    assert frame.loc[0, "Date"] == "2024-11-15"
+    assert frame.loc[0, "FtPoints"] == 4
+    assert frame.loc[0, "FTA"] == 4
+    assert frame.loc[0, "OffRebounds"] == 1
+    assert frame.loc[0, "DefRebounds"] == 7
+    assert frame.loc[0, "Fouls"] == 2
+
+
+def test_recorded_pbp_game_stats_parse_and_attach_game_identity():
+    payload = _load("pbp_stats/game_stats.valid.json")
+    frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
+
+    assert len(frame) == 3
+    assert frame.loc[0, "EntityId"] == "2544"
+    assert frame.loc[0, "GameId"] == "0022400001"
+    assert frame.loc[0, "Date"] == "2024-11-15"
+    assert frame.loc[0, "Team"] == "LAL"
+    assert frame.loc[0, "Opponent"] == "SAS"
+    assert frame.loc[2, "Team"] == "SAS"
+    assert frame.loc[2, "Opponent"] == "LAL"
+    assert frame.loc[2, "Points"] == 25
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"multi_row_table_data": "nope"},
+        {"multi_row_table_data": [{"EntityId": "2544"}]},
+        {"multi_row_table_data": [None]},
+        None,
+        {"stats": {"Home": {"FullGame": [None]}, "Away": {"FullGame": []}}},
+        {"stats": {"Home": {"FullGame": []}, "Away": {}}},
+    ],
+)
+def test_malformed_pbp_game_log_shapes_are_provider_response_error(payload):
+    with pytest.raises(telemetry.ProviderResponseError):
+        PBPGameLogAdapter.parse_game_logs(payload)
+    with pytest.raises(telemetry.ProviderResponseError):
+        PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")

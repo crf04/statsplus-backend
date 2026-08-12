@@ -14,9 +14,8 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.services.game_log_frame import derive_game_log_frame
+from app.services.game_log_frame import GAME_LOG_FRAME_COLUMNS, derive_game_log_frame
 from app.services.pbp_game_log_normalization import (
     PBPJoinCounts,
     normalize_pbp_game_logs,
@@ -64,11 +63,9 @@ class LivePBPGameLogsSource:
         self,
         pbp_provider: Any,
         event_catalog: EventCatalogReader | None,
-        settings: RuntimeSettings | None = None,
     ) -> None:
         self.pbp_provider = pbp_provider
         self.event_catalog = event_catalog
-        self.settings = settings
 
     def get_player_logs(
         self,
@@ -102,7 +99,7 @@ class LivePBPGameLogsSource:
             raise ProviderUnavailableError(
                 "PBP Stats returned no canonically joinable game logs."
             )
-        return _chronological_frame(frame)
+        return _recency_frame(frame)
 
     def cached(self, season: str) -> bool:
         del season
@@ -115,13 +112,8 @@ class LivePBPGameLogsSource:
 class StoredGameLogsSource:
     """Build the canonical request-time frame from durable player-game facts."""
 
-    def __init__(
-        self,
-        repository: PlayerGameLogReader,
-        settings: RuntimeSettings | None = None,
-    ) -> None:
+    def __init__(self, repository: PlayerGameLogReader) -> None:
         self.repository = repository
-        self.settings = settings
 
     def get_player_logs(
         self,
@@ -140,7 +132,7 @@ class StoredGameLogsSource:
             for record in records
             if record.season_type == "Regular Season"
         )
-        return _chronological_frame(
+        return _recency_frame(
             derive_game_log_frame(
                 _records_to_primitive_frame(records),
                 round_minutes=True,
@@ -163,12 +155,10 @@ class DatabaseFirstGameLogsSource:
         live_source: GameLogsSource,
         stored_source: GameLogsSource,
         repository: PlayerGameLogReader,
-        settings: RuntimeSettings | None = None,
     ) -> None:
         self.live_source = live_source
         self.stored_source = stored_source
         self.repository = repository
-        self.settings = settings
 
     def get_player_logs(
         self,
@@ -196,24 +186,25 @@ class DatabaseFirstGameLogsSource:
         return self.live_source
 
 
-def _chronological_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Order a canonical frame deterministically, oldest game first.
+def _recency_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Order a canonical frame deterministically, most recent game first.
 
-    The legacy NBA provider returned games in chronological order and the
-    last-N filter keeps the leading rows, so the live PBP and stored paths
-    must agree on the same ascending order for identical response documents.
+    The legacy NBA provider returned games newest first and the last-N
+    ``game_filter`` keeps the leading rows, so the live PBP and stored paths
+    must agree on the same newest-first order for identical response documents.
     """
     if frame.empty:
         return frame
     return frame.sort_values(
         ["GAME_DATE", "GAME_ID"],
+        ascending=[False, False],
         kind="stable",
     ).reset_index(drop=True)
 
 
 def _records_to_primitive_frame(records: tuple[Any, ...]) -> pd.DataFrame:
     if not records:
-        return pd.DataFrame(columns=_RECORD_PRIMITIVE_COLUMNS)
+        return pd.DataFrame(columns=GAME_LOG_FRAME_COLUMNS)
     rows = [_record_to_primitive(record) for record in records]
     return pd.DataFrame(rows)
 
@@ -252,32 +243,7 @@ def _record_to_primitive(record: Any) -> dict[str, Any]:
     }
 
 
-_RECORD_PRIMITIVE_COLUMNS = (
-    "PLAYER_ID",
-    "PLAYER_NAME",
-    "GAME_ID",
-    "GAME_DATE",
-    "MATCHUP",
-    "TEAM_ID",
-    "TEAM_ABBREVIATION",
-    "MIN",
-    "PTS",
-    "REB",
-    "AST",
-    "FGM",
-    "FGA",
-    "FG3M",
-    "FG3A",
-    "FTM",
-    "FTA",
-    "OREB",
-    "DREB",
-    "TOV",
-    "STL",
-    "BLK",
-    "PF",
-    "PLUS_MINUS",
-)
+_RECORD_PRIMITIVE_COLUMNS = GAME_LOG_FRAME_COLUMNS
 
 
 __all__ = [
