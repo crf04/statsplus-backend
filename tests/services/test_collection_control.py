@@ -8,6 +8,8 @@ from sqlalchemy import select
 from app.models.collection_control import (
     ActiveSeason,
     AuditEvent,
+    BootstrapRequest,
+    CatalogPublication,
     CollectionAlert,
     CollectionCycle,
     CompositionJob,
@@ -740,6 +742,52 @@ def test_catalog_completion_requires_regular_governed_schedule_and_roster_eviden
         collect_before=now + timedelta(hours=1),
     )
     assert manifest.status == "active"
+
+
+def test_catalog_publication_rechecks_active_season_before_reconciliation(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    with control_db.connect() as connection:
+        before = connection.execute(select(EventCatalogEntry)).all()
+
+    control.activate_season("2026-27", actor="operator")
+    with pytest.raises(ControlPlaneError, match="season_not_active"):
+        control.publish_catalog(request.request_id, _catalog_payload("event"), version="stale-season")
+
+    with control_db.connect() as connection:
+        assert connection.execute(select(EventCatalogEntry)).all() == before
+        assert connection.execute(select(CatalogPublication)).all() == []
+        assert connection.execute(select(BootstrapRequest.status).where(
+            BootstrapRequest.request_id == request.request_id
+        )).scalar_one() == "pending"
+
+
+def test_athlete_catalog_uses_last_good_event_when_newer_event_attempt_is_incomplete(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event-complete"
+    ).complete
+
+    incomplete_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    incomplete = control.publish_catalog(
+        incomplete_request.request_id,
+        {"events": _catalog_payload("event")["events"][:-1]},
+        version="event-incomplete",
+    )
+    assert incomplete.complete is False
+
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    athlete = control.publish_catalog(
+        athlete_request.request_id, _catalog_payload("athlete"), version="athlete-complete"
+    )
+    assert athlete.complete is True
 
 
 def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(control_db):

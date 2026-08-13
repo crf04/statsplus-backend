@@ -1102,6 +1102,11 @@ class CollectionControlService(_SessionService):
             if request.status != "pending" or _aware(request.expires_at) <= _aware(now):
                 request.status = "expired" if request.status == "pending" else request.status
                 raise ControlPlaneError("bootstrap_expired")
+            active = session.scalar(select(ActiveSeason).where(
+                ActiveSeason.season == request.season,
+            ).with_for_update())
+            if active is None or active.status != "active" or active.phase != "Regular Season":
+                raise ControlPlaneError("season_not_active")
             try:
                 _validate_catalog_payload(
                     payload, request.catalog_type,
@@ -1114,11 +1119,9 @@ class CollectionControlService(_SessionService):
                     min_athlete_identities=1,
                 )
                 if request.catalog_type == "athlete":
-                    event = session.scalar(select(CatalogPublication).where(
-                        CatalogPublication.season == request.season,
-                        CatalogPublication.catalog_type == "event",
-                        CatalogPublication.cutoff == request.cutoff,
-                    ).order_by(CatalogPublication.published_at.desc()))
+                    event = self._latest_catalog_in_session(
+                        session, request.season, "event", cutoff=request.cutoff, now=now,
+                    )
                     if event is None or not event.complete:
                         raise ValueError("event evidence required")
                     required_ids = _required_athlete_ids(event.payload)
@@ -1291,32 +1294,45 @@ class CollectionControlService(_SessionService):
             "manifests": visible_manifests,
         }
 
+    @staticmethod
+    def _latest_catalog_in_session(
+        session: Session, season: str, catalog_type: str, *,
+        cutoff: datetime | None = None, now: datetime,
+        required_ids: Iterable[str] = (),
+    ) -> CatalogPublication | None:
+        stmt = select(CatalogPublication).where(
+            CatalogPublication.season == season,
+            CatalogPublication.catalog_type == catalog_type,
+            CatalogPublication.complete.is_(True),
+        )
+        if cutoff is not None:
+            stmt = stmt.where(CatalogPublication.cutoff <= _aware(cutoff))
+        rows = list(session.scalars(stmt.order_by(
+            CatalogPublication.cutoff.desc(), CatalogPublication.published_at.desc(),
+        )))
+        required = {str(value) for value in required_ids}
+        for row in rows:
+            if row.expires_at is not None and _aware(row.expires_at) <= now:
+                continue
+            if required:
+                try:
+                    document = json.loads(row.payload)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not required <= _catalog_identity_ids(document):
+                    continue
+            return row
+        return None
+
     def latest_catalog(self, season: str, catalog_type: str, *, cutoff: datetime | None = None,
                        now: datetime | None = None,
                        required_ids: Iterable[str] = ()) -> CatalogPublication | None:
-        now = _aware(now or self.clock())
+        current = _aware(now or self.clock())
         with self.session() as session:
-            stmt = select(CatalogPublication).where(
-                CatalogPublication.season == season,
-                CatalogPublication.catalog_type == catalog_type,
-                CatalogPublication.complete.is_(True),
+            return self._latest_catalog_in_session(
+                session, season, catalog_type, cutoff=cutoff, now=current,
+                required_ids=required_ids,
             )
-            if cutoff is not None:
-                stmt = stmt.where(CatalogPublication.cutoff <= _aware(cutoff))
-            rows = list(session.scalars(stmt.order_by(CatalogPublication.cutoff.desc(), CatalogPublication.published_at.desc())))
-            required = {str(value) for value in required_ids}
-            for row in rows:
-                if row.expires_at is not None and _aware(row.expires_at) <= now:
-                    continue
-                if required:
-                    try:
-                        document = json.loads(row.payload)
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    if not required <= _catalog_identity_ids(document):
-                        continue
-                return row
-            return None
 
     def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
                         collect_before: datetime, accepted_versions: Iterable[int] = (1, 2),
