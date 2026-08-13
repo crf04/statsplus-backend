@@ -94,6 +94,8 @@ def test_operator_route_matrix_is_registered_and_reasoned(client, app):
         ("/api/admin/collection/compositions/job/retry", "POST"),
         ("/api/admin/collection/cycles/start", "POST"),
         ("/api/admin/collection/repair", "POST"),
+        ("/api/admin/collection/cycles/cycle/finish", "POST"),
+        ("/api/admin/collection/cycles/cycle/not-applicable", "POST"),
         ("/api/admin/collection/bootstrap", "POST"),
         ("/api/admin/collection/collectors/id/revoke", "POST"),
         ("/api/admin/collection/collectors/id/rotate", "POST"),

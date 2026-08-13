@@ -227,6 +227,45 @@ def scoped_repair():
     return jsonify({"job_id": job.job_id, "status": job.status}), 202
 
 
+@collection_bp.post("/admin/collection/cycles/<cycle_id>/finish")
+@require_admin
+@route_error_boundary("Failed to finish collection cycle.")
+def finish_cycle(cycle_id: str):
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        cycle = _service("collection_control").finish_cycle(cycle_id, status=str(body["status"]), reason=reason)
+        _service("collection_operations").audit(actor=actor, action="cycle.finish", resource=cycle_id, reason=reason)
+    except (KeyError, TypeError, ValueError) as error:
+        raise _control_error(error) from error
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    return jsonify({"job_id": cycle.cycle_id, "cycle_id": cycle.cycle_id, "status": cycle.status}), 202
+
+
+@collection_bp.post("/admin/collection/cycles/<cycle_id>/not-applicable")
+@require_admin
+@route_error_boundary("Failed to govern stream applicability.")
+def govern_not_applicable(cycle_id: str):
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        row = _service("collection_control").govern_not_applicable(
+            cycle_id, str(body["stream_key"]), actor=actor, reason=reason
+        )
+        _service("collection_operations").audit(actor=actor, action="cycle.not_applicable", resource=cycle_id, reason=reason,
+                                                details={"stream_key": row.stream_key})
+    except (KeyError, TypeError, ValueError) as error:
+        raise _control_error(error) from error
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    return jsonify({"job_id": cycle_id, "cycle_id": cycle_id, "stream_key": row.stream_key, "status": "governed"}), 202
+
+
 @collection_bp.post("/admin/collection/bootstrap")
 @require_admin
 @route_error_boundary("Failed to create the bootstrap request.")

@@ -1432,6 +1432,8 @@ POST /api/admin/collection/streams/<stream_key>/activate
 POST /api/admin/collection/compositions/<job_id>/retry
 POST /api/admin/collection/cycles/start
 POST /api/admin/collection/repair
+POST /api/admin/collection/cycles/<cycle_id>/finish
+POST /api/admin/collection/cycles/<cycle_id>/not-applicable
 POST /api/admin/collection/bootstrap
 POST /api/admin/collection/collectors/<identity_id>/revoke
 POST /api/admin/collection/collectors/<identity_id>/rotate
