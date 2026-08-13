@@ -267,6 +267,8 @@ def main() -> int:
                 raise ValueError("restore command must consume {backup_artifact}")
             if not any("{database_url}" in token for token in restore_command):
                 raise ValueError("restore command must target {database_url}")
+            if "--historical-repair" not in pbp_command:
+                raise ValueError("pbp repair command must invoke --historical-repair")
             if str(args.restored_database_url) in {
                 str(args.database_url),
                 str(args.production_database_url),

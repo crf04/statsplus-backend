@@ -89,6 +89,23 @@ class FailureDrillReport:
             "production_evidence": self.production_evidence,
             "drills": [asdict(drill) for drill in self.drills],
         }
+        restore_drill = next(
+            (drill.details for drill in self.drills if drill.name == "isolated_restore_replay"),
+            {},
+        )
+        if self.production_evidence:
+            payload.update(
+                {
+                    "engine": "postgresql",
+                    "restore_command_evidence": restore_drill.get("restore_command_evidence"),
+                    "restore_duration_ms": restore_drill.get("restore_duration_ms"),
+                    "pbp_repair_observation_id": restore_drill.get("pbp_repair_observation_id"),
+                    "pbp_repair_job_id": restore_drill.get("pbp_repair_job_id"),
+                    "recovery_data_point": restore_drill.get("recovery_data_point"),
+                }
+            )
+        else:
+            payload["engine"] = "sqlite"
         payload["artifact_schema"] = {
             "version": 1,
             "engine": "postgresql" if self.production_evidence else "sqlite",
