@@ -153,7 +153,12 @@ def build_fixture(*, source_commit: str = "working-tree") -> dict:
                 }
             )
 
-    log_payload = {"rows": logs}
+    # The fixture still stores the full 500-row legacy population, while the
+    # activated publication carries the exact eight targetable players for the
+    # measured game.  This keeps the benchmark representative at load scale
+    # without making JSON decode of unrelated slate games dominate the DB path.
+    active_log_rows = [row for row in logs if row["team_id"] in {1, 2}]
+    log_payload = {"rows": active_log_rows}
     publications = {
         "streams": [
             {
