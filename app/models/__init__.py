@@ -82,6 +82,19 @@ from .team_matchup import (  # noqa: E402
     TeamMatchupSurfaceObservationRow,
 )
 from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
+from .collection_control import (  # noqa: E402
+    ActiveSeason,
+    BootstrapRequest,
+    CatalogPublication,
+    CollectionManifest,
+    CollectorIdentity,
+    CollectionObservation,
+    PublicationStream,
+    PublicationVersion,
+    PublicationPointer,
+    CompositionJob,
+    CollectorTokenReplay,
+)
 
 __all__ = [
     'Base',
@@ -114,4 +127,15 @@ __all__ = [
     'TeamMatchupSurfaceObservationRow',
     'InjurySnapshot',
     'InjurySourceSnapshot',
+    'ActiveSeason',
+    'BootstrapRequest',
+    'CatalogPublication',
+    'CollectionManifest',
+    'CollectorIdentity',
+    'CollectionObservation',
+    'PublicationStream',
+    'PublicationVersion',
+    'PublicationPointer',
+    'CompositionJob',
+    'CollectorTokenReplay',
 ]

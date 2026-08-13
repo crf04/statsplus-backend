@@ -144,6 +144,7 @@ def _register_blueprints(app: Flask) -> None:
     from app.routes.player_routes import player_bp
     from app.routes.team_routes import team_bp
     from app.routes.user_routes import user_bp
+    from app.routes.collection_routes import collection_bp
 
     app.register_blueprint(player_bp, url_prefix="/api/players")
     app.register_blueprint(game_bp, url_prefix="/api/games")
@@ -153,6 +154,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(nl_bp, url_prefix="/api")
     app.register_blueprint(health_bp)
     app.register_blueprint(user_bp, url_prefix="/api/user")
+    app.register_blueprint(collection_bp, url_prefix="/api")
 
 
 def _register_error_handlers(app: Flask) -> None:

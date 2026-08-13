@@ -49,6 +49,10 @@ class ApplicationDependencies:
     player_diet_service: Any | None = None
     pbp_game_logs_provider: Any | None = None
     game_logs_source: Any | None = None
+    collector_tokens: Any | None = None
+    collection_control: Any | None = None
+    observation_ingestion: Any | None = None
+    publication_service: Any | None = None
 
 
 def build_dependencies(
@@ -98,6 +102,12 @@ def build_dependencies(
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
+    from app.services.collection_control import (
+        CollectorTokenService,
+        CollectionControlService,
+        ObservationIngestionService,
+        PublicationService,
+    )
 
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
@@ -115,6 +125,17 @@ def build_dependencies(
 
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
+    collector_tokens = collection_control = observation_ingestion = publication_service = None
+    if not demo_database:
+        # The signing secret is deployment-only.  A process-local key keeps
+        # local development credential-free; production should inject one.
+        signing_secret = settings.auth.collector_signing_secret
+        collector_tokens = CollectorTokenService(
+            engine, environment=settings.environment, signing_secret=signing_secret
+        )
+        collection_control = CollectionControlService(engine)
+        observation_ingestion = ObservationIngestionService(engine)
+        publication_service = PublicationService(engine)
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
     )
@@ -381,6 +402,10 @@ def build_dependencies(
         player_diet_service=player_diet_service,
         pbp_game_logs_provider=pbp_game_logs_provider,
         game_logs_source=game_logs_source,
+        collector_tokens=collector_tokens,
+        collection_control=collection_control,
+        observation_ingestion=observation_ingestion,
+        publication_service=publication_service,
     )
 
 

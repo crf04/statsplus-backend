@@ -2030,6 +2030,25 @@ GET /api/health/pbp-stats or PUT /api/data/*_PBP
 instances from `ApplicationDependencies`; they do not create duplicate
 providers or perform provider calls in route modules.
 
+### Collection control plane
+
+Issue #84's Railway control plane is an additive seam beside the legacy data
+refresh queue. `app.services.collection_control` owns the Active Season,
+catalog bootstrap/publication, immutable cutoff-specific Collection Manifest,
+collector identity/token, atomic Observation ingestion, and fenced Publication
+pointer services. Collectors receive short-lived HMAC-signed tokens bound to an
+environment, audience, and explicit scopes; token replay can be rejected by
+consuming its ID, and rotated machine secrets overlap only until their bounded
+expiry. A repeated collector/client observation ID with the same checksum is
+an idempotent receipt; a conflicting checksum is rejected. Publication
+advancement increments a per-stream database fence, preserving the prior
+active version for rollback and rejecting stale composition workers.
+
+Migration 017 creates these records without changing existing public readers.
+The collector routes are narrow HTTP adapters under `/api/collector`, while
+reasoned Firebase-admin mutations live under `/api/admin/collection`; raw
+observations and credentials are never returned.
+
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and

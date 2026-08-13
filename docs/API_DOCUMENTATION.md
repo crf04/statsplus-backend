@@ -1415,6 +1415,30 @@ after an intended contract change, and review the diff.
 - **Scope.** NBA pregame Player Projection Markets only. Live, closed, settled,
   team, match, futures, entry-placement, and non-NBA offerings are out of scope.
 
+## Collection control-plane endpoints
+
+The control plane is additive and does not alter existing public readers.
+Collector routes use a short-lived signed bearer token issued by an
+administrator; tokens are bound to the deployment environment, audience, and
+scope. Operator mutations require Firebase administrator authentication.
+
+```http
+POST /api/collector/token
+GET /api/collector/manifest/<manifest_id>
+POST /api/collector/observations
+POST /api/admin/collection/seasons/<season>
+POST /api/admin/collection/streams/<stream_key>/rollback
+```
+
+`POST /api/collector/observations` accepts one complete normalized envelope
+and payload. The server validates the manifest, schema version, environment,
+scope, checksum, and size before one atomic insert. Repeating the same
+collector/client observation ID and checksum returns the original receipt;
+reusing the ID with a different checksum is rejected. Operator actions return
+bounded durable identifiers and require a human-readable reason where they
+mutate publication state. Raw observations, credentials, and player-level
+payloads are never returned by these routes.
+
 ## User Endpoints
 
 Most user endpoints require Firebase auth:

@@ -327,6 +327,40 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
         )
 
 
+def _create_collection_control_plane_tables(connection: Connection) -> None:
+    """Create the additive Railway collection-control schema (#84)."""
+    from app.models.collection_control import (
+        ActiveSeason,
+        BootstrapRequest,
+        CatalogPublication,
+        CollectionManifest,
+        CollectorIdentity,
+        CollectionObservation,
+        PublicationStream,
+        PublicationVersion,
+        PublicationPointer,
+        CompositionJob,
+        CollectorTokenReplay,
+    )
+
+    # Creation order is intentionally explicit for PostgreSQL deployments and
+    # keeps this migration usable on SQLite temporary databases.
+    for model in (
+        ActiveSeason,
+        BootstrapRequest,
+        CatalogPublication,
+        CollectionManifest,
+        CollectorIdentity,
+        CollectionObservation,
+        PublicationStream,
+        PublicationVersion,
+        PublicationPointer,
+        CompositionJob,
+        CollectorTokenReplay,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -352,6 +386,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "016_pbp_game_log_primitives",
         _upgrade_player_game_log_primitives,
     ),
+    Migration(17, "017_collection_control_plane", _create_collection_control_plane_tables),
 )
 
 
