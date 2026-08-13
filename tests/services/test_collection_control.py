@@ -18,6 +18,7 @@ from app.models.collection_control import (
     CollectorUsage,
     CollectorLease,
     OperatorJob,
+    PublicationPointer,
     PublicationVersion,
     PublicationObservation,
     PublicationStream,
@@ -715,6 +716,113 @@ def test_usage_rollover_resets_locked_row_and_preserves_429_limits(control_db):
     assert (rolled.envelope_count, rolled.byte_count, rolled.poll_count) == (1, 10, 1)
     with pytest.raises(ControlPlaneError, match="usage_limit"):
         operations.record_usage("rollover", envelopes=1, max_envelopes=1)
+
+
+def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usage(control_db):
+    now = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_stream(
+        "fresh-stream", provider="nba", owner="railway", required_observations=[],
+        publication_strategy="replace", freshness_rule="daily_recheck", enabled=True,
+    )
+    publications.register_stream(
+        "stale-stream", provider="nba", owner="railway", required_observations=[],
+        publication_strategy="replace", freshness_rule="daily_recheck", enabled=True,
+    )
+    publications.register_stream(
+        "missing-stream", provider="nba", owner="railway", required_observations=[],
+        publication_strategy="replace", freshness_rule="daily_recheck", enabled=False,
+    )
+    publications.register_stream(
+        "synergy:l15", provider="nba", owner="residential_collector",
+        required_observations=["synergy"], publication_strategy="never_schedule",
+        freshness_rule="unavailable", enabled=False,
+    )
+    with pytest.raises(ControlPlaneError, match="stream_unavailable"):
+        publications.activate_stream("synergy:l15", reason="must remain unavailable")
+    with control_db.begin() as connection:
+        for stream_key, created_at, cutoff in (
+            ("fresh-stream", now - timedelta(days=1), now - timedelta(hours=2)),
+            ("stale-stream", now - timedelta(days=2), now - timedelta(days=2)),
+        ):
+            publication_id = f"publication-{stream_key}"
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=publication_id, stream_key=stream_key, season="2025-26",
+                cutoff=cutoff, version=1, status="active", checksum="a" * 64,
+                payload="{}", created_at=created_at, reason=None, fence=3,
+            ))
+            connection.execute(PublicationPointer.__table__.insert().values(
+                stream_key=stream_key, active_publication_id=publication_id,
+                previous_publication_id=None, fence=3, updated_at=created_at,
+            ))
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    created = tokens.create_identity(
+        "diagnostic", scopes=["poll"], owner="residential_collector", providers=["nba"],
+        surfaces=["event_catalog"], identity_id="diagnostic-collector",
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        created["identity_id"], created["secret"], scopes=["poll"]
+    ))
+    tokens.report_status(claims, release_version="collector-1.2.3", release_checksum="b" * 64)
+    old = tokens.create_identity(
+        "diagnostic-old", scopes=["poll"], owner="residential_collector", providers=["nba"],
+        surfaces=["event_catalog"], identity_id="diagnostic-collector-old",
+    )
+    old_claims = tokens.validate(tokens.issue_for_secret(
+        old["identity_id"], old["secret"], scopes=["poll"]
+    ))
+    tokens.report_status(
+        old_claims, release_version="collector-1.1.0", release_checksum="c" * 64,
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectorLease.__table__.insert().values(
+            collector_id=claims.collector_id, lease_owner="worker-1",
+            lease_expires_at=now + timedelta(seconds=30), fence=1, updated_at=now,
+        ))
+    operations = CollectionOperationsService(control_db, publication_service=publications, clock=lambda: now)
+    operations.record_usage("diagnostic-collector", polls=7, envelopes=3, bytes_received=2048)
+    diagnostics = operations.diagnostics(limit=50)
+
+    streams = {row["stream_key"]: row for row in diagnostics["streams"]}
+    assert streams["fresh-stream"]["freshness_status"] == "fresh"
+    assert streams["fresh-stream"]["age_seconds"] == 86400
+    assert streams["fresh-stream"]["coverage_cutoff"] == "2026-08-12T10:00:00+00:00"
+    assert streams["fresh-stream"]["fence"] == 3
+    assert streams["stale-stream"]["freshness_status"] == "stale"
+    assert streams["missing-stream"]["freshness_status"] == "missing"
+    assert streams["synergy:l15"]["freshness_status"] == "unavailable"
+    assert streams["synergy:l15"]["available"] is False
+
+    collector = next(row for row in diagnostics["collectors"] if row["identity_id"] == claims.collector_id)
+    assert collector["release_version"] == "collector-1.2.3"
+    assert collector["release_checksum"] == "b" * 64
+    older = next(row for row in diagnostics["collectors"] if row["identity_id"] == old_claims.collector_id)
+    assert (older["release_version"], older["release_checksum"]) == (
+        "collector-1.1.0", "c" * 64,
+    )
+    usage = next(row for row in diagnostics["usage"] if row["collector_id"] == claims.collector_id)
+    assert usage["poll_count"] == 7
+    assert usage["concurrency_count"] == 1
+    assert usage["concurrency_retry_after_seconds"] == 30
+    assert usage["limits"] == {
+        "poll_count": 100, "envelope_count": 1000,
+        "byte_count": 50 * 1024 * 1024, "concurrency_count": 1,
+    }
+    assert usage["retry_after_seconds"] == 86400
+
+
+def test_collector_status_rejects_unsafe_release_metadata(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    created = tokens.create_identity(
+        "diagnostic", scopes=["poll"], owner="residential_collector", providers=["nba"],
+        surfaces=["event_catalog"], identity_id="diagnostic-collector",
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        created["identity_id"], created["secret"], scopes=["poll"]
+    ))
+    with pytest.raises(ControlPlaneError, match="invalid_release_status"):
+        tokens.report_status(claims, release_version="../../secret", release_checksum="not-a-checksum")
 
 
 def test_catalog_completion_requires_regular_governed_schedule_and_roster_evidence(control_db):

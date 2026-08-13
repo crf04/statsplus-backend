@@ -103,6 +103,7 @@ class CollectorIdentity(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     release_version = Column(String(64), nullable=True)
+    release_checksum = Column(String(64), nullable=True)
     # Authorization is bound to the machine owner and the provider/surface
     # registry, not inferred from the generic operation scopes in ``scopes``.
     owner = Column(String(64), nullable=False, default="residential_collector")

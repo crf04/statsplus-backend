@@ -61,7 +61,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "020_operator_control",
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
-        "023_canonical_game_ledger",
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -125,6 +126,10 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "canonical_game_ledger_publications",
         ]
     )
+    collector_columns = {
+        column["name"] for column in inspect(engine).get_columns("collector_identities")
+    }
+    assert {"release_version", "release_checksum"} <= collector_columns
     assert {
         column["name"] for column in inspect(engine).get_columns("users")
     } == {
@@ -322,7 +327,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (20, "020_operator_control"),
             (21, "021_collector_surface_authorization"),
             (22, "022_publication_provenance_reconciliation"),
-            (23, "023_canonical_game_ledger"),
+            (23, "023_collector_release_status"),
+            (24, "024_canonical_game_ledger"),
         ]
 
 
@@ -359,7 +365,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "020_operator_control",
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
-        "023_canonical_game_ledger",
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -379,6 +386,30 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("canonical_game_ledger_player_facts")
     assert inspect(engine).has_table("canonical_game_ledger_backfill")
     assert inspect(engine).has_table("canonical_game_ledger_publications")
+
+
+def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-022.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 22),
+        )
+        assert run_migrations(engine).current_version == 22
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE collector_identities DROP COLUMN release_checksum"))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == (
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
+    )
+    assert upgraded.current_version == 24
+    columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
+    assert {"release_version", "release_checksum"} <= columns
 
 
 def test_demo_database_validation_is_read_only():
@@ -616,7 +647,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "020_operator_control",
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
-        "023_canonical_game_ledger",
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -660,11 +692,12 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "020_operator_control",
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
-        "023_canonical_game_ledger",
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
     )
-    assert upgraded.current_version == 23
+    assert upgraded.current_version == 24
     assert repeated.applied == ()
-    assert repeated.current_version == 23
+    assert repeated.current_version == 24
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -717,7 +750,8 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "020_operator_control",
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
-        "023_canonical_game_ledger",
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
