@@ -865,7 +865,12 @@ the canonical ledger surface scope, schema version, and manifest cutoff, and a
 candidate refuses mixed-manifest or mismatched-cutoff provenance. Provider
 documents live only in an exact-ID staging cache during validation: successful
 entries are consumed after the atomic ledger commit, while every rejected or
-failed entry is discarded without affecting concurrent IDs.
+failed entry is discarded without affecting concurrent IDs. Validation and
+per-game acceptance happen inside the bounded worker lifecycle, so retained
+full provider documents never exceed the configured collection concurrency.
+The backfill service has no ungoverned/direct mode: a real manifest identity,
+exact canonical scope, accepted schema version, cutoff, deadline, and governed
+event snapshot are mandatory before provider I/O.
 
 ### Database-first game-log reads
 

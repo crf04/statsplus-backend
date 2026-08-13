@@ -28,6 +28,7 @@ class LedgerGovernance:
     manifest_id: str | None = None
     manifest_scope: str = "canonical_game_ledger"
     collect_before: datetime | None = None
+    accepted_versions: frozenset[int] = frozenset({1})
 
 
 class LedgerGovernanceReader(Protocol):
@@ -149,6 +150,7 @@ class ActiveManifestLedgerGovernanceReader:
                 if manifest["collect_before"].tzinfo is None
                 else manifest["collect_before"]
             ),
+            accepted_versions=frozenset(int(value) for value in json.loads(manifest["accepted_versions"])),
         )
 
     def read_for_collection(self, season: str) -> LedgerGovernance:
@@ -211,6 +213,7 @@ class LedgerRuntime:
             manifest_id=governance.manifest_id,
             manifest_scope=governance.manifest_scope,
             collect_before=governance.collect_before,
+            accepted_versions=governance.accepted_versions,
         )
 
     def compose_queued(self, season: str) -> int:
