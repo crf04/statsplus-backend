@@ -63,6 +63,7 @@ The public error categories and HTTP statuses are:
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
 
@@ -1421,9 +1422,16 @@ The control plane is additive and does not alter existing public readers.
 Collector routes use a machine-secret exchange for a short-lived signed bearer
 token; tokens are bound to the deployment environment, audience, and scope.
 Operator mutations require Firebase administrator authentication.
+An invalid machine secret or bearer token is `401 invalid_token`; malformed
+token input such as a non-integer TTL is `400 invalid_input`; a valid token
+without the required collector scope is `403 forbidden`. Durable collection
+state conflicts (stale publication fences, immutable cycles, duplicate
+idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 
 ```http
 POST /api/collector/token
+GET /api/collector/discovery
+GET /api/collector/bootstrap
 GET /api/collector/bootstrap/<request_id>
 GET /api/collector/bootstrap/<request_id>/status
 POST /api/collector/catalog/<request_id>
@@ -1459,11 +1467,19 @@ bounded durable identifiers and require a human-readable reason where they
 mutate publication state. Raw observations and player-level
 payloads are never returned by these routes. Collector limits return `429
 rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
-Bootstrap status is a bounded response containing request state, season,
+`GET /api/collector/discovery` (also available as `GET /api/collector/bootstrap`)
+is the machine-authenticated, bounded polling seam: it returns pending bootstrap
+requests and active manifests visible to the caller's environment and token
+scopes, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
-facts. A collector with the bootstrap/catalog scope publishes one catalog at
-`POST /api/collector/catalog/<request_id>` and the request becomes succeeded;
-expired or already-completed requests are rejected. Railway then creates the
+facts. A collector with the bootstrap/catalog scope publishes one catalog using
+the same gzip-compressed Observation Envelope contract at
+`POST /api/collector/catalog/<request_id>`. The envelope carries the request's
+catalog observation type, provider/environment, scope, season/cutoff, schema,
+retrieval time, client observation ID, and checksum. The accepted observation
+and governed catalog publication commit together; repeating the same ID and
+checksum returns the original publication, while expired or already-completed
+requests are rejected. Railway then creates the
 immutable cutoff manifest only after both Event and Athlete Catalog
 publications pass their governed freshness checks.
 

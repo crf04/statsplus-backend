@@ -137,7 +137,9 @@ def build_dependencies(
         collector_tokens = CollectorTokenService(
             engine, environment=settings.environment, signing_secret=signing_secret
         )
-        collection_control = CollectionControlService(engine)
+        collection_control = CollectionControlService(
+            engine, environment=settings.environment
+        )
         publication_service = PublicationService(engine)
         collection_operations = CollectionOperationsService(
             engine,
@@ -149,7 +151,9 @@ def build_dependencies(
         if inspect(engine).has_table("publication_streams"):
             publication_service.register_default_streams()
         observation_ingestion = ObservationIngestionService(
-            engine, publication_service=publication_service
+            engine,
+            publication_service=publication_service,
+            collection_control=collection_control,
         )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)

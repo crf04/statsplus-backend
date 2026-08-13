@@ -24,7 +24,6 @@ from app.services.collection_control import (
     MAX_COMPRESSED_BYTES,
     MAX_ENVELOPE_BYTES,
     decompress_gzip_limited,
-    OperatorActionResult,
 )
 from app.utils.auth import get_current_user, require_admin
 
@@ -77,6 +76,7 @@ def _control_error(error: Exception) -> AppError:
         "manifest_not_found", "bootstrap_not_found", "cycle_not_found",
         "manifest_expired", "bootstrap_expired", "stream_not_found",
         "composition_not_found", "reconciliation_not_found",
+        "credential_delivery_unavailable",
     }:
         return ResourceNotFoundError("The collection resource was not found.", detail=reason)
     if reason in {
@@ -93,13 +93,32 @@ def _control_error(error: Exception) -> AppError:
 def issue_collector_token():
     """Exchange a machine secret for a short-lived scoped token."""
     body = _body()
+    identity_id = body.get("identity_id")
+    secret = body.get("secret")
+    ttl_seconds = body.get("ttl_seconds", 300)
+    scopes = body.get("scopes")
+    if (
+        not isinstance(identity_id, str)
+        or not identity_id.strip()
+        or not isinstance(secret, str)
+        or not secret
+        or isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, int)
+        or (scopes is not None and (
+            not isinstance(scopes, (list, tuple, set, frozenset))
+            or any(not isinstance(scope, str) or not scope.strip() for scope in scopes)
+        ))
+    ):
+        raise InvalidInputError(
+            "The collector token request is malformed.", detail="malformed_input"
+        )
     try:
         token = _service("collector_tokens").issue_for_secret(
-            str(body.get("identity_id", "")), str(body.get("secret", "")),
-            scopes=body.get("scopes"), ttl_seconds=int(body.get("ttl_seconds", 300))
+            identity_id.strip(), secret,
+            scopes=scopes, ttl_seconds=ttl_seconds
         )
     except ControlPlaneError as error:
-        raise InvalidTokenError("The collector identity secret is invalid.", detail=error.reason) from error
+        raise _control_error(error) from error
     except (TypeError, ValueError) as error:
         raise InvalidInputError("The collector token request is malformed.", detail=error) from error
     return jsonify({"token": token}), 201
@@ -131,26 +150,94 @@ def get_bootstrap_status(request_id: str):
     return jsonify(_bootstrap_response(row))
 
 
+@collection_bp.get("/collector/discovery")
+@collection_bp.get("/collector/bootstrap")
+@route_error_boundary("Failed to discover collection work.")
+def discover_collection_work():
+    claims = _collector_claims_any(("poll", "bootstrap", "catalog_publish"))
+    try:
+        limit = request.args.get("limit", default="50")
+        if isinstance(limit, str) and not limit.isdigit():
+            raise ValueError("limit must be an integer")
+        result = _service("collection_control").discover(
+            environment=claims.environment,
+            scopes=claims.scopes,
+            limit=int(limit),
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    except (TypeError, ValueError) as error:
+        raise InvalidInputError("The discovery limit is malformed.", detail=error) from error
+    return jsonify(result)
+
+
 @collection_bp.post("/collector/catalog/<request_id>")
 @route_error_boundary("Failed to publish the bootstrap catalog.")
 def publish_bootstrap_catalog(request_id: str):
-    _collector_claims_any(("catalog_publish", "bootstrap", "ingest"))
-    body = _body()
-    allowed = {"version", "payload", "checksum", "expires_at"}
-    if set(body) - allowed or "version" not in body or "payload" not in body:
-        raise InvalidInputError("A catalog version and payload are required.", detail="malformed_catalog")
-    if len(json.dumps(body["payload"], separators=(",", ":"), ensure_ascii=False).encode()) > MAX_ENVELOPE_BYTES:
-        raise InvalidInputError("The catalog payload is too large.", detail="payload_too_large")
-    expires_at = None
-    if body.get("expires_at") is not None:
-        expires_at = datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00"))
+    claims = _collector_claims_any(("catalog_publish", "bootstrap", "ingest"))
+    if request.headers.get("Content-Encoding", "").lower() != "gzip":
+        raise InvalidInputError(
+            "Catalog envelopes must use gzip compression.", detail="compression_required"
+        )
+    raw = _read_limited_body(MAX_COMPRESSED_BYTES)
     try:
-        row = _service("collection_control").publish_catalog(
-            request_id, body["payload"], version=str(body["version"]),
-            checksum=str(body["checksum"]) if body.get("checksum") else None,
+        decoded = decompress_gzip_limited(
+            raw,
+            max_input_bytes=MAX_COMPRESSED_BYTES,
+            max_output_bytes=MAX_ENVELOPE_BYTES,
+        )
+        envelope = json.loads(decoded)
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise InvalidInputError(
+            "The compressed catalog envelope is malformed.", detail="malformed_envelope"
+        ) from error
+    if not isinstance(envelope, dict):
+        raise InvalidInputError(
+            "The compressed catalog envelope is malformed.", detail="malformed_envelope"
+        )
+    payload = envelope.pop("payload", None)
+    version = envelope.pop("catalog_version", envelope.pop("version", None))
+    expires_at_value = envelope.pop("expires_at", None)
+    if payload is None or not isinstance(version, str) or not version.strip():
+        raise InvalidInputError(
+            "A catalog version and payload are required.", detail="malformed_catalog"
+        )
+    if expires_at_value is not None:
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_value).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise InvalidInputError("The catalog expiry is malformed.", detail=error) from error
+    else:
+        expires_at = None
+    if "checksum" not in envelope:
+        raise InvalidInputError("A catalog checksum is required.", detail="malformed_envelope")
+    accepted = {
+        "manifest_id", "client_observation_id", "environment", "provider",
+        "observation_type", "scope", "season", "cutoff", "schema_version",
+        "retrieved_at", "checksum",
+    }
+    if set(envelope) != accepted:
+        raise InvalidInputError(
+            "The catalog envelope fields are invalid.", detail="malformed_envelope"
+        )
+    encoded_payload = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+    try:
+        _service("collection_operations").record_usage(
+            claims.collector_id, envelopes=1, bytes_received=len(raw)
+        )
+        row = _service("observation_ingestion").ingest_catalog(
+            claims,
+            envelope,
+            encoded_payload,
+            request_id=request_id,
+            catalog_version=version.strip(),
             expires_at=expires_at,
         )
     except ControlPlaneError as error:
+        if error.reason == "usage_limit":
+            raise RateLimitedError(60, detail=error.reason) from error
         raise _control_error(error) from error
     except (TypeError, ValueError) as error:
         raise _control_error(error) from error
@@ -167,17 +254,21 @@ def publish_bootstrap_catalog(request_id: str):
 
 
 def _collector_claims(required_scope: str):
+    """Authenticate a collector and preserve auth-vs-authorization errors."""
+
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith("bearer "):
         raise AuthenticationRequiredError("A collector bearer token is required.")
     try:
         claims = _service("collector_tokens").validate(header[7:].strip(), required_scope=required_scope)
+        if required_scope not in claims.scopes:
+            raise ControlPlaneError("scope_denied")
         _service("collection_operations").record_usage(claims.collector_id, polls=1)
         return claims
     except ControlPlaneError as error:
         if error.reason == "usage_limit":
             raise RateLimitedError(60, detail=error.reason) from error
-        raise InvalidTokenError("The collector token is invalid.", detail=error.reason) from error
+        raise _control_error(error) from error
 
 
 def _collector_claims_any(required_scopes: tuple[str, ...]):
@@ -463,11 +554,7 @@ def rotate_collector(identity_id: str):
         raise _control_error(error) from error
     except (TypeError, ValueError) as error:
         raise _control_error(error) from error
-    # A legacy injected dependency graph may not yet expose the transactional
-    # wrapper; preserve its status-only response while production always uses
-    # the durable result above.
-    job_id = result.job_id if isinstance(result, OperatorActionResult) else identity_id
-    return jsonify({"job_id": job_id, "identity_id": identity_id, "status": "rotated"}), 202
+    return jsonify({"job_id": result.job_id, "identity_id": identity_id, "status": "rotated"}), 202
 
 
 @collection_bp.get("/admin/collection/credential-deliveries/<delivery_id>")

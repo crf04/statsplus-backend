@@ -2053,15 +2053,20 @@ may use a process-local key.
 Migration 017 creates these records without changing existing public readers.
 The collector routes are narrow HTTP adapters under `/api/collector`, while
 reasoned Firebase-admin mutations live under `/api/admin/collection`; raw
-observations and credentials are never returned. Bootstrap status and catalog
-publication complete the executable Request -> Catalog -> Manifest handshake.
+observations and credentials are never returned. Machine discovery/polling is
+environment- and scope-bound, deterministic, and bounded; bootstrap status and
+catalog publication complete the executable Request -> Catalog -> Manifest
+handshake.
 Every operator mutation is coordinated by one service transaction that writes
 the state change, a durable `OperatorJob`, and its audit event together; a
 failed mutation cannot leave a succeeded job or audit trail. Publication
 composition locks its per-stream pointer row on PostgreSQL and checks the
 worker's expected fence before advancing it. Completeness filters accepted
 observations by manifest, provider, and registered scope, then applies the
-canonical 30-team or registered Base evidence gate.
+canonical 30-team or registered Base evidence gate. Catalog publication enters
+through the same bounded, gzip Observation Envelope path as other collector
+evidence; the accepted catalog observation and its governed publication are one
+transaction, so a direct complete flag cannot bypass row validation.
 
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap

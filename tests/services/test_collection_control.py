@@ -31,6 +31,12 @@ from app.services.collection_control import (
 UTC = timezone.utc
 
 
+def _catalog_payload(kind):
+    if kind == "event":
+        return {"events": []}
+    return {"identities": ["1"]}
+
+
 @pytest.fixture
 def control_db(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
@@ -80,7 +86,7 @@ def test_bootstrap_requires_active_season_and_manifest_uses_exact_cutoff(control
     control.activate_season("2025-26", actor="operator")
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, {"kind": kind}, version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     assert manifest.cutoff == cutoff
     assert json.loads(manifest.accepted_versions) == [1, 2]
@@ -95,7 +101,7 @@ def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(cont
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, {"kind": kind}, version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now[0] + timedelta(minutes=1))
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=clock)
     identity = tokens.create_identity("pc", scopes=["ingest"])
@@ -103,7 +109,10 @@ def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(cont
     publication = PublicationService(control_db, clock=clock)
     publication.register_stream("synergy_play_types", provider="nba", owner="collector", required_observations=["synergy_play_types"], publication_strategy="snapshot_replace", enabled=True)
     ingestion = ObservationIngestionService(control_db, publication_service=publication, clock=clock)
-    payload = b'{"rows":[1]}'
+    payload = json.dumps({
+        "base": "play_types",
+        "rows": [{"slice_key": "Transition", "category": "Transition"}],
+    }, separators=(",", ":")).encode()
     envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-late", "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types", "scope": {}, "season": "2025-26", "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(), "retrieved_at": now[0].isoformat()}
     receipt = ingestion.ingest(claims, envelope, payload)
     assert receipt.replay is False
@@ -121,12 +130,15 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, {"kind": kind}, version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
     identity = tokens.create_identity("pc", scopes=["ingest"])
     claims = tokens.validate(tokens.issue(identity["identity_id"], scopes=["ingest"]))
-    payload = json.dumps({"rows": [1, 2]}, separators=(",", ":")).encode()
+    payload = json.dumps({
+        "base": "play_types",
+        "rows": [{"slice_key": "Transition"}, {"slice_key": "Isolation"}],
+    }, separators=(",", ":")).encode()
     envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-1", "environment": "testing",
         "provider": "nba", "observation_type": "synergy", "scope": {"season": "2025-26"}, "season": "2025-26",
         "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(),
@@ -173,7 +185,7 @@ def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, {"kind": kind}, version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=0)
     assert cycle.status == "no_game"
@@ -273,7 +285,9 @@ def test_completeness_uses_same_manifest_provider_scope_and_registered_evidence(
             collector_id="collector", manifest_id="manifest-1", environment="testing",
             provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
             season="2025-26", cutoff=now, schema_version=2,
-            checksum="a" * 64, payload=json.dumps({"team_ids": sorted(NBA_TEAM_IDS)}),
+            checksum="a" * 64, payload=json.dumps(
+                {"rows": [{"team_id": team_id} for team_id in sorted(NBA_TEAM_IDS)]}
+            ),
             payload_bytes=2, retrieved_at=now, accepted_at=now,
         ))
     publication.compose(
@@ -331,3 +345,110 @@ def test_compressed_observation_is_rejected_before_oversize_allocation(control_d
     }
     with pytest.raises(ControlPlaneError, match="payload_too_large"):
         ingestion.ingest(claims, envelope, payload, compressed=True, max_payload_bytes=16)
+
+
+def test_catalog_bootstrap_uses_the_observation_envelope_and_is_idempotent(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    payload = {"events": [{"id": "game-1", "status": "Final"}]}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    envelope = {
+        "manifest_id": None, "client_observation_id": "catalog-1", "environment": "testing",
+        "provider": "nba", "observation_type": "event_catalog",
+        "scope": {"window": "regular_season"}, "season": "2025-26",
+        "cutoff": cutoff.isoformat(), "schema_version": 2,
+        "retrieved_at": now.isoformat(),
+        "checksum": __import__("hashlib").sha256(encoded).hexdigest(),
+    }
+    claims = __import__("app.services.collection_control", fromlist=["CollectorClaims"]).CollectorClaims(
+        "collector-1", "statsplus-collector", "testing", frozenset({"catalog_publish"}), "jti", now
+    )
+    ingestion = ObservationIngestionService(control_db, collection_control=control, clock=lambda: now)
+    publication = ingestion.ingest_catalog(
+        claims, envelope, encoded, request_id=request.request_id, catalog_version="v1"
+    )
+    assert publication.catalog_type == "event"
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionObservation)).first().manifest_id is None
+    replay = ingestion.ingest_catalog(
+        claims, envelope, encoded, request_id=request.request_id, catalog_version="v1"
+    )
+    assert replay.publication_id == publication.publication_id
+
+
+def test_discovery_is_environment_and_scope_bound(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control = CollectionControlService(control_db, environment="testing", clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
+    )
+    discovered = control.discover(environment="testing", scopes=["poll"])
+    assert [item["request_id"] for item in discovered["bootstrap_requests"]] == [request.request_id]
+    with pytest.raises(ControlPlaneError, match="scope_denied"):
+        control.discover(environment="testing", scopes=["ingest"])
+    with pytest.raises(ControlPlaneError, match="environment_mismatch"):
+        control.discover(environment="production", scopes=["poll"])
+
+
+def test_event_catalog_rejects_caller_game_count_fallback(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
+    )
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(request.request_id, {"completed_game_count": 999}, version="v1")
+
+
+def test_league_completeness_rejects_asserted_team_list(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "league-assertion", provider="nba", owner="collector", required_observations=["league_obs"],
+        publication_strategy="replace", supported_windows=["season"],
+        completeness_rule="league_complete", enabled=True,
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs-assertion", client_observation_id="client-assertion",
+            collector_id="collector", manifest_id="manifest-assertion", environment="testing",
+            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2, checksum="d" * 64,
+            payload=json.dumps({"team_ids": sorted(NBA_TEAM_IDS)}), payload_bytes=2,
+            retrieved_at=now, accepted_at=now,
+        ))
+    with pytest.raises(ControlPlaneError, match="league_incomplete"):
+        publication.compose(
+            "league-assertion", season="2025-26", cutoff=now,
+            payload={"published": True}, manifest_id="manifest-assertion",
+        )
+
+
+def test_base_completeness_requires_every_registered_slice(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "synergy_play_types", provider="nba", owner="collector",
+        required_observations=["synergy_play_types"], publication_strategy="replace",
+        supported_windows=["season"], completeness_rule="base_complete", enabled=True,
+    )
+    rows = [{"slice_key": "Transition"}]
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs-slice", client_observation_id="client-slice",
+            collector_id="collector", manifest_id="manifest-slice", environment="testing",
+            provider="nba", observation_type="synergy_play_types", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2, checksum="e" * 64,
+            payload=json.dumps({"base": "play_types", "rows": rows}), payload_bytes=2,
+            retrieved_at=now, accepted_at=now,
+        ))
+    with pytest.raises(ControlPlaneError, match="base_incomplete"):
+        publication.compose(
+            "synergy_play_types", season="2025-26", cutoff=now,
+            payload={"published": True}, manifest_id="manifest-slice",
+        )

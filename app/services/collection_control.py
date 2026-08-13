@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
+from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 
 from app.models.collection_control import (
     ActiveSeason,
@@ -72,6 +73,27 @@ STREAM_BASES: dict[str, frozenset[str]] = {
     "grouped_shot_types": frozenset({"shot_types"}),
     "exact_shot_zones": frozenset({"shot_zones"}),
     "assist_locations": frozenset({"assist_locations"}),
+}
+STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
+    "synergy_play_types": frozenset(PLAY_TYPES),
+    "grouped_shot_types": frozenset(SHOOTING_TYPES),
+    "exact_shot_zones": frozenset({
+        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+        "Corner 3", "Above the Break 3",
+    }),
+    "assist_locations": frozenset({
+        "Arc3Assists", "Corner3Assists", "AtRimAssists",
+        "ShortMidRangeAssists", "LongMidRangeAssists",
+    }),
+}
+OBSERVATION_BASES: dict[str, str] = {
+    "synergy": "play_types",
+    "synergy_play_types": "play_types",
+    "shot_types": "shot_types",
+    "grouped_shot_types": "shot_types",
+    "shot_zones": "shot_zones",
+    "exact_shot_zones": "shot_zones",
+    "assist_locations": "assist_locations",
 }
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +148,22 @@ def _aware(value: datetime) -> datetime:
 
 def _iso(value: datetime | None) -> str | None:
     return _aware(value).isoformat() if value is not None else None
+
+
+def _bootstrap_dict(row: BootstrapRequest) -> dict[str, Any]:
+    """Serialize bootstrap state without returning catalog payload facts."""
+
+    return {
+        "request_id": row.request_id,
+        "season": row.season,
+        "catalog_type": row.catalog_type,
+        "cutoff": _iso(row.cutoff),
+        "status": row.status,
+        "expires_at": _iso(row.expires_at),
+        "catalog_version": row.catalog_version,
+        "completed_at": _iso(row.completed_at),
+        "failure_reason": row.failure_reason,
+    }
 
 
 def _json(value: Any) -> str:
@@ -479,6 +517,11 @@ class CollectorTokenService(_SessionService):
 class CollectionControlService(_SessionService):
     """Manage active seasons, bootstrap requests, catalogs, and manifests."""
 
+    def __init__(self, engine: Engine, *, environment: str = "testing",
+                 clock: Callable[[], datetime] = utcnow) -> None:
+        super().__init__(engine, clock=clock)
+        self.environment = environment.strip() or "testing"
+
     def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
                         session: Session | None = None) -> ActiveSeason:
         if not _valid_season(season):
@@ -530,6 +573,10 @@ class CollectionControlService(_SessionService):
             if request.status != "pending" or _aware(request.expires_at) <= _aware(now):
                 request.status = "expired" if request.status == "pending" else request.status
                 raise ControlPlaneError("bootstrap_expired")
+            try:
+                _validate_catalog_payload(payload, request.catalog_type)
+            except ValueError as error:
+                raise ControlPlaneError("catalog_payload_invalid") from error
             publication = CatalogPublication(publication_id=_uuid(), season=request.season, catalog_type=request.catalog_type,
                 cutoff=request.cutoff, version=version, checksum=checksum, payload=encoded,
                 complete=True, published_at=now, expires_at=expires_at)
@@ -548,6 +595,61 @@ class CollectionControlService(_SessionService):
             if request.status == "pending" and _aware(request.expires_at) <= current:
                 request.status = "expired"
             return request
+
+    def discover(self, *, environment: str, scopes: Iterable[str], limit: int = 50,
+                 now: datetime | None = None) -> dict[str, Any]:
+        """Return bounded pending work visible to one collector deployment.
+
+        Bootstrap requests are deployment-local state, so the service rejects
+        a token from a different environment before reading any rows.  A
+        generic ``poll`` scope can discover active manifests; narrower scope
+        tokens only see manifests whose frozen scope they explicitly carry.
+        Results are ordered newest-first with stable IDs for deterministic
+        polling and are never allowed to grow beyond the caller's bound.
+        """
+
+        caller_environment = str(environment or "").strip()
+        if caller_environment != self.environment:
+            raise ControlPlaneError("environment_mismatch")
+        caller_scopes = {str(scope).strip() for scope in scopes if str(scope).strip()}
+        if not caller_scopes.intersection({"poll", "bootstrap", "catalog_publish"}):
+            raise ControlPlaneError("scope_denied")
+        bounded = max(1, min(int(limit), 100))
+        current = _aware(now or self.clock())
+        with self.session() as session, session.begin():
+            pending = list(session.scalars(select(BootstrapRequest).where(
+                BootstrapRequest.status == "pending",
+                BootstrapRequest.expires_at > current,
+            ).order_by(
+                BootstrapRequest.created_at.desc(),
+                BootstrapRequest.request_id.asc(),
+            ).limit(bounded)))
+            manifests = list(session.scalars(select(CollectionManifest).where(
+                CollectionManifest.status == "active",
+                CollectionManifest.collect_before > current,
+            ).order_by(
+                CollectionManifest.created_at.desc(),
+                CollectionManifest.manifest_id.asc(),
+            ).limit(bounded)))
+        visible_manifests = []
+        for manifest in manifests:
+            frozen_scopes = set(json.loads(manifest.scopes))
+            if "poll" in caller_scopes or frozen_scopes.intersection(caller_scopes):
+                visible_manifests.append({
+                    "manifest_id": manifest.manifest_id,
+                    "season": manifest.season,
+                    "cutoff": _iso(manifest.cutoff),
+                    "collect_before": _iso(manifest.collect_before),
+                    "accepted_versions": json.loads(manifest.accepted_versions),
+                    "scopes": sorted(frozen_scopes),
+                    "checksum": manifest.checksum,
+                    "status": manifest.status,
+                })
+        return {
+            "environment": self.environment,
+            "bootstrap_requests": [_bootstrap_dict(row) for row in pending],
+            "manifests": visible_manifests,
+        }
 
     def latest_catalog(self, season: str, catalog_type: str, *, cutoff: datetime | None = None,
                        now: datetime | None = None) -> CatalogPublication | None:
@@ -661,6 +763,11 @@ class CollectionControlService(_SessionService):
             ).order_by(CatalogPublication.published_at.desc()))
             if event is None:
                 raise ControlPlaneError("event_catalog_required")
+            try:
+                event_document = json.loads(event.payload)
+                _validate_catalog_payload(event_document, "event")
+            except (TypeError, json.JSONDecodeError, ValueError) as error:
+                raise ControlPlaneError("event_catalog_invalid") from error
             game_count = _completed_game_count(event.payload, cutoff=_aware(manifest.cutoff))
             cycle = CollectionCycle(cycle_id=_uuid(), season=manifest.season, manifest_id=manifest_id,
                 cutoff=manifest.cutoff, status="no_game" if game_count == 0 else "collecting",
@@ -737,9 +844,11 @@ class ObservationIngestionService(_SessionService):
     """Validate and durably accept one complete observation envelope."""
 
     def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
+                 collection_control: "CollectionControlService | None" = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
+        self.collection_control = collection_control
         self._identity_locks: dict[str, threading.BoundedSemaphore] = {}
         self._identity_locks_guard = threading.Lock()
 
@@ -757,9 +866,38 @@ class ObservationIngestionService(_SessionService):
         finally:
             lock.release()
 
+    def ingest_catalog(self, claims: CollectorClaims, envelope: Mapping[str, Any],
+                       payload: bytes | str, *, request_id: str, catalog_version: str,
+                       expires_at: datetime | None = None,
+                       max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+                       max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> CatalogPublication:
+        """Accept and publish one catalog through the normal envelope gate."""
+
+        with self._identity_locks_guard:
+            lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
+        if not lock.acquire(blocking=False):
+            raise ControlPlaneError("usage_limit")
+        try:
+            return self._ingest(
+                claims,
+                envelope,
+                payload,
+                compressed=False,
+                max_payload_bytes=max_payload_bytes,
+                max_compressed_bytes=max_compressed_bytes,
+                catalog_request_id=request_id,
+                catalog_version=catalog_version,
+                catalog_expires_at=expires_at,
+            )
+        finally:
+            lock.release()
+
     def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
-               *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
-               max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
+                *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+                max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
+                catalog_request_id: str | None = None,
+                catalog_version: str | None = None,
+                catalog_expires_at: datetime | None = None) -> ObservationReceipt | CatalogPublication:
         if not isinstance(envelope, Mapping):
             raise ControlPlaneError("malformed_envelope")
         if compressed and isinstance(payload, str):
@@ -784,10 +922,15 @@ class ObservationIngestionService(_SessionService):
             raise ControlPlaneError("malformed_payload") from error
         if not isinstance(value, (dict, list)):
             raise ControlPlaneError("malformed_payload")
+        canonical_payload = _json(value).encode()
         required = {"manifest_id", "client_observation_id", "environment", "provider", "observation_type", "scope", "season", "cutoff", "schema_version", "retrieved_at", "checksum"}
         if set(envelope) != required:
             raise ControlPlaneError("malformed_envelope")
-        if "ingest" not in claims.scopes:
+        if catalog_request_id is None and "ingest" not in claims.scopes:
+            raise ControlPlaneError("scope_denied")
+        if catalog_request_id is not None and not claims.scopes.intersection(
+            {"catalog_publish", "bootstrap", "ingest"}
+        ):
             raise ControlPlaneError("scope_denied")
         if envelope["environment"] != claims.environment or envelope["season"] is None:
             raise ControlPlaneError("environment_mismatch")
@@ -810,28 +953,76 @@ class ObservationIngestionService(_SessionService):
         scope_text = _json(envelope["scope"])
         if len(scope_text.encode()) > MAX_SCOPE_BYTES:
             raise ControlPlaneError("scope_limit")
-        if not isinstance(envelope["manifest_id"], str) or not envelope["manifest_id"].strip():
-            raise ControlPlaneError("manifest_not_found")
-        manifest_id = envelope["manifest_id"].strip()
-        checksum = str(envelope.get("checksum") or _checksum(decoded))
-        if checksum != _checksum(decoded):
+        raw_manifest_id = envelope["manifest_id"]
+        if catalog_request_id is None:
+            if not isinstance(raw_manifest_id, str) or not raw_manifest_id.strip():
+                raise ControlPlaneError("manifest_not_found")
+            manifest_id = raw_manifest_id.strip()
+        else:
+            if raw_manifest_id is not None:
+                raise ControlPlaneError("manifest_scope_mismatch")
+            manifest_id = ""
+        checksum = str(envelope.get("checksum") or "")
+        if not checksum or checksum != _checksum(decoded):
             raise ControlPlaneError("checksum_mismatch")
         now = self.clock()
         with self.session() as session, session.begin():
-            manifest = session.get(CollectionManifest, manifest_id)
-            if manifest is None or manifest.status != "active":
-                raise ControlPlaneError("manifest_expired")
-            if _aware(now) >= _aware(manifest.collect_before):
-                raise ControlPlaneError("manifest_expired")
-            if schema_version not in set(json.loads(manifest.accepted_versions)):
-                raise ControlPlaneError("schema_unsupported")
-            if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
-                raise ControlPlaneError("manifest_scope_mismatch")
-            allowed_scopes = set(json.loads(manifest.scopes))
-            if observation_type not in allowed_scopes and "*" not in allowed_scopes:
-                raise ControlPlaneError("scope_denied")
             scope_value = envelope["scope"]
-            if self.publication_service is not None:
+            catalog_request = None
+            if catalog_request_id is not None:
+                if self.collection_control is None:
+                    raise ControlPlaneError("control_plane_unavailable")
+                if observation_type not in {"event_catalog", "athlete_catalog"}:
+                    raise ControlPlaneError("catalog_observation_invalid")
+                if envelope.get("manifest_id") is not None:
+                    raise ControlPlaneError("manifest_scope_mismatch")
+                catalog_request = session.get(BootstrapRequest, catalog_request_id)
+                if catalog_request is None:
+                    raise ControlPlaneError("bootstrap_not_found")
+                if catalog_request.status != "pending" or _aware(catalog_request.expires_at) <= _aware(now):
+                    if catalog_request.status == "succeeded":
+                        existing = session.scalar(select(CollectionObservation).where(
+                            CollectionObservation.collector_id == claims.collector_id,
+                            CollectionObservation.client_observation_id == client_id,
+                        ))
+                        if existing is not None and existing.checksum == checksum:
+                            publication = session.scalar(select(CatalogPublication).where(
+                                CatalogPublication.season == catalog_request.season,
+                                CatalogPublication.catalog_type == catalog_request.catalog_type,
+                                CatalogPublication.cutoff == catalog_request.cutoff,
+                            ).order_by(CatalogPublication.published_at.desc()))
+                            if publication is not None:
+                                return publication
+                    raise ControlPlaneError("bootstrap_expired")
+                expected_type = f"{catalog_request.catalog_type}_catalog"
+                if observation_type != expected_type:
+                    raise ControlPlaneError("catalog_observation_invalid")
+                if catalog_request.season != str(envelope["season"]):
+                    raise ControlPlaneError("manifest_scope_mismatch")
+                if _aware(catalog_request.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
+                    raise ControlPlaneError("manifest_scope_mismatch")
+                if catalog_version is None or not catalog_version.strip():
+                    raise ControlPlaneError("invalid_catalog_version")
+                if isinstance(scope_value, Mapping):
+                    window = scope_value.get("window", scope_value.get("scope"))
+                    if window not in {"regular_season", "season", "whole_season"}:
+                        raise ControlPlaneError("scope_unsupported")
+                elif str(scope_value) not in {"regular_season", "season", "whole_season"}:
+                    raise ControlPlaneError("scope_unsupported")
+            else:
+                manifest = session.get(CollectionManifest, manifest_id)
+                if manifest is None or manifest.status != "active":
+                    raise ControlPlaneError("manifest_expired")
+                if _aware(now) >= _aware(manifest.collect_before):
+                    raise ControlPlaneError("manifest_expired")
+                if schema_version not in set(json.loads(manifest.accepted_versions)):
+                    raise ControlPlaneError("schema_unsupported")
+                if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
+                    raise ControlPlaneError("manifest_scope_mismatch")
+                allowed_scopes = set(json.loads(manifest.scopes))
+                if observation_type not in allowed_scopes and "*" not in allowed_scopes:
+                    raise ControlPlaneError("scope_denied")
+            if self.publication_service is not None and catalog_request is None:
                 stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
@@ -851,17 +1042,35 @@ class ObservationIngestionService(_SessionService):
             if existing is not None:
                 if existing.checksum != checksum:
                     raise ControlPlaneError("observation_id_conflict")
+                if catalog_request is not None:
+                    publication = session.scalar(select(CatalogPublication).where(
+                        CatalogPublication.season == catalog_request.season,
+                        CatalogPublication.catalog_type == catalog_request.catalog_type,
+                        CatalogPublication.cutoff == catalog_request.cutoff,
+                    ).order_by(CatalogPublication.published_at.desc()))
+                    if publication is None:
+                        raise ControlPlaneError("catalog_publication_missing")
+                    return publication
                 return ObservationReceipt(existing.observation_id, client_id, checksum, replay=True)
             row = CollectionObservation(observation_id=_uuid(), client_observation_id=client_id, collector_id=claims.collector_id,
                 environment=claims.environment, provider=envelope["provider"].strip(), observation_type=observation_type,
-                manifest_id=manifest_id, scope=scope_text, season=str(envelope["season"]), cutoff=_parse_datetime(envelope["cutoff"]), schema_version=schema_version,
-                checksum=checksum, payload=decoded.decode(), payload_bytes=len(decoded), retrieved_at=_parse_datetime(envelope["retrieved_at"]), accepted_at=now)
+                manifest_id=None if catalog_request is not None else manifest_id, scope=scope_text, season=str(envelope["season"]), cutoff=_parse_datetime(envelope["cutoff"]), schema_version=schema_version,
+                checksum=checksum, payload=canonical_payload.decode(), payload_bytes=len(canonical_payload), retrieved_at=_parse_datetime(envelope["retrieved_at"]), accepted_at=now)
             session.add(row)
             try:
                 session.flush()
             except IntegrityError as error:
                 session.rollback()
                 raise ControlPlaneError("observation_race") from error
+            if catalog_request is not None:
+                return self.collection_control.publish_catalog(
+                    catalog_request_id,
+                    value,
+                    version=catalog_version or "",
+                    checksum=checksum,
+                    expires_at=catalog_expires_at,
+                    session=session,
+                )
             if self.publication_service is not None:
                 self.publication_service.enqueue_for_observation(
                     observation_type,
@@ -1085,7 +1294,11 @@ class PublicationService(_SessionService):
                     continue
                 if not isinstance(evidence, Mapping):
                     continue
+                if any(key in evidence for key in ("team_ids", "team_tricodes")):
+                    invalid_team_evidence = True
                 for team_evidence in _evidence_team_fields(evidence):
+                    if any(key in team_evidence for key in ("team_ids", "team_tricodes")):
+                        invalid_team_evidence = True
                     ids, ids_valid = _strict_team_ids(team_evidence.get("team_ids"))
                     codes, codes_valid = _strict_team_codes(
                         team_evidence.get("team_tricodes", team_evidence.get("teams"))
@@ -1114,6 +1327,8 @@ class PublicationService(_SessionService):
             if not team_ids and team_codes != set(NBA_TEAM_TRICODES):
                 raise ControlPlaneError("league_incomplete")
         if stream.completeness_rule == "base_complete" and required:
+            expected_slices = STREAM_REQUIRED_SLICES.get(stream.stream_key)
+            observed_slices: dict[str, set[str]] = {}
             accepted = False
             for observation in observations:
                 if (
@@ -1126,13 +1341,27 @@ class PublicationService(_SessionService):
                     evidence = json.loads(observation.payload)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                if isinstance(evidence, Mapping) and any(
-                    _registered_base_for_stream(stream.stream_key, base)
-                    for base in _evidence_bases(evidence)
-                ):
-                    accepted = True
-                    break
-            if not accepted:
+                if not isinstance(evidence, Mapping):
+                    continue
+                matching_bases = {
+                    str(base) for base in _evidence_bases(evidence)
+                    if _registered_base_for_stream(stream.stream_key, base)
+                }
+                if not matching_bases:
+                    continue
+                accepted = True
+                if expected_slices is not None:
+                    for base, slice_key in _evidence_slice_pairs(evidence):
+                        if base in matching_bases and slice_key in expected_slices:
+                            observed_slices.setdefault(slice_key, set()).add(observation.observation_id)
+            if not accepted or (
+                expected_slices is not None
+                and (
+                    set(observed_slices) != set(expected_slices)
+                    or len({next(iter(ids)) for ids in observed_slices.values()})
+                    != len(expected_slices)
+                )
+            ):
                 raise ControlPlaneError("base_incomplete")
 
     def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
@@ -1594,8 +1823,12 @@ def _strict_team_codes(value: Any) -> tuple[set[str], bool]:
 
 
 def _evidence_team_fields(evidence: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    fields = [evidence]
-    for key in ("rows", "records", "data", "observations"):
+    fields: list[Mapping[str, Any]] = []
+    if any(key in evidence for key in (
+        "team_id", "tricode", "abbreviation", "team_ids", "team_tricodes"
+    )):
+        fields.append(evidence)
+    for key in ("rows", "records", "data", "observations", "teams"):
         items = evidence.get(key)
         if isinstance(items, list):
             fields.extend(item for item in items if isinstance(item, Mapping))
@@ -1618,6 +1851,24 @@ def _evidence_bases(evidence: Mapping[str, Any]) -> set[Any]:
                 if isinstance(item, Mapping) and "base" in item
             )
     return bases
+
+
+def _evidence_slice_pairs(evidence: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """Extract explicit registered Base/slice identities from accepted rows."""
+
+    fields: list[Mapping[str, Any]] = [evidence]
+    for key in ("rows", "records", "data", "observations"):
+        items = evidence.get(key)
+        if isinstance(items, list):
+            fields.extend(item for item in items if isinstance(item, Mapping))
+    default_base = str(evidence.get("base") or "").strip()
+    pairs: set[tuple[str, str]] = set()
+    for field in fields:
+        base = str(field.get("base") or default_base).strip()
+        slice_key = field.get("slice_key", field.get("slice", field.get("category")))
+        if base and slice_key not in (None, ""):
+            pairs.add((base, str(slice_key).strip()))
+    return pairs
 
 
 def _observation_matches_scope(observation: CollectionObservation,
@@ -1680,9 +1931,6 @@ def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
                 identities.add(identity)
                 count += 1
         return count
-    raw_count = document.get("completed_game_count")
-    if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0:
-        return raw_count
     return 0
 
 
@@ -1723,10 +1971,90 @@ def _find_observation_ids(value: Any) -> set[str]:
     return found
 
 
+def _catalog_rows(value: Any, *, catalog_type: str) -> list[Any] | None:
+    if isinstance(value, list):
+        return value if catalog_type == "event" else None
+    if not isinstance(value, Mapping):
+        return None
+    key = "events" if catalog_type == "event" else "identities"
+    alternate = "games" if catalog_type == "event" else "players"
+    rows = value.get(key, value.get(alternate))
+    return rows if isinstance(rows, list) else None
+
+
+def _validate_catalog_payload(value: Any, catalog_type: str) -> None:
+    """Validate the governed row shape before a catalog becomes complete."""
+
+    if catalog_type not in {"event", "athlete"}:
+        raise ValueError("invalid catalog type")
+    rows = _catalog_rows(value, catalog_type=catalog_type)
+    if rows is None or len(rows) > MAX_RECORDS_PER_OBSERVATION:
+        raise ValueError("catalog rows required")
+    identities: set[str] = set()
+    for row in rows:
+        if catalog_type == "event":
+            if not isinstance(row, Mapping):
+                raise ValueError("event row required")
+            identity = row.get("nba_game_id", row.get("game_id", row.get("id")))
+            if identity in (None, ""):
+                raise ValueError("event identity required")
+            status = row.get("status", row.get("status_text", row.get("status_code")))
+            if status in (None, "") and "completed" not in row:
+                raise ValueError("event status required")
+            scheduled = row.get("scheduled_at", row.get("date"))
+            if scheduled is not None:
+                _parse_datetime(str(scheduled))
+        else:
+            if isinstance(row, Mapping):
+                identity = row.get("player_id", row.get("id", row.get("identity_id")))
+            else:
+                identity = row
+            if identity in (None, ""):
+                raise ValueError("athlete identity required")
+        identity_text = str(identity)
+        if identity_text in identities:
+            raise ValueError("duplicate catalog identity")
+        identities.add(identity_text)
+
+
 def _validate_observation_payload(value: Any, *, observation_type: str) -> None:
     """Run the closed registry validator before durable observation insert."""
 
-    del observation_type  # registry ownership is checked against the envelope below
+    if observation_type in {"event_catalog", "athlete_catalog"}:
+        _validate_catalog_payload(
+            value,
+            "event" if observation_type == "event_catalog" else "athlete",
+        )
+        _validate_payload_shape(value)
+        return
+    expected_base = OBSERVATION_BASES.get(observation_type)
+    if expected_base is not None:
+        if not isinstance(value, Mapping):
+            raise ValueError("registry payload must be an object")
+        root_base = value.get("base")
+        if root_base not in (None, expected_base):
+            raise ValueError("observation base mismatch")
+        rows = None
+        for key in ("rows", "records", "data", "observations"):
+            if key in value:
+                rows = value[key]
+                break
+        if not isinstance(rows, list) or not rows or not all(isinstance(row, Mapping) for row in rows):
+            raise ValueError("registered observation rows required")
+        for row in rows:
+            row_base = row.get("base", expected_base)
+            if row_base != expected_base:
+                raise ValueError("observation base mismatch")
+            if not any(key in row for key in ("slice_key", "slice", "category")):
+                raise ValueError("observation slice required")
+    elif isinstance(value, Mapping):
+        for key in ("rows", "records", "data", "observations"):
+            if key in value and (
+                not isinstance(value[key], list)
+                or not value[key]
+                or not all(isinstance(row, Mapping) for row in value[key])
+            ):
+                raise ValueError("observation rows malformed")
     if value is None or value == {} or value == []:
         raise ValueError("empty payload")
     if isinstance(value, list):
