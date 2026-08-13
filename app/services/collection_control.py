@@ -38,6 +38,7 @@ from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
     CollectorIdentity,
+    CollectorStatusTransition,
     CollectionObservation,
     CollectorTokenReplay,
     CollectorLease,
@@ -674,14 +675,19 @@ class CollectorTokenService(_SessionService):
             return identity
 
     def report_status(self, claims: CollectorClaims, *, release_version: str,
-                      release_checksum: str) -> CollectorIdentity:
+                      release_checksum: str, state: str = "running",
+                      reason: str = "release_report") -> CollectorIdentity:
         """Persist bounded release evidence reported by the authenticated machine."""
 
         version = str(release_version).strip()
         checksum = str(release_checksum).strip().lower()
+        state = str(state).strip().lower()
+        reason = str(reason).strip().lower()
         if (
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}", version) is None
             or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+            or state not in {"running", "no_work", "complete", "retry", "non_retryable", "busy"}
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason) is None
         ):
             raise ControlPlaneError("invalid_release_status")
         now = self.clock()
@@ -694,6 +700,18 @@ class CollectorTokenService(_SessionService):
             identity.release_version = version
             identity.release_checksum = checksum
             identity.last_seen_at = now
+            prior = session.scalar(select(CollectorStatusTransition).where(
+                CollectorStatusTransition.collector_id == claims.collector_id,
+            ).order_by(CollectorStatusTransition.created_at.desc()).limit(1))
+            transition_reason = (
+                "recovery" if state in {"complete", "no_work"} and prior is not None
+                and prior.state in {"retry", "non_retryable", "busy"} else reason
+            )
+            session.add(CollectorStatusTransition(
+                transition_id=_uuid(), collector_id=claims.collector_id,
+                state=state, reason=transition_reason, release_version=version,
+                release_checksum=checksum, created_at=now,
+            ))
             return identity
 
     def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,

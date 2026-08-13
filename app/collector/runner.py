@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from .client import CollectorHTTPError, CollectorToken, RailwayClient
 from .cache import InstructionCache
@@ -197,16 +197,31 @@ class ResidentialCollector:
     def _token(self) -> CollectorToken:
         return self.client.exchange_token(self._secret_value(), ttl_seconds=self.token_ttl_seconds)
 
-    def _report_status(self, token: CollectorToken) -> None:
+    def _fresh_token(self, token: CollectorToken | None) -> CollectorToken:
+        if token is None or token.expires_at <= _now(self.clock) + timedelta(seconds=30):
+            return self._token()
+        return token
+
+    def _report_status(self, token: CollectorToken, *, state: str, reason: str) -> CollectorToken:
         if not self.release_checksum:
-            return
+            return token
+        token = self._fresh_token(token)
         try:
             self.client.report_status(
                 token, release_version=self.release_version,
-                release_checksum=self.release_checksum,
+                release_checksum=self.release_checksum, state=state, reason=reason,
             )
-        except CollectorHTTPError:
+        except CollectorHTTPError as error:
+            if error.reason == "token_expired":
+                token = self._token()
+                self.client.report_status(
+                    token, release_version=self.release_version,
+                    release_checksum=self.release_checksum, state=state, reason=reason,
+                )
+                return token
             self.status.record("railway_unavailable")
+            raise
+        return token
 
     def _receipt_checksum(self, item: OutboxItem, receipt: Mapping[str, Any]) -> str:
         value = receipt.get("checksum")
@@ -214,15 +229,19 @@ class ResidentialCollector:
             raise OutboxError("Railway returned no durable receipt checksum")
         return value
 
-    def _drain(self, token: CollectorToken) -> tuple[int, bool, tuple[str, ...]]:
+    def _drain(self, token: CollectorToken) -> tuple[int, bool, tuple[str, ...], CollectorToken]:
         uploaded = 0
         retry = False
         failures: list[str] = []
-        aged = self.outbox.aged_pending(now=_now(self.clock), limit=1000)
-        seen = {item.item_id for item in aged}
-        items = aged + tuple(item for item in self.outbox.pending(limit=1000) if item.item_id not in seen)
+        aged_ids = {item.item_id for item in self.outbox.aged_pending(now=_now(self.clock), limit=1000)}
+        items = self.outbox.pending(limit=1000)
         for item in items:
+            if item.item_id in aged_ids:
+                failures.append("outbox_retention")
+                self.status.record("outbox_retention")
+                continue
             try:
+                token = self._fresh_token(token)
                 self.outbox.mark_attempt(item.item_id)
                 receipt = (
                     self.client.upload_catalog(token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload)
@@ -234,6 +253,18 @@ class ResidentialCollector:
                 uploaded += 1
                 self.status.record("work_complete", scope=str(item.metadata.get("observation_type") or item.kind))
             except CollectorHTTPError as error:
+                if error.reason == "token_expired":
+                    try:
+                        token = self._token()
+                        receipt = (
+                            self.client.upload_catalog(token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload)
+                            if item.kind == "catalog" else self.client.upload_observation(token, item.payload)
+                        )
+                        self.outbox.acknowledge(item.item_id, checksum=self._receipt_checksum(item, receipt))
+                        uploaded += 1
+                        continue
+                    except CollectorHTTPError as refreshed_error:
+                        error = refreshed_error
                 code = safe_code(error.reason, fallback="railway_unavailable")
                 self.status.record(code, scope=str(item.metadata.get("observation_type") or item.kind))
                 failures.append(code)
@@ -245,7 +276,7 @@ class ResidentialCollector:
                 failures.append("outbox_receipt_invalid")
                 self.status.record("control_rejected", scope=str(item.metadata.get("observation_type") or item.kind))
                 continue
-        return uploaded, retry, tuple(failures)
+        return uploaded, retry, tuple(failures), token
 
     def _make_observation_envelopes(
         self, observations: tuple[Any, ...], *, manifest_id: str,
@@ -263,7 +294,8 @@ class ResidentialCollector:
             ))
         return tuple(result)
 
-    def _process_bootstrap(self, request: Mapping[str, Any], *, catalog_type: str) -> tuple[int, tuple[str, ...]]:
+    def _process_bootstrap(self, request: Mapping[str, Any], *, catalog_type: str,
+                           after_spool: Callable[[], None] | None = None) -> tuple[int, tuple[str, ...]]:
         if request.get("status") not in {None, "pending"}:
             return 0, ("bootstrap_not_pending",)
         if _instruction_expiry(request, now=_now(self.clock)):
@@ -276,10 +308,13 @@ class ResidentialCollector:
         )
         assert isinstance(catalog, CatalogEnvelope)
         self.outbox.enqueue_catalog(catalog)
+        if after_spool is not None:
+            after_spool()
         self.status.record("work_pending", scope=observation_type)
         return 1, ()
 
-    def _process_manifest(self, manifest: Mapping[str, Any]) -> tuple[int, int, tuple[str, ...], tuple[str, ...], bool]:
+    def _process_manifest(self, manifest: Mapping[str, Any], *,
+                          after_spool: Callable[[], None] | None = None) -> tuple[int, int, tuple[str, ...], tuple[str, ...], bool]:
         manifest_id = str(manifest.get("manifest_id") or "").strip()
         season = str(manifest.get("season") or "").strip()
         cutoff = str(manifest.get("cutoff") or "").strip()
@@ -328,6 +363,8 @@ class ResidentialCollector:
                     )[0]
                     self.outbox.enqueue_observation(envelope)
                     spooled += 1
+                    if after_spool is not None:
+                        after_spool()
                     self.status.record("work_pending", scope=scope)
             except ProviderTransientError as error:
                 transient = True
@@ -352,9 +389,9 @@ class ResidentialCollector:
             token: CollectorToken | None = None
             failures: tuple[str, ...] = ()
             token_failure: str | None = None
+            status_failure: str | None = None
             try:
                 token = self._token()
-                self._report_status(token)
             except CollectorHTTPError as error:
                 token_failure = safe_code(error.reason, fallback="token_failure")
                 if not error.retryable:
@@ -362,11 +399,16 @@ class ResidentialCollector:
                 self.status.record(token_failure)
             except (ValueError, TypeError):
                 return self._result(RunDisposition.NON_RETRYABLE, failures=("credential_unavailable",))
+            if token is not None:
+                try:
+                    token = self._report_status(token, state="running", reason="run_started")
+                except CollectorHTTPError as error:
+                    status_failure = safe_code(error.reason, fallback="control_rejected")
 
             uploaded = 0
             initial_transient = False
             if token is not None:
-                uploaded, retry, failures = self._drain(token)
+                uploaded, retry, failures, token = self._drain(token)
                 if failures and not retry:
                     return self._result(RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures)
                 initial_transient = retry
@@ -374,7 +416,14 @@ class ResidentialCollector:
             discovery: Mapping[str, Any] | None = None
             if token is not None:
                 try:
-                    discovery = self.client.discover(token, limit=self.poll_limit)
+                    token = self._fresh_token(token)
+                    try:
+                        discovery = self.client.discover(token, limit=self.poll_limit)
+                    except CollectorHTTPError as error:
+                        if error.reason != "token_expired":
+                            raise
+                        token = self._token()
+                        discovery = self.client.discover(token, limit=self.poll_limit)
                     if self.instruction_cache is not None:
                         try:
                             self.instruction_cache.store(discovery)
@@ -401,14 +450,29 @@ class ResidentialCollector:
             attempted = spooled = 0
             skipped: list[str] = []
             local_failures: list[str] = []
+            if status_failure:
+                local_failures.append(status_failure)
             transient = initial_transient or token is None or bool(token_failure) or bool(failures)
+
+            def drain_incrementally() -> None:
+                nonlocal token, uploaded, transient
+                if token is None:
+                    transient = True
+                    return
+                drained, should_retry, drain_failures, token = self._drain(token)
+                uploaded += drained
+                transient = transient or should_retry
+                local_failures.extend(drain_failures)
+
             for request in bootstraps:
                 if not isinstance(request, Mapping):
                     local_failures.append("malformed_bootstrap")
                     continue
                 catalog_type = str(request.get("catalog_type") or "").strip()
                 try:
-                    count, request_failures = self._process_bootstrap(request, catalog_type=catalog_type)
+                    count, request_failures = self._process_bootstrap(
+                        request, catalog_type=catalog_type, after_spool=drain_incrementally,
+                    )
                     spooled += count
                     skipped.extend(request_failures)
                 except ProviderTransientError as error:
@@ -424,7 +488,9 @@ class ResidentialCollector:
                     local_failures.append("malformed_manifest")
                     continue
                 try:
-                    count, produced, manifest_skipped, manifest_failures, manifest_transient = self._process_manifest(manifest)
+                    count, produced, manifest_skipped, manifest_failures, manifest_transient = self._process_manifest(
+                        manifest, after_spool=drain_incrementally,
+                    )
                     attempted += count
                     spooled += produced
                     skipped.extend(manifest_skipped)
@@ -440,7 +506,7 @@ class ResidentialCollector:
                     local_failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
 
             if token is not None:
-                final_uploaded, final_retry, final_failures = self._drain(token)
+                final_uploaded, final_retry, final_failures, token = self._drain(token)
                 uploaded += final_uploaded
                 local_failures.extend(final_failures)
                 transient = transient or final_retry
@@ -461,6 +527,18 @@ class ResidentialCollector:
             else:
                 disposition = RunDisposition.COMPLETE
                 self.status.record("work_complete")
+            terminal_status_failure: str | None = None
+            if token is not None:
+                try:
+                    token = self._report_status(
+                        token, state=disposition.value,
+                        reason=(local_failures[0] if local_failures else disposition.value),
+                    )
+                except CollectorHTTPError as error:
+                    terminal_status_failure = safe_code(error.reason, fallback="control_rejected")
+                    local_failures.append(terminal_status_failure)
+                    if disposition in {RunDisposition.NO_WORK, RunDisposition.COMPLETE}:
+                        disposition = RunDisposition.NON_RETRYABLE
             result = self._result(
                 disposition, bootstraps=len(bootstraps), manifests=len(manifests),
                 attempted=attempted, spooled=spooled, uploaded=uploaded,

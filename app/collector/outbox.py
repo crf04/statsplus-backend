@@ -135,11 +135,23 @@ class OutboxRepository:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
+        journal_mode = str(self._connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).casefold()
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        self._connection.execute("PRAGMA wal_autocheckpoint=64")
+        if journal_mode != "wal" or int(self._connection.execute("PRAGMA synchronous").fetchone()[0]) != 2:
+            self._connection.close()
+            raise OutboxError("required SQLite durability mode is unavailable")
         self._initialize()
         self._baseline_footprint = self._initialize_footprint_baseline()
+        self._operational_headroom = min(max(4 * 1024, self.max_bytes // 8), 1024 * 1024)
+        page_size = int(self._connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(self._connection.execute("PRAGMA page_count").fetchone()[0])
+        maximum_pages = page_count + max(1, self.max_bytes // page_size)
+        applied = int(self._connection.execute(f"PRAGMA max_page_count={maximum_pages}").fetchone()[0])
+        if applied < maximum_pages:
+            self._connection.close()
+            raise OutboxError("SQLite hard page limit could not be applied")
 
     def _initialize(self) -> None:
         with self._lock:
@@ -200,6 +212,9 @@ class OutboxRepository:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            if self.path != ":memory:":
+                # Bound accumulated WAL growth before reserving the next write.
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield self._connection
@@ -207,6 +222,9 @@ class OutboxRepository:
                 self._connection.execute("ROLLBACK")
                 raise
             else:
+                if self.storage_footprint_bytes() - self._baseline_footprint > self.max_bytes:
+                    self._connection.execute("ROLLBACK")
+                    raise OutboxFull("SQLite operational headroom is exhausted")
                 self._connection.execute("COMMIT")
 
     def _total_bytes(self, connection: sqlite3.Connection) -> int:
@@ -225,7 +243,7 @@ class OutboxRepository:
         database = Path(self.path)
         return max(logical, database.stat().st_size if database.exists() else 0) + (
             Path(self.path + "-wal").stat().st_size if Path(self.path + "-wal").exists() else 0
-        )
+        ) + (Path(self.path + "-shm").stat().st_size if Path(self.path + "-shm").exists() else 0)
 
     def durability_pragmas(self) -> Mapping[str, Any]:
         with self._lock:
@@ -291,7 +309,12 @@ class OutboxRepository:
                 raise OutboxError("client observation ID is already bound to a different checksum")
             page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
             reserved = len(payload_bytes) + len(encoded_metadata.encode("utf-8")) + (3 * page_size)
-            if self.storage_footprint_bytes() - self._baseline_footprint + reserved > self.max_bytes:
+            committed_payload = self._total_bytes(connection)
+            if (
+                self.storage_footprint_bytes() - self._baseline_footprint
+                + committed_payload + reserved
+                > self.max_bytes - self._operational_headroom
+            ):
                 raise OutboxFull("the outbox hard limit would discard unsent work")
             cursor = connection.execute(
                 """INSERT INTO collector_outbox

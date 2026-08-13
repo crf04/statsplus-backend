@@ -67,8 +67,10 @@ only compressed normalized envelopes plus bounded routing metadata. It orders
 newer cutoffs first, rejects a hard-limit write rather than deleting current
 work, measuring the allocated database plus WAL footprint with page overhead,
 and refuses to silently discard unsent entries older than 30 days. Aged entries
-are attempted before current work but cannot hide the newer drain; only a
-server-governed obsolete cutoff may remove an unsent row.
+are marked for operator attention and skipped while the newer-cutoff-first
+drain continues; only a server-governed obsolete cutoff may remove an unsent
+row. Use the governed cutoff with the repository's `prune_obsolete` recovery
+operation, never filesystem deletion.
 Restarting the process reopens the same file and replays pending items. A stale
 process lease expires and can be recovered; a live lease prevents overlapping
 instances. The product database remains Railway Postgres.
@@ -92,7 +94,9 @@ immutable staged release and preserves the previous version. After the
 compatible Railway reader is deployed, perform one bounded foreground run and
 run `promote_collector.ps1`, which checks configuration, protected credential
 availability, release checksum, and the full compatibility rehearsal before it
-enables the named task. `rollback_collector.ps1` disables the task and switches
+enables the named task. Promotion also requires checksum-pinned result evidence
+from an isolated HTTPS non-production Railway rehearsal covering credential,
+authentication, discovery, status, and ingestion. `rollback_collector.ps1` disables the task and switches
 only to the previous immutable release; verify its `python -m statsplus_collector release`
 checksum before enabling the task. It never performs an unattended update.
 
@@ -103,7 +107,7 @@ Railway service never opens an inbound connection to the PC.
 
 ## Provider compatibility probes
 
-The rehearsal must run sanitized recorded schedule/roster, Synergy, grouped
+The default rehearsal runs deterministic sanitized recorded-shape schedule/roster, Synergy, grouped
 shot-type, and exact-zone responses through the same normalizers used by the
 live adapter. Opponent Season and exact-L15 calls must show explicit
 `team_id`, Regular Season, date/last-15 parameters in the recorded request.
@@ -111,6 +115,8 @@ Every row must have canonical identity, finite non-negative values, makes no
 greater than attempts, and the exact registered category/zone coverage. NBA
 provider-authored taxonomy labels are retained; public Synergy L15 is not
 probed as a supported surface.
+Pass `--live` only for the separate explicit NBA endpoint compatibility check;
+promotion uses the deterministic offline gate plus the isolated Railway evidence.
 
 ## Release identity
 

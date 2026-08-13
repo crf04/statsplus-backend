@@ -313,7 +313,10 @@ def _collector_claims_any(required_scopes: tuple[str, ...]):
 def report_collector_status():
     claims = _collector_claims_any(("poll", "ingest", "catalog_publish"))
     body = _body()
-    if set(body) != {"release_version", "release_checksum"}:
+    if set(body) not in (
+        {"release_version", "release_checksum"},
+        {"release_version", "release_checksum", "state", "reason"},
+    ):
         raise InvalidInputError(
             "Only bounded collector release metadata is accepted.",
             detail="invalid_release_status",
@@ -323,6 +326,7 @@ def report_collector_status():
             claims,
             release_version=body.get("release_version"),
             release_checksum=body.get("release_checksum"),
+            state=body.get("state", "running"), reason=body.get("reason", "release_report"),
         )
     except ControlPlaneError as error:
         raise _control_error(error) from error

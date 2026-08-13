@@ -1542,12 +1542,13 @@ alert, one stale-threshold alert, a six-hour `cycle_attention` alert, and one
 `recovery` alert when state clears; queued/running work suppresses failure and
 stale false positives.
 
-`POST /api/collector/status` accepts exactly `release_version` and
-`release_checksum`. The version is 1-64 characters from the bounded release
+`POST /api/collector/status` accepts the authoritative `release_version` and
+`release_checksum` plus an optional closed `state`/stable `reason` pair. The version is 1-64 characters from the bounded release
 identifier vocabulary (`A-Z`, `a-z`, digits, `.`, `_`, `+`, `-`), and the
 checksum is exactly 64 hexadecimal characters. The authenticated identity's
-`last_seen_at` and release evidence are persisted; payloads, secrets, player
-data, and arbitrary status fields are rejected.
+`last_seen_at` and release evidence are persisted. Lifecycle reports append an
+immutable transition, including an explicit recovery after retry/failure;
+payloads, secrets, player data, and arbitrary status fields are rejected.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this

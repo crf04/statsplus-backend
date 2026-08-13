@@ -176,7 +176,7 @@ class RailwayClient:
             merged.setdefault("X-Collector-Release", self.release_version)
         if token is not None:
             bearer = token.token if isinstance(token, CollectorToken) else str(token)
-            if not bearer or (isinstance(token, CollectorToken) and token.is_expired):
+            if not bearer:
                 raise CollectorHTTPError("token_expired", status=401)
             merged["Authorization"] = f"Bearer {bearer}"
         try:
@@ -265,10 +265,12 @@ class RailwayClient:
             raise CollectorHTTPError("malformed_receipt")
         return dict(value)
 
-    def report_status(self, token: CollectorToken | str, *,
-                      release_version: str, release_checksum: str) -> dict[str, Any]:
+    def report_status(self, token: CollectorToken | str, *, release_version: str,
+                      release_checksum: str, state: str = "running",
+                      reason: str = "release_report") -> dict[str, Any]:
         response = self._request("POST", "/api/collector/status", token=token, json_body={
             "release_version": release_version, "release_checksum": release_checksum,
+            "state": state, "reason": reason,
         })
         value = response.json()
         if not isinstance(value, Mapping):

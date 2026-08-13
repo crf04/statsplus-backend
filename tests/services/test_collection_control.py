@@ -825,6 +825,30 @@ def test_collector_status_rejects_unsafe_release_metadata(control_db):
         tokens.report_status(claims, release_version="../../secret", release_checksum="not-a-checksum")
 
 
+def test_collector_status_transitions_are_append_only_and_record_recovery(control_db):
+    from app.models.collection_control import CollectorStatusTransition
+
+    now = [datetime(2026, 8, 12, tzinfo=UTC)]
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
+    identity = tokens.create_identity(
+        "transitions", scopes=["poll"], owner="residential_collector",
+        providers=["nba"], surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["poll"]))
+    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
+                         state="retry", reason="railway_unavailable")
+    now[0] += timedelta(minutes=1)
+    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
+                         state="complete", reason="complete")
+    with control_db.connect() as connection:
+        rows = connection.execute(select(CollectorStatusTransition).order_by(
+            CollectorStatusTransition.created_at.asc()
+        )).all()
+    assert [(row.state, row.reason) for row in rows] == [
+        ("retry", "railway_unavailable"), ("complete", "recovery"),
+    ]
+
+
 def test_catalog_completion_requires_regular_governed_schedule_and_roster_evidence(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)

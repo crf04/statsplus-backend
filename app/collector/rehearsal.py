@@ -22,6 +22,52 @@ from .provider import ProviderTransientError, _call
 NBA_TEAM_IDS = tuple(range(1610612737, 1610612767))
 
 
+class SanitizedFixtureProvider:
+    """Deterministic recorded-shape provider used by the default offline gate."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+
+    def _record(self, method: str, **parameters: Any) -> None:
+        self.requests.append({"method": method, **parameters})
+
+    def fetch_whole_season_schedule(self, *, season: str) -> list[dict[str, Any]]:
+        self._record("schedule", season=season)
+        return [{"game_id": "fixture-game", "home_team_id": NBA_TEAM_IDS[0],
+                 "away_team_id": NBA_TEAM_IDS[1], "scheduled_at": "2026-04-10T00:00:00Z",
+                 "status": "Final", "classification": "Regular Season"}]
+
+    def get_player_roster(self, *, season: str) -> list[dict[str, Any]]:
+        self._record("roster", season=season)
+        return [{"player_id": 1, "display_name": "Fixture Player", "team_id": NBA_TEAM_IDS[0],
+                 "season": season, "roster_status": "active"}]
+
+    def fetch_synergy_play_types(self, play_type: str, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("synergy", play_type=play_type, **parameters)
+        return [{"player_id": 1, "category": play_type, "GP": 1, "POSS": 1, "PTS": 1}]
+
+    def fetch_player_shot_type(self, general_range: str, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("player_shot_type", general_range=general_range, **parameters)
+        return [{"player_id": 1, "category": general_range, "FGA": 1, "FGM": 1}]
+
+    def fetch_player_shooting_zone(self, date_from: str | None = None, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("player_zone", date_from=date_from, **parameters)
+        return [self._zones(player_id=1)]
+
+    def fetch_opponent_shot_chart(self, general_range: str, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("opponent_shot_type", general_range=general_range, date_from=date_from, **parameters)
+        return [{"team_id": parameters["team_id"], "category": general_range, "FGA": 1, "FGM": 1}]
+
+    def fetch_opponent_shooting_zone(self, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("opponent_zone", date_from=date_from, **parameters)
+        return [self._zones(team_id=parameters["team_id"])]
+
+    @staticmethod
+    def _zones(**identity: Any) -> dict[str, Any]:
+        return {**identity, "Restricted Area": 1, "In The Paint (Non-RA)": 1,
+                "Mid-Range": 1, "Corner 3": 1, "Above the Break 3": 1}
+
+
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
     scope: str
@@ -140,4 +186,4 @@ class ResidentialCompatibilityProbes:
 CompatibilityProbe = ResidentialCompatibilityProbes
 
 
-__all__ = ["CompatibilityProbe", "NBA_TEAM_IDS", "ProbeResult", "ResidentialCompatibilityProbes"]
+__all__ = ["CompatibilityProbe", "NBA_TEAM_IDS", "ProbeResult", "ResidentialCompatibilityProbes", "SanitizedFixtureProvider"]

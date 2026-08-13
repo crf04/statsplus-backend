@@ -75,6 +75,13 @@ def test_collector_status_report_is_machine_authenticated_and_bounded(client, ap
     }
     dependencies.collector_tokens.report_status.assert_called_once()
 
+    transition = client.post(
+        "/api/collector/status", headers={"Authorization": "Bearer token"},
+        json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+              "state": "retry", "reason": "railway_unavailable"},
+    )
+    assert transition.status_code == 200
+
     unsafe = client.post(
         "/api/collector/status", headers={"Authorization": "Bearer token"},
         json={

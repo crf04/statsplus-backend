@@ -148,8 +148,17 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
     first_payload = _wire("one", "a")
     outbox = OutboxRepository(tmp_path / "outbox.sqlite3", max_bytes=20 * 1024, max_item_bytes=2048, clock=lambda: NOW)
     outbox.enqueue(kind="observation", client_observation_id="one", checksum=_wire_checksum("a"), cutoff=NOW, payload=first_payload, metadata={})
-    with pytest.raises(OutboxFull):
-        outbox.enqueue(kind="observation", client_observation_id="two", checksum=_wire_checksum("b"), cutoff=NOW, payload=_wire("two", "b"), metadata={})
+    rejected = False
+    for index in range(2, 100):
+        marker = f"item-{index}"
+        try:
+            outbox.enqueue(kind="observation", client_observation_id=marker, checksum=_wire_checksum(marker),
+                           cutoff=NOW, payload=_wire(marker, marker), metadata={})
+        except OutboxFull:
+            rejected = True
+            break
+    assert rejected
+    assert outbox.pending()[0].client_observation_id == "one"
     owner = outbox.acquire_lease(owner="first", ttl_seconds=60)
     assert owner == "first"
     with pytest.raises(OutboxBusy):
@@ -182,6 +191,9 @@ def test_windows_task_lifecycle_requires_explicit_named_promotion():
     assert "Disable-ScheduledTask -TaskName $TaskName" in rollback
     assert "credential-check" in promote and "validate-config" in promote
     assert "rehearsal --season $Season --cutoff $Cutoff" in promote
+    assert "RailwayRehearsalResult" in promote and "RailwayEvidenceChecksum" in promote
+    assert "'credential','auth','discovery','status','ingestion'" in promote
+    assert "$evidence.environment -eq 'production'" in promote
     assert "Enable-ScheduledTask -TaskName $TaskName" in promote
 
 
@@ -207,6 +219,64 @@ def test_cli_rehearsal_command_invokes_compatibility_probes(monkeypatch, capsys)
     assert cli.main(["rehearsal", "--season", "2025-26", "--cutoff", NOW.isoformat()]) == 0
     assert [call[2] for call in calls] == [1610612737, 1610612738]
     assert json.loads(capsys.readouterr().out)["status"] == "passed"
+
+
+def test_real_cli_rehearsal_defaults_to_offline_sanitized_fixtures(monkeypatch, capsys):
+    from app.collector import cli
+
+    monkeypatch.setenv("COLLECTOR_RAILWAY_URL", "https://railway.example")
+    monkeypatch.setenv("COLLECTOR_IDENTITY_ID", "collector")
+    assert cli.main(["rehearsal", "--season", "2025-26", "--cutoff", NOW.isoformat()]) == 0
+    evidence = json.loads(capsys.readouterr().out)
+    assert evidence["mode"] == "offline"
+    assert evidence["teams"] == 30
+    assert evidence["failed_scopes"] == []
+
+
+def test_long_run_refreshes_short_lived_tokens_between_incremental_uploads(tmp_path: Path):
+    clock = [NOW]
+    descriptors = [{"scope": "synergy_play_types", "parameters": {
+        "window": "season", "subject": "player", "play_type": "Transition",
+    }} for _ in range(5)]
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": "long", "season": "2025-26", "cutoff": NOW.isoformat(),
+        "collect_before": (NOW + timedelta(hours=2)).isoformat(), "accepted_versions": [2],
+        "scopes": ["synergy_play_types"], "scope_descriptors": descriptors,
+    }]}
+
+    class ExpiringTransport(FakeTransport):
+        def __init__(self):
+            super().__init__(discovery=discovery)
+            self.issued = 0
+            self.expiries = {}
+
+        def request(self, method, url, **kwargs):
+            if url.endswith("/api/collector/token"):
+                self.issued += 1
+                token = f"token-{self.issued}"
+                self.expiries[token] = clock[0] + timedelta(seconds=120)
+                self.calls.append((method, url, kwargs.get("headers") or {}, kwargs.get("body"), kwargs.get("json_body")))
+                return HTTPResponse(201, {"token": token, "expires_at": self.expiries[token].isoformat()})
+            bearer = (kwargs.get("headers") or {}).get("Authorization", "").removeprefix("Bearer ")
+            if bearer and clock[0] >= self.expiries[bearer]:
+                return HTTPResponse(401, {"error": {"code": "token_expired"}})
+            return super().request(method, url, **kwargs)
+
+    class SlowProvider(FakeProvider):
+        def fetch_synergy_play_types(self, *args, **kwargs):
+            clock[0] += timedelta(seconds=70)
+            return super().fetch_synergy_play_types(*args, **kwargs)
+
+    transport = ExpiringTransport()
+    collector, _, outbox = _collector(tmp_path, discovery=discovery, transport=transport,
+                                      provider=SlowProvider(), now=clock[0])
+    collector.clock = lambda: clock[0]
+    collector.executor.clock = collector.clock
+    result = collector.run()
+    assert result.uploaded == 5
+    assert transport.issued >= 3
+    assert outbox.count() == 0
+    outbox.close()
 
 
 def test_runner_spools_verified_responses_before_later_category_failure(tmp_path: Path):
@@ -293,8 +363,26 @@ def test_runner_reports_bounded_start_and_terminal_status(tmp_path: Path):
     )
     assert collector.run().disposition is RunDisposition.NO_WORK
     status_calls = [call for call in transport.calls if call[1].endswith("/api/collector/status")]
-    assert len(status_calls) == 1
-    assert all(set(call[4]) == {"release_version", "release_checksum"} for call in status_calls)
+    assert [call[4]["state"] for call in status_calls] == ["running", "no_work"]
+    assert all(set(call[4]) == {"release_version", "release_checksum", "state", "reason"} for call in status_calls)
+    outbox.close()
+
+
+def test_rejected_status_is_reported_without_skipping_primary_work(tmp_path: Path):
+    class RejectedStatus(FakeTransport):
+        def request(self, method, url, **kwargs):
+            if url.endswith("/api/collector/status"):
+                self.calls.append((method, url, kwargs.get("headers") or {}, None, kwargs.get("json_body")))
+                return HTTPResponse(400, {"error": {"code": "invalid_release_status"}})
+            return super().request(method, url, **kwargs)
+
+    transport = RejectedStatus(discovery={"environment": "testing", "bootstrap_requests": [], "manifests": []})
+    collector, _, outbox = _collector(tmp_path, discovery=transport.discovery, transport=transport,
+                                      release_checksum="a" * 64)
+    result = collector.run()
+    assert any("discovery" in call[1] for call in transport.calls)
+    assert result.disposition is RunDisposition.NON_RETRYABLE
+    assert "control_rejected" in result.failures
     outbox.close()
 
 
@@ -496,3 +584,51 @@ def test_aged_unsent_work_is_preserved_and_does_not_hide_newer_drain(tmp_path: P
     assert current.prune_obsolete(governed_before_cutoff=NOW - timedelta(days=1)) == 1
     assert [item.client_observation_id for item in current.pending()] == ["current"]
     current.close()
+
+
+def test_runner_skips_aged_item_but_uploads_newest_priority_first(tmp_path: Path):
+    path = tmp_path / "priority.sqlite3"
+    old = OutboxRepository(path, clock=lambda: NOW - timedelta(days=31))
+    old.enqueue(kind="observation", client_observation_id="aged", checksum=_wire_checksum("aged"),
+                cutoff=NOW - timedelta(days=31), payload=_wire("aged", "aged"), metadata={})
+    old.close()
+    transport = FakeTransport(discovery={"environment": "testing", "bootstrap_requests": [], "manifests": []})
+    current = OutboxRepository(path, clock=lambda: NOW)
+    current.enqueue(kind="observation", client_observation_id="new", checksum=_wire_checksum("new"),
+                    cutoff=NOW, payload=_wire("new", "new"), metadata={})
+    collector = ResidentialCollector(
+        client=RailwayClient("http://127.0.0.1", identity_id="collector", environment="testing",
+                             transport=transport, allow_insecure_localhost=True),
+        outbox=current, provider=FakeProvider(), identity_id="collector", environment="testing",
+        secret="machine-secret", clock=lambda: NOW,
+    )
+    result = collector.run()
+    assert result.uploaded == 1
+    assert current.pending()[0].client_observation_id == "aged"
+    assert "outbox_retention" in result.failures
+    current.close()
+
+
+def test_outbox_fails_closed_when_wal_durability_is_unavailable(monkeypatch, tmp_path: Path):
+    import app.collector.outbox as module
+
+    real_connect = module.sqlite3.connect
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            object.__setattr__(self, "connection", connection)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def __setattr__(self, name, value):
+            setattr(self.connection, name, value)
+
+        def execute(self, statement, *args, **kwargs):
+            if str(statement).strip().casefold() == "pragma journal_mode=wal":
+                return self.connection.execute("SELECT 'delete'")
+            return self.connection.execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, "connect", lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)))
+    with pytest.raises(Exception, match="durability mode"):
+        OutboxRepository(tmp_path / "unsafe.sqlite3")

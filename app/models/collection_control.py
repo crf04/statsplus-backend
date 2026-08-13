@@ -113,6 +113,26 @@ class CollectorIdentity(Base):
     __table_args__ = (Index("ix_collector_identity_environment", "environment"),)
 
 
+class CollectorStatusTransition(Base):
+    __tablename__ = "collector_status_transitions"
+
+    transition_id = Column(String(36), primary_key=True)
+    collector_id = Column(String(64), nullable=False)
+    state = Column(String(24), nullable=False)
+    reason = Column(String(80), nullable=False)
+    release_version = Column(String(64), nullable=False)
+    release_checksum = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('running','no_work','complete','retry','non_retryable','busy')",
+            name="ck_collector_status_transition_state",
+        ),
+        Index("ix_collector_status_transition_machine", "collector_id", "created_at"),
+    )
+
+
 class CollectionObservation(Base):
     __tablename__ = "collection_observations"
 
@@ -380,7 +400,7 @@ class CredentialDelivery(Base):
 
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
-    "CollectorIdentity", "CollectionObservation", "PublicationStream",
+    "CollectorIdentity", "CollectorStatusTransition", "CollectionObservation", "PublicationStream",
     "PublicationVersion", "PublicationObservation", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
