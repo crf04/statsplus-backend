@@ -146,7 +146,6 @@ class AthleteCatalogService:
 
         if seasons is None:
             raise ValueError("one or more explicit canonical seasons are required")
-        self._assert_legacy_write_allowed()
         canonical_seasons = self._validate_seasons(seasons)
         results: list[AthleteCatalogSeasonResult] = []
         for season in canonical_seasons:
@@ -277,6 +276,9 @@ class AthleteCatalogService:
         catalog_table = AthleteCatalog.__table__
         freshness_table = AthleteCatalogFreshness.__table__
         with self.engine.begin() as connection:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                checker("athlete_catalog", connection=connection)
             # Delete and insert occur in this same transaction.  Any failure
             # rolls back the delete, preserving the prior successful season.
             connection.execute(

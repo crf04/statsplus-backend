@@ -420,18 +420,10 @@ class MatchupService:
         pool_players: Sequence[PoolPlayer],
     ) -> MatchupInjuryResult:
         if self.injuries is not None:
-            if self.database_only:
-                stored_reader = getattr(self.injuries, "get_stored_injuries", None)
-                if callable(stored_reader):
-                    return stored_reader(
-                        event=event,
-                        season=season,
-                        pool_players=pool_players,
-                    )
-                # A database-only assembly must not silently fall back to the
-                # pre-tip provider path when an injected injury service has no
-                # stored reader.
-                return unavailable_injury_result("stored_snapshot_unavailable")
+            # Database-first applies to governed statistical facts.  Injury
+            # Reports retain their existing live/snapshot contract, including
+            # the provider path used before this migration; callers that need
+            # a stored-only injury view use the dedicated service seam.
             return self.injuries.get_injuries(
                 event=event,
                 season=season,

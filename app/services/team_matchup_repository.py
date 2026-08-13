@@ -115,22 +115,6 @@ class TeamMatchupRepository:
     ) -> None:
         """Replace related windows in one transaction after collection."""
 
-        if self._write_fence is not None:
-            checker = getattr(self._write_fence, "assert_writable", None)
-            if callable(checker):
-                # The legacy replacement is a single transaction spanning
-                # season/L15 traditional and assist surfaces.  Fence the
-                # complete write unit before its first delete/insert.
-                for stream_key in (
-                    "traditional_opponent",
-                    "traditional_opponent_season",
-                    "traditional_opponent_l15",
-                    "assist_locations",
-                    "assist_locations_season",
-                    "assist_locations_l15",
-                ):
-                    checker(stream_key)
-
         received = tuple(
             (scope, tuple(facts), tuple(observations))
             for scope, facts, observations in snapshots
@@ -150,7 +134,28 @@ class TeamMatchupRepository:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
+            checker = getattr(self._write_fence, "assert_writable", None)
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
+                if callable(checker):
+                    stream_by_surface = {
+                        "traditional": (
+                            "traditional_opponent_l15"
+                            if scope.window_games is not None
+                            else "traditional_opponent_season"
+                        ),
+                        "assist_locations": (
+                            "assist_locations_l15"
+                            if scope.window_games is not None
+                            else "assist_locations_season"
+                        ),
+                    }
+                    # Lock/check only the stream(s) represented by this
+                    # snapshot.  A season write must not fence L15, and a
+                    # traditional-only write must not fence assist locations.
+                    for observation in observation_rows:
+                        stream_key = stream_by_surface.get(observation.surface)
+                        if stream_key is not None:
+                            checker(stream_key, connection=connection)
                 identity = {
                     "season": scope.season,
                     "as_of_date": scope.as_of,

@@ -296,9 +296,11 @@ def build_dependencies(
             nba_stats_provider=nba_stats_provider,
             pbp_stats_provider=pbp_stats_provider,
             write_fence=write_fence,
+            publication_reader=publication_reader,
         )
         team_matchup_query_service = TeamMatchupQueryService(
-            TeamMatchupRepository(engine, write_fence=write_fence)
+            TeamMatchupRepository(engine, write_fence=write_fence),
+            publication_reader=publication_reader,
         )
         from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
         from app.services.ledger_backfill import (
@@ -399,6 +401,7 @@ def build_dependencies(
         ),
         write_fence=write_fence,
         serve_stale=not demo_database,
+        publication_reader=publication_reader,
     )
     from app.services.game_logs_source import (
         DatabaseFirstGameLogsSource,

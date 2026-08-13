@@ -1015,29 +1015,38 @@ reader reports additive `mixed_cutoff` and `mixed_freshness` flags without
 collapsing the source clocks.
 
 `MatchupService(database_only=True)` is the production assembly used by the
-authenticated Matchup route. Its injury seam calls `get_stored_injuries`
-only; `DatabaseOnlyProviderGuard` is available to tests and raises on any
-provider attribute access. The route therefore composes only durable Regular
-Season facts and retains the existing success/degraded/missing shape. Event
-classification rejects Playoffs and Play-In during this first activation, and
-the registry keeps `synergy:l15` as `never_schedule`/
-`provider_window_unsupported`.
+authenticated Matchup route for governed statistical facts. Active streams
+are decoded from immutable PublicationVersion payloads; an explicitly
+inactive stream is the only state that permits its legacy repository fallback,
+while a missing or malformed active payload degrades closed. The existing
+Injury Reports seam is unchanged: it may use the live/snapshot behavior
+already provided by `MatchupInjuryService`; database-first statistics do not
+force a stored-only injury path. `DatabaseOnlyProviderGuard` is available to
+tests and raises on any forbidden statistical provider attribute access. The
+route composes durable Regular Season facts and retains the existing
+success/degraded/missing shape. Event classification rejects Playoffs and
+Play-In during this first activation, and the registry keeps `synergy:l15` as
+`never_schedule`/`provider_window_unsupported`.
 
 `PublicationService.activate_stream` is additive and auditable through
 `PublicationActivation`; `rollback` and composition use the existing per-stream
 fence. `LegacyWriteFence` is injected into the legacy Event/Athlete Catalog,
  player-log, Player Diet, and team-matchup writers, so activated streams reject
  old writes while the tables remain readable for rollback and validation.
- Migration 029 creates only the activation evidence table; no legacy table is
- removed.
+Migrations 029 and 030 create and then bind the activation evidence table to
+an immutable PublicationVersion with a unique stream/candidate constraint;
+no legacy table is removed.
 
-`HistoricalRehearsalRunner` requires seven ordered dates, executes injected
-fixture/live validation callbacks, checks the completed-season Synergy result,
-and compares pointers before and after to prove the isolated rehearsal did
-not mutate production state. `FailureDrillRunner` and the benchmark seam are
-credential-free deterministic tooling. The benchmark retains bounded SQLite
-or PostgreSQL query-plan text alongside baseline/database-first p95 values; it
-records but does not claim a recovery-time or recovery-point SLA.
+`HistoricalRehearsalRunner` requires seven ordered dates, a concrete isolated
+collection/composition callback, and a completed-season Synergy validation
+callback. It persists the ordered report records and compares pointers before
+and after to prove the isolated rehearsal did not mutate production state.
+`FailureDrillRunner` exercises a migrated temporary control plane, including
+publication, idempotency, replay, alert, and SQLite backup/restore seams by
+default. The benchmark requires distinct baseline/database-first callables,
+zero provider calls, and retained bounded SQLite or PostgreSQL query-plan
+evidence alongside p95 values; it records but does not claim a recovery-time
+or recovery-point SLA.
 
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window

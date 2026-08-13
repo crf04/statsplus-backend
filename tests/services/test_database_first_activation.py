@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
@@ -10,6 +11,8 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     DatabaseOnlyProviderGuard,
     LegacyWriteFence,
+    PublicationPayloadError,
+    decode_player_game_logs,
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
 from app.services.database_first_drills import FailureDrillRunner
@@ -103,6 +106,61 @@ def test_reader_reports_independent_missing_and_mixed_streams(tmp_path):
     assert metadata["mixed_cutoff"] is False
 
 
+def test_reader_marks_disabled_stream_as_the_only_legacy_fallback(tmp_path):
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "legacy_fallback_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=False,
+    )
+    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(
+        "legacy_fallback_test", season="2025-26"
+    )
+    assert result.legacy_fallback_allowed
+    assert result.source == "legacy_database"
+    assert result.status == "inactive"
+
+
+def test_player_log_publication_decoder_is_strict():
+    row = {
+        "season": "2025-26",
+        "season_type": "Regular Season",
+        "player_id": 1,
+        "game_id": "game-1",
+        "player_name": "Player One",
+        "game_date": "2026-01-01",
+        "team_id": 1,
+        "team_tricode": "AAA",
+        "opponent_team_id": 2,
+        "opponent_team_tricode": "BBB",
+        "is_home": True,
+        "minutes": 30.0,
+        "points": 10,
+        "rebounds": 5,
+        "assists": 2,
+        "field_goals_made": 4,
+        "field_goals_attempted": 8,
+        "three_pointers_made": 1,
+        "three_pointers_attempted": 3,
+        "free_throws_made": 1,
+        "free_throws_attempted": 1,
+        "offensive_rebounds": 1,
+        "defensive_rebounds": 4,
+        "turnovers": 1,
+        "steals": 1,
+        "blocks": 0,
+        "personal_fouls": 1,
+    }
+    decoded = decode_player_game_logs([row], season="2025-26")
+    assert decoded[0].game_id == "game-1"
+    with pytest.raises(PublicationPayloadError):
+        decode_player_game_logs([{**row, "is_home": "true"}], season="2025-26")
+
+
 def test_legacy_write_fence_fails_only_after_stream_activation(tmp_path):
     engine = _db(tmp_path)
     service = PublicationService(engine, clock=lambda: NOW)
@@ -175,3 +233,15 @@ def test_benchmark_emits_query_plan_and_passes_local_gate(tmp_path):
     )
     assert report.passed
     assert report.query_plans
+
+
+def test_benchmark_rejects_one_callable_for_both_paths(tmp_path):
+    engine = _db(tmp_path)
+
+    def read():
+        return None
+
+    with pytest.raises(ValueError, match="distinct"):
+        benchmark_matchup_reads(
+            engine, baseline=read, database_first=read, iterations=1
+        )

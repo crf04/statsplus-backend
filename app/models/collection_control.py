@@ -252,7 +252,11 @@ class PublicationActivation(Base):
 
     activation_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
-    publication_id = Column(String(36), nullable=False)
+    publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     actor = Column(String(128), nullable=False)
     reason = Column(String(255), nullable=False)
     fence = Column(Integer, nullable=False)
@@ -260,6 +264,12 @@ class PublicationActivation(Base):
 
     __table_args__ = (
         Index("ix_publication_activations_stream_created", "stream_key", "created_at"),
+        Index(
+            "uq_publication_activations_stream_publication",
+            "stream_key",
+            "publication_id",
+            unique=True,
+        ),
     )
 
 

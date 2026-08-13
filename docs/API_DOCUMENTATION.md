@@ -1102,25 +1102,32 @@ writer cannot overwrite a newer pointer. Activation evidence is retained in
 the `publication_activations` table and never contains raw observations.
 
 The authenticated Matchup and Matchup Selection routes read the durable
-Regular Season catalog, Player Pool, game-log, Diet, injury-snapshot, and team
-window seams. They make zero request-time NBA Stats, PBP, DFS, or injury
-provider calls in the database-first assembly. Existing fields remain
-backward compatible. Additive `provenance` stream entries identify the
-Publication ID, UTC Coverage Cutoff, age, and `fresh`/`stale` state; additive
+Regular Season catalog, Player Pool, game-log, Diet, injury, and team-window
+seams. Activated statistical streams decode their immutable PublicationVersion
+payloads and make zero request-time NBA Stats, PBP, or DFS calls. Injury
+Reports retain their existing live/snapshot contract; database-first
+statistics do not force a stored-only injury path. Existing fields remain
+backward compatible. Additive `provenance` stream entries identify the exact
+Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state;
+inactive streams explicitly report `legacy_database` fallback. Additive
 `coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
 when one contributor is older or unavailable. A stale active Publication is
 served as the last good fact with its real age; a failed partial attempt never
 replaces it. Synergy L15 is always `unavailable/provider_window_unsupported`
 and Playoff/Play-In requests are outside this first Regular Season activation.
 
-The isolated `scripts/database_first_rehearsal.py` command accepts exactly
-seven ordered Eastern dates and writes a validation report without changing
-production pointers. `scripts/database_first_drills.py` records deterministic
-outage, duplicate delivery, Outbox replay, expired credential, provider
-failure, alert recovery, and restore/replay checks. The
-`scripts/benchmark_matchups.py` command retains p95 latency and bounded query
-plans; the production gate is below one second and within ten percent of the
-recorded baseline. These artifacts claim no formal recovery SLA.
+The isolated `scripts/database_first_rehearsal.py` command requires a concrete
+non-production environment, collection/composition command, completed-season
+Synergy command, and exactly seven ordered dates; it writes a validation
+report without changing production pointers. `scripts/database_first_drills.py`
+records deterministic outage, duplicate delivery, Outbox replay, expired
+credential, provider failure, alert recovery, and restore/replay checks using
+temporary control-plane state. The `scripts/benchmark_matchups.py` command
+requires a production-like fixture and game identity, runs distinct legacy and
+PublicationVersion reads, retains p95 latency and bounded query plans, and
+fails without plan evidence, zero provider calls, a sub-second p95, and a
+database-first p95 no greater than 110% of baseline. These artifacts claim no
+formal recovery SLA.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

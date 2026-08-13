@@ -59,7 +59,7 @@ class EventCatalogService:
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._write_fence = write_fence
-        self.repository = EventCatalogRepository(engine)
+        self.repository = EventCatalogRepository(engine, write_fence=write_fence)
         if is_demo_database_url(str(engine.url)):
             raise ValueError("The canonical event catalog requires a writable application database.")
         configured = getattr(
@@ -103,7 +103,6 @@ class EventCatalogService:
         return EventCatalogBatchResult(tuple(results), failures)
 
     def _refresh_one(self, canonical: str, *, now: datetime | None) -> EventCatalogRefreshResult:
-        self._assert_legacy_write_allowed()
         refreshed_at = assume_utc(now or self._clock())
         try:
             raw = self.provider.fetch_whole_season_schedule(season=canonical)

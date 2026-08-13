@@ -2189,7 +2189,12 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("stream_unavailable")
         now = self.clock()
         with self.session() as session, session.begin():
-            row = session.get(PublicationStream, stream_key)
+            # Writers lock this same stream row inside their transaction
+            # before checking the fence.  Taking it here makes activation and
+            # the final legacy write decision serialize on one generation.
+            row = session.scalar(select(PublicationStream).where(
+                PublicationStream.stream_key == stream_key
+            ).with_for_update())
             if row is None:
                 row = PublicationStream(stream_key=stream_key, provider=provider, owner=owner,
                     required_observations=_json(sorted(set(required_observations))), publication_strategy=publication_strategy,
@@ -2223,6 +2228,7 @@ class PublicationService(_SessionService):
                         parity_artifact_id: str | None = None,
                         candidate_publication_id: str | None = None,
                         actor: str = "operator",
+                        require_candidate: bool = False,
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -2239,6 +2245,33 @@ class PublicationService(_SessionService):
                 "traditional_opponent_l15",
                 "player_per36",
             } else None
+            if require_candidate and not candidate_publication_id:
+                raise ControlPlaneError("publication_candidate_required")
+            candidate = None
+            if candidate_publication_id is not None:
+                # A parity artifact may be the evidence for a candidate that
+                # was already made active by an earlier attempt.  Keep that
+                # evidence check meaningful, while ordinary activations stay
+                # strict and accept candidates only once, before activation.
+                candidate_statuses = (
+                    ("candidate", "active")
+                    if parity_stream is not None
+                    else ("candidate",)
+                )
+                candidate = session.scalar(select(PublicationVersion).where(
+                    PublicationVersion.publication_id == candidate_publication_id,
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.status.in_(candidate_statuses),
+                ).order_by(PublicationVersion.version.desc()).limit(1))
+                if candidate is None:
+                    raise ControlPlaneError("publication_candidate_invalid")
+                if season is not None and candidate.season != season:
+                    raise ControlPlaneError("publication_candidate_invalid")
+                if cutoff is not None and (
+                    cutoff.tzinfo is None
+                    or _aware(candidate.cutoff) != _aware(cutoff)
+                ):
+                    raise ControlPlaneError("publication_candidate_invalid")
             if parity_stream is not None:
                 if (
                     season is None
@@ -2254,13 +2287,12 @@ class PublicationService(_SessionService):
                     or not candidate_publication_id.strip()
                 ):
                     raise ControlPlaneError("ledger_parity_evidence_required")
-                candidate = session.scalar(select(PublicationVersion).where(
-                    PublicationVersion.publication_id == candidate_publication_id,
-                    PublicationVersion.stream_key == stream_key,
-                    PublicationVersion.season == season,
-                    PublicationVersion.cutoff == _aware(cutoff),
-                    PublicationVersion.status == "candidate",
-                ).order_by(PublicationVersion.version.desc()).limit(1))
+                if (
+                    candidate is None
+                    or candidate.season != season
+                    or _aware(candidate.cutoff) != _aware(cutoff)
+                ):
+                    raise ControlPlaneError("publication_candidate_invalid")
                 artifact = session.scalar(select(LedgerParityArtifact).where(
                     LedgerParityArtifact.artifact_id == parity_artifact_id,
                     LedgerParityArtifact.stream_key == parity_stream,
@@ -2278,46 +2310,55 @@ class PublicationService(_SessionService):
                     )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
-            elif candidate_publication_id is not None:
-                # Non-ledger streams do not need a parity adjudication, but a
-                # cutover must still name an immutable candidate belonging to
-                # this stream.  Without this check an operator typo could
-                # leave activation evidence pointing at another stream (or a
-                # fabricated publication ID).
-                candidate = session.scalar(select(PublicationVersion).where(
-                    PublicationVersion.publication_id == candidate_publication_id,
-                    PublicationVersion.stream_key == stream_key,
-                    PublicationVersion.status == "candidate",
-                ).order_by(PublicationVersion.version.desc()).limit(1))
-                if candidate is None:
-                    raise ControlPlaneError("publication_candidate_invalid")
-                if season is not None and candidate.season != season:
-                    raise ControlPlaneError("publication_candidate_invalid")
-                if cutoff is not None and (
-                    cutoff.tzinfo is None or candidate.cutoff != _aware(cutoff)
-                ):
-                    raise ControlPlaneError("publication_candidate_invalid")
-            row.enabled = True
-            # Activation is additive and auditable.  If this call names a
-            # candidate, retain that exact identity; otherwise bind evidence
-            # to the current pointer when one exists.  Existing callers that
-            # only toggle a stream remain compatible and simply produce no
-            # activation row until a publication is available.
+            pointer = session.scalar(select(PublicationPointer).where(
+                PublicationPointer.stream_key == stream_key
+            ).with_for_update())
             publication_id = candidate_publication_id
-            if publication_id is None:
-                pointer = session.get(PublicationPointer, stream_key)
-                publication_id = pointer.active_publication_id if pointer else None
-            if publication_id:
-                pointer = session.get(PublicationPointer, stream_key)
+            if candidate is not None:
+                duplicate = session.scalar(select(PublicationActivation.activation_id).where(
+                    PublicationActivation.stream_key == stream_key,
+                    PublicationActivation.publication_id == candidate.publication_id,
+                ).limit(1))
+                if duplicate is not None:
+                    raise ControlPlaneError("activation_already_recorded")
+                now = self.clock()
+                if pointer is None:
+                    pointer = PublicationPointer(
+                        stream_key=stream_key,
+                        fence=0,
+                        updated_at=now,
+                    )
+                    session.add(pointer)
+                    session.flush()
+                old_publication_id = pointer.active_publication_id
+                pointer.fence += 1
+                pointer.previous_publication_id = old_publication_id
+                pointer.active_publication_id = candidate.publication_id
+                pointer.updated_at = now
+                candidate.status = "active"
+                candidate.fence = pointer.fence
+                if old_publication_id and old_publication_id != candidate.publication_id:
+                    old = session.get(PublicationVersion, old_publication_id)
+                    if old is not None:
+                        old.status = "superseded"
+                publication_id = candidate.publication_id
                 session.add(PublicationActivation(
                     activation_id=_uuid(),
                     stream_key=stream_key,
                     publication_id=publication_id,
                     actor=str(actor).strip()[:128] or "operator",
                     reason=reason.strip()[:255],
-                    fence=int(pointer.fence) if pointer else 0,
-                    created_at=self.clock(),
+                    fence=int(pointer.fence),
+                    created_at=now,
                 ))
+            elif require_candidate:
+                raise ControlPlaneError("publication_candidate_required")
+            elif pointer is not None and pointer.active_publication_id:
+                # Compatibility-only direct callers may re-enable an already
+                # bound stream.  Operator/API activation always takes the
+                # candidate path above.
+                publication_id = pointer.active_publication_id
+            row.enabled = True
             return row
 
     def enqueue(self, stream_key: str, *, season: str, cutoff: datetime,
@@ -2732,6 +2773,7 @@ class PublicationService(_SessionService):
             protected.update(session.scalars(select(PublicationVersion.publication_id).where(
                 PublicationVersion.status == "rollback"
             )))
+            protected.update(session.scalars(select(PublicationActivation.publication_id)))
             query = select(PublicationVersion).where(
                 PublicationVersion.status.in_(("superseded", "candidate")),
                 ~PublicationVersion.publication_id.in_(protected),
@@ -2838,6 +2880,7 @@ class CollectionOperationsService(_SessionService):
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
                 actor=actor,
+                require_candidate=True,
                 session=session,
             ),
         )

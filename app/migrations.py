@@ -645,6 +645,87 @@ def _create_publication_activations(connection: Connection) -> None:
     PublicationActivation.__table__.create(connection, checkfirst=True)
 
 
+def _upgrade_publication_activation_constraints(connection: Connection) -> None:
+    """Bind activation evidence to an immutable candidate exactly once.
+
+    Migration 029 intentionally introduced the additive evidence table without
+    a relationship so it could be replayed alongside the parallel #85/#86
+    histories.  This follow-up adds the durable foreign key and uniqueness
+    rule.  PostgreSQL can alter the table in place; SQLite needs the small
+    table-rebuild form because it cannot add a table-level foreign key.
+    """
+
+    from app.models.collection_control import PublicationActivation
+
+    table_name = PublicationActivation.__tablename__
+    inspector = inspect(connection)
+    foreign_keys = inspector.get_foreign_keys(table_name)
+    has_publication_fk = any(
+        key.get("referred_table") == "publication_versions"
+        and "publication_id" in set(key.get("constrained_columns") or ())
+        for key in foreign_keys
+    )
+    unique_indexes = inspector.get_indexes(table_name)
+    has_unique_activation = any(
+        index.get("name") == "uq_publication_activations_stream_publication"
+        and index.get("unique")
+        and tuple(index.get("column_names") or ()) == ("stream_key", "publication_id")
+        for index in unique_indexes
+    )
+
+    if connection.dialect.name == "sqlite" and not has_publication_fk:
+        preparer = connection.dialect.identifier_preparer
+        old = preparer.quote(table_name)
+        rebuilt_name = f"{table_name}__030"
+        rebuilt = preparer.quote(rebuilt_name)
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.execute(text(
+            f"CREATE TABLE {rebuilt} ("
+            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, "
+            "publication_id VARCHAR(36) NOT NULL, "
+            "actor VARCHAR(128) NOT NULL, "
+            "reason VARCHAR(255) NOT NULL, "
+            "fence INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL, "
+            "CONSTRAINT fk_publication_activation_publication "
+            "FOREIGN KEY(publication_id) REFERENCES publication_versions(publication_id) "
+            "ON DELETE RESTRICT"
+            ")"
+        ))
+        connection.execute(text(
+            f"INSERT INTO {rebuilt} "
+            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+            f"SELECT activation_id, stream_key, publication_id, actor, reason, fence, created_at FROM {old}"
+        ))
+        connection.execute(text(f"DROP TABLE {old}"))
+        connection.execute(text(f"ALTER TABLE {rebuilt} RENAME TO {old}"))
+        connection.execute(text(
+            f"CREATE INDEX ix_publication_activations_stream_created "
+            f"ON {old} (stream_key, created_at)"
+        ))
+        connection.execute(text(
+            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+            f"ON {old} (stream_key, publication_id)"
+        ))
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        return
+
+    if not has_publication_fk:
+        connection.execute(text(
+            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table_name)} "
+            "ADD CONSTRAINT fk_publication_activation_publication "
+            "FOREIGN KEY (publication_id) REFERENCES publication_versions(publication_id) "
+            "ON DELETE RESTRICT"
+        ))
+    if not has_unique_activation:
+        connection.execute(text(
+            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+            f"ON {connection.dialect.identifier_preparer.quote(table_name)} "
+            "(stream_key, publication_id)"
+        ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -686,6 +767,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     # replayable on one linear schema.
     Migration(28, "028_collector_status_transitions", _create_collector_status_transitions),
     Migration(29, "029_publication_activations", _create_publication_activations),
+    Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
 )
 
 

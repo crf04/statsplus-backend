@@ -20,6 +20,10 @@ from app.models.player_diet import (
     PlayerDietSurfaceObservationRow,
 )
 from app.providers.nba_stats import validate_canonical_season
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    decode_player_diet,
+)
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
 
@@ -105,11 +109,18 @@ class _ProviderDependencyUnavailable(ValueError):
 class PlayerDietRepository:
     """Persist available Bases while retaining prior facts for degraded Bases."""
 
-    def __init__(self, engine: Engine, *, write_fence: Any | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        write_fence: Any | None = None,
+        publication_reader: Any | None = None,
+    ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store player Diet facts")
         self.engine = engine
         self._write_fence = write_fence
+        self._publication_reader = publication_reader
 
     def publish(
         self,
@@ -119,19 +130,6 @@ class PlayerDietRepository:
         *,
         retrieved_at: datetime,
     ) -> None:
-        if self._write_fence is not None:
-            checker = getattr(self._write_fence, "assert_writable", None)
-            if callable(checker):
-                # One legacy refresh writes all player-Diet bases in one
-                # transaction.  Check every corresponding activated stream
-                # before touching any row, so a partial write cannot bypass
-                # the cutover by publishing a different base first.
-                for stream_key in (
-                    "synergy_play_types",
-                    "grouped_shot_types",
-                    "exact_shot_zones",
-                ):
-                    checker(stream_key)
         season = validate_canonical_season(season)
         observed_at = assume_utc(retrieved_at)
         fact_rows = tuple(facts)
@@ -144,7 +142,15 @@ class PlayerDietRepository:
         fact_table = PlayerDietFactRow.__table__
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
+            checker = getattr(self._write_fence, "assert_writable", None)
             for observation in observation_rows:
+                stream_key = {
+                    "play_types": "synergy_play_types",
+                    "shot_types": "grouped_shot_types",
+                    "shot_zones": "exact_shot_zones",
+                }.get(observation.base)
+                if callable(checker) and stream_key is not None:
+                    checker(stream_key, connection=connection)
                 if observation.status != "available":
                     continue
                 connection.execute(
@@ -255,6 +261,9 @@ class PlayerDietRepository:
     ) -> PlayerDietResult:
         season = validate_canonical_season(season)
         requested = self._canonical_player_ids(player_ids)
+        publication_result = self._publication_result(season, requested)
+        if publication_result is not None:
+            return publication_result
         fact_table = PlayerDietFactRow.__table__
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with self.engine.connect() as connection:
@@ -314,6 +323,139 @@ class PlayerDietRepository:
             ),
         )
 
+    def _publication_result(
+        self, season: str, requested: tuple[int, ...]
+    ) -> PlayerDietResult | None:
+        """Serve activated Diet bases independently from immutable payloads."""
+
+        if self._publication_reader is None:
+            return None
+        stream_by_base = {
+            "play_types": "synergy_play_types",
+            "shot_types": "grouped_shot_types",
+            "shot_zones": "exact_shot_zones",
+        }
+        facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
+        observations: list[StoredPlayerDietObservation] = []
+        fallback_bases: list[str] = []
+        used_publication = False
+        for base in PLAYER_DIET_BASES:
+            stream_key = stream_by_base.get(base)
+            if stream_key is None:
+                # Assist locations have no PublicationVersion stream yet and
+                # therefore remain on their existing governed repository.
+                continue
+            read = self._publication_reader.read(stream_key, season=season)
+            if read.legacy_fallback_allowed:
+                fallback_bases.append(base)
+                continue
+            used_publication = True
+            retrieved_at = read.retrieved_at or datetime.now(timezone.utc)
+            if not read.available:
+                observations.append(
+                    StoredPlayerDietObservation(
+                        base=base,
+                        status="unavailable" if read.status == "unavailable" else "missing",
+                        unavailable_reason=f"publication_{read.status}",
+                        retrieved_at=retrieved_at,
+                    )
+                )
+                continue
+            try:
+                facts = decode_player_diet(
+                    read.payload, base=base, retrieved_at=retrieved_at
+                )
+            except PublicationPayloadError:
+                observations.append(
+                    StoredPlayerDietObservation(
+                        base=base,
+                        status="unavailable",
+                        unavailable_reason="publication_payload_invalid",
+                        retrieved_at=retrieved_at,
+                    )
+                )
+                continue
+            observations.append(
+                StoredPlayerDietObservation(
+                    base=base,
+                    status="available",
+                    retrieved_at=retrieved_at,
+                )
+            )
+            for fact in facts:
+                if fact.player_id in requested:
+                    facts_by_player[fact.player_id].append(
+                        StoredPlayerDietFact(
+                            player_id=fact.player_id,
+                            base=fact.base,
+                            slice_key=fact.slice_key,
+                            share=fact.share,
+                            volume=fact.volume,
+                            games_played=fact.games_played,
+                            volume_unit=fact.volume_unit,
+                            provider=fact.provider,
+                            retrieved_at=retrieved_at,
+                        )
+                    )
+        if used_publication:
+            # Assist locations has no PublicationVersion stream in this
+            # activation packet, so it remains on its existing governed
+            # repository whenever any sibling Diet stream is cut over.
+            if "assist_locations" not in fallback_bases:
+                fallback_bases.append("assist_locations")
+            fact_table = PlayerDietFactRow.__table__
+            observation_table = PlayerDietSurfaceObservationRow.__table__
+            with self.engine.connect() as connection:
+                legacy_facts = connection.execute(
+                    select(fact_table).where(
+                        fact_table.c.season == season,
+                        fact_table.c.base.in_(fallback_bases),
+                        fact_table.c.player_id.in_(requested) if requested else False,
+                    )
+                ).mappings().all() if requested else ()
+                legacy_observations = connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.season == season,
+                        observation_table.c.base.in_(fallback_bases),
+                    )
+                ).mappings().all()
+            for row in legacy_facts:
+                facts_by_player[row["player_id"]].append(
+                    StoredPlayerDietFact(
+                        player_id=row["player_id"],
+                        base=row["base"],
+                        slice_key=row["slice_key"],
+                        share=row["share"],
+                        volume=row["volume"],
+                        games_played=row["games_played"],
+                        volume_unit=row["volume_unit"],
+                        provider=row["provider"],
+                        retrieved_at=assume_utc(row["retrieved_at"]),
+                    )
+                )
+            observations.extend(
+                StoredPlayerDietObservation(
+                    base=row["base"],
+                    status=row["status"],
+                    unavailable_reason=row["unavailable_reason"],
+                    retrieved_at=assume_utc(row["retrieved_at"]),
+                )
+                for row in legacy_observations
+            )
+        if not used_publication:
+            return None
+        return PlayerDietResult(
+            season=season,
+            players={
+                player_id: tuple(sorted(
+                    facts_by_player[player_id],
+                    key=lambda fact: (fact.base, fact.slice_key),
+                ))
+                for player_id in sorted(facts_by_player)
+            },
+            observations=tuple(sorted(observations, key=lambda row: row.base)),
+        )
+
     @staticmethod
     def _canonical_player_ids(player_ids: Sequence[int]) -> tuple[int, ...]:
         if isinstance(player_ids, (str, bytes)):
@@ -336,8 +478,13 @@ class PlayerDietService:
         pbp_stats_provider: Any,
         clock: Callable[[], datetime] | None = None,
         write_fence: Any | None = None,
+        publication_reader: Any | None = None,
     ) -> None:
-        self.repository = PlayerDietRepository(engine, write_fence=write_fence)
+        self.repository = PlayerDietRepository(
+            engine,
+            write_fence=write_fence,
+            publication_reader=publication_reader,
+        )
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider

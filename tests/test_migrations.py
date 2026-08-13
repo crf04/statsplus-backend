@@ -68,6 +68,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -342,6 +343,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (27, "027_bind_ledger_parity_to_publications"),
             (28, "028_collector_status_transitions"),
             (29, "029_publication_activations"),
+            (30, "030_bind_publication_activation_candidates"),
         ]
 
 
@@ -385,6 +387,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -429,8 +432,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
-    assert upgraded.current_version == 29
+    assert upgraded.current_version == 30
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -493,6 +497,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     with engine.connect() as connection:
         assert connection.scalar(text(
@@ -745,6 +750,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -795,10 +801,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
-    assert upgraded.current_version == 29
+    assert upgraded.current_version == 30
     assert repeated.applied == ()
-    assert repeated.current_version == 29
+    assert repeated.current_version == 30
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -858,6 +865,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
         "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

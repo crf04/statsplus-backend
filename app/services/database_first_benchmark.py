@@ -21,10 +21,19 @@ class BenchmarkReport:
     under_one_second: bool
     within_ten_percent: bool
     query_plans: tuple[str, ...]
+    query_plans_available: bool = True
+    provider_calls: int = 0
+    baseline_source: str = "injected"
+    database_first_source: str = "injected"
 
     @property
     def passed(self) -> bool:
-        return self.under_one_second and self.within_ten_percent
+        return (
+            self.under_one_second
+            and self.within_ten_percent
+            and self.query_plans_available
+            and self.provider_calls == 0
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "passed": self.passed}
@@ -44,8 +53,18 @@ def benchmark_matchup_reads(
     baseline: Callable[[], Any],
     database_first: Callable[[], Any],
     iterations: int = 20,
+    provider_calls: int = 0,
+    baseline_source: str = "injected",
+    database_first_source: str = "injected",
 ) -> BenchmarkReport:
-    """Measure two injected callables and retain bounded SQL query plans."""
+    """Measure distinct full-read seams and retain bounded SQL query plans."""
+
+    if baseline is database_first:
+        raise ValueError(
+            "benchmark requires distinct baseline and database-first callables"
+        )
+    if isinstance(provider_calls, bool) or not isinstance(provider_calls, int) or provider_calls < 0:
+        raise ValueError("provider_calls must be a non-negative integer")
 
     count = max(1, min(int(iterations), 1000))
     baseline_times: list[float] = []
@@ -69,6 +88,9 @@ def benchmark_matchup_reads(
     else:
         ratio = db_p95 / max(baseline_p95, measurement_floor_ms)
     plans = _query_plans(engine)
+    plans_available = bool(plans) and all(
+        "=> unavailable" not in plan for plan in plans
+    )
     return BenchmarkReport(
         iterations=count,
         baseline_p95_ms=round(baseline_p95, 3),
@@ -77,6 +99,10 @@ def benchmark_matchup_reads(
         under_one_second=db_p95 < 1000.0,
         within_ten_percent=ratio <= 1.10,
         query_plans=plans,
+        query_plans_available=plans_available,
+        provider_calls=provider_calls,
+        baseline_source=baseline_source,
+        database_first_source=database_first_source,
     )
 
 
@@ -94,8 +120,6 @@ def _query_plans(engine: Engine) -> tuple[str, ...]:
                 rows = connection.execute(text(prefix + statement)).all()
                 plans.append(statement + " => " + " | ".join(str(row) for row in rows)[:1024])
             except Exception:
-                # Optional tables are allowed in a fresh isolated benchmark;
-                # absence is retained as evidence instead of aborting the run.
                 plans.append(statement + " => unavailable")
     return tuple(plans)
 

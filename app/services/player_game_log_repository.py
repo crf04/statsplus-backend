@@ -39,6 +39,10 @@ from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
     StatsFreshnessRepository,
 )
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    decode_player_game_logs,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,7 @@ class PlayerGameLogRepository:
         clock: Callable[[], datetime] | None = None,
         write_fence: Any | None = None,
         serve_stale: bool = False,
+        publication_reader: Any | None = None,
     ) -> None:
         self.engine = engine
         self._stats_surface_season = validate_canonical_season(stats_surface_season)
@@ -160,6 +165,7 @@ class PlayerGameLogRepository:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._write_fence = write_fence
         self._serve_stale = bool(serve_stale)
+        self._publication_reader = publication_reader
         self._stats_surface_max_age_seconds = exact_seconds(
             exact_timedelta(
                 exact_seconds(stats_surface_max_age),
@@ -195,7 +201,6 @@ class PlayerGameLogRepository:
         current_catalog_game_ids: frozenset[str] | None = None,
         recoverable_game_ids: frozenset[str] = frozenset(),
     ) -> PlayerGameLogPublication:
-        self._assert_legacy_write_allowed()
         canonical_season = validate_canonical_season(season)
         if publication_status not in {"complete", "in_progress"}:
             raise ValueError(
@@ -251,6 +256,7 @@ class PlayerGameLogRepository:
         log_table = PlayerGameLog.__table__
         refresh_table = PlayerGameLogRefresh.__table__
         with self.engine.begin() as connection:
+            self._assert_legacy_write_allowed(connection=connection)
             existing_row_count = connection.execute(
                 select(refresh_table.c.row_count).where(
                     refresh_table.c.season == canonical_season
@@ -318,6 +324,13 @@ class PlayerGameLogRepository:
         self, season: str, player_id: int
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        publication_rows = self._publication_rows(canonical_season)
+        if publication_rows is not None:
+            return tuple(
+                record
+                for record in publication_rows
+                if record.player_id == player_id
+            )
         if not self._season_is_readable(canonical_season):
             return ()
         log_table = PlayerGameLog.__table__
@@ -355,6 +368,15 @@ class PlayerGameLogRepository:
 
     def get_read_freshness(self, season: str) -> PlayerGameLogReadFreshness:
         canonical_season = validate_canonical_season(season)
+        if self._publication_reader is not None:
+            read = self._publication_reader.read(
+                "player_game_logs", season=canonical_season
+            )
+            if not read.legacy_fallback_allowed:
+                return PlayerGameLogReadFreshness(
+                    read.freshness if read.available else read.status,
+                    read.retrieved_at,
+                )
         publication = self.get_freshness(canonical_season)
         if publication.retrieved_at is None:
             return PlayerGameLogReadFreshness("missing", None)
@@ -393,7 +415,6 @@ class PlayerGameLogRepository:
         boundary changes nothing, preserving the exact prior fact rows and the
         last complete publication.
         """
-        self._assert_legacy_write_allowed()
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
@@ -440,6 +461,7 @@ class PlayerGameLogRepository:
         sync_table = PlayerGameLogSync.__table__
         published_rows = 0
         with self.engine.begin() as connection:
+            self._assert_legacy_write_allowed(connection=connection)
             for game_id, (season_type, records, checksum) in staged.items():
                 connection.execute(
                     delete(log_table).where(
@@ -510,13 +532,33 @@ class PlayerGameLogRepository:
             recovered_removed_row_count=0,
         )
 
-    def _assert_legacy_write_allowed(self) -> None:
+    def _assert_legacy_write_allowed(self, *, connection: Any | None = None) -> None:
         """Keep the pre-activation writer additive but fence it after cutover."""
 
         if self._write_fence is not None:
             checker = getattr(self._write_fence, "assert_writable", None)
             if callable(checker):
-                checker("player_game_logs")
+                checker("player_game_logs", connection=connection)
+
+    def _publication_rows(
+        self, season: str
+    ) -> tuple[PlayerGameLogRecord, ...] | None:
+        """Read immutable facts; only an explicitly inactive stream falls back."""
+
+        if self._publication_reader is None:
+            return None
+        read = self._publication_reader.read("player_game_logs", season=season)
+        if read.legacy_fallback_allowed:
+            return None
+        if not read.available:
+            return ()
+        try:
+            return tuple(decode_player_game_logs(read.payload, season=season))
+        except PublicationPayloadError:
+            # The route remains degraded rather than serving a different
+            # generation of legacy facts when an active immutable document is
+            # malformed.
+            return ()
 
     def _completed_coverage_status(
         self,
@@ -675,7 +717,12 @@ class PlayerGameLogRepository:
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {
             player_id: [] for player_id in canonical_ids
         }
-        if self._season_is_readable(canonical_season):
+        publication_rows = self._publication_rows(canonical_season)
+        if publication_rows is not None:
+            for record in publication_rows:
+                if record.player_id in rows_by_player:
+                    rows_by_player[record.player_id].append(record)
+        elif self._season_is_readable(canonical_season):
             log_table = PlayerGameLog.__table__
             with self.engine.connect() as connection:
                 rows = connection.execute(
@@ -778,6 +825,14 @@ class PlayerGameLogRepository:
         opponent_team_id: int,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        publication_rows = self._publication_rows(canonical_season)
+        if publication_rows is not None:
+            return tuple(
+                record
+                for record in publication_rows
+                if record.player_id in player_ids
+                and record.opponent_team_id == opponent_team_id
+            )
         if not self._season_is_readable(canonical_season):
             return ()
         log_table = PlayerGameLog.__table__

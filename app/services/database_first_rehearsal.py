@@ -106,11 +106,24 @@ class HistoricalRehearsalRunner:
             return self._failed(season, "historical rehearsal dates must be ordered and unique")
         if any(isinstance(cutoff, datetime) or not isinstance(cutoff, date) for cutoff in dates):
             return self._failed(season, "historical rehearsal cutoffs must be calendar dates")
-        before = self._pointer_snapshot()
+        if collect is None:
+            return self._failed(
+                season,
+                "historical rehearsal requires an isolated collection/composition callback",
+            )
+        if synergy_check is None:
+            return self._failed(
+                season,
+                "historical rehearsal requires a completed-season Synergy validation callback",
+            )
         records: list[RehearsalRecord] = []
+        before: tuple[tuple[str, str | None, str | None, int], ...] = ()
         try:
+            before = self._pointer_snapshot()
             for sequence, cutoff in enumerate(dates, start=1):
-                details = dict(collect(cutoff)) if collect is not None else {}
+                details = dict(collect(cutoff))
+                if "status" not in details and not details:
+                    raise ValueError("collection/composition callback must return status")
                 status = str(details.pop("status", "passed"))
                 if status not in {"passed", "failed", "skipped"}:
                     raise ValueError("rehearsal callback returned an invalid status")
@@ -126,12 +139,10 @@ class HistoricalRehearsalRunner:
                 )
                 if status == "failed":
                     raise ValueError(f"historical rehearsal failed at {cutoff.isoformat()}")
-            synergy_status = "passed"
-            if synergy_check is not None:
-                result = synergy_check(dates[-1])
-                synergy_status = "passed" if result is True or result is None else str(result)
-                if synergy_status not in {"passed", "skipped"}:
-                    raise ValueError("completed-season Synergy validation failed")
+            result = synergy_check(dates[-1])
+            synergy_status = "passed" if result is True else str(result)
+            if synergy_status != "passed":
+                raise ValueError("completed-season Synergy validation failed")
             after = self._pointer_snapshot()
             unchanged = before == after
             if not unchanged:
@@ -144,14 +155,19 @@ class HistoricalRehearsalRunner:
                 synergy_season_status=synergy_status,
                 production_pointers_unchanged=True,
             )
-        except (TypeError, ValueError, KeyError) as error:
+        except Exception as error:
+            try:
+                after_failure = self._pointer_snapshot()
+                unchanged = bool(before == after_failure)
+            except RuntimeError:
+                unchanged = False
             return HistoricalRehearsalReport(
                 season=season,
                 environment=self.environment,
                 status="failed",
                 records=tuple(records),
                 synergy_season_status="failed",
-                production_pointers_unchanged=before == self._pointer_snapshot(),
+                production_pointers_unchanged=unchanged,
                 error=str(error)[:255],
             )
 
@@ -170,10 +186,10 @@ class HistoricalRehearsalRunner:
                     )
                     for row in rows
                 )
-        except Exception:
-            # A fresh isolated DB may not have the optional control table yet;
-            # that is still a stable empty pointer snapshot for the runner.
-            return ()
+        except Exception as error:
+            raise RuntimeError(
+                "historical rehearsal requires a migrated isolated control-plane database"
+            ) from error
 
     def _failed(self, season: str, error: str) -> HistoricalRehearsalReport:
         return HistoricalRehearsalReport(

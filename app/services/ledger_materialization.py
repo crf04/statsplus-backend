@@ -168,7 +168,28 @@ class LedgerMaterializationService:
         )
         retrieved_at = self.clock()
         player_game_logs = tuple(
-            {"game_id": game.game_id, **_json_default(player)}
+            {
+                "season": game.season,
+                "season_type": game.season_type,
+                "game_id": game.game_id,
+                "game_date": game.game_date,
+                "opponent_team_id": (
+                    game.away_team_id
+                    if player.team_id == game.home_team_id
+                    else game.home_team_id
+                ),
+                "opponent_team_tricode": (
+                    game.away_team_tricode
+                    if player.team_id == game.home_team_id
+                    else game.home_team_tricode
+                ),
+                "is_home": player.team_id == game.home_team_id,
+                **_json_default(player),
+                # PlayerGameFact keeps two-/three-point primitives while the
+                # public log contract exposes aggregate field-goal columns.
+                "field_goals_made": player.field_goals_made,
+                "field_goals_attempted": player.field_goals_attempted,
+            }
             for game in eligible
             for player in game.player_facts
         )
