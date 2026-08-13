@@ -9,7 +9,7 @@ import gzip
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
@@ -73,6 +73,18 @@ class PBPRepairIdentitySnapshot:
 
     observation_ids: frozenset[str]
     composition_job_ids: frozenset[str]
+
+
+def _json_artifact_value(value: Any) -> Any:
+    """Normalize known database scalar containers for strict JSON artifacts."""
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_artifact_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_artifact_value(item) for item in value]
+    return value
 
 
 def capture_pbp_repair_identity_snapshot(
@@ -370,7 +382,7 @@ class FailureDrillReport:
                 else ["recovery_time_ms", "recovery_data_point"]
             ),
         }
-        return payload
+        return _json_artifact_value(payload)
 
 
 class FailureDrillRunner:
@@ -724,7 +736,8 @@ class FailureDrillRunner:
         )
 
     def _id(self, label: str) -> str:
-        return f"drill-{self.run_id[:16]}-{label}"
+        label_digest = hashlib.sha256(label.encode()).hexdigest()[:12]
+        return f"drill-{self.run_id[:16]}-{label_digest}"
 
     def _default_hook(self, name: str) -> Callable[[], Mapping[str, Any]]:
         """Return a deterministic exercise against the temporary control plane."""

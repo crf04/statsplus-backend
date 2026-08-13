@@ -1,0 +1,280 @@
+{
+  "artifact_schema": {
+    "engine": "postgresql",
+    "required_fields": [
+      "restore_command_evidence",
+      "recovery_time_ms",
+      "pbp_repair_observation_id",
+      "pbp_repair_job_id"
+    ],
+    "version": 1
+  },
+  "completed_at": "2026-08-13T23:37:42.277976+00:00",
+  "drills": [
+    {
+      "attempts": 2,
+      "details": {
+        "environment": "operator",
+        "no_partial_publish": true,
+        "production_evidence": true,
+        "published_attempts": [
+          1
+        ],
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 1277.524,
+        "retry_statuses": [
+          "failed",
+          "succeeded"
+        ],
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true
+      },
+      "name": "railway_outage_retry",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "committed": 1,
+        "deliveries": 2,
+        "environment": "operator",
+        "idempotent": true,
+        "production_evidence": true,
+        "receipt_layer": "control_plane_observation_ingestion",
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 7394.265,
+        "replay": true,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true
+      },
+      "name": "duplicate_delivery_idempotency",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "acknowledged": true,
+        "environment": "operator",
+        "idempotent": true,
+        "pending_before_reboot": 1,
+        "production_evidence": true,
+        "receipt_layer": "residential_outbox_sqlite",
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 39.078,
+        "replayed_after_reboot": 1,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true
+      },
+      "name": "collector_reboot_outbox_replay",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "accepted": false,
+        "credential_status": "expired",
+        "environment": "operator",
+        "production_evidence": true,
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 2059.018,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true,
+        "writes": 0
+      },
+      "name": "expired_credential_rejection",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "environment": "operator",
+        "failed_attempt": {
+          "value": null
+        },
+        "last_good": {
+          "value": 7
+        },
+        "last_good_retained": true,
+        "partial_attempt_published": false,
+        "production_evidence": true,
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 1779.9,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "served": {
+          "value": 7
+        },
+        "verified": true
+      },
+      "name": "provider_failure_last_good_retention",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "alert_transitions": [
+          "failure",
+          "recovery"
+        ],
+        "environment": "operator",
+        "production_evidence": true,
+        "recovery_emitted": true,
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 511.609,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true
+      },
+      "name": "alert_recovery",
+      "status": "passed"
+    },
+    {
+      "attempts": 1,
+      "details": {
+        "adapter": "postgres_disposable_restore",
+        "audit_rows": 1,
+        "audit_validated": true,
+        "environment": "postgres_isolated",
+        "exact_expected_rows_validated": true,
+        "foreign_keys_validated": true,
+        "latest_governed_cutoff": "2025-10-21T23:59:00+00:00",
+        "ledger_rows": 2,
+        "ledger_validated": true,
+        "orphan_activation_rows": 0,
+        "orphan_provenance_rows": 0,
+        "outbox_replayed_twice": true,
+        "pbp_repair_evidence": {
+          "adapter": "ledger_refresh_historical_repair",
+          "checksum": "3d9db2dfb6d9eb7604049433f2415e64e3a58c404f91b94f65ad95649eb1f2de",
+          "composition_job_id": "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+          "composition_job_ids": [
+            "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+            "47abfc9b-bc59-4bab-a1ed-5731357a6dcc",
+            "7586c45c-5b2c-4a82-972b-815768a17841",
+            "7a695b7c-d3da-4136-8b57-e4912fe8dd81",
+            "d62ae656-5878-40f1-aac4-6262792c338a",
+            "e6c0b604-b4d1-46dc-ab00-4fb1150fd5c8"
+          ],
+          "game_id": "0022500001",
+          "observation_id": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+          "repair_result": {
+            "adapter": "ledger_refresh_historical_repair",
+            "checksum": "3d9db2dfb6d9eb7604049433f2415e64e3a58c404f91b94f65ad95649eb1f2de",
+            "command": [
+              "C:\\Users\\Chris Fu\\statsplus-backend-87\\.venv\\Scripts\\python.exe",
+              "C:\\Users\\Chris Fu\\statsplus-backend-87\\scripts\\ledger_refresh.py",
+              "2025-26",
+              "--database-url",
+              "postgresql://postgres:***@altaria.proxy.rlwy.net:18285/railway",
+              "--historical-repair",
+              "--max-games",
+              "1"
+            ],
+            "command_result": {
+              "complete": true,
+              "status": "complete"
+            },
+            "composition_job_id": "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+            "composition_job_ids": [
+              "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+              "47abfc9b-bc59-4bab-a1ed-5731357a6dcc",
+              "7586c45c-5b2c-4a82-972b-815768a17841",
+              "7a695b7c-d3da-4136-8b57-e4912fe8dd81",
+              "d62ae656-5878-40f1-aac4-6262792c338a",
+              "e6c0b604-b4d1-46dc-ab00-4fb1150fd5c8"
+            ],
+            "game_id": "0022500001",
+            "manifest_id": "restore-drill-ledger-manifest",
+            "observation_id": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+            "returncode": 0,
+            "updated_rows": 1,
+            "verified": true
+          },
+          "updated_rows": 1,
+          "verified": true
+        },
+        "pbp_repair_executed": true,
+        "pbp_repair_job_id": "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+        "pbp_repair_observation_id": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+        "pbp_repair_rows": 1,
+        "pbp_repair_validated": true,
+        "pointer_rows": 1,
+        "pointers_validated": true,
+        "production_evidence": true,
+        "provenance_rows": 2,
+        "provenance_validated": true,
+        "recovery_data_point": {
+          "latest_governed_cutoff": "2025-10-21T23:59:00+00:00",
+          "latest_observation": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+          "observed_at": "2026-08-13T23:37:42.276976+00:00",
+          "query_duration_ms": 203018.929
+        },
+        "recovery_point": "post-commit",
+        "recovery_time_ms": 203018.929,
+        "replay_evidence": {
+          "outbox_acknowledged": true,
+          "outbox_duplicate_item_idempotent": true,
+          "outbox_replayed_twice": true,
+          "verified": true
+        },
+        "replay_rows": 6,
+        "replay_validated": true,
+        "restore_command_evidence": {
+          "backup_artifact": "restore-drill-20260813.dump",
+          "command": [
+            "C:\\Users\\Chris Fu\\AppData\\Local\\statsplus-tools\\postgresql18\\pgsql\\bin\\pg_restore.exe",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+            "--dbname",
+            "postgresql://postgres:***@altaria.proxy.rlwy.net:18285/railway",
+            "C:\\Users\\Chris Fu\\AppData\\Local\\statsplus-tools\\restore-drill-20260813.dump"
+          ],
+          "command_result": {},
+          "completed_at": "2026-08-13T23:35:37.859463+00:00",
+          "output_captured": false,
+          "returncode": 0,
+          "started_at": "2026-08-13T23:34:19.259041+00:00",
+          "status": "succeeded"
+        },
+        "restore_duration_ms": 203018.929,
+        "run_id": "03b43cd494264106847ed64dc7a4b609",
+        "verified": true
+      },
+      "name": "isolated_restore_replay",
+      "status": "passed"
+    }
+  ],
+  "engine": "postgresql",
+  "environment": "operator",
+  "pbp_repair_job_id": "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
+  "pbp_repair_observation_id": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+  "production_evidence": true,
+  "recovery_data_point": {
+    "latest_governed_cutoff": "2025-10-21T23:59:00+00:00",
+    "latest_observation": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
+    "observed_at": "2026-08-13T23:37:42.276976+00:00",
+    "query_duration_ms": 203018.929
+  },
+  "restore_command_evidence": {
+    "backup_artifact": "restore-drill-20260813.dump",
+    "command": [
+      "C:\\Users\\Chris Fu\\AppData\\Local\\statsplus-tools\\postgresql18\\pgsql\\bin\\pg_restore.exe",
+      "--clean",
+      "--if-exists",
+      "--no-owner",
+      "--no-privileges",
+      "--dbname",
+      "postgresql://postgres:***@altaria.proxy.rlwy.net:18285/railway",
+      "C:\\Users\\Chris Fu\\AppData\\Local\\statsplus-tools\\restore-drill-20260813.dump"
+    ],
+    "command_result": {},
+    "completed_at": "2026-08-13T23:35:37.859463+00:00",
+    "output_captured": false,
+    "returncode": 0,
+    "started_at": "2026-08-13T23:34:19.259041+00:00",
+    "status": "succeeded"
+  },
+  "restore_duration_ms": 203018.929,
+  "started_at": "2026-08-13T23:36:18.642512+00:00",
+  "status": "passed"
+}

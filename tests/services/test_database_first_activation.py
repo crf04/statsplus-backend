@@ -348,6 +348,34 @@ def test_failure_drills_are_deterministic_and_named():
     assert report.drills[0].attempts == 2
 
 
+def test_failure_drill_report_serializes_database_timestamps():
+    report = FailureDrillRunner(clock=lambda: NOW).run(
+        hooks={
+            "isolated_restore_replay": lambda: {
+                "verified": True,
+                "latest_governed_cutoff": NOW,
+            }
+        }
+    )
+
+    encoded = json.dumps(report.to_dict())
+
+    assert NOW.isoformat() in encoded
+
+
+def test_failure_drill_database_ids_fit_postgres_uuid_columns():
+    runner = FailureDrillRunner(clock=lambda: NOW)
+
+    values = {
+        runner._id("ingestion-manifest"),
+        runner._id("ingestion-collector"),
+        runner._id("receipt-1"),
+    }
+
+    assert len(values) == 3
+    assert all(len(value) <= 36 for value in values)
+
+
 def test_url_drill_requires_out_of_band_marker_not_isolated_assertion(tmp_path):
     runner = FailureDrillRunner(
         database_url=f"sqlite:///{tmp_path / 'unsafe.sqlite3'}",
