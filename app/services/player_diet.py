@@ -143,14 +143,26 @@ class PlayerDietRepository:
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
             checker = getattr(self._write_fence, "assert_writable", None)
-            for observation in observation_rows:
-                stream_key = {
+            stream_by_base = {
+                    "assist_locations": "player_assist_locations",
                     "play_types": "synergy_play_types",
                     "shot_types": "grouped_shot_types",
                     "shot_zones": "exact_shot_zones",
-                }.get(observation.base)
-                if callable(checker) and stream_key is not None:
+            }
+            if callable(checker):
+                # Lock only the Bases represented by this atomic update, in a
+                # stable order so concurrent independent refreshes cannot
+                # deadlock while still fencing activation races.
+                for stream_key in sorted(
+                    {
+                        stream_by_base[observation.base]
+                        for observation in observation_rows
+                        if observation.status in {"available", "unavailable", "missing"}
+                        and observation.base in stream_by_base
+                    }
+                ):
                     checker(stream_key, connection=connection)
+            for observation in observation_rows:
                 if observation.status != "available":
                     continue
                 connection.execute(
@@ -331,6 +343,7 @@ class PlayerDietRepository:
         if self._publication_reader is None:
             return None
         stream_by_base = {
+            "assist_locations": "player_assist_locations",
             "play_types": "synergy_play_types",
             "shot_types": "grouped_shot_types",
             "shot_zones": "exact_shot_zones",
@@ -339,13 +352,20 @@ class PlayerDietRepository:
         observations: list[StoredPlayerDietObservation] = []
         fallback_bases: list[str] = []
         used_publication = False
+        read_many = getattr(self._publication_reader, "read_many", None)
+        publication_reads = (
+            read_many(tuple(stream_by_base.values()), season=season)
+            if callable(read_many)
+            else {
+                stream_key: self._publication_reader.read(stream_key, season=season)
+                for stream_key in stream_by_base.values()
+            }
+        )
         for base in PLAYER_DIET_BASES:
             stream_key = stream_by_base.get(base)
             if stream_key is None:
-                # Assist locations have no PublicationVersion stream yet and
-                # therefore remain on their existing governed repository.
                 continue
-            read = self._publication_reader.read(stream_key, season=season)
+            read = publication_reads[stream_key]
             if read.legacy_fallback_allowed:
                 fallback_bases.append(base)
                 continue
@@ -356,7 +376,7 @@ class PlayerDietRepository:
                     StoredPlayerDietObservation(
                         base=base,
                         status="unavailable" if read.status == "unavailable" else "missing",
-                        unavailable_reason=f"publication_{read.status}",
+                        unavailable_reason=read.unavailable_reason or f"publication_{read.status}",
                         retrieved_at=retrieved_at,
                     )
                 )
@@ -398,11 +418,6 @@ class PlayerDietRepository:
                         )
                     )
         if used_publication:
-            # Assist locations has no PublicationVersion stream in this
-            # activation packet, so it remains on its existing governed
-            # repository whenever any sibling Diet stream is cut over.
-            if "assist_locations" not in fallback_bases:
-                fallback_bases.append("assist_locations")
             fact_table = PlayerDietFactRow.__table__
             observation_table = PlayerDietSurfaceObservationRow.__table__
             with self.engine.connect() as connection:

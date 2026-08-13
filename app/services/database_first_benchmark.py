@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, replace
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -56,6 +57,8 @@ def benchmark_matchup_reads(
     provider_calls: int = 0,
     baseline_source: str = "injected",
     database_first_source: str = "injected",
+    season: str = "2025-26",
+    game_id: str = "benchmark-game",
 ) -> BenchmarkReport:
     """Measure distinct full-read seams and retain bounded SQL query plans."""
 
@@ -87,7 +90,7 @@ def benchmark_matchup_reads(
         ratio = 1.0
     else:
         ratio = db_p95 / max(baseline_p95, measurement_floor_ms)
-    plans = _query_plans(engine)
+    plans = _query_plans(engine, season=season, game_id=game_id)
     plans_available = bool(plans) and all(
         "=> unavailable" not in plan for plan in plans
     )
@@ -106,11 +109,76 @@ def benchmark_matchup_reads(
     )
 
 
-def _query_plans(engine: Engine) -> tuple[str, ...]:
+def benchmark_matchup_services(
+    engine: Engine,
+    *,
+    baseline_route: Callable[[], Any],
+    database_first_route: Callable[[], Any],
+    season: str,
+    game_id: str,
+    iterations: int = 20,
+    provider_call_count: Callable[[], int] | None = None,
+) -> BenchmarkReport:
+    """Benchmark the complete route/service callables over one fixture.
+
+    The SQL benchmark remains available for low-level diagnostics, but the
+    activation gate uses this seam so both paths execute the same public
+    response assembly.  A provider counter can be injected by the service
+    fixture; its delta must stay zero for the database-first path.
+    """
+
+    if not str(season).strip() or not str(game_id).strip():
+        raise ValueError("benchmark requires concrete season and game identity")
+    if baseline_route is database_first_route:
+        raise ValueError("benchmark requires distinct route/service callables")
+
+    def invoke(route: Callable[[], Any]) -> Any:
+        value = route()
+        if not isinstance(value, Mapping):
+            raise ValueError("benchmark route returned no response object")
+        return value
+
+    observed_calls = 0
+    def invoke_database_first() -> Any:
+        nonlocal observed_calls
+        before = provider_call_count() if provider_call_count is not None else 0
+        value = invoke(database_first_route)
+        after = provider_call_count() if provider_call_count is not None else before
+        observed_calls += max(0, int(after) - int(before))
+        return value
+
+    report = benchmark_matchup_reads(
+        engine,
+        baseline=lambda: invoke(baseline_route),
+        database_first=invoke_database_first,
+        iterations=iterations,
+        baseline_source="matchup_service_legacy",
+        database_first_source="matchup_route_database_first",
+        season=season,
+        game_id=game_id,
+    )
+    if provider_call_count is None:
+        observed_calls = report.provider_calls
+    return replace(report, provider_calls=observed_calls)
+
+
+def _query_plans(
+    engine: Engine, *, season: str = "2025-26", game_id: str = "benchmark-game"
+) -> tuple[str, ...]:
+    safe_season = str(season).replace("'", "''")
+    safe_game_id = str(game_id).replace("'", "''")
     statements = (
         "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key",
-        "SELECT stream_key, active_publication_id FROM publication_pointers",
-        "SELECT season, player_id, game_date, game_id FROM player_game_logs WHERE season = '2025-26' ORDER BY game_date DESC, game_id DESC LIMIT 50",
+        "SELECT p.stream_key, p.fence, v.publication_id, v.version "
+        "FROM publication_pointers p JOIN publication_versions v "
+        "ON v.publication_id = p.active_publication_id "
+        f"WHERE v.season = '{safe_season}'",
+        "SELECT v.publication_id, v.stream_key, v.payload FROM publication_pointers p "
+        "JOIN publication_versions v ON v.publication_id = p.active_publication_id "
+        f"WHERE v.season = '{safe_season}' AND v.stream_key = 'player_game_logs'",
+        "SELECT season, player_id, game_date, game_id FROM player_game_logs "
+        f"WHERE season = '{safe_season}' AND game_id = '{safe_game_id}' "
+        "ORDER BY game_date DESC, game_id DESC LIMIT 50",
     )
     plans: list[str] = []
     with engine.connect() as connection:
@@ -130,4 +198,9 @@ def write_benchmark_report(report: BenchmarkReport, path: str) -> None:
         handle.write("\n")
 
 
-__all__ = ["BenchmarkReport", "benchmark_matchup_reads", "write_benchmark_report"]
+__all__ = [
+    "BenchmarkReport",
+    "benchmark_matchup_reads",
+    "benchmark_matchup_services",
+    "write_benchmark_report",
+]

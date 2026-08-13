@@ -228,12 +228,14 @@ def decode_player_diet(
 ) -> tuple[Any, ...]:
     """Decode one governed player-Diet stream without filling defaults."""
 
+    from app.models.catalogs import PLAY_TYPES
     from app.services.player_diet import PlayerDietFact, PLAYER_DIET_BASES
 
     stream_key = {
         "play_types": "synergy_play_types",
         "shot_types": "grouped_shot_types",
         "shot_zones": "exact_shot_zones",
+        "assist_locations": "player_assist_locations",
     }.get(base)
     if stream_key is None or base not in PLAYER_DIET_BASES:
         raise PublicationPayloadError(f"unsupported player Diet publication base {base}")
@@ -245,12 +247,33 @@ def decode_player_diet(
         "play_types": "possessions",
         "shot_types": "field_goal_attempts",
         "shot_zones": "field_goal_attempts",
+        "assist_locations": "assists",
     }
     expected_providers = {
         "play_types": "nba_synergy",
         "shot_types": "nba_stats",
         "shot_zones": "nba_stats",
+        "assist_locations": "pbp_stats",
     }
+    allowed_slices = {
+        "play_types": set(PLAY_TYPES),
+        "shot_types": {"catch_and_shoot", "pullups", "less_than_10_ft"},
+        "shot_zones": {
+            "Restricted Area",
+            "In The Paint (Non-RA)",
+            "Mid-Range",
+            "Corner 3",
+            "Above the Break 3",
+        },
+        "assist_locations": {
+            "Arc3Assists",
+            "Corner3Assists",
+            "AtRimAssists",
+            "ShortMidRangeAssists",
+            "LongMidRangeAssists",
+        },
+    }
+    identities: set[tuple[int, str]] = set()
     for row in rows:
         for field in (
             "player_id", "slice_key", "share", "volume", "games_played",
@@ -261,15 +284,27 @@ def decode_player_diet(
             raise PublicationPayloadError(f"{stream_key} publication volume unit mismatch")
         if _strict_text(row["provider"], field="provider", stream_key=stream_key) != expected_providers[base]:
             raise PublicationPayloadError(f"{stream_key} publication provider mismatch")
+        player_id = _strict_int(
+            row["player_id"], field="player_id", stream_key=stream_key, minimum=1
+        )
+        slice_key = _strict_text(
+            row["slice_key"], field="slice_key", stream_key=stream_key
+        )
+        if slice_key not in allowed_slices[base]:
+            raise PublicationPayloadError(f"{stream_key} publication slice is unsupported")
+        identity = (player_id, slice_key)
+        if identity in identities:
+            raise PublicationPayloadError(f"{stream_key} publication repeats a fact")
+        identities.add(identity)
         share = _strict_float(
             row["share"], field="share", stream_key=stream_key, minimum=0
         )
         if share > 1:
             raise PublicationPayloadError(f"{stream_key} publication share is out of range")
         result.append(PlayerDietFact(
-            player_id=_strict_int(row["player_id"], field="player_id", stream_key=stream_key, minimum=1),
+            player_id=player_id,
             base=base,
-            slice_key=_strict_text(row["slice_key"], field="slice_key", stream_key=stream_key),
+            slice_key=slice_key,
             share=share,
             volume=_strict_float(row["volume"], field="volume", stream_key=stream_key, minimum=0),
             games_played=_strict_int(row["games_played"], field="games_played", stream_key=stream_key, minimum=1),
@@ -278,6 +313,65 @@ def decode_player_diet(
         ))
     if not result:
         raise PublicationPayloadError(f"{stream_key} publication is empty")
+    return tuple(result)
+
+
+def decode_player_per36(payload: Any, *, season: str | None = None) -> tuple[Any, ...]:
+    """Decode the immutable per-36 ledger rows without lossy coercion.
+
+    The ledger derives these rows from canonical game facts.  Keeping the
+    decoder here makes the read-side boundary just as strict as game logs and
+    prevents an activated payload from silently falling back to the legacy
+    ``player_per36_stats`` table when one column is malformed.
+    """
+
+    from app.services.ledger_derivations import PlayerPer36Fact
+
+    stream_key = "player_per36"
+    fields = tuple(PlayerPer36Fact.__dataclass_fields__)
+    result = []
+    for row in _payload_rows(payload, stream_key=stream_key):
+        for field in fields:
+            _required(row, field, stream_key=stream_key)
+        row_season = _strict_text(row["season"], field="season", stream_key=stream_key)
+        if season is not None and row_season != season:
+            raise PublicationPayloadError("player_per36 publication season mismatch")
+        values: dict[str, Any] = {"season": row_season}
+        values["player_id"] = _strict_int(
+            row["player_id"], field="player_id", stream_key=stream_key, minimum=1
+        )
+        for field in fields:
+            if field in {"season", "player_id"}:
+                continue
+            if field == "team_ids_at_game":
+                team_ids = row[field]
+                if not isinstance(team_ids, (list, tuple)) or not team_ids:
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication field team_ids_at_game is invalid"
+                    )
+                values[field] = tuple(
+                    _strict_int(
+                        team_id,
+                        field="team_ids_at_game",
+                        stream_key=stream_key,
+                        minimum=1,
+                    )
+                    for team_id in team_ids
+                )
+                continue
+            if field == "game_count":
+                values[field] = _strict_int(
+                    row[field], field=field, stream_key=stream_key, minimum=1
+                )
+                continue
+            values[field] = _strict_float(
+                row[field], field=field, stream_key=stream_key, minimum=0
+            )
+        result.append(PlayerPer36Fact(**values))
+    if not result:
+        raise PublicationPayloadError("player_per36 publication is empty")
+    if len({row.player_id for row in result}) != len(result):
+        raise PublicationPayloadError("player_per36 publication repeats a player")
     return tuple(result)
 
 
@@ -298,10 +392,17 @@ class PublicationTeamWindowRow:
 def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTeamWindowRow, ...]:
     """Decode a complete, immutable team-window publication."""
 
-    if stream_key not in {
+    supported = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
-    }:
+        "synergy_play_types_opponent_season",
+        "synergy_play_types_opponent_l15",
+        "grouped_shot_types_opponent_season",
+        "grouped_shot_types_opponent_l15",
+        "exact_shot_zones_opponent_season",
+        "exact_shot_zones_opponent_l15",
+    }
+    if stream_key not in supported:
         raise PublicationPayloadError(f"unsupported team-window publication {stream_key}")
     rows = _payload_rows(payload, stream_key=stream_key)
     decoded = []
@@ -358,6 +459,41 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     return tuple(decoded)
 
 
+def _validate_known_publication_payload(
+    stream_key: str, payload: Any, *, season: str, retrieved_at: datetime
+) -> None:
+    """Apply the strict decoder for every public database-first stream."""
+
+    team_streams = {
+        "traditional_opponent_season", "traditional_opponent_l15",
+        "assist_locations_season", "assist_locations_l15",
+        "synergy_play_types_opponent_season",
+        "synergy_play_types_opponent_l15",
+        "grouped_shot_types_opponent_season",
+        "grouped_shot_types_opponent_l15",
+        "exact_shot_zones_opponent_season",
+        "exact_shot_zones_opponent_l15",
+    }
+    diet_bases = {
+        "synergy_play_types": "play_types",
+        "grouped_shot_types": "shot_types",
+        "exact_shot_zones": "shot_zones",
+        "player_assist_locations": "assist_locations",
+    }
+    if stream_key == "player_game_logs":
+        decode_player_game_logs(payload, season=season)
+    elif stream_key == "player_per36":
+        decode_player_per36(payload, season=season)
+    elif stream_key in team_streams:
+        decode_team_window(payload, stream_key=stream_key)
+    elif stream_key in diet_bases:
+        decode_player_diet(
+            payload,
+            base=diet_bases[stream_key],
+            retrieved_at=retrieved_at,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationRead:
     """One immutable stream read and its bounded provenance."""
@@ -375,6 +511,8 @@ class PublicationRead:
     retrieved_at: datetime | None = None
     legacy_fallback_allowed: bool = False
     checksum: str | None = None
+    fence: int | None = None
+    unavailable_reason: str | None = None
 
     @property
     def available(self) -> bool:
@@ -396,6 +534,13 @@ class PublicationRead:
             "source": self.source,
             "legacy_fallback_allowed": self.legacy_fallback_allowed,
             "payload_checksum": self.checksum,
+            "retrieved_at": (
+                _utc(self.retrieved_at).isoformat()
+                if self.retrieved_at is not None
+                else None
+            ),
+            "fence": self.fence,
+            "unavailable_reason": self.unavailable_reason,
         }
 
 
@@ -429,40 +574,130 @@ class DatabaseFirstPublicationReader:
         candidate.  Public callers leave it at its safe default.
         """
 
-        with self._session() as session:
-            stream = session.scalar(
-                select(PublicationStream).where(
-                    PublicationStream.stream_key == stream_key
-                )
-            )
-            pointer = session.scalar(
-                select(PublicationPointer).where(
-                    PublicationPointer.stream_key == stream_key
-                )
-            )
-            if stream is None:
-                return self._missing(stream_key, "unavailable")
-            if require_active and not bool(stream.enabled):
-                return self._legacy_fallback(stream_key)
-            if pointer is None or not pointer.active_publication_id:
-                return self._missing(stream_key, "missing")
-            publication = session.scalar(
-                select(PublicationVersion).where(
-                    PublicationVersion.publication_id == pointer.active_publication_id
-                )
-            )
+        return self.read_many(
+            (stream_key,), season=season, require_active=require_active
+        )[stream_key]
 
+    def read_many(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str | None = None,
+        require_active: bool = True,
+    ) -> dict[str, PublicationRead]:
+        """Read all contributors from one database snapshot.
+
+        Facts and their pointer/provenance labels must describe the same
+        generation.  A single transaction prevents metadata from observing a
+        pointer advance between two per-stream reads.
+        """
+
+        keys = tuple(sorted(set(str(key) for key in stream_keys)))
+        if not keys:
+            return {}
+        with self._session() as session, session.begin():
+            # Keep stream, pointer, and immutable version in one SELECT.  A
+            # PostgreSQL READ COMMITTED transaction takes a fresh snapshot per
+            # statement, so three sequential SELECTs could otherwise label a
+            # fact with the pointer from a later generation.
+            rows = session.execute(
+                select(PublicationStream, PublicationPointer, PublicationVersion)
+                .outerjoin(
+                    PublicationPointer,
+                    PublicationPointer.stream_key == PublicationStream.stream_key,
+                )
+                .outerjoin(
+                    PublicationVersion,
+                    PublicationVersion.publication_id
+                    == PublicationPointer.active_publication_id,
+                )
+                .where(PublicationStream.stream_key.in_(keys))
+            ).all()
+            snapshot = {
+                stream.stream_key: (stream, pointer, publication)
+                for stream, pointer, publication in rows
+            }
+            now = _utc(self.clock())
+            return {
+                key: self._read_row(key, **{
+                    "stream": snapshot[key][0] if key in snapshot else None,
+                    "pointer": snapshot[key][1] if key in snapshot else None,
+                    "publication": snapshot[key][2] if key in snapshot else None,
+                    "season": season,
+                    "require_active": require_active,
+                    "now": now,
+                })
+                for key in keys
+            }
+
+    def _read_row(
+        self,
+        stream_key: str,
+        *,
+        stream: PublicationStream | None,
+        pointer: PublicationPointer | None,
+        publication: PublicationVersion | None,
+        season: str | None,
+        require_active: bool,
+        now: datetime,
+    ) -> PublicationRead:
+        if stream is None:
+            if stream_key == "synergy:l15":
+                return self._missing(
+                    stream_key,
+                    "unavailable",
+                    reason="provider_window_unsupported",
+                )
+            return self._missing(
+                stream_key, "unavailable", reason="stream_not_registered"
+            )
+        if stream.publication_strategy == "never_schedule" or str(
+            stream.freshness_rule
+        ) == "unavailable":
+            return self._missing(
+                stream_key,
+                "unavailable",
+                reason="provider_window_unsupported",
+            )
+        if require_active and not bool(stream.enabled):
+            return self._legacy_fallback(stream_key)
+        if pointer is None or not pointer.active_publication_id:
+            return self._missing(stream_key, "missing")
         if publication is None or publication.status not in {"active", "rollback"}:
-            return self._missing(stream_key, "missing")
+            return self._missing(stream_key, "missing", fence=pointer.fence)
         if season is not None and publication.season != season:
-            return self._missing(stream_key, "missing")
+            return self._missing(
+                stream_key,
+                "missing",
+                reason="publication_season_mismatch",
+                fence=pointer.fence,
+            )
         try:
             payload = json.loads(publication.payload)
         except (TypeError, ValueError, json.JSONDecodeError):
             # A corrupt rendered document must never make the read path fall
             # back to a provider or to a partial prior attempt.
-            return self._missing(stream_key, "unavailable")
-        now = _utc(self.clock())
+            return self._missing(
+                stream_key,
+                "unavailable",
+                reason="publication_payload_invalid",
+                fence=pointer.fence,
+            )
+        retrieved_at = _utc(publication.created_at)
+        try:
+            _validate_known_publication_payload(
+                stream_key,
+                payload,
+                season=publication.season,
+                retrieved_at=retrieved_at,
+            )
+        except PublicationPayloadError:
+            return self._missing(
+                stream_key,
+                "unavailable",
+                reason="publication_payload_invalid",
+                fence=pointer.fence,
+            )
         age = max(0, int((now - _utc(publication.created_at)).total_seconds()))
         threshold = self.freshness_seconds.get(str(stream.freshness_rule))
         freshness = "fresh" if threshold is not None and age <= threshold else "stale"
@@ -476,22 +711,10 @@ class DatabaseFirstPublicationReader:
             freshness=freshness,
             age_seconds=age,
             payload=payload,
-            retrieved_at=_utc(publication.created_at),
+            retrieved_at=retrieved_at,
             checksum=publication.checksum,
+            fence=int(pointer.fence),
         )
-
-    def read_many(
-        self,
-        stream_keys: Iterable[str],
-        *,
-        season: str | None = None,
-    ) -> dict[str, PublicationRead]:
-        """Read streams independently; one missing stream never hides others."""
-
-        return {
-            stream_key: self.read(stream_key, season=season)
-            for stream_key in sorted(set(stream_keys))
-        }
 
     def metadata(
         self,
@@ -500,18 +723,32 @@ class DatabaseFirstPublicationReader:
         season: str | None = None,
     ) -> dict[str, Any]:
         reads = self.read_many(stream_keys, season=season)
-        available = [read for read in reads.values() if read.available]
-        cutoffs = {read.cutoff for read in available if read.cutoff}
-        freshness = {read.freshness for read in available}
+        # Missing/unavailable contributors are part of the coverage truth.
+        # Mapping them to explicit sentinels prevents a fresh stream paired
+        # with an absent stream from being reported as uniformly fresh.
+        cutoff_states = {
+            read.cutoff if read.cutoff is not None else f"status:{read.status}"
+            for read in reads.values()
+        }
+        freshness_states = {
+            f"{read.freshness}:{read.status}" for read in reads.values()
+        }
+        cutoffs = {read.cutoff for read in reads.values() if read.cutoff}
         return {
             "streams": {key: read.to_dict() for key, read in reads.items()},
-            "mixed_cutoff": len(cutoffs) > 1,
-            "mixed_freshness": len(freshness) > 1,
+            "mixed_cutoff": len(cutoff_states) > 1,
+            "mixed_freshness": len(freshness_states) > 1,
             "coverage_cutoffs": sorted(cutoffs),
         }
 
     @staticmethod
-    def _missing(stream_key: str, status: str) -> PublicationRead:
+    def _missing(
+        stream_key: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        fence: int | None = None,
+    ) -> PublicationRead:
         return PublicationRead(
             stream_key=stream_key,
             publication_id=None,
@@ -522,6 +759,8 @@ class DatabaseFirstPublicationReader:
             freshness="missing" if status == "missing" else "unavailable",
             age_seconds=None,
             payload=None,
+            fence=fence,
+            unavailable_reason=reason,
         )
 
     @staticmethod
@@ -538,6 +777,7 @@ class DatabaseFirstPublicationReader:
             payload=None,
             source="legacy_database",
             legacy_fallback_allowed=True,
+            unavailable_reason=None,
         )
 
 
@@ -645,5 +885,6 @@ __all__ = [
     "ProviderCallGuard",
     "decode_player_diet",
     "decode_player_game_logs",
+    "decode_player_per36",
     "decode_team_window",
 ]

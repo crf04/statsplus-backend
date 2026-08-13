@@ -171,6 +171,16 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
+    {"stream_key": "player_assist_locations", "provider": "pbp", "owner": "railway", "scope": "season", "required": ("player_assists",), "schema": (1,), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    # Opponent grouped surfaces are independent publications from their
+    # player Diet counterparts.  Keeping a stream per subject/window is what
+    # lets a cutover fence only the exact legacy table being refreshed.
+    {"stream_key": "synergy_play_types_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "synergy_play_types_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
+    {"stream_key": "grouped_shot_types_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "grouped_shot_types_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": "exact_shot_zones_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "exact_shot_zones_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "dfs_boards", "provider": "railway", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
     {"stream_key": "injury_reports", "provider": "rotowire", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
     {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
@@ -255,6 +265,64 @@ def _stream_definition(stream: PublicationStream) -> SurfaceDefinition:
         windows=tuple(json.loads(stream.supported_windows)),
         enabled=stream.enabled,
     )
+
+
+def _validate_activation_candidate_payload(
+    stream_key: str, payload: str, *, season: str
+) -> None:
+    """Validate the immutable fact envelope before binding its pointer.
+
+    Composition validates collection completeness, but that is intentionally
+    schema-neutral.  Activation is the irreversible public cutover, so the
+    governed database-first streams also need their strict read-side decoder
+    to accept the exact candidate that is about to become active.
+    """
+
+    decoder_streams = {
+        "player_game_logs": "player_game_logs",
+        "player_per36": "player_per36",
+        "traditional_opponent_season": "traditional_opponent_season",
+        "traditional_opponent_l15": "traditional_opponent_l15",
+        "assist_locations_season": "assist_locations_season",
+        "assist_locations_l15": "assist_locations_l15",
+        "synergy_play_types_opponent_season": "synergy_play_types_opponent_season",
+        "synergy_play_types_opponent_l15": "synergy_play_types_opponent_l15",
+        "grouped_shot_types_opponent_season": "grouped_shot_types_opponent_season",
+        "grouped_shot_types_opponent_l15": "grouped_shot_types_opponent_l15",
+        "exact_shot_zones_opponent_season": "exact_shot_zones_opponent_season",
+        "exact_shot_zones_opponent_l15": "exact_shot_zones_opponent_l15",
+    }
+    diet_bases = {
+        "synergy_play_types": "play_types",
+        "grouped_shot_types": "shot_types",
+        "exact_shot_zones": "shot_zones",
+        "player_assist_locations": "assist_locations",
+    }
+    if stream_key not in decoder_streams and stream_key not in diet_bases:
+        return
+    try:
+        document = json.loads(payload)
+        from app.services.database_first_activation import (
+            decode_player_diet,
+            decode_player_game_logs,
+            decode_player_per36,
+            decode_team_window,
+        )
+
+        if stream_key == "player_game_logs":
+            decode_player_game_logs(document, season=season)
+        elif stream_key == "player_per36":
+            decode_player_per36(document, season=season)
+        elif stream_key in diet_bases:
+            decode_player_diet(
+                document,
+                base=diet_bases[stream_key],
+                retrieved_at=utcnow(),
+            )
+        else:
+            decode_team_window(document, stream_key=decoder_streams[stream_key])
+    except Exception as error:
+        raise ControlPlaneError("publication_candidate_invalid") from error
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -2233,7 +2301,13 @@ class PublicationService(_SessionService):
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         with self._session_scope(session) as session:
-            row = session.get(PublicationStream, stream_key)
+            # Writers take this same row lock before touching the legacy
+            # tables.  Activation must serialize on it before validating and
+            # enabling the candidate; a plain identity read leaves a race in
+            # which an old writer can commit after the cutover decision.
+            row = session.scalar(select(PublicationStream).where(
+                PublicationStream.stream_key == stream_key
+            ).with_for_update())
             if row is None:
                 raise ControlPlaneError("stream_not_found")
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
@@ -2310,6 +2384,12 @@ class PublicationService(_SessionService):
                     )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
+            if candidate is not None:
+                _validate_activation_candidate_payload(
+                    stream_key,
+                    candidate.payload,
+                    season=candidate.season,
+                )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
             ).with_for_update())

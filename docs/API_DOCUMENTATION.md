@@ -268,8 +268,10 @@ period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
 When a prior Matchup read has stored a still-fresh or permitted-stale injury
 snapshot, a matched Out player is also removed from the corresponding Slate
-count. This is a stored-only read: Slate never calls the injury provider, and
-an expired or unavailable injury snapshot cannot change counts.
+count. This is Slate's existing stored-snapshot count contract: Slate never
+calls the injury provider, and an expired or unavailable injury snapshot
+cannot change counts. Matchup Injury Reports retain their separate
+live/snapshot contract.
 
 `freshness.pool.providers` uses the closed vocabulary `fresh | stale-served |
 missing` and retains each usable provider snapshot's actual retrieval time. A
@@ -380,7 +382,7 @@ status authority:
 
 When the status is not `available`, every metric value for that Base/window is
 `null`. In particular, exact Synergy play types Last-15 is always `null` with
-`status: "unavailable"` and `unavailable_reason: "provider_unsupported"`;
+`status: "unavailable"` and `unavailable_reason: "provider_window_unsupported"`;
 Season values are never substituted. Independently published Season and
 Last-15 scopes can contain different metric identities; the affected
 Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
@@ -1104,7 +1106,10 @@ the `publication_activations` table and never contains raw observations.
 The authenticated Matchup and Matchup Selection routes read the durable
 Regular Season catalog, Player Pool, game-log, Diet, injury, and team-window
 seams. Activated statistical streams decode their immutable PublicationVersion
-payloads and make zero request-time NBA Stats, PBP, or DFS calls. Injury
+payloads independently for player game logs, per-36, each Player Diet Base,
+and each Season/L15 team-window surface; an inactive stream alone permits its
+legacy fallback. These reads make zero request-time NBA Stats, PBP, or DFS
+calls. Injury
 Reports retain their existing live/snapshot contract; database-first
 statistics do not force a stored-only injury path. Existing fields remain
 backward compatible. Additive `provenance` stream entries identify the exact
@@ -1122,10 +1127,12 @@ Synergy command, and exactly seven ordered dates; it writes a validation
 report without changing production pointers. `scripts/database_first_drills.py`
 records deterministic outage, duplicate delivery, Outbox replay, expired
 credential, provider failure, alert recovery, and restore/replay checks using
-temporary control-plane state. The `scripts/benchmark_matchups.py` command
-requires a production-like fixture and game identity, runs distinct legacy and
-PublicationVersion reads, retains p95 latency and bounded query plans, and
-fails without plan evidence, zero provider calls, a sub-second p95, and a
+temporary control-plane state; SQLite restore is explicitly a local unit
+adapter, while a production gate requires configured Postgres evidence. The
+`scripts/benchmark_matchups.py` command requires a production-like fixture and
+game identity, invokes the complete legacy and activated MatchupService paths,
+retains p95 latency and bounded query plans, and fails without plan evidence,
+zero provider calls, a sub-second p95, and a
 database-first p95 no greater than 110% of baseline. These artifacts claim no
 formal recovery SLA.
 Internal season rates default to Regular Season only unless a caller explicitly

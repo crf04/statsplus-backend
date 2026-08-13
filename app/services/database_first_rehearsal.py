@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models.collection_control import PublicationPointer
+from app.models.collection_control import PublicationPointer, PublicationVersion
 
 
 UTC = timezone.utc
@@ -77,11 +77,19 @@ class HistoricalRehearsalRunner:
         *,
         environment: str = "historical_rehearsal",
         clock: Callable[[], datetime] | None = None,
+        isolated_engine: Engine | None = None,
     ) -> None:
         self.engine = engine
+        # ``engine`` is the production/control-plane snapshot source.  An
+        # explicit isolated engine is required for real rehearsal evidence;
+        # keeping the default equal preserves the small in-process test seam.
+        self.isolated_engine = isolated_engine or engine
         self.environment = environment
         self.clock = clock or (lambda: datetime.now(UTC))
         self._session = sessionmaker(bind=engine, expire_on_commit=False)
+        self._isolated_session = sessionmaker(
+            bind=self.isolated_engine, expire_on_commit=False
+        )
 
     def run(
         self,
@@ -121,28 +129,79 @@ class HistoricalRehearsalRunner:
         try:
             before = self._pointer_snapshot()
             for sequence, cutoff in enumerate(dates, start=1):
-                details = dict(collect(cutoff))
-                if "status" not in details and not details:
-                    raise ValueError("collection/composition callback must return status")
-                status = str(details.pop("status", "passed"))
-                if status not in {"passed", "failed", "skipped"}:
-                    raise ValueError("rehearsal callback returned an invalid status")
-                streams = tuple(sorted(str(value) for value in details.pop("streams", ())))
+                raw_details = collect(cutoff)
+                if not isinstance(raw_details, Mapping):
+                    raise ValueError(
+                        "collection/composition callback must return a JSON object"
+                    )
+                details = dict(raw_details)
+                status = str(details.get("status", ""))
+                if status != "passed":
+                    raise ValueError(
+                        "historical rehearsal requires every date to pass; "
+                        "skipped or failed dates are not evidence"
+                    )
+                publication_ids = details.get("publication_ids")
+                if not isinstance(publication_ids, Mapping) or not publication_ids:
+                    raise ValueError(
+                        "each rehearsal date requires immutable publication_ids"
+                    )
+                parity = details.get("parity")
+                if not isinstance(parity, Mapping):
+                    raise ValueError(
+                        "each rehearsal date requires exact/adjudicated parity evidence"
+                    )
+                if not isinstance(parity.get("equal"), bool) or not isinstance(
+                    parity.get("differences"), list
+                ):
+                    raise ValueError("parity must include boolean equal and differences list")
+                if bool(parity["equal"]) != (not parity["differences"]):
+                    raise ValueError(
+                        "parity equal must agree with the recorded differences"
+                    )
+                decision = str(parity.get("decision", ""))
+                if decision not in {"exact", "approved", "rejected"}:
+                    raise ValueError("parity evidence requires an adjudication decision")
+                if parity["differences"] and decision == "exact":
+                    raise ValueError(
+                        "non-empty parity differences require adjudicated approval/rejection"
+                    )
+                if parity["equal"] and decision != "exact":
+                    raise ValueError("exact parity requires the exact decision")
+                self._assert_isolated_publications(
+                    publication_ids, season=season, cutoff=cutoff
+                )
+                streams = tuple(sorted(str(key) for key in publication_ids))
                 records.append(
                     RehearsalRecord(
                         sequence=sequence,
                         cutoff=cutoff.isoformat(),
                         status=status,
                         streams=streams,
-                        details=details,
+                        details={
+                            **details,
+                            "publication_ids": {
+                                str(key): str(value)
+                                for key, value in publication_ids.items()
+                            },
+                            "parity": dict(parity),
+                        },
                     )
                 )
-                if status == "failed":
-                    raise ValueError(f"historical rehearsal failed at {cutoff.isoformat()}")
             result = synergy_check(dates[-1])
-            synergy_status = "passed" if result is True else str(result)
-            if synergy_status != "passed":
+            if not isinstance(result, Mapping) or str(result.get("status")) != "passed":
                 raise ValueError("completed-season Synergy validation failed")
+            synergy_id = result.get("candidate_publication_id")
+            if not isinstance(synergy_id, str) or not synergy_id.strip():
+                raise ValueError(
+                    "completed-season Synergy validation requires a candidate publication"
+                )
+            self._assert_isolated_publications(
+                {"synergy_play_types": synergy_id},
+                season=season,
+                cutoff=dates[-1],
+            )
+            synergy_status = "passed"
             after = self._pointer_snapshot()
             unchanged = before == after
             if not unchanged:
@@ -189,6 +248,100 @@ class HistoricalRehearsalRunner:
         except Exception as error:
             raise RuntimeError(
                 "historical rehearsal requires a migrated isolated control-plane database"
+            ) from error
+
+    def _assert_isolated_publications(
+        self,
+        publication_ids: Mapping[str, Any],
+        *,
+        season: str,
+        cutoff: date,
+    ) -> None:
+        pairs = tuple(
+            (str(key).strip(), str(value).strip())
+            for key, value in publication_ids.items()
+        )
+        ids = tuple(value for _, value in pairs)
+        if not ids or any(not value for value in ids):
+            raise ValueError("rehearsal publication IDs must be non-empty")
+        if len(set(ids)) != len(ids):
+            raise ValueError("rehearsal publication IDs must be unique")
+        try:
+            with self._isolated_session() as session:
+                rows = session.scalars(
+                    select(PublicationVersion).where(
+                        PublicationVersion.publication_id.in_(ids)
+                    )
+                ).all()
+        except Exception as error:
+            raise ValueError(
+                "historical rehearsal requires a migrated isolated publication database"
+            ) from error
+        by_id = {row.publication_id: row for row in rows}
+        if set(by_id) != set(ids):
+            raise ValueError("rehearsal referenced a publication absent from isolated DB")
+        for stream_key, publication_id in pairs:
+            row = by_id[publication_id]
+            if row.stream_key != stream_key:
+                raise ValueError("rehearsal publication stream does not match its key")
+            if row.season != season or row.cutoff.date() != cutoff:
+                raise ValueError("rehearsal publication season/cutoff mismatch")
+            if row.status not in {"candidate", "active", "rollback"}:
+                raise ValueError("rehearsal publication is not retained evidence")
+            self._validate_publication_payload(
+                stream_key, row.payload, season=season
+            )
+
+    @staticmethod
+    def _validate_publication_payload(
+        stream_key: str, payload: str, *, season: str
+    ) -> None:
+        """Reject empty/arbitrary JSON in a rehearsal evidence publication."""
+
+        decoder_streams = {
+            "traditional_opponent_season", "traditional_opponent_l15",
+            "assist_locations_season", "assist_locations_l15",
+            "synergy_play_types_opponent_season",
+            "synergy_play_types_opponent_l15",
+            "grouped_shot_types_opponent_season",
+            "grouped_shot_types_opponent_l15",
+            "exact_shot_zones_opponent_season",
+            "exact_shot_zones_opponent_l15",
+        }
+        diet_bases = {
+            "synergy_play_types": "play_types",
+            "grouped_shot_types": "shot_types",
+            "exact_shot_zones": "shot_zones",
+            "player_assist_locations": "assist_locations",
+        }
+        if stream_key not in {
+            "player_game_logs", "player_per36", *decoder_streams, *diet_bases
+        }:
+            return
+        try:
+            document = json.loads(payload)
+            from app.services.database_first_activation import (
+                decode_player_diet,
+                decode_player_game_logs,
+                decode_player_per36,
+                decode_team_window,
+            )
+
+            if stream_key == "player_game_logs":
+                decode_player_game_logs(document, season=season)
+            elif stream_key == "player_per36":
+                decode_player_per36(document, season=season)
+            elif stream_key in diet_bases:
+                decode_player_diet(
+                    document,
+                    base=diet_bases[stream_key],
+                    retrieved_at=datetime.now(UTC),
+                )
+            else:
+                decode_team_window(document, stream_key=stream_key)
+        except Exception as error:
+            raise ValueError(
+                f"rehearsal publication payload is invalid for {stream_key}"
             ) from error
 
     def _failed(self, season: str, error: str) -> HistoricalRehearsalReport:

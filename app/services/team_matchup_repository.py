@@ -150,6 +150,21 @@ class TeamMatchupRepository:
                             if scope.window_games is not None
                             else "assist_locations_season",
                         ),
+                        "play_types": (
+                            "synergy_play_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "synergy_play_types_opponent_season",
+                        ),
+                        "shot_types": (
+                            "grouped_shot_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "grouped_shot_types_opponent_season",
+                        ),
+                        "shot_zones": (
+                            "exact_shot_zones_opponent_l15"
+                            if scope.window_games is not None
+                            else "exact_shot_zones_opponent_season",
+                        ),
                     }
                     # Lock/check only the stream(s) represented by this
                     # snapshot.  A season write must not fence L15, and a

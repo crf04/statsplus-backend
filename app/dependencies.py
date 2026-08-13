@@ -223,6 +223,7 @@ def build_dependencies(
         engine,
         settings=settings,
         nba_stats_provider=nba_stats_provider,
+        publication_reader=publication_reader,
     )
     team_service = TeamService(
         engine,
@@ -236,6 +237,7 @@ def build_dependencies(
         pbp_provider=pbp_stats_provider,
         nba_stats_provider=nba_stats_provider,
         stats_freshness=stats_freshness_repository,
+        write_fence=write_fence,
     )
     provider_health_service = ProviderHealthService(
         engine,

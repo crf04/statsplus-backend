@@ -678,7 +678,17 @@ def _upgrade_publication_activation_constraints(connection: Connection) -> None:
         old = preparer.quote(table_name)
         rebuilt_name = f"{table_name}__030"
         rebuilt = preparer.quote(rebuilt_name)
-        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        # The migration runner executes each migration in a transaction.  A
+        # SQLite foreign_keys pragma change inside that transaction is a no-op
+        # (and would make the rebuild appear to work while leaving the
+        # connection in an ambiguous integrity state).  The activation table
+        # has no inbound references, so it can be rebuilt with enforcement on.
+        # Fail closed if a caller supplied a connection that did not preserve
+        # the application's invariant.
+        if connection.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+            raise RuntimeError(
+                "migration 030 requires SQLite foreign_keys enforcement"
+            )
         connection.execute(text(
             f"CREATE TABLE {rebuilt} ("
             "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
@@ -708,7 +718,10 @@ def _upgrade_publication_activation_constraints(connection: Connection) -> None:
             f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
             f"ON {old} (stream_key, publication_id)"
         ))
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        if connection.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+            raise RuntimeError(
+                "migration 030 left SQLite foreign_keys enforcement disabled"
+            )
         return
 
     if not has_publication_fk:

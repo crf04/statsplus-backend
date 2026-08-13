@@ -27,6 +27,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", required=True)
     parser.add_argument(
+        "--production-database-url",
+        help="optional read-only production/control-plane URL whose pointers must remain unchanged",
+    )
+    parser.add_argument(
         "--environment",
         required=True,
         choices=("historical_rehearsal", "testing"),
@@ -46,8 +50,13 @@ def main() -> int:
     )
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
-    engine = create_engine(args.database_url)
-    run_migrations(engine)
+    isolated_engine = create_engine(args.database_url)
+    run_migrations(isolated_engine)
+    production_engine = (
+        create_engine(args.production_database_url)
+        if args.production_database_url
+        else isolated_engine
+    )
     cutoffs = (
         tuple(date.fromisoformat(value) for value in args.cutoffs)
         if args.cutoffs
@@ -77,14 +86,12 @@ def main() -> int:
 
     def synergy(cutoff: date) -> object:
         result = run_command(args.synergy_command, cutoff)
-        if result is True:
-            return True
-        if isinstance(result, dict):
-            return result.get("status", "failed")
         return result
 
     report = HistoricalRehearsalRunner(
-        engine, environment=args.environment
+        production_engine,
+        environment=args.environment,
+        isolated_engine=isolated_engine,
     ).run(
         args.season,
         cutoffs=cutoffs,

@@ -1035,7 +1035,7 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
         if observation.surface == "play_types"
     )
     assert play_type_observation.status == "unavailable"
-    assert play_type_observation.unavailable_reason == "provider_unsupported"
+    assert play_type_observation.unavailable_reason == "provider_window_unsupported"
     assert not any(fact.base == "play_types" for fact in last_15.facts)
 
 
@@ -1507,7 +1507,7 @@ def test_refresh_marks_cross_phase_last_15_unavailable_without_mixing_games(
         for item in last_15.observations
     } == {
         ("assist_locations", "unavailable", "provider_window_unrepresentable"),
-        ("play_types", "unavailable", "provider_unsupported"),
+        ("play_types", "unavailable", "provider_window_unsupported"),
         ("shot_types", "unavailable", "provider_window_unrepresentable"),
         ("shot_zones", "unavailable", "provider_window_unrepresentable"),
         ("traditional", "unavailable", "provider_window_unrepresentable"),

@@ -363,9 +363,10 @@ Provider-controlled player links are exposed only when they resolve to HTTPS on
 `rotowire.com` or one of its subdomains; every other value falls back to the
 fixed injury-report source URL.
 
-`SlateService` uses the injury service's stored-only read to apply the same Out
-override to targetable counts. It never refreshes injuries; opening a Slate
-cannot fan out league-feed requests across its games.
+`SlateService` uses its existing stored-snapshot injury read to apply the same
+Out override to targetable counts. It never refreshes injuries; opening a
+Slate cannot fan out league-feed requests across its games. This does not
+change the separate Matchup Injury Reports live/snapshot contract.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a
@@ -1042,11 +1043,14 @@ collection/composition callback, and a completed-season Synergy validation
 callback. It persists the ordered report records and compares pointers before
 and after to prove the isolated rehearsal did not mutate production state.
 `FailureDrillRunner` exercises a migrated temporary control plane, including
-publication, idempotency, replay, alert, and SQLite backup/restore seams by
-default. The benchmark requires distinct baseline/database-first callables,
-zero provider calls, and retained bounded SQLite or PostgreSQL query-plan
-evidence alongside p95 values; it records but does not claim a recovery-time
-or recovery-point SLA.
+publication, control-plane receipt idempotency, residential Outbox replay,
+alert recovery, and backup/restore seams. SQLite backup/restore is an explicit
+local unit adapter; a production gate refuses to claim evidence without a
+configured Postgres URL and a completed Postgres backup/restore artifact. The
+benchmark invokes distinct complete MatchupService callables, requires zero
+provider calls, and retains bounded SQLite or PostgreSQL query-plan evidence
+alongside p95 values; it records but does not claim a recovery-time or
+recovery-point SLA.
 
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
@@ -1216,7 +1220,7 @@ league-wide cutoff is never used. The recorded BOS `2025-03-01` through
 `GamesPlayed=22`, so it is valid provider data and explicitly not a Last-15
 aggregate. Synergy exposes neither Last-N nor date
 bounds, so its fact-free Last-15 play-type observation is
-`unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
+`unavailable/provider_window_unsupported`; no Season value is relabeled as Last-15.
 Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
 each governed slice; `GP` is provider evidence rather than a display metric.
 The traditional NBA surface persists `OPP_REB`, `OPP_TOV`, `OPP_STL`, and

@@ -240,7 +240,7 @@ def _team_matchups(
                     TeamMatchupObservation(
                         base,
                         "unavailable" if base == "play_types" else "available",
-                        "provider_unsupported" if base == "play_types" else None,
+                        "provider_window_unsupported" if base == "play_types" else None,
                     )
                     for base in bases
                 ),
@@ -571,7 +571,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     payload = response.get_json()
     assert payload["league"]["surface_availability"]["play_types"]["last_15"] == {
         "status": "unavailable",
-        "unavailable_reason": "provider_unsupported",
+        "unavailable_reason": "provider_window_unsupported",
     }
     assert payload["league"]["defense_sheet"]["play_types"][0]["last_15"] is None
     assert payload["teams"][0]["defense_sheet"]["play_types"][0]["last_15"] is None

@@ -156,21 +156,26 @@ class TeamMatchupQueryService:
 
         if self._publication_reader is None:
             return legacy
-        stream_key = (
-            "traditional_opponent_l15"
-            if window_games is not None
-            else "traditional_opponent_season"
-        )
-        assist_stream_key = (
-            "assist_locations_l15"
-            if window_games is not None
-            else "assist_locations_season"
+        window = "l15" if window_games is not None else "season"
+        stream_by_base = {
+            "traditional": f"traditional_opponent_{window}",
+            "assist_locations": f"assist_locations_{window}",
+            "play_types": f"synergy_play_types_opponent_{window}",
+            "shot_types": f"grouped_shot_types_opponent_{window}",
+            "shot_zones": f"exact_shot_zones_opponent_{window}",
+        }
+        read_many = getattr(self._publication_reader, "read_many", None)
+        publication_reads = (
+            read_many(tuple(stream_by_base.values()), season=season)
+            if callable(read_many)
+            else {
+                stream_key: self._publication_reader.read(stream_key, season=season)
+                for stream_key in stream_by_base.values()
+            }
         )
         reads = {
-            "traditional": self._publication_reader.read(stream_key, season=season),
-            "assist_locations": self._publication_reader.read(
-                assist_stream_key, season=season
-            ),
+            base: publication_reads[stream_key]
+            for base, stream_key in stream_by_base.items()
         }
         active = {
             base: read
@@ -186,7 +191,7 @@ class TeamMatchupQueryService:
                 continue
             try:
                 rows = decode_team_window(read.payload, stream_key=(
-                    stream_key if base == "traditional" else assist_stream_key
+                    stream_by_base[base]
                 ))
             except PublicationPayloadError:
                 base_windows[base] = None
@@ -233,7 +238,9 @@ class TeamMatchupQueryService:
                 observations.append(StoredTeamMatchupObservation(
                     surface=base,
                     status="unavailable" if read.status == "unavailable" else "missing",
-                    unavailable_reason=f"publication_{read.status}",
+                    unavailable_reason=(
+                        read.unavailable_reason or f"publication_{read.status}"
+                    ),
                     retrieved_at=read.retrieved_at or self._clock(),
                 ))
                 continue
@@ -282,11 +289,27 @@ class TeamMatchupQueryService:
                 "ShortMidRangeAssists": "short_mid_range_assists",
                 "LongMidRangeAssists": "long_mid_range_assists",
             },
-        }[base]
+        }.get(base)
+        if stat_names is None:
+            # Grouped shot/zone/Synergy publications carry their complete
+            # identity in the metric key (for example
+            # ``Isolation_PTS``).  Do not substitute the legacy surface when
+            # one of those streams is active; project exactly the keys the
+            # immutable payload supplied.
+            keys = tuple(rows[0].league_average)
+            stat_names = {
+                key: key.rsplit("_", 1)[-1] if "_" in key else key
+                for key in keys
+            }
         league_by_key = rows[0].league_average
         sigma_by_key = rows[0].population_sigma
         league_metrics = []
         for display_key, metric_key in stat_names.items():
+            if metric_key not in league_by_key:
+                # For canonical grouped metric keys, ``display_key`` itself
+                # is the map key.  The fallback keeps the decoder compatible
+                # with both ledger and normalized provider payloads.
+                metric_key = display_key
             if metric_key not in league_by_key:
                 continue
             league_metrics.append(LeagueMatchupMetric(
@@ -300,6 +323,8 @@ class TeamMatchupQueryService:
         team_metrics = defaultdict(list)
         for row in rows:
             for display_key, metric_key in stat_names.items():
+                if metric_key not in row.per48:
+                    metric_key = display_key
                 if metric_key not in row.per48:
                     continue
                 average = row.league_average[metric_key]

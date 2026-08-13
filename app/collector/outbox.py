@@ -521,8 +521,14 @@ class OutboxRepository:
         self.close()
 
 
+# The control-plane packet names the durable collector queue
+# ``ResidentialOutbox``.  Keep the implementation and the older repository
+# import as one class so drills exercise the exact production SQLite path.
+ResidentialOutbox = OutboxRepository
+
+
 __all__ = [
     "DEFAULT_MAX_BYTES", "DEFAULT_MAX_ITEM_BYTES", "LEASE_SECONDS", "RETENTION_DAYS",
     "OutboxBusy", "OutboxError", "OutboxFull", "OutboxItem", "OutboxRepository",
-    "OutboxRetentionError",
+    "ResidentialOutbox", "OutboxRetentionError",
 ]

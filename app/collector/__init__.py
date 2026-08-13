@@ -30,6 +30,7 @@ from .outbox import (
     OutboxFull,
     OutboxItem,
     OutboxRepository,
+    ResidentialOutbox,
     OutboxRetentionError,
 )
 from .client import (
@@ -71,6 +72,7 @@ __all__ = [
     "OutboxFull",
     "OutboxItem",
     "OutboxRepository",
+    "ResidentialOutbox",
     "OutboxRetentionError",
     "CollectorHTTPError",
     "CollectorToken",

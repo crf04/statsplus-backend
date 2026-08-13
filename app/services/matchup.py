@@ -391,6 +391,14 @@ class MatchupService:
                     "synergy_play_types",
                     "grouped_shot_types",
                     "exact_shot_zones",
+                    "player_assist_locations",
+                    "synergy:l15",
+                    "synergy_play_types_opponent_season",
+                    "synergy_play_types_opponent_l15",
+                    "grouped_shot_types_opponent_season",
+                    "grouped_shot_types_opponent_l15",
+                    "exact_shot_zones_opponent_season",
+                    "exact_shot_zones_opponent_l15",
                 ),
                 season=season,
             )
@@ -1088,6 +1096,15 @@ class MatchupService:
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
+                if base == "play_types" and window_name == "last_15":
+                    # NBA Synergy exposes no bounded Last-15/date window.
+                    # Keep this exact public reason even when an older legacy
+                    # snapshot happened to contain a similarly named row.
+                    result[base][window_name] = {
+                        "status": "unavailable",
+                        "unavailable_reason": "provider_window_unsupported",
+                    }
+                    continue
                 if state["status"] != "available" or metric_index is None:
                     result[base][window_name] = state
                     continue

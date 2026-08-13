@@ -322,7 +322,7 @@ class TeamMatchupRefreshService:
             rolling_observations = self._surface_observations(
                 default_status="unavailable",
                 default_reason="provider_window_unrepresentable",
-                overrides={"play_types": ("unavailable", "provider_unsupported")},
+                overrides={"play_types": ("unavailable", "provider_window_unsupported")},
             )
         else:
             rolling_facts, window_overrides = self._collect_last_15(
@@ -333,7 +333,7 @@ class TeamMatchupRefreshService:
             )
             rolling_observations = self._surface_observations(
                 overrides={
-                    "play_types": ("unavailable", "provider_unsupported"),
+                    "play_types": ("unavailable", "provider_window_unsupported"),
                     **window_overrides,
                 }
             )

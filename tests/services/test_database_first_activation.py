@@ -1,11 +1,13 @@
 """Activation/read-side contracts for backend issue #87."""
 
 from datetime import date, datetime, timedelta, timezone
+import json
 
 import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
+from app.models.collection_control import PublicationVersion
 from app.services.collection_control import PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
@@ -103,7 +105,36 @@ def test_reader_reports_independent_missing_and_mixed_streams(tmp_path):
     )
     assert metadata["streams"]["one"]["status"] == "active"
     assert metadata["streams"]["two"]["status"] == "missing"
-    assert metadata["mixed_cutoff"] is False
+    assert metadata["mixed_cutoff"] is True
+    assert metadata["mixed_freshness"] is True
+
+
+def test_reader_metadata_marks_fresh_plus_invalid_publication_as_mixed(tmp_path):
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "fresh", provider="ledger", owner="railway", required_observations=(),
+        publication_strategy="replace", enabled=True,
+    )
+    service.register_stream(
+        "player_per36", provider="ledger", owner="railway",
+        required_observations=(), publication_strategy="replace", enabled=True,
+    )
+    service.compose("fresh", season="2025-26", cutoff=NOW, payload={"value": 1})
+    service.compose(
+        "player_per36", season="2025-26", cutoff=NOW, payload={"rows": []}
+    )
+
+    metadata = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).metadata(
+        ("fresh", "player_per36"), season="2025-26"
+    )
+
+    assert metadata["streams"]["player_per36"]["status"] == "unavailable"
+    assert metadata["streams"]["player_per36"]["unavailable_reason"] == (
+        "publication_payload_invalid"
+    )
+    assert metadata["mixed_cutoff"] is True
+    assert metadata["mixed_freshness"] is True
 
 
 def test_reader_marks_disabled_stream_as_the_only_legacy_fallback(tmp_path):
@@ -196,11 +227,68 @@ def test_provider_guard_is_fail_closed():
 def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path):
     engine = _db(tmp_path)
     dates = tuple(date(2026, 4, day) for day in range(6, 13))
+    player_log_payload = json.dumps({
+        "rows": [{
+            "season": "2025-26", "season_type": "Regular Season",
+            "player_id": 1, "game_id": "game-1", "player_name": "Player One",
+            "game_date": "2026-04-06", "team_id": 1, "team_tricode": "AAA",
+            "opponent_team_id": 2, "opponent_team_tricode": "BBB",
+            "is_home": True, "minutes": 30.0, "points": 10, "rebounds": 5,
+            "assists": 2, "field_goals_made": 4, "field_goals_attempted": 8,
+            "three_pointers_made": 1, "three_pointers_attempted": 3,
+            "free_throws_made": 1, "free_throws_attempted": 1,
+            "offensive_rebounds": 1, "defensive_rebounds": 4,
+            "turnovers": 1, "steals": 1, "blocks": 0, "personal_fouls": 1,
+        }]
+    })
+    synergy_payload = json.dumps({
+        "base": "play_types",
+        "rows": [{
+            "player_id": 1, "slice_key": "Transition", "share": 0.1,
+            "volume": 1.0, "games_played": 1, "volume_unit": "possessions",
+            "provider": "nba_synergy",
+        }],
+    })
+    with engine.begin() as connection:
+        for cutoff in dates:
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=f"rehearsal-{cutoff.isoformat()}",
+                stream_key="player_game_logs",
+                season="2025-26",
+                cutoff=datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC),
+                version=1,
+                status="candidate",
+                checksum="a" * 64,
+                payload=player_log_payload,
+                created_at=NOW,
+                fence=0,
+            ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="rehearsal-synergy",
+            stream_key="synergy_play_types",
+            season="2025-26",
+            cutoff=datetime.combine(dates[-1], datetime.min.time(), tzinfo=UTC),
+            version=1,
+            status="candidate",
+            checksum="b" * 64,
+            payload=synergy_payload,
+            created_at=NOW,
+            fence=0,
+        ))
     report = HistoricalRehearsalRunner(engine).run(
         "2025-26",
         cutoffs=dates,
-        collect=lambda cutoff: {"streams": ("player_game_logs",), "cutoff": cutoff.isoformat()},
-        synergy_check=lambda cutoff: True,
+        collect=lambda cutoff: {
+            "status": "passed",
+            "publication_ids": {
+                "player_game_logs": f"rehearsal-{cutoff.isoformat()}"
+            },
+            "parity": {"equal": True, "differences": [], "decision": "exact"},
+        },
+        synergy_check=lambda cutoff: {
+            "status": "passed",
+            "candidate_publication_id": "rehearsal-synergy",
+        },
     )
     assert report.status == "passed"
     assert len(report.records) == 7
