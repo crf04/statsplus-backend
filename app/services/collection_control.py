@@ -38,6 +38,7 @@ from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
     CollectorIdentity,
+    CollectorStatusTransition,
     CollectionObservation,
     CollectorTokenReplay,
     CollectorLease,
@@ -177,6 +178,39 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
 SURFACE_REGISTRY: tuple[SurfaceDefinition, ...] = tuple(
     SurfaceDefinition(**definition) for definition in _SURFACE_REGISTRY_RAW
 )
+
+
+def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> list[dict[str, Any]]:
+    """Expand frozen surface authority into exact, executable NBA requests."""
+
+    authorized = {str(value) for value in scopes}
+    descriptors: list[dict[str, Any]] = []
+    synergy = next((value for value in ("synergy_play_types", "synergy") if value in authorized), None)
+    shots = next((value for value in ("grouped_shot_types", "shot_types") if value in authorized), None)
+    zones = next((value for value in ("exact_shot_zones", "shot_zones") if value in authorized), None)
+    if synergy:
+        descriptors.extend({"scope": synergy, "parameters": {
+            "window": "season", "subject": "player", "play_type": category,
+            "subject_code": "P", "type_grouping": "season",
+        }} for category in PLAY_TYPES)
+    if shots:
+        descriptors.extend({"scope": shots, "parameters": {
+            "window": "season", "subject": "player", "general_range": category,
+        }} for category in SHOOTING_TYPES)
+    if zones:
+        descriptors.append({"scope": zones, "parameters": {"window": "season", "subject": "player"}})
+    date_to = _aware(cutoff).date().isoformat()
+    for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
+        for window in ("season", "l15"):
+            governed = {"window": window, "subject": "opponent", "team_id": team_id,
+                        "date_from": None, "date_to": date_to}
+            if shots:
+                descriptors.extend({"scope": shots, "parameters": {
+                    **governed, "general_range": category,
+                }} for category in SHOOTING_TYPES)
+            if zones:
+                descriptors.append({"scope": zones, "parameters": dict(governed)})
+    return descriptors
 
 
 def _surface_definition(surface: str) -> SurfaceDefinition | None:
@@ -646,14 +680,19 @@ class CollectorTokenService(_SessionService):
             return identity
 
     def report_status(self, claims: CollectorClaims, *, release_version: str,
-                      release_checksum: str) -> CollectorIdentity:
+                      release_checksum: str, state: str = "running",
+                      reason: str = "release_report") -> CollectorIdentity:
         """Persist bounded release evidence reported by the authenticated machine."""
 
         version = str(release_version).strip()
         checksum = str(release_checksum).strip().lower()
+        state = str(state).strip().lower()
+        reason = str(reason).strip().lower()
         if (
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}", version) is None
             or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+            or state not in {"running", "no_work", "complete", "retry", "non_retryable", "busy"}
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason) is None
         ):
             raise ControlPlaneError("invalid_release_status")
         now = self.clock()
@@ -666,6 +705,18 @@ class CollectorTokenService(_SessionService):
             identity.release_version = version
             identity.release_checksum = checksum
             identity.last_seen_at = now
+            prior = session.scalar(select(CollectorStatusTransition).where(
+                CollectorStatusTransition.collector_id == claims.collector_id,
+            ).order_by(CollectorStatusTransition.created_at.desc()).limit(1))
+            transition_reason = (
+                "recovery" if state in {"complete", "no_work"} and prior is not None
+                and prior.state in {"retry", "non_retryable", "busy"} else reason
+            )
+            session.add(CollectorStatusTransition(
+                transition_id=_uuid(), collector_id=claims.collector_id,
+                state=state, reason=transition_reason, release_version=version,
+                release_checksum=checksum, created_at=now,
+            ))
             return identity
 
     def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,
@@ -1317,6 +1368,7 @@ class CollectionControlService(_SessionService):
                     ):
                         authorized_scopes.update(frozen_scopes.intersection(_surface_names(definition)))
                 if authorized_scopes:
+                    scope_descriptors = _collector_scope_descriptors(authorized_scopes, manifest.cutoff)
                     visible_manifests.append({
                         "manifest_id": manifest.manifest_id,
                         "season": manifest.season,
@@ -1324,6 +1376,7 @@ class CollectionControlService(_SessionService):
                         "collect_before": _iso(manifest.collect_before),
                         "accepted_versions": json.loads(manifest.accepted_versions),
                         "scopes": sorted(authorized_scopes),
+                        "scope_descriptors": scope_descriptors,
                         "checksum": manifest.checksum,
                         "status": manifest.status,
                     })
@@ -1333,7 +1386,76 @@ class CollectionControlService(_SessionService):
             "environment": self.environment,
             "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
+            "obsolete_before_cutoff": max(
+                (item["cutoff"] for item in visible_manifests), default=None,
+            ),
         }
+
+    def create_rehearsal_manifest(self, *, claims: CollectorClaims, season: str,
+                                  cutoff: datetime, now: datetime | None = None) -> CollectionManifest:
+        """Issue an isolated validation manifest that can never compose a publication."""
+
+        current = _aware(now or self.clock())
+        cutoff = _aware(cutoff)
+        if self.environment == "production" or claims.environment != self.environment:
+            raise ControlPlaneError("environment_mismatch")
+        if not {"poll", "ingest", "catalog_publish"} <= set(claims.scopes):
+            raise ControlPlaneError("scope_denied")
+        material = {"collector": claims.collector_id, "season": season, "cutoff": _iso(cutoff),
+                    "scope": "rehearsal_validation", "issued_at": _iso(current)}
+        row = CollectionManifest(
+            manifest_id=_uuid(), season=str(season), cutoff=cutoff,
+            collect_before=current + timedelta(minutes=10), accepted_versions="[2]",
+            scopes='["rehearsal_validation"]', checksum=_checksum(_json(material)),
+            status="active", created_at=current,
+        )
+        with self.session() as session, session.begin():
+            session.add(row)
+            _add_audit(session, actor=claims.collector_id, action="collector.rehearsal_manifest",
+                       resource=row.manifest_id, reason="rehearsal_validation",
+                       details={"season": str(season), "cutoff": _iso(cutoff)}, created_at=current)
+        return row
+
+    def verify_rehearsal_receipt(self, *, claims: CollectorClaims, manifest_id: str,
+                                 observation_id: str, client_observation_id: str,
+                                 checksum: str) -> CollectionObservation:
+        with self.session() as session:
+            row = session.get(CollectionObservation, observation_id)
+            manifest = session.get(CollectionManifest, manifest_id)
+            if (
+                row is None or manifest is None or row.collector_id != claims.collector_id
+                or row.manifest_id != manifest_id or row.observation_type != "rehearsal_validation"
+                or row.client_observation_id != client_observation_id or row.checksum != checksum
+                or json.loads(manifest.scopes) != ["rehearsal_validation"]
+            ):
+                raise ControlPlaneError("rehearsal_receipt_invalid")
+            return row
+
+    def rehearsal_operations(self, *, claims: CollectorClaims, manifest_id: str,
+                             observation_id: str) -> list[str]:
+        """Derive proof labels from durable machine, manifest, status, and receipt rows."""
+
+        with self.session() as session:
+            manifest_audit = session.scalar(select(AuditEvent).where(
+                AuditEvent.actor == claims.collector_id,
+                AuditEvent.action == "collector.rehearsal_manifest",
+                AuditEvent.resource == manifest_id,
+            ))
+            status = session.scalar(select(CollectorStatusTransition).where(
+                CollectorStatusTransition.collector_id == claims.collector_id,
+                CollectorStatusTransition.reason.in_({"rehearsal_started", "rehearsal_verified"}),
+            ))
+            observation = session.get(CollectionObservation, observation_id)
+        operations: list[str] = []
+        if claims.token_id:
+            operations.extend(("credential", "auth"))
+        if manifest_audit is not None:
+            operations.append("discovery")
+        if status is not None:
+            operations.append("status")
+        if observation is not None and observation.manifest_id == manifest_id:
+            operations.append("ingestion")
+        return operations
 
     @staticmethod
     def _latest_catalog_in_session(
@@ -1481,6 +1603,7 @@ class CollectionControlService(_SessionService):
                 if not authorized_scopes:
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
+                row._scope_descriptors = _collector_scope_descriptors(authorized_scopes, row.cutoff)
             return row
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
@@ -1950,7 +2073,8 @@ class ObservationIngestionService(_SessionService):
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
                     raise ControlPlaneError("scope_denied")
-            if self.publication_service is not None and catalog_request is None:
+                rehearsal_validation = observation_type == "rehearsal_validation" and allowed_scopes == {"rehearsal_validation"}
+            if self.publication_service is not None and catalog_request is None and not rehearsal_validation:
                 stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
@@ -1968,7 +2092,7 @@ class ObservationIngestionService(_SessionService):
                         raise ControlPlaneError("scope_unsupported")
                 if window is not None and str(window) not in supported_windows:
                     raise ControlPlaneError("scope_unsupported")
-            elif catalog_request is None:
+            elif catalog_request is None and not rehearsal_validation:
                 definition = _surface_definition(observation_type)
                 if definition is None or not _claims_allow_surface(
                     claims, definition=definition,
@@ -2025,7 +2149,7 @@ class ObservationIngestionService(_SessionService):
                     expires_at=catalog_expires_at,
                     session=session,
                 )
-            elif self.publication_service is not None:
+            elif self.publication_service is not None and not rehearsal_validation:
                 self.publication_service.enqueue_for_observation(
                     observation_type,
                     season=str(envelope["season"]),

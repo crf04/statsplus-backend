@@ -1005,6 +1005,73 @@ def test_collector_status_rejects_unsafe_release_metadata(control_db):
         tokens.report_status(claims, release_version="../../secret", release_checksum="not-a-checksum")
 
 
+def test_collector_status_transitions_are_append_only_and_record_recovery(control_db):
+    from app.models.collection_control import CollectorStatusTransition
+
+    now = [datetime(2026, 8, 12, tzinfo=UTC)]
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
+    identity = tokens.create_identity(
+        "transitions", scopes=["poll"], owner="residential_collector",
+        providers=["nba"], surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["poll"]))
+    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
+                         state="retry", reason="railway_unavailable")
+    now[0] += timedelta(minutes=1)
+    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
+                         state="complete", reason="complete")
+    with control_db.connect() as connection:
+        rows = connection.execute(select(CollectorStatusTransition).order_by(
+            CollectorStatusTransition.created_at.asc()
+        )).all()
+    assert [(row.state, row.reason) for row in rows] == [
+        ("retry", "railway_unavailable"), ("complete", "recovery"),
+    ]
+
+
+def test_rehearsal_manifest_ingests_durable_replay_without_publication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    identity = tokens.create_identity(
+        "rehearsal", scopes=["poll", "ingest", "catalog_publish"],
+        owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"],
+        scopes=["poll", "ingest", "catalog_publish"],
+    ))
+    control = CollectionControlService(control_db, environment="testing", clock=lambda: now)
+    manifest = control.create_rehearsal_manifest(
+        claims=claims, season="2025-26", cutoff=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
+                         state="running", reason="rehearsal_started")
+    payload = json.dumps({"observations": [{"contract_version": 1, "sanitized": True}]},
+                         separators=(",", ":")).encode()
+    envelope = {
+        "manifest_id": manifest.manifest_id, "client_observation_id": "rehearsal-client",
+        "environment": "testing", "provider": "nba", "observation_type": "rehearsal_validation",
+        "scope": {"window": "rehearsal"}, "season": "2025-26",
+        "cutoff": datetime(2026, 8, 11, tzinfo=UTC).isoformat(), "schema_version": 2,
+        "retrieved_at": now.isoformat(),
+        "checksum": __import__("hashlib").sha256(payload).hexdigest(),
+    }
+    ingestion = ObservationIngestionService(control_db, collection_control=control, clock=lambda: now)
+    first = ingestion.ingest(claims, envelope, gzip.compress(payload), compressed=True)
+    replay = ingestion.ingest(claims, envelope, gzip.compress(payload), compressed=True)
+    assert replay.replay and replay.observation_id == first.observation_id
+    verified = control.verify_rehearsal_receipt(
+        claims=claims, manifest_id=manifest.manifest_id, observation_id=first.observation_id,
+        client_observation_id="rehearsal-client", checksum=envelope["checksum"],
+    )
+    assert verified.observation_type == "rehearsal_validation"
+    assert set(control.rehearsal_operations(
+        claims=claims, manifest_id=manifest.manifest_id, observation_id=first.observation_id,
+    )) == {"credential", "auth", "discovery", "status", "ingestion"}
+    with control_db.connect() as connection:
+        assert connection.execute(select(PublicationVersion)).all() == []
+
+
 def test_catalog_completion_requires_regular_governed_schedule_and_roster_evidence(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
