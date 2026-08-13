@@ -1135,6 +1135,12 @@ requires an out-of-band `statsplus_disposable_control` marker nonce; the
 `isolated` flag is not isolation evidence. A production gate additionally
 requires a dedicated Postgres schema, expected IDs/checksums, direct restored
 database verification, and explicit replay/repair evidence. The
+PBP repair expectation names only its known preconditions (`season`,
+`manifest_id`, `game_id`, and the expected ledger `checksum`). The drill
+captures restored observation and composition-job identities before invoking
+the repair, then reports only newly created IDs after binding the accepted PBP
+ledger observation and every invalidated derived stream to that manifest's
+cutoff; a pre-existing matching row cannot satisfy the drill. The
 marker is provisioned out-of-band (for example, a row in
 `statsplus_disposable_control(marker_nonce, purpose, schema_name)` with
 `purpose = 'database_first_drill'`) and the preflight rejects any existing

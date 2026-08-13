@@ -28,10 +28,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.database_first_drills import (
+    capture_pbp_repair_identity_snapshot,
     connected_database_identity,
     preflight_disposable_database,
     run_failure_drills,
     same_database_identity,
+    verify_new_pbp_repair_identities,
 )
 
 
@@ -263,11 +265,26 @@ def _build_pbp_repair_callback(
 
     season = str(spec.get("season", ""))
     expected_manifest = str(spec.get("manifest_id", ""))
-    expected_job = str(spec.get("composition_job_id", ""))
-    if not season or not expected_manifest or not expected_job:
-        raise ValueError("pbp_repair season, manifest_id, and composition_job_id are required")
+    expected_game_id = str(spec.get("game_id", ""))
+    expected_checksum = str(spec.get("checksum", ""))
+    if (
+        not season
+        or not expected_manifest
+        or not expected_game_id
+        or len(expected_checksum) != 64
+    ):
+        raise ValueError(
+            "pbp_repair season, manifest_id, game_id, and checksum are required"
+        )
 
     def repair(engine, game_id: str) -> Mapping[str, Any]:
+        if game_id != expected_game_id:
+            return {
+                "verified": False,
+                "adapter": "ledger_refresh_historical_repair",
+                "reason": "governed_repair_game_mismatch",
+            }
+        before = capture_pbp_repair_identity_snapshot(engine)
         rendered = _render(
             command,
             replacements={
@@ -295,33 +312,26 @@ def _build_pbp_repair_callback(
                 "returncode": completed.returncode,
                 "command_result": _safe_command_result(command_result),
             }
-        from sqlalchemy import text
-
-        with engine.connect() as connection:
-            observation = connection.execute(
-                text(
-                    "SELECT observation_id, checksum, manifest_id "
-                    "FROM collection_observations "
-                    "WHERE observation_type = 'canonical_game_ledger' "
-                    "AND accepted_at IS NOT NULL AND scope LIKE :scope "
-                    "ORDER BY accepted_at DESC LIMIT 1"
-                ),
-                {"scope": f"%{game_id}%"},
-            ).mappings().first()
-            job = connection.execute(
-                text(
-                    "SELECT job_id FROM composition_jobs "
-                    "WHERE job_id = :job_id AND season = :season"
-                ),
-                {"job_id": expected_job, "season": season},
-            ).scalar_one_or_none()
-        if observation is None or str(observation["manifest_id"]) != expected_manifest or job is None:
+        verified = verify_new_pbp_repair_identities(
+            engine,
+            season=season,
+            manifest_id=expected_manifest,
+            game_id=game_id,
+            checksum=expected_checksum,
+            before=before,
+        )
+        if not verified.get("verified"):
             return {
                 "verified": False,
                 "adapter": "ledger_refresh_historical_repair",
                 "command": _redact(rendered),
                 "returncode": completed.returncode,
-                "reason": "governed_repair_observation_or_job_missing",
+                "reason": str(
+                    verified.get(
+                        "reason",
+                        "governed_repair_observation_or_job_missing",
+                    )
+                ),
             }
         return {
             "verified": True,
@@ -329,9 +339,10 @@ def _build_pbp_repair_callback(
             "command": _redact(rendered),
             "returncode": completed.returncode,
             "game_id": game_id,
-            "observation_id": str(observation["observation_id"]),
-            "composition_job_id": str(job),
-            "checksum": str(observation["checksum"]),
+            "observation_id": str(verified["observation_id"]),
+            "composition_job_id": str(verified["composition_job_id"]),
+            "composition_job_ids": tuple(verified["composition_job_ids"]),
+            "checksum": expected_checksum,
             "updated_rows": 1,
             "manifest_id": expected_manifest,
             "command_result": _safe_command_result(command_result),

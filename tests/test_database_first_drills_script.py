@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
 
+from app.migrations import run_migrations
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame
+from app.models.collection_control import (
+    CollectionManifest,
+    CollectionObservation,
+    CompositionJob,
+)
+from app.services.database_first_drills import FailureDrillRunner
 from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
 from app.services.database_first_drills import DatabaseIdentity
@@ -52,6 +62,8 @@ def test_command_result_projection_drops_untrusted_output_fields():
 
 
 def test_pbp_repair_evidence_does_not_persist_subprocess_output(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
     monkeypatch.setattr(
         drill_script.subprocess,
         "run",
@@ -72,11 +84,12 @@ def test_pbp_repair_evidence_does_not_persist_subprocess_output(monkeypatch):
         spec={
             "season": "2025-26",
             "manifest_id": "manifest",
-            "composition_job_id": "job",
+            "game_id": "game-1",
+            "checksum": "c" * 64,
         },
     )
 
-    result = callback(None, "game-1")
+    result = callback(engine, "game-1")
 
     assert result["command_result"] == {"complete": False}
     rendered = repr(result)
@@ -84,12 +97,202 @@ def test_pbp_repair_evidence_does_not_persist_subprocess_output(monkeypatch):
         assert secret not in rendered
 
 
+def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(
+    monkeypatch, tmp_path
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'restored.sqlite3'}")
+    run_migrations(engine)
+    now = datetime(2026, 4, 13, 12, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 4, 12, 23, 59, tzinfo=timezone.utc)
+    game_id = "0022501234"
+    manifest_id = "repair-manifest"
+    expected_checksum = "e" * 64
+    old_observation_id = "old-observation"
+    new_observation_id = "random-new-observation"
+    new_job_ids = {
+        stream: f"random-{index}-job"
+        for index, stream in enumerate(
+            (
+                "player_game_logs",
+                "traditional_opponent_season",
+                "traditional_opponent_l15",
+                "assist_locations_season",
+                "assist_locations_l15",
+                "player_per36",
+            ),
+            start=1,
+        )
+    }
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=now + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="manifest-checksum",
+            status="active",
+            created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id=old_observation_id,
+            client_observation_id="old-client-observation",
+            collector_id="railway-ledger",
+            manifest_id=manifest_id,
+            environment="server",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
+            season="2025-26",
+            cutoff=cutoff,
+            schema_version=1,
+            checksum="o" * 64,
+            payload="[]",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id=game_id,
+            season="2025-26",
+            season_type="Regular Season",
+            game_date=date(2026, 4, 12),
+            home_team_id=1,
+            home_team_tricode="AAA",
+            away_team_id=2,
+            away_team_tricode="BBB",
+            status="final",
+            source_observation_id=old_observation_id,
+            checksum="a" * 64,
+            retrieved_at=now,
+            updated_at=now,
+        ))
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="old-job",
+            stream_key="player_game_logs",
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=cutoff - timedelta(days=1),
+            status="queued",
+            attempts=0,
+            created_at=now,
+            updated_at=now,
+        ))
+
+    def run_repair(*args, **kwargs):
+        with engine.begin() as connection:
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=new_observation_id,
+                client_observation_id="new-client-observation",
+                collector_id="railway-ledger",
+                manifest_id=manifest_id,
+                environment="server",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({
+                    "game_id": game_id,
+                    "surface": "canonical_game_ledger",
+                }),
+                season="2025-26",
+                cutoff=cutoff,
+                schema_version=1,
+                checksum="n" * 64,
+                payload="[]",
+                payload_bytes=2,
+                retrieved_at=now + timedelta(minutes=1),
+                accepted_at=now + timedelta(minutes=1),
+            ))
+            connection.execute(
+                CanonicalGameLedgerGame.__table__.update()
+                .where(CanonicalGameLedgerGame.game_id == game_id)
+                .values(
+                    source_observation_id=new_observation_id,
+                    checksum=expected_checksum,
+                    updated_at=now + timedelta(minutes=1),
+                )
+            )
+            connection.execute(CompositionJob.__table__.insert(), [
+                {
+                    "job_id": job_id,
+                    "stream_key": stream,
+                    "manifest_id": manifest_id,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": now + timedelta(minutes=1),
+                    "updated_at": now + timedelta(minutes=1),
+                    "last_error": None,
+                }
+                for stream, job_id in new_job_ids.items()
+            ])
+        return SimpleNamespace(returncode=0, stdout='{"complete": true}', stderr="")
+
+    monkeypatch.setattr(drill_script.subprocess, "run", run_repair)
+    expectations = {
+        "season": "2025-26",
+        "manifest_id": manifest_id,
+        "game_id": game_id,
+        "checksum": expected_checksum,
+    }
+    callback = drill_script._build_pbp_repair_callback(
+        ["ledger-refresh", "{season}", "--database-url", "{database_url}"],
+        database_url=str(engine.url),
+        spec=expectations,
+    )
+    runner = FailureDrillRunner(
+        engine=engine,
+        restore_expectations={"pbp_repair": expectations},
+        pbp_repair=callback,
+    )
+
+    evidence = runner._restore_pbp_repair(engine)
+
+    assert evidence["verified"] is True
+    assert evidence["observation_id"] == new_observation_id
+    assert set(evidence["composition_job_ids"]) == set(new_job_ids.values())
+    assert old_observation_id not in repr(evidence)
+    assert "old-job" not in repr(evidence)
+
+    monkeypatch.setattr(
+        drill_script.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"complete": true}',
+            stderr="",
+        ),
+    )
+    replay_callback = drill_script._build_pbp_repair_callback(
+        ["ledger-refresh", "{season}", "--database-url", "{database_url}"],
+        database_url=str(engine.url),
+        spec=expectations,
+    )
+    replay_evidence = FailureDrillRunner(
+        engine=engine,
+        restore_expectations={"pbp_repair": expectations},
+        pbp_repair=replay_callback,
+    )._restore_pbp_repair(engine)
+
+    assert replay_evidence["verified"] is False
+    assert replay_evidence["observation_id"] == ""
+    assert replay_evidence["composition_job_ids"] == ()
+
+
 def test_restore_report_omits_raw_subprocess_output(monkeypatch, tmp_path):
     backup = tmp_path / "restore.backup"
     backup.write_bytes(b"backup")
     expectations = tmp_path / "expectations.json"
     expectations.write_text(
-        json.dumps({"pbp_repair": {"season": "2025-26", "manifest_id": "m", "composition_job_id": "j"}}),
+        json.dumps({
+            "pbp_repair": {
+                "season": "2025-26",
+                "manifest_id": "m",
+                "game_id": "game-1",
+                "checksum": "c" * 64,
+            }
+        }),
         encoding="utf-8",
     )
     report_path = tmp_path / "report.json"

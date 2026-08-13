@@ -523,10 +523,10 @@ def test_operator_restore_rejects_missing_governed_repair_seam(tmp_path):
         environment="operator",
         restore_expectations={
             "pbp_repair": {
+                "season": "2025-26",
+                "manifest_id": "repair-manifest",
                 "game_id": "known-game",
                 "checksum": "c" * 64,
-                "observation_id": "accepted-observation",
-                "composition_job_id": "repair-job",
             }
         },
     )

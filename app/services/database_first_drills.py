@@ -16,16 +16,19 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
     CollectionManifest,
+    CollectionObservation,
     CollectorStatusTransition,
+    CompositionJob,
     PublicationPointer,
 )
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame
 from app.services.collection_control import (
     CollectorClaims,
     CollectorTokenService,
@@ -61,6 +64,135 @@ DOMAIN_TABLES = frozenset({
     "player_diets",
     "team_matchups",
 })
+
+
+@dataclass(frozen=True, slots=True)
+class PBPRepairIdentitySnapshot:
+    """Durable repair identities present before one governed command."""
+
+    observation_ids: frozenset[str]
+    composition_job_ids: frozenset[str]
+
+
+def capture_pbp_repair_identity_snapshot(
+    engine: Engine,
+) -> PBPRepairIdentitySnapshot:
+    """Capture all durable IDs so no restored row can satisfy a new repair."""
+
+    with engine.connect() as connection:
+        observation_ids = connection.scalars(select(
+            CollectionObservation.observation_id,
+        )).all()
+        composition_job_ids = connection.scalars(select(
+            CompositionJob.job_id,
+        )).all()
+    return PBPRepairIdentitySnapshot(
+        observation_ids=frozenset(str(value) for value in observation_ids),
+        composition_job_ids=frozenset(str(value) for value in composition_job_ids),
+    )
+
+
+def verify_new_pbp_repair_identities(
+    engine: Engine,
+    *,
+    season: str,
+    manifest_id: str,
+    game_id: str,
+    checksum: str,
+    before: PBPRepairIdentitySnapshot,
+) -> Mapping[str, Any]:
+    """Discover and bind only identities durably created by a repair command."""
+
+    from app.services.ledger_materialization import LedgerCorrectionQueue
+
+    with engine.connect() as connection:
+        manifest = connection.execute(select(
+            CollectionManifest.manifest_id,
+            CollectionManifest.season,
+            CollectionManifest.cutoff,
+        ).where(
+            CollectionManifest.manifest_id == manifest_id,
+            CollectionManifest.season == season,
+            CollectionManifest.status == "active",
+        )).mappings().one_or_none()
+        ledger = connection.execute(select(
+            CanonicalGameLedgerGame.source_observation_id,
+            CanonicalGameLedgerGame.checksum,
+        ).where(
+            CanonicalGameLedgerGame.game_id == game_id,
+            CanonicalGameLedgerGame.season == season,
+        )).mappings().one_or_none()
+        if manifest is None or ledger is None or str(ledger["checksum"]) != checksum:
+            return {"verified": False, "reason": "governed_repair_ledger_mismatch"}
+        observation_id = str(ledger["source_observation_id"])
+        observation = connection.execute(select(
+            CollectionObservation.observation_id,
+            CollectionObservation.manifest_id,
+            CollectionObservation.provider,
+            CollectionObservation.observation_type,
+            CollectionObservation.scope,
+            CollectionObservation.season,
+            CollectionObservation.cutoff,
+        ).where(
+            CollectionObservation.observation_id == observation_id,
+        )).mappings().one_or_none()
+        jobs = connection.execute(select(
+            CompositionJob.job_id,
+            CompositionJob.stream_key,
+            CompositionJob.manifest_id,
+            CompositionJob.season,
+            CompositionJob.cutoff,
+            CompositionJob.status,
+        ).where(
+            CompositionJob.manifest_id == manifest_id,
+            CompositionJob.season == season,
+            CompositionJob.cutoff == manifest["cutoff"],
+        )).mappings().all()
+    try:
+        scope = json.loads(str(observation["scope"])) if observation is not None else None
+    except (TypeError, ValueError):
+        scope = None
+    observation_valid = (
+        observation is not None
+        and observation_id not in before.observation_ids
+        and str(observation["manifest_id"]) == manifest_id
+        and str(observation["season"]) == season
+        and observation["cutoff"] == manifest["cutoff"]
+        and str(observation["provider"]) == "pbp"
+        and str(observation["observation_type"]) == "canonical_game_ledger"
+        and isinstance(scope, Mapping)
+        and str(scope.get("game_id", "")) == game_id
+        and str(scope.get("surface", "")) == "canonical_game_ledger"
+    )
+    expected_streams = frozenset(LedgerCorrectionQueue.STREAMS)
+    new_jobs = tuple(
+        row
+        for row in jobs
+        if str(row["job_id"]) not in before.composition_job_ids
+        and str(row["stream_key"]) in expected_streams
+        and str(row["manifest_id"]) == manifest_id
+        and str(row["season"]) == season
+        and row["cutoff"] == manifest["cutoff"]
+        and str(row["status"]) in {"queued", "succeeded"}
+    )
+    jobs_valid = (
+        len(new_jobs) == len(expected_streams)
+        and {str(row["stream_key"]) for row in new_jobs} == expected_streams
+    )
+    if not observation_valid or not jobs_valid:
+        return {
+            "verified": False,
+            "reason": "governed_repair_observation_or_job_missing",
+        }
+    job_ids = tuple(sorted(str(row["job_id"]) for row in new_jobs))
+    return {
+        "verified": True,
+        "observation_id": observation_id,
+        "composition_job_id": job_ids[0],
+        "composition_job_ids": job_ids,
+        "checksum": checksum,
+        "manifest_id": manifest_id,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1377,12 +1509,12 @@ class FailureDrillRunner:
         specification = self.restore_expectations.get("pbp_repair")
         if not isinstance(specification, Mapping):
             return {"verified": False, "reason": "pbp_repair_specification_required"}
+        season = str(specification.get("season", ""))
+        manifest_id = str(specification.get("manifest_id", ""))
         game_id = str(specification.get("game_id", ""))
         checksum = str(specification.get("checksum", ""))
-        expected_observation_id = str(specification.get("observation_id", ""))
-        expected_job_id = str(specification.get("composition_job_id", ""))
-        if not game_id or len(checksum) != 64 or not expected_observation_id or not expected_job_id:
-            return {"verified": False, "reason": "pbp_repair_identity_required"}
+        if not season or not manifest_id or not game_id or len(checksum) != 64:
+            return {"verified": False, "reason": "pbp_repair_preconditions_required"}
         if self.pbp_repair is None:
             return {
                 "verified": False,
@@ -1390,28 +1522,36 @@ class FailureDrillRunner:
                 "game_id": game_id,
             }
         try:
+            before = capture_pbp_repair_identity_snapshot(restored)
             result = self.pbp_repair(restored, game_id)
             if not isinstance(result, Mapping):
                 return {"verified": False, "reason": "governed_pbp_repair_evidence_required"}
             executed = bool(result.get("verified", True)) and int(result.get("updated_rows", 1)) > 0
-            with restored.connect() as connection:
-                verified = connection.execute(text(
-                    "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = :game_id"
-                ), {"game_id": game_id}).scalar_one_or_none() == checksum
+            verified = verify_new_pbp_repair_identities(
+                restored,
+                season=season,
+                manifest_id=manifest_id,
+                game_id=game_id,
+                checksum=checksum,
+                before=before,
+            )
+            actual_job_ids = tuple(verified.get("composition_job_ids", ()))
+            reported_job_ids = tuple(result.get("composition_job_ids", ()))
             evidence = {
                 "game_id": game_id,
-                "observation_id": str(result.get("observation_id", "")),
-                "composition_job_id": str(result.get("composition_job_id", "")),
+                "observation_id": str(verified.get("observation_id", "")),
+                "composition_job_id": str(verified.get("composition_job_id", "")),
+                "composition_job_ids": actual_job_ids,
                 "checksum": checksum,
                 "updated_rows": int(result.get("updated_rows", 0)),
                 "adapter": str(result.get("adapter", "governed_ledger_repair")),
             }
-            identities_match = (
-                evidence["observation_id"] == expected_observation_id
-                and evidence["composition_job_id"] == expected_job_id
+            evidence_matches = (
+                str(result.get("observation_id", "")) == evidence["observation_id"]
+                and reported_job_ids == actual_job_ids
             )
             return {
-                "verified": executed and verified and identities_match,
+                "verified": executed and bool(verified.get("verified")) and evidence_matches,
                 "repair_result": dict(result),
                 **evidence,
             }
