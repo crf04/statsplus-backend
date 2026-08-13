@@ -28,12 +28,12 @@ def main() -> int:
     parser.add_argument("--database-url", required=True)
     parser.add_argument(
         "--production-database-url",
-        help="optional read-only production/control-plane URL whose pointers must remain unchanged",
+        help="separate read-only production snapshot URL whose pointers must remain unchanged",
     )
     parser.add_argument(
         "--environment",
         required=True,
-        choices=("historical_rehearsal", "testing"),
+        choices=("historical_rehearsal", "testing", "unit"),
         help="must point at an isolated non-production control plane",
     )
     parser.add_argument("--season", default="2025-26")
@@ -46,16 +46,21 @@ def main() -> int:
     parser.add_argument(
         "--synergy-command",
         required=True,
-        help="completed-season Synergy command returning true or JSON status=passed",
+        help="completed-season Synergy command returning candidate_publication_id and raw expected_facts JSON",
     )
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
+    if args.environment != "unit" and not args.production_database_url:
+        parser.error(
+            "operator rehearsal requires --production-database-url; use --environment unit "
+            "only for local adapter evidence"
+        )
     isolated_engine = create_engine(args.database_url)
     run_migrations(isolated_engine)
     production_engine = (
         create_engine(args.production_database_url)
         if args.production_database_url
-        else isolated_engine
+        else None
     )
     cutoffs = (
         tuple(date.fromisoformat(value) for value in args.cutoffs)
@@ -89,9 +94,10 @@ def main() -> int:
         return result
 
     report = HistoricalRehearsalRunner(
-        production_engine,
+        isolated_engine,
         environment=args.environment,
         isolated_engine=isolated_engine,
+        production_engine=production_engine,
     ).run(
         args.season,
         cutoffs=cutoffs,

@@ -77,6 +77,7 @@ class TeamMatchupQueryService:
         *,
         window_games: int | None = None,
         as_of: date | None = None,
+        publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date."""
 
@@ -93,6 +94,7 @@ class TeamMatchupQueryService:
                 cutoff=cutoff,
                 window_games=window_games,
                 legacy=None,
+                publication_snapshot=publication_snapshot,
             )
         observation_snapshot = self.repository.get_snapshot(observation_scope)
         observations = observation_snapshot.observations
@@ -127,9 +129,12 @@ class TeamMatchupQueryService:
             cutoff=cutoff,
             window_games=window_games,
             legacy=legacy_window,
+            publication_snapshot=publication_snapshot,
         )
 
-    def get_window(self, scope: TeamMatchupSnapshotScope) -> TeamMatchupWindow:
+    def get_window(
+        self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None
+    ) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
         legacy_window = self._build_window(
             scope,
@@ -142,6 +147,7 @@ class TeamMatchupQueryService:
             cutoff=scope.as_of,
             window_games=scope.window_games,
             legacy=legacy_window,
+            publication_snapshot=publication_snapshot,
         )
 
     def _database_first_window(
@@ -151,6 +157,7 @@ class TeamMatchupQueryService:
         cutoff: date,
         window_games: int | None,
         legacy: TeamMatchupWindow | None,
+        publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
@@ -164,15 +171,23 @@ class TeamMatchupQueryService:
             "shot_types": f"grouped_shot_types_opponent_{window}",
             "shot_zones": f"exact_shot_zones_opponent_{window}",
         }
-        read_many = getattr(self._publication_reader, "read_many", None)
-        publication_reads = (
-            read_many(tuple(stream_by_base.values()), season=season)
-            if callable(read_many)
-            else {
-                stream_key: self._publication_reader.read(stream_key, season=season)
+        if publication_snapshot is not None:
+            publication_reads = {
+                stream_key: publication_snapshot.read(stream_key)
                 for stream_key in stream_by_base.values()
             }
-        )
+        else:
+            read_many = getattr(self._publication_reader, "read_many", None)
+            publication_reads = (
+                read_many(tuple(stream_by_base.values()), season=season)
+                if callable(read_many)
+                else {
+                    stream_key: self._publication_reader.read(
+                        stream_key, season=season
+                    )
+                    for stream_key in stream_by_base.values()
+                }
+            )
         reads = {
             base: publication_reads[stream_key]
             for base, stream_key in stream_by_base.items()
@@ -190,9 +205,13 @@ class TeamMatchupQueryService:
                 base_windows[base] = None
                 continue
             try:
-                rows = decode_team_window(read.payload, stream_key=(
-                    stream_by_base[base]
-                ))
+                rows = (
+                    tuple(read.decoded)
+                    if read.decoded is not None
+                    else decode_team_window(
+                        read.payload, stream_key=stream_by_base[base]
+                    )
+                )
             except PublicationPayloadError:
                 base_windows[base] = None
                 continue

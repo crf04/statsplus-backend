@@ -321,10 +321,12 @@ class PlayerGameLogRepository:
         )
 
     def list_player_rows(
-        self, season: str, player_id: int
+        self, season: str, player_id: int, *, publication_snapshot: Any | None = None
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
-        publication_rows = self._publication_rows(canonical_season)
+        publication_rows = self._publication_rows(
+            canonical_season, publication_snapshot=publication_snapshot
+        )
         if publication_rows is not None:
             return tuple(
                 record
@@ -366,12 +368,17 @@ class PlayerGameLogRepository:
             publication_status=str(row["publication_status"]),
         )
 
-    def get_read_freshness(self, season: str) -> PlayerGameLogReadFreshness:
+    def get_read_freshness(
+        self, season: str, *, publication_snapshot: Any | None = None
+    ) -> PlayerGameLogReadFreshness:
         canonical_season = validate_canonical_season(season)
         if self._publication_reader is not None:
-            read = self._publication_reader.read(
-                "player_game_logs", season=canonical_season
-            )
+            if publication_snapshot is not None:
+                read = publication_snapshot.read("player_game_logs")
+            else:
+                read = self._publication_reader.read(
+                    "player_game_logs", season=canonical_season
+                )
             if not read.legacy_fallback_allowed:
                 return PlayerGameLogReadFreshness(
                     read.freshness if read.available else read.status,
@@ -541,18 +548,24 @@ class PlayerGameLogRepository:
                 checker("player_game_logs", connection=connection)
 
     def _publication_rows(
-        self, season: str
+        self, season: str, *, publication_snapshot: Any | None = None
     ) -> tuple[PlayerGameLogRecord, ...] | None:
         """Read immutable facts; only an explicitly inactive stream falls back."""
 
         if self._publication_reader is None:
             return None
-        read = self._publication_reader.read("player_game_logs", season=season)
+        read = (
+            publication_snapshot.read("player_game_logs")
+            if publication_snapshot is not None
+            else self._publication_reader.read("player_game_logs", season=season)
+        )
         if read.legacy_fallback_allowed:
             return None
         if not read.available:
             return ()
         try:
+            if read.decoded is not None:
+                return tuple(read.decoded)
             return tuple(decode_player_game_logs(read.payload, season=season))
         except PublicationPayloadError:
             # The route remains degraded rather than serving a different
@@ -690,11 +703,13 @@ class PlayerGameLogRepository:
         player_id: int,
         *,
         season_type: str | None = REGULAR_SEASON_TYPE,
+        publication_snapshot: Any | None = None,
     ) -> PlayerSeasonRate | None:
         return self.get_player_summaries(
             season,
             (player_id,),
             rate_season_type=season_type,
+            publication_snapshot=publication_snapshot,
         )[player_id].season_rate
 
     def get_player_summaries(
@@ -703,6 +718,7 @@ class PlayerGameLogRepository:
         player_ids: Iterable[int],
         *,
         rate_season_type: str | None = REGULAR_SEASON_TYPE,
+        publication_snapshot: Any | None = None,
     ) -> dict[int, PlayerSeasonLogSummary]:
         """Return per-player rates and chronological combined-phase last tens."""
 
@@ -717,7 +733,9 @@ class PlayerGameLogRepository:
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {
             player_id: [] for player_id in canonical_ids
         }
-        publication_rows = self._publication_rows(canonical_season)
+        publication_rows = self._publication_rows(
+            canonical_season, publication_snapshot=publication_snapshot
+        )
         if publication_rows is not None:
             for record in publication_rows:
                 if record.player_id in rows_by_player:
@@ -790,23 +808,40 @@ class PlayerGameLogRepository:
         )
 
     def get_last_ten_minutes(
-        self, season: str, player_id: int
+        self,
+        season: str,
+        player_id: int,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> tuple[float, ...]:
-        return self.get_player_summaries(season, (player_id,))[
+        return self.get_player_summaries(
+            season, (player_id,), publication_snapshot=publication_snapshot
+        )[
             player_id
         ].last_ten_minutes
 
     def list_h2h_rows(
-        self, season: str, player_id: int, opponent_team_id: int
+        self,
+        season: str,
+        player_id: int,
+        opponent_team_id: int,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         return self._list_rows(
             season,
             player_ids=(player_id,),
             opponent_team_id=opponent_team_id,
+            publication_snapshot=publication_snapshot,
         )
 
     def list_archetype_rows(
-        self, season: str, player_ids: Iterable[int], opponent_team_id: int
+        self,
+        season: str,
+        player_ids: Iterable[int],
+        opponent_team_id: int,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_ids = tuple(sorted(set(player_ids)))
         if not canonical_ids:
@@ -815,6 +850,7 @@ class PlayerGameLogRepository:
             season,
             player_ids=canonical_ids,
             opponent_team_id=opponent_team_id,
+            publication_snapshot=publication_snapshot,
         )
 
     def _list_rows(
@@ -823,9 +859,12 @@ class PlayerGameLogRepository:
         *,
         player_ids: tuple[int, ...],
         opponent_team_id: int,
+        publication_snapshot: Any | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
-        publication_rows = self._publication_rows(canonical_season)
+        publication_rows = self._publication_rows(
+            canonical_season, publication_snapshot=publication_snapshot
+        )
         if publication_rows is not None:
             return tuple(
                 record

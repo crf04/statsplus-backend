@@ -59,6 +59,7 @@ class MatchupSelectionService:
         archetypes: ArchetypeReader,
         statistic_catalog: StatisticCatalog,
         settings: RuntimeSettings,
+        publication_reader: Any | None = None,
         h2h_thin_min_games: int | None = None,
         archetype_thin_min_games: int | None = None,
     ) -> None:
@@ -79,6 +80,7 @@ class MatchupSelectionService:
         self.player_logs = player_logs
         self.archetypes = archetypes
         self.settings = settings
+        self.publication_reader = publication_reader
         self.h2h_thin_min_games = h2h_thin_min_games
         self.archetype_thin_min_games = archetype_thin_min_games
         self._statistics = {
@@ -97,6 +99,7 @@ class MatchupSelectionService:
 
     def get_selection(self, *, game_id: str, player_id: int) -> dict[str, Any]:
         season = self.settings.nba.current_season
+        publication_snapshot = self._publication_snapshot(season)
         event = self._event(season, game_id)
         pool = (
             None
@@ -125,18 +128,42 @@ class MatchupSelectionService:
                 "The stored Player Pool categories are incompatible with the current "
                 "Statistic Catalog."
             )
-        log_freshness = self.player_logs.get_read_freshness(season)
-        rate = self.player_logs.get_season_rate(season, player_id)
+        log_freshness = self._call_with_snapshot(
+            self.player_logs.get_read_freshness,
+            season,
+            publication_snapshot=publication_snapshot,
+        )
+        rate = self._call_with_snapshot(
+            self.player_logs.get_season_rate,
+            season,
+            player_id,
+            publication_snapshot=publication_snapshot,
+        )
         h2h_records = self.player_logs.list_h2h_rows(
-            season, player_id, opponent_team_id
+            season,
+            player_id,
+            opponent_team_id,
+            **self._snapshot_kwargs(
+                self.player_logs.list_h2h_rows, publication_snapshot
+            ),
         )
         h2h_rated = self._rate_rows(h2h_records, markets, {player_id: rate})
 
         peer_ids = self.archetypes.list_peer_ids(player_id)
         archetype_records = self.player_logs.list_archetype_rows(
-            season, peer_ids, opponent_team_id
+            season,
+            peer_ids,
+            opponent_team_id,
+            **self._snapshot_kwargs(
+                self.player_logs.list_archetype_rows, publication_snapshot
+            ),
         )
-        summaries = self.player_logs.get_player_summaries(season, peer_ids)
+        summaries = self._call_with_snapshot(
+            self.player_logs.get_player_summaries,
+            season,
+            peer_ids,
+            publication_snapshot=publication_snapshot,
+        )
         peer_rates = {
             peer_id: summary.season_rate for peer_id, summary in summaries.items()
         }
@@ -157,6 +184,39 @@ class MatchupSelectionService:
             "h2h": self._table(h2h_rated, self.h2h_thin_min_games),
             "archetype": self._table(archetype_rated, self.archetype_thin_min_games),
         }
+
+    def _publication_snapshot(self, season: str):
+        if self.publication_reader is None:
+            return None
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(self.publication_reader, "read_snapshot", None)
+        if not callable(snapshot):
+            return None
+        return snapshot(("player_game_logs",), season=season)
+
+    @staticmethod
+    def _snapshot_kwargs(method, snapshot) -> dict[str, Any]:
+        if snapshot is None:
+            return {}
+        try:
+            import inspect
+
+            parameters = inspect.signature(method).parameters.values()
+            if any(
+                parameter.name == "publication_snapshot"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                return {"publication_snapshot": snapshot}
+        except (TypeError, ValueError):
+            pass
+        return {}
+
+    @classmethod
+    def _call_with_snapshot(cls, method, *args, publication_snapshot=None, **kwargs):
+        kwargs.update(cls._snapshot_kwargs(method, publication_snapshot))
+        return method(*args, **kwargs)
 
     def _event(self, season: str, game_id: str) -> Mapping[str, Any]:
         if self.event_catalog is None:

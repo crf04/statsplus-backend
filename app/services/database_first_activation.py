@@ -459,10 +459,10 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     return tuple(decoded)
 
 
-def _validate_known_publication_payload(
+def _decode_known_publication_payload(
     stream_key: str, payload: Any, *, season: str, retrieved_at: datetime
-) -> None:
-    """Apply the strict decoder for every public database-first stream."""
+) -> tuple[Any, ...] | None:
+    """Decode every governed public stream once at the read boundary."""
 
     team_streams = {
         "traditional_opponent_season", "traditional_opponent_l15",
@@ -481,17 +481,28 @@ def _validate_known_publication_payload(
         "player_assist_locations": "assist_locations",
     }
     if stream_key == "player_game_logs":
-        decode_player_game_logs(payload, season=season)
-    elif stream_key == "player_per36":
-        decode_player_per36(payload, season=season)
-    elif stream_key in team_streams:
-        decode_team_window(payload, stream_key=stream_key)
-    elif stream_key in diet_bases:
-        decode_player_diet(
+        return decode_player_game_logs(payload, season=season)
+    if stream_key == "player_per36":
+        return decode_player_per36(payload, season=season)
+    if stream_key in team_streams:
+        return decode_team_window(payload, stream_key=stream_key)
+    if stream_key in diet_bases:
+        return decode_player_diet(
             payload,
             base=diet_bases[stream_key],
             retrieved_at=retrieved_at,
         )
+    return None
+
+
+def _validate_known_publication_payload(
+    stream_key: str, payload: Any, *, season: str, retrieved_at: datetime
+) -> None:
+    """Validate a governed payload while preserving the old helper seam."""
+
+    _decode_known_publication_payload(
+        stream_key, payload, season=season, retrieved_at=retrieved_at
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +524,11 @@ class PublicationRead:
     checksum: str | None = None
     fence: int | None = None
     unavailable_reason: str | None = None
+    # Decoded immutable facts are captured with the pointer/version query.
+    # Keeping them on the read object lets a request reuse the exact values
+    # whose provenance it reports instead of decoding (or re-reading) a later
+    # generation.
+    decoded: tuple[Any, ...] | None = None
 
     @property
     def available(self) -> bool:
@@ -541,6 +557,66 @@ class PublicationRead:
             ),
             "fence": self.fence,
             "unavailable_reason": self.unavailable_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationReadSnapshot:
+    """One request-scoped publication generation.
+
+    ``reads`` and their decoded facts are produced by one database
+    transaction.  Consumers may pass this object through the Matchups
+    assembly so facts and additive provenance cannot be torn by a pointer
+    advance between repository calls.
+    """
+
+    season: str | None
+    reads: Mapping[str, PublicationRead]
+    generation: tuple[tuple[str, str | None, int | None, int | None], ...]
+
+    def read(self, stream_key: str) -> PublicationRead:
+        return self.reads.get(
+            stream_key,
+            PublicationRead(
+                stream_key=stream_key,
+                publication_id=None,
+                season=self.season,
+                cutoff=None,
+                version=None,
+                status="missing",
+                freshness="missing",
+                age_seconds=None,
+                payload=None,
+            ),
+        )
+
+    def metadata(self) -> dict[str, Any]:
+        """Build coverage metadata without a second pointer query."""
+
+        cutoff_states = {
+            read.cutoff if read.cutoff is not None else f"status:{read.status}"
+            for read in self.reads.values()
+        }
+        freshness_states = {
+            f"{read.freshness}:{read.status}" for read in self.reads.values()
+        }
+        cutoffs = {read.cutoff for read in self.reads.values() if read.cutoff}
+        return {
+            "streams": {
+                key: read.to_dict() for key, read in self.reads.items()
+            },
+            "mixed_cutoff": len(cutoff_states) > 1,
+            "mixed_freshness": len(freshness_states) > 1,
+            "coverage_cutoffs": sorted(cutoffs),
+            "generation": [
+                {
+                    "stream_key": stream_key,
+                    "publication_id": publication_id,
+                    "fence": fence,
+                    "version": version,
+                }
+                for stream_key, publication_id, fence, version in self.generation
+            ],
         }
 
 
@@ -592,9 +668,24 @@ class DatabaseFirstPublicationReader:
         pointer advance between two per-stream reads.
         """
 
+        return dict(
+            self.snapshot(
+                stream_keys, season=season, require_active=require_active
+            ).reads
+        )
+
+    def snapshot(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str | None = None,
+        require_active: bool = True,
+    ) -> PublicationReadSnapshot:
+        """Capture all requested pointers, payloads, and decoded facts once."""
+
         keys = tuple(sorted(set(str(key) for key in stream_keys)))
         if not keys:
-            return {}
+            return PublicationReadSnapshot(season, {}, ())
         with self._session() as session, session.begin():
             # Keep stream, pointer, and immutable version in one SELECT.  A
             # PostgreSQL READ COMMITTED transaction takes a fresh snapshot per
@@ -618,7 +709,7 @@ class DatabaseFirstPublicationReader:
                 for stream, pointer, publication in rows
             }
             now = _utc(self.clock())
-            return {
+            reads = {
                 key: self._read_row(key, **{
                     "stream": snapshot[key][0] if key in snapshot else None,
                     "pointer": snapshot[key][1] if key in snapshot else None,
@@ -629,6 +720,22 @@ class DatabaseFirstPublicationReader:
                 })
                 for key in keys
             }
+            return PublicationReadSnapshot(
+                season=season,
+                reads=reads,
+                generation=tuple(
+                    (
+                        key,
+                        read.publication_id,
+                        read.fence,
+                        read.version,
+                    )
+                    for key, read in sorted(reads.items())
+                ),
+            )
+
+    # Explicit verb alias for callers that prefer the read-side vocabulary.
+    read_snapshot = snapshot
 
     def _read_row(
         self,
@@ -660,7 +767,7 @@ class DatabaseFirstPublicationReader:
                 reason="provider_window_unsupported",
             )
         if require_active and not bool(stream.enabled):
-            return self._legacy_fallback(stream_key)
+            return self._legacy_fallback(stream_key, fence=pointer.fence if pointer else None)
         if pointer is None or not pointer.active_publication_id:
             return self._missing(stream_key, "missing")
         if publication is None or publication.status not in {"active", "rollback"}:
@@ -685,7 +792,7 @@ class DatabaseFirstPublicationReader:
             )
         retrieved_at = _utc(publication.created_at)
         try:
-            _validate_known_publication_payload(
+            decoded = _decode_known_publication_payload(
                 stream_key,
                 payload,
                 season=publication.season,
@@ -714,6 +821,7 @@ class DatabaseFirstPublicationReader:
             retrieved_at=retrieved_at,
             checksum=publication.checksum,
             fence=int(pointer.fence),
+            decoded=decoded,
         )
 
     def metadata(
@@ -722,24 +830,7 @@ class DatabaseFirstPublicationReader:
         *,
         season: str | None = None,
     ) -> dict[str, Any]:
-        reads = self.read_many(stream_keys, season=season)
-        # Missing/unavailable contributors are part of the coverage truth.
-        # Mapping them to explicit sentinels prevents a fresh stream paired
-        # with an absent stream from being reported as uniformly fresh.
-        cutoff_states = {
-            read.cutoff if read.cutoff is not None else f"status:{read.status}"
-            for read in reads.values()
-        }
-        freshness_states = {
-            f"{read.freshness}:{read.status}" for read in reads.values()
-        }
-        cutoffs = {read.cutoff for read in reads.values() if read.cutoff}
-        return {
-            "streams": {key: read.to_dict() for key, read in reads.items()},
-            "mixed_cutoff": len(cutoff_states) > 1,
-            "mixed_freshness": len(freshness_states) > 1,
-            "coverage_cutoffs": sorted(cutoffs),
-        }
+        return self.snapshot(stream_keys, season=season).metadata()
 
     @staticmethod
     def _missing(
@@ -764,7 +855,9 @@ class DatabaseFirstPublicationReader:
         )
 
     @staticmethod
-    def _legacy_fallback(stream_key: str) -> PublicationRead:
+    def _legacy_fallback(
+        stream_key: str, *, fence: int | None = None
+    ) -> PublicationRead:
         return PublicationRead(
             stream_key=stream_key,
             publication_id=None,
@@ -778,16 +871,25 @@ class DatabaseFirstPublicationReader:
             source="legacy_database",
             legacy_fallback_allowed=True,
             unavailable_reason=None,
+            fence=fence,
         )
 
 
 class DatabaseOnlyProviderGuard:
     """Test/assembly guard that fails on every provider attribute access."""
 
-    def __init__(self, name: str = "provider") -> None:
+    def __init__(
+        self,
+        name: str = "provider",
+        *,
+        counter: list[int] | None = None,
+    ) -> None:
         self.name = name
+        self.counter = counter
 
     def __getattr__(self, operation: str) -> Any:
+        if self.counter is not None:
+            self.counter[0] += 1
         raise AssertionError(
             f"database-only Matchups read attempted {self.name}.{operation}"
         )
@@ -880,6 +982,7 @@ __all__ = [
     "PUBLICATION_FRESHNESS_SECONDS",
     "PublicationPayloadError",
     "PublicationRead",
+    "PublicationReadSnapshot",
     "PublicationTeamWindowRow",
     "PublicationReadRouter",
     "ProviderCallGuard",

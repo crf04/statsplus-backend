@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -21,7 +20,7 @@ def main() -> int:
     parser.add_argument(
         "--database-url",
         default=os.environ.get("DATABASE_URL"),
-        help="configured Postgres DATABASE_URL; SQLite is allowed only with --sqlite-unit",
+        help="disposable isolated drill database URL",
     )
     parser.add_argument(
         "--sqlite-unit",
@@ -29,44 +28,33 @@ def main() -> int:
         help="run the explicit local SQLite adapter drill (not production evidence)",
     )
     parser.add_argument(
-        "--postgres-restore-command",
+        "--production-database-url",
         help=(
-            "operator-supplied command that performs a configured Postgres "
-            "backup/restore and prints JSON evidence"
+            "production/control URL used only to reject accidental same-database drills"
         ),
+    )
+    parser.add_argument(
+        "--restored-database-url",
+        help="disposable isolated Postgres URL containing the completed restore",
     )
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")
+    if args.sqlite_unit and not str(args.database_url).startswith("sqlite"):
+        parser.error("--sqlite-unit requires a SQLite drill database")
     if str(args.database_url).startswith("sqlite") and not args.sqlite_unit:
         parser.error("SQLite drills require explicit --sqlite-unit")
-    restore_adapter = None
-    if args.postgres_restore_command:
-        if args.sqlite_unit:
-            parser.error("--postgres-restore-command cannot be combined with --sqlite-unit")
-
-        def restore_adapter():
-            completed = subprocess.run(
-                args.postgres_restore_command,
-                shell=True,
-                check=True,
-                capture_output=True,
-                text=True,
-                env=os.environ.copy(),
-            )
-            output = completed.stdout.strip()
-            if not output:
-                raise ValueError("Postgres restore command returned no evidence")
-            evidence = json.loads(output)
-            if not isinstance(evidence, dict):
-                raise ValueError("Postgres restore evidence must be an object")
-            return evidence
+    if not args.sqlite_unit and not args.restored_database_url:
+        parser.error("operator drills require --restored-database-url")
 
     report = run_failure_drills(
         database_url=args.database_url,
+        environment="unit" if args.sqlite_unit else "operator",
+        isolated=True,
+        production_database_url=args.production_database_url,
+        restored_database_url=args.restored_database_url,
         require_production_evidence=not args.sqlite_unit,
-        restore_adapter=restore_adapter,
     )
     with open(args.report, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)

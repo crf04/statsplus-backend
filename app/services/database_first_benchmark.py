@@ -23,6 +23,8 @@ class BenchmarkReport:
     within_ten_percent: bool
     query_plans: tuple[str, ...]
     query_plans_available: bool = True
+    query_plans_indexed: bool = True
+    fixture_validated: bool = True
     provider_calls: int = 0
     baseline_source: str = "injected"
     database_first_source: str = "injected"
@@ -33,6 +35,8 @@ class BenchmarkReport:
             self.under_one_second
             and self.within_ten_percent
             and self.query_plans_available
+            and self.query_plans_indexed
+            and self.fixture_validated
             and self.provider_calls == 0
         )
 
@@ -59,6 +63,8 @@ def benchmark_matchup_reads(
     database_first_source: str = "injected",
     season: str = "2025-26",
     game_id: str = "benchmark-game",
+    require_indexed_plans: bool = False,
+    fixture_validated: bool = True,
 ) -> BenchmarkReport:
     """Measure distinct full-read seams and retain bounded SQL query plans."""
 
@@ -94,6 +100,7 @@ def benchmark_matchup_reads(
     plans_available = bool(plans) and all(
         "=> unavailable" not in plan for plan in plans
     )
+    plans_indexed = _plans_are_indexed(plans) if require_indexed_plans else True
     return BenchmarkReport(
         iterations=count,
         baseline_p95_ms=round(baseline_p95, 3),
@@ -103,6 +110,8 @@ def benchmark_matchup_reads(
         within_ten_percent=ratio <= 1.10,
         query_plans=plans,
         query_plans_available=plans_available,
+        query_plans_indexed=plans_indexed,
+        fixture_validated=fixture_validated,
         provider_calls=provider_calls,
         baseline_source=baseline_source,
         database_first_source=database_first_source,
@@ -118,6 +127,7 @@ def benchmark_matchup_services(
     game_id: str,
     iterations: int = 20,
     provider_call_count: Callable[[], int] | None = None,
+    fixture_validated: bool = False,
 ) -> BenchmarkReport:
     """Benchmark the complete route/service callables over one fixture.
 
@@ -131,6 +141,10 @@ def benchmark_matchup_services(
         raise ValueError("benchmark requires concrete season and game identity")
     if baseline_route is database_first_route:
         raise ValueError("benchmark requires distinct route/service callables")
+    if provider_call_count is None:
+        raise ValueError("benchmark requires an instrumented statistical provider counter")
+    if not fixture_validated:
+        raise ValueError("benchmark requires a validated disposable fixture")
 
     def invoke(route: Callable[[], Any]) -> Any:
         value = route()
@@ -141,9 +155,11 @@ def benchmark_matchup_services(
     observed_calls = 0
     def invoke_database_first() -> Any:
         nonlocal observed_calls
-        before = provider_call_count() if provider_call_count is not None else 0
+        before = provider_call_count()
         value = invoke(database_first_route)
-        after = provider_call_count() if provider_call_count is not None else before
+        after = provider_call_count()
+        if isinstance(before, bool) or isinstance(after, bool):
+            raise ValueError("provider counter must return an integer")
         observed_calls += max(0, int(after) - int(before))
         return value
 
@@ -156,9 +172,9 @@ def benchmark_matchup_services(
         database_first_source="matchup_route_database_first",
         season=season,
         game_id=game_id,
+        require_indexed_plans=True,
+        fixture_validated=True,
     )
-    if provider_call_count is None:
-        observed_calls = report.provider_calls
     return replace(report, provider_calls=observed_calls)
 
 
@@ -179,6 +195,8 @@ def _query_plans(
         "SELECT season, player_id, game_date, game_id FROM player_game_logs "
         f"WHERE season = '{safe_season}' AND game_id = '{safe_game_id}' "
         "ORDER BY game_date DESC, game_id DESC LIMIT 50",
+        "SELECT game_id, season, game_date FROM canonical_game_ledger_games "
+        f"WHERE season = '{safe_season}' ORDER BY game_date DESC, game_id DESC LIMIT 50",
     )
     plans: list[str] = []
     with engine.connect() as connection:
@@ -190,6 +208,31 @@ def _query_plans(
             except Exception:
                 plans.append(statement + " => unavailable")
     return tuple(plans)
+
+
+def _plans_are_indexed(plans: tuple[str, ...]) -> bool:
+    """Reject full scans for bounded publication/ledger read queries."""
+
+    required_tables = (
+        "publication_pointers",
+        "publication_versions",
+        "player_game_logs",
+        "canonical_game_ledger_games",
+    )
+    for plan in plans:
+        if "=> unavailable" in plan:
+            return False
+        upper = plan.upper()
+        for table in required_tables:
+            if table.upper() in upper and f"SCAN {table.upper()}" in upper:
+                return False
+        # SQLite reports aliased publication tables as ``SCAN p``/``SCAN v``;
+        # the SQL text retained in the artifact identifies those aliases.
+        if "publication_pointers" in plan.lower() and "SCAN P" in upper:
+            return False
+        if "publication_versions" in plan.lower() and "SCAN V" in upper:
+            return False
+    return True
 
 
 def write_benchmark_report(report: BenchmarkReport, path: str) -> None:

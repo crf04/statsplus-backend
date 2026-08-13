@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timedelta, timezone
 import json
+import hashlib
 
 import pytest
 from sqlalchemy import create_engine
@@ -258,7 +259,7 @@ def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path
                 cutoff=datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC),
                 version=1,
                 status="candidate",
-                checksum="a" * 64,
+                checksum=hashlib.sha256(player_log_payload.encode()).hexdigest(),
                 payload=player_log_payload,
                 created_at=NOW,
                 fence=0,
@@ -270,36 +271,36 @@ def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path
             cutoff=datetime.combine(dates[-1], datetime.min.time(), tzinfo=UTC),
             version=1,
             status="candidate",
-            checksum="b" * 64,
+            checksum=hashlib.sha256(synergy_payload.encode()).hexdigest(),
             payload=synergy_payload,
             created_at=NOW,
             fence=0,
         ))
-    report = HistoricalRehearsalRunner(engine).run(
+    report = HistoricalRehearsalRunner(engine, environment="unit").run(
         "2025-26",
         cutoffs=dates,
         collect=lambda cutoff: {
-            "status": "passed",
             "publication_ids": {
                 "player_game_logs": f"rehearsal-{cutoff.isoformat()}"
             },
-            "parity": {"equal": True, "differences": [], "decision": "exact"},
+            "expected_facts": {"player_game_logs": json.loads(player_log_payload)},
         },
         synergy_check=lambda cutoff: {
-            "status": "passed",
             "candidate_publication_id": "rehearsal-synergy",
+            "expected_facts": {"synergy_play_types": json.loads(synergy_payload)},
         },
     )
     assert report.status == "passed"
     assert len(report.records) == 7
-    assert report.production_pointers_unchanged
+    assert not report.production_pointers_unchanged
+    assert not report.production_immutability_checked
     assert report.synergy_season_status == "passed"
 
 
 def test_historical_rehearsal_rejects_unordered_window(tmp_path):
     engine = _db(tmp_path)
     dates = tuple(date(2026, 4, day) for day in range(6, 12))
-    report = HistoricalRehearsalRunner(engine).run("2025-26", cutoffs=dates)
+    report = HistoricalRehearsalRunner(engine, environment="unit").run("2025-26", cutoffs=dates)
     assert report.status == "failed"
     assert "exactly 7" in (report.error or "")
 

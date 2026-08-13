@@ -1021,8 +1021,8 @@ are decoded from immutable PublicationVersion payloads; an explicitly
 inactive stream is the only state that permits its legacy repository fallback,
 while a missing or malformed active payload degrades closed. The existing
 Injury Reports seam is unchanged: it may use the live/snapshot behavior
-already provided by `MatchupInjuryService`; database-first statistics do not
-force a stored-only injury path. `DatabaseOnlyProviderGuard` is available to
+already provided by `MatchupInjuryService`; statistical activation does not
+change that injury contract. `DatabaseOnlyProviderGuard` is available to
 tests and raises on any forbidden statistical provider attribute access. The
 route composes durable Regular Season facts and retains the existing
 success/degraded/missing shape. Event classification rejects Playoffs and
@@ -1039,9 +1039,12 @@ an immutable PublicationVersion with a unique stream/candidate constraint;
 no legacy table is removed.
 
 `HistoricalRehearsalRunner` requires seven ordered dates, a concrete isolated
-collection/composition callback, and a completed-season Synergy validation
-callback. It persists the ordered report records and compares pointers before
-and after to prove the isolated rehearsal did not mutate production state.
+collection/composition callback that returns raw governed facts, and a
+completed-season Synergy callback with a candidate publication and raw facts.
+It derives exact/normalized parity from isolated Publication payloads; a
+difference requires a persisted approved adjudication. Operator evidence also
+requires an explicit separate production snapshot database; unit evidence does
+not claim production immutability.
 `FailureDrillRunner` exercises a migrated temporary control plane, including
 publication, control-plane receipt idempotency, residential Outbox replay,
 alert recovery, and backup/restore seams. SQLite backup/restore is an explicit

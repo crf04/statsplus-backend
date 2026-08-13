@@ -442,6 +442,7 @@ def build_dependencies(
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,
         settings=settings,
+        publication_reader=publication_reader,
     )
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,

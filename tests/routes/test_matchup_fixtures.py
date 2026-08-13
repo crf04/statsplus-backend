@@ -19,7 +19,13 @@ from app.config.settings import (
 from app.migrations import run_migrations
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.event_catalog_service import EventCatalogService
+from app.services.database_first_activation import (
+    PublicationRead,
+    PublicationReadSnapshot,
+)
 from app.services.matchup import MatchupService
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.player_diet import (
@@ -38,6 +44,7 @@ from app.services.player_pool_snapshot_repository import (
 )
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
+from app.services.slate_service import SlateService
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
@@ -924,3 +931,209 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
     )
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
     assert payload["injuries"]["status"] == "fresh"
+
+
+def test_authenticated_slate_matchup_selection_journey_uses_one_activated_generation(
+    tmp_path,
+):
+    """Exercise the public chain with activated, rollback, mixed, and L15 states."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'journey.sqlite3'}")
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    event_catalog = _event_catalog(engine, settings)
+    pool = _player_pool(engine)
+    player_logs = _player_logs(engine, catalog)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+    log_facts = player_logs.list_player_rows(SEASON, 2544)
+    diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
+    stream_keys = (
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
+        "synergy_play_types",
+        "grouped_shot_types",
+        "exact_shot_zones",
+        "player_assist_locations",
+        "synergy:l15",
+        "synergy_play_types_opponent_season",
+        "synergy_play_types_opponent_l15",
+        "grouped_shot_types_opponent_season",
+        "grouped_shot_types_opponent_l15",
+        "exact_shot_zones_opponent_season",
+        "exact_shot_zones_opponent_l15",
+    )
+
+    def legacy_read(stream_key):
+        return PublicationRead(
+            stream_key=stream_key,
+            publication_id=None,
+            season=SEASON,
+            cutoff=None,
+            version=None,
+            status="inactive",
+            freshness="legacy_fallback",
+            age_seconds=None,
+            payload=None,
+            source="legacy_database",
+            legacy_fallback_allowed=True,
+        )
+
+    reads = {stream_key: legacy_read(stream_key) for stream_key in stream_keys}
+    reads["player_game_logs"] = PublicationRead(
+        stream_key="player_game_logs",
+        publication_id="rollback-player-logs",
+        season=SEASON,
+        cutoff=(NOW - timedelta(days=1)).isoformat(),
+        version=2,
+        status="rollback",
+        freshness="stale",
+        age_seconds=86400,
+        payload={"rows": []},
+        retrieved_at=NOW - timedelta(days=1),
+        checksum="a" * 64,
+        fence=2,
+        decoded=tuple(log_facts),
+    )
+    diet_streams = {
+        "synergy_play_types": "play_types",
+        "grouped_shot_types": "shot_types",
+        "exact_shot_zones": "shot_zones",
+        "player_assist_locations": "assist_locations",
+    }
+    for stream_key, base in diet_streams.items():
+        reads[stream_key] = PublicationRead(
+            stream_key=stream_key,
+            publication_id=f"active-{base}",
+            season=SEASON,
+            cutoff=NOW.isoformat(),
+            version=3,
+            status="active",
+            freshness="fresh",
+            age_seconds=0,
+            payload={"rows": []},
+            retrieved_at=NOW,
+            checksum="b" * 64,
+            fence=3,
+            decoded=tuple(fact for fact in diet_facts if fact.base == base),
+        )
+    reads["synergy:l15"] = PublicationRead(
+        stream_key="synergy:l15",
+        publication_id=None,
+        season=SEASON,
+        cutoff=None,
+        version=None,
+        status="unavailable",
+        freshness="unavailable",
+        age_seconds=None,
+        payload=None,
+        unavailable_reason="provider_window_unsupported",
+    )
+    reads["synergy_play_types_opponent_l15"] = reads["synergy:l15"]
+
+    class JourneyReader:
+        def snapshot(self, requested, *, season):
+            selected = {key: reads[key] for key in requested}
+            return PublicationReadSnapshot(
+                season=season,
+                reads=selected,
+                generation=tuple(
+                    (key, value.publication_id, value.fence, value.version)
+                    for key, value in sorted(selected.items())
+                ),
+            )
+
+    reader = JourneyReader()
+    player_logs._publication_reader = reader
+    player_diets.repository._publication_reader = reader
+    team_matchups._publication_reader = reader
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    matchup_service = MatchupService(
+        event_catalog=event_catalog,
+        player_pool=pool,
+        player_logs=player_logs,
+        player_diets=player_diets,
+        team_matchups=team_matchups,
+        stats_freshness=stats_freshness,
+        settings=settings,
+        injuries=None,
+        clock=lambda: NOW,
+        publication_reader=reader,
+    )
+    selection_service = MatchupSelectionService(
+        event_catalog=event_catalog,
+        player_pool=pool,
+        player_logs=player_logs,
+        archetypes=PlayerArchetypeRepository(engine),
+        statistic_catalog=catalog,
+        settings=settings,
+        publication_reader=reader,
+    )
+    provider_calls = {"nba": 0, "pbp": 0}
+
+    class ProviderCounter:
+        def __init__(self, name):
+            self.name = name
+
+        def __getattr__(self, operation):
+            provider_calls[self.name] += 1
+            raise AssertionError(f"unexpected {self.name}.{operation} request")
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                slate_service=SlateService(
+                    event_catalog,
+                    settings=settings,
+                    player_pool=None,
+                    injuries=None,
+                    clock=lambda: NOW,
+                ),
+                matchup_service=matchup_service,
+                matchup_selection_service=selection_service,
+                nba_stats_provider=ProviderCounter("nba"),
+                pbp_stats_provider=ProviderCounter("pbp"),
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    client = app.test_client()
+
+    slate_response = client.get("/api/games/slate?date=2026-01-15")
+    matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    selection_response = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert slate_response.status_code == 200
+    assert matchup_response.status_code == 200
+    assert selection_response.status_code == 200
+    matchup = matchup_response.get_json()
+    assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
+    assert matchup["provenance"]["player_game_logs"]["publication_id"] == "rollback-player-logs"
+    assert matchup["provenance"]["synergy_play_types"]["publication_id"] == "active-play_types"
+    assert matchup["provenance"]["synergy:l15"]["unavailable_reason"] == "provider_window_unsupported"
+    assert matchup["coverage"]["mixed_cutoff"]
+    assert matchup["coverage"]["mixed_freshness"]
+    assert matchup["league"]["surface_availability"]["play_types"]["last_15"] == {
+        "status": "unavailable",
+        "unavailable_reason": "provider_window_unsupported",
+    }
+    assert selection_response.get_json()["h2h"]["rows"]
+    assert provider_calls == {"nba": 0, "pbp": 0}

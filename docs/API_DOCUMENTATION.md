@@ -1110,8 +1110,8 @@ payloads independently for player game logs, per-36, each Player Diet Base,
 and each Season/L15 team-window surface; an inactive stream alone permits its
 legacy fallback. These reads make zero request-time NBA Stats, PBP, or DFS
 calls. Injury
-Reports retain their existing live/snapshot contract; database-first
-statistics do not force a stored-only injury path. Existing fields remain
+Reports retain their existing live/snapshot contract; statistical activation
+does not change injury behavior. Existing fields remain
 backward compatible. Additive `provenance` stream entries identify the exact
 Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state;
 inactive streams explicitly report `legacy_database` fallback. Additive
@@ -1122,17 +1122,21 @@ replaces it. Synergy L15 is always `unavailable/provider_window_unsupported`
 and Playoff/Play-In requests are outside this first Regular Season activation.
 
 The isolated `scripts/database_first_rehearsal.py` command requires a concrete
-non-production environment, collection/composition command, completed-season
-Synergy command, and exactly seven ordered dates; it writes a validation
-report without changing production pointers. `scripts/database_first_drills.py`
+non-production environment, raw-facts collection/composition command,
+completed-season Synergy candidate/facts command, and exactly seven ordered
+dates; it derives parity from isolated publications and writes a validation
+report without changing production pointers. Operator evidence requires an
+explicit separate production snapshot database. `scripts/database_first_drills.py`
 records deterministic outage, duplicate delivery, Outbox replay, expired
 credential, provider failure, alert recovery, and restore/replay checks using
 temporary control-plane state; SQLite restore is explicitly a local unit
 adapter, while a production gate requires configured Postgres evidence. The
-`scripts/benchmark_matchups.py` command requires a production-like fixture and
-game identity, invokes the complete legacy and activated MatchupService paths,
-retains p95 latency and bounded query plans, and fails without plan evidence,
-zero provider calls, a sub-second p95, and a
+`scripts/benchmark_matchups.py` command requires a production-like fixture,
+game identity, and an explicitly disposable database. It loads and validates
+the fixture, invokes the complete legacy and activated MatchupService paths,
+retains measured p95 latency and bounded indexed publication/ledger query
+plans, and fails without plan evidence, instrumented zero provider calls, a
+sub-second p95, and a
 database-first p95 no greater than 110% of baseline. These artifacts claim no
 formal recovery SLA.
 Internal season rates default to Regular Season only unless a caller explicitly

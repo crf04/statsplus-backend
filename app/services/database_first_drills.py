@@ -11,8 +11,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 from app.migrations import run_migrations
@@ -47,6 +48,7 @@ class FailureDrillReport:
     started_at: str
     completed_at: str
     drills: tuple[DrillResult, ...]
+    environment: str = "unit"
     production_evidence: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -54,6 +56,7 @@ class FailureDrillReport:
             "status": self.status,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "environment": self.environment,
             "production_evidence": self.production_evidence,
             "drills": [asdict(drill) for drill in self.drills],
         }
@@ -78,12 +81,36 @@ class FailureDrillRunner:
         engine: Engine | None = None,
         clock: Callable[[], datetime] | None = None,
         database_url: str | None = None,
+        environment: str = "unit",
+        isolated: bool = False,
+        production_database_url: str | None = None,
+        restored_database_url: str | None = None,
         restore_adapter: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
-        self.production_evidence = self.engine.dialect.name == "postgresql"
+        self.environment = str(environment).strip().lower() or "unit"
+        self.run_id = uuid4().hex
+        self.production_database_url = production_database_url
+        self.restored_database_url = restored_database_url
         self.restore_adapter = restore_adapter
+        requested_url = database_url or (str(engine.url) if engine is not None else None)
+        self.configuration_error = self._validate_configuration(
+            requested_url,
+            isolated=isolated,
+            production_database_url=production_database_url,
+            restored_database_url=restored_database_url,
+        )
+        if self.configuration_error is not None:
+            self.engine = engine or create_engine("sqlite:///:memory:")
+            self.production_evidence = False
+            self.publications = None
+            self.ingestion = None
+            return
+        self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
+        self.production_evidence = (
+            self.environment not in {"unit", "test_unit"}
+            and self.engine.dialect.name == "postgresql"
+        )
         run_migrations(self.engine)
         self.publications = PublicationService(self.engine, clock=self.clock)
         self.publications.register_stream(
@@ -107,6 +134,29 @@ class FailureDrillRunner:
             self.engine, publication_service=self.publications, clock=self.clock
         )
 
+    @staticmethod
+    def _validate_configuration(
+        database_url: str | None,
+        *,
+        isolated: bool,
+        production_database_url: str | None,
+        restored_database_url: str | None,
+    ) -> str | None:
+        if database_url is None:
+            return None
+        normalized = str(database_url).lower()
+        if not isolated and any(
+            marker in normalized for marker in ("prod", "production", "railway")
+        ):
+            return "drill database must be explicitly marked isolated"
+        if production_database_url and str(database_url) == str(production_database_url):
+            return "drill database cannot equal production/control database"
+        if restored_database_url and str(restored_database_url) in {
+            str(database_url), str(production_database_url)
+        }:
+            return "restored drill database must be a separate disposable database"
+        return None
+
     def run(
         self,
         *,
@@ -115,46 +165,13 @@ class FailureDrillRunner:
     ) -> FailureDrillReport:
         started = self.clock().astimezone(UTC).isoformat()
         results: list[DrillResult] = []
+        if self.configuration_error is not None:
+            return self._failed_report(started, self.configuration_error)
         if require_production_evidence and not self.production_evidence:
             completed = self.clock().astimezone(UTC).isoformat()
-            return FailureDrillReport(
-                status="failed",
-                started_at=started,
-                completed_at=completed,
-                drills=tuple(
-                    DrillResult(
-                        name=name,
-                        status="failed",
-                        attempts=0,
-                        details={
-                            "error": "postgres_database_url_required",
-                            "production_evidence": False,
-                        },
-                    )
-                    for name in self.NAMES
-                ),
-                production_evidence=False,
-            )
-        if require_production_evidence and self.restore_adapter is None:
-            completed = self.clock().astimezone(UTC).isoformat()
-            return FailureDrillReport(
-                status="failed",
-                started_at=started,
-                completed_at=completed,
-                drills=tuple(
-                    DrillResult(
-                        name=name,
-                        status="failed",
-                        attempts=0,
-                        details={
-                            "error": "postgres_restore_adapter_required",
-                            "production_evidence": False,
-                        },
-                    )
-                    for name in self.NAMES
-                ),
-                production_evidence=False,
-            )
+            return self._failed_report(started, "postgres isolated drill database required")
+        if require_production_evidence and not self.restored_database_url:
+            return self._failed_report(started, "restored isolated Postgres database URL required")
         for name in self.NAMES:
             hook = (hooks or {}).get(name) or self._default_hook(name)
             measured = perf_counter()
@@ -167,6 +184,8 @@ class FailureDrillRunner:
                 details.setdefault("recovery_time_ms", round((perf_counter() - measured) * 1000, 3))
                 details.setdefault("recovery_point", "post-commit")
                 details.setdefault("production_evidence", self.production_evidence)
+                details.setdefault("environment", self.environment)
+                details.setdefault("run_id", self.run_id)
                 results.append(
                     DrillResult(
                         name=name,
@@ -185,6 +204,8 @@ class FailureDrillRunner:
                             "error": type(error).__name__,
                             "recovery_time_ms": round((perf_counter() - measured) * 1000, 3),
                             "production_evidence": self.production_evidence,
+                            "environment": self.environment,
+                            "run_id": self.run_id,
                         },
                     )
                 )
@@ -194,8 +215,36 @@ class FailureDrillRunner:
             started_at=started,
             completed_at=completed,
             drills=tuple(results),
+            environment=self.environment,
             production_evidence=self.production_evidence,
         )
+
+    def _failed_report(self, started: str, error: str) -> FailureDrillReport:
+        completed = self.clock().astimezone(UTC).isoformat()
+        return FailureDrillReport(
+            status="failed",
+            started_at=started,
+            completed_at=completed,
+            drills=tuple(
+                DrillResult(
+                    name=name,
+                    status="failed",
+                    attempts=0,
+                    details={
+                        "error": error,
+                        "environment": self.environment,
+                        "run_id": self.run_id,
+                        "production_evidence": False,
+                    },
+                )
+                for name in self.NAMES
+            ),
+            environment=self.environment,
+            production_evidence=False,
+        )
+
+    def _id(self, label: str) -> str:
+        return f"drill-{self.run_id[:16]}-{label}"
 
     def _default_hook(self, name: str) -> Callable[[], Mapping[str, Any]]:
         """Return a deterministic exercise against the temporary control plane."""
@@ -238,7 +287,7 @@ class FailureDrillRunner:
                 separators=(",", ":"),
             ).encode()
             checksum = hashlib.sha256(payload).hexdigest()
-            manifest_id = "drill-ingestion-manifest"
+            manifest_id = self._id("ingestion-manifest")
             with self.engine.begin() as connection:
                 connection.execute(
                     CollectionManifest.__table__.insert().values(
@@ -260,12 +309,12 @@ class FailureDrillRunner:
                 clock=self.clock,
             )
             identity = tokens.create_identity(
-                "drill-ingestion-collector",
+                self._id("ingestion-collector"),
                 scopes=["ingest"],
                 providers=["drill"],
                 surfaces=["drill_observation"],
                 owner="local",
-                identity_id="drill-ingestion-collector",
+                identity_id=self._id("ingestion-collector"),
             )
             token = tokens.issue_for_secret(
                 identity["identity_id"],
@@ -277,7 +326,7 @@ class FailureDrillRunner:
             claims = tokens.validate(token, required_scope="ingest")
             envelope = {
                 "manifest_id": manifest_id,
-                "client_observation_id": "drill-receipt-1",
+                "client_observation_id": self._id("receipt-1"),
                 "environment": "testing",
                 "provider": "drill",
                 "observation_type": "drill_observation",
@@ -302,18 +351,18 @@ class FailureDrillRunner:
         def collector_reboot_outbox_replay() -> Mapping[str, Any]:
             now = self.clock().astimezone(UTC)
             envelope = ObservationEnvelope(
-                manifest_id="drill-manifest",
-                client_observation_id="drill-observation-1",
+                manifest_id=self._id("manifest"),
+                client_observation_id=self._id("observation-1"),
                 environment="testing",
-                collector_id="drill-collector",
+                collector_id=self._id("collector"),
                 provider="nba",
                 observation_type="canonical_game_ledger",
-                scope={"surface": "canonical_game_ledger", "game_id": "drill-game"},
+                scope={"surface": "canonical_game_ledger", "game_id": self._id("game")},
                 season="2025-26",
                 cutoff=now.isoformat(),
                 retrieved_at=now.isoformat(),
                 schema_version=1,
-                payload={"surface": "canonical_game_ledger", "rows": [{"game_id": "drill-game"}]},
+                payload={"surface": "canonical_game_ledger", "rows": [{"game_id": self._id("game")}]},
             )
             with TemporaryDirectory(prefix="statsplus-outbox-") as directory:
                 path = str(Path(directory) / "outbox.sqlite3")
@@ -345,11 +394,11 @@ class FailureDrillRunner:
                 clock=lambda: current[0],
             )
             identity = tokens.create_identity(
-                "drill-collector",
+                self._id("collector"),
                 scopes=["ingest"],
                 providers=["nba"],
                 surfaces=["canonical_game_ledger"],
-                identity_id="drill-expiry-collector",
+                identity_id=self._id("expiry-collector"),
             )
             token = tokens.issue_for_secret(
                 identity["identity_id"], identity["secret"], scopes=["ingest"], ttl_seconds=1
@@ -392,8 +441,8 @@ class FailureDrillRunner:
             with self.engine.begin() as connection:
                 for state, reason in (("retry", "provider outage"), ("complete", "recovered")):
                     connection.execute(CollectorStatusTransition.__table__.insert().values(
-                        transition_id=f"drill-{state}",
-                        collector_id="drill-collector",
+                        transition_id=self._id(state),
+                        collector_id=self._id("collector"),
                         state=state,
                         reason=reason,
                         release_version="drill",
@@ -409,27 +458,7 @@ class FailureDrillRunner:
 
         def isolated_restore_replay() -> Mapping[str, Any]:
             if self.production_evidence:
-                if self.restore_adapter is None:
-                    raise ValueError("postgres_restore_adapter_required")
-                evidence = self.restore_adapter()
-                if not isinstance(evidence, Mapping):
-                    raise ValueError("postgres_restore_evidence_malformed")
-                required = {
-                    "backup_created", "restored", "ledger_validated",
-                    "pointers_validated", "audit_validated",
-                    "provenance_validated", "pbp_repair_validated",
-                    "replay_validated",
-                }
-                if not required <= set(evidence):
-                    raise ValueError("postgres_restore_evidence_incomplete")
-                if not all(bool(evidence[key]) for key in required):
-                    raise ValueError("postgres_restore_evidence_failed")
-                return {
-                    **dict(evidence),
-                    "adapter": "postgres_configured",
-                    "production_evidence": True,
-                    "verified": True,
-                }
+                return self._query_restored_database()
             from sqlite3 import connect
             from app.models.canonical_game_ledger import (
                 CanonicalGameLedgerGame,
@@ -444,11 +473,19 @@ class FailureDrillRunner:
                 PublicationVersion,
             )
 
+            restore_publication = self._id("restore-publication")
+            restore_stream = self._id("restore-stream")
+            restore_observation = self._id("restore-observation")
+            restore_collector = self._id("restore-collector")
+            restore_game = self._id("restore-game")
+            restore_audit = self._id("restore-audit")
+            restore_job = self._id("restore-job")
+
             with self.engine.begin() as connection:
                 now = self.clock().astimezone(UTC)
                 publication = {
-                    "publication_id": "restore-publication",
-                    "stream_key": "restore_stream",
+                    "publication_id": restore_publication,
+                    "stream_key": restore_stream,
                     "season": "2025-26",
                     "cutoff": now,
                     "version": 1,
@@ -467,11 +504,11 @@ class FailureDrillRunner:
                     connection.execute(PublicationVersion.__table__.insert().values(**publication))
                 if connection.execute(
                     PublicationPointer.__table__.select().where(
-                        PublicationPointer.stream_key == "restore_stream"
+                        PublicationPointer.stream_key == restore_stream
                     )
                 ).first() is None:
                     connection.execute(PublicationPointer.__table__.insert().values(
-                        stream_key="restore_stream",
+                        stream_key=restore_stream,
                         active_publication_id=publication["publication_id"],
                         previous_publication_id=None,
                         fence=1,
@@ -479,23 +516,23 @@ class FailureDrillRunner:
                     ))
                 if connection.execute(
                     CollectionObservation.__table__.select().where(
-                        CollectionObservation.observation_id == "restore-observation"
+                        CollectionObservation.observation_id == restore_observation
                     )
                 ).first() is None:
                     connection.execute(CollectionObservation.__table__.insert().values(
-                        observation_id="restore-observation",
-                        client_observation_id="restore-observation",
-                        collector_id="restore-collector",
+                        observation_id=restore_observation,
+                        client_observation_id=restore_observation,
+                        collector_id=restore_collector,
                         manifest_id=None,
                         environment="testing",
                         provider="pbp",
                         observation_type="canonical_game_ledger",
-                        scope=json.dumps({"surface": "canonical_game_ledger", "game_id": "restore-game"}),
+                        scope=json.dumps({"surface": "canonical_game_ledger", "game_id": restore_game}),
                         season="2025-26",
                         cutoff=now,
                         schema_version=1,
                         checksum="o" * 64,
-                        payload=json.dumps({"game_id": "restore-game"}),
+                        payload=json.dumps({"game_id": restore_game}),
                         payload_bytes=28,
                         retrieved_at=now,
                         accepted_at=now,
@@ -503,37 +540,37 @@ class FailureDrillRunner:
                 if connection.execute(
                     PublicationObservation.__table__.select().where(
                         PublicationObservation.publication_id == publication["publication_id"],
-                        PublicationObservation.observation_id == "restore-observation",
+                        PublicationObservation.observation_id == restore_observation,
                     )
                 ).first() is None:
                     connection.execute(PublicationObservation.__table__.insert().values(
                         publication_id=publication["publication_id"],
-                        observation_id="restore-observation",
+                        observation_id=restore_observation,
                         role="restore_evidence",
-                        slice_key="restore-game",
+                        slice_key=restore_game,
                         created_at=now,
                     ))
                 if connection.execute(
                     AuditEvent.__table__.select().where(
-                        AuditEvent.event_id == "restore-audit"
+                        AuditEvent.event_id == restore_audit
                     )
                 ).first() is None:
                     connection.execute(AuditEvent.__table__.insert().values(
-                        event_id="restore-audit",
+                        event_id=restore_audit,
                         actor="drill",
                         action="restore.verify",
-                        resource="restore-publication",
+                        resource=restore_publication,
                         reason="restore drill",
                         details=json.dumps({"replay": True}),
                         created_at=now,
                     ))
                 if connection.execute(
                     CanonicalGameLedgerGame.__table__.select().where(
-                        CanonicalGameLedgerGame.game_id == "restore-game"
+                        CanonicalGameLedgerGame.game_id == restore_game
                     )
                 ).first() is None:
                     connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-                        game_id="restore-game",
+                        game_id=restore_game,
                         season="2025-26",
                         season_type="Regular Season",
                         game_date=now.date(),
@@ -542,7 +579,7 @@ class FailureDrillRunner:
                         away_team_id=2,
                         away_team_tricode="BBB",
                         status="final",
-                        source_observation_id="restore-observation",
+                        source_observation_id=restore_observation,
                         checksum="g" * 64,
                         retrieved_at=now,
                         updated_at=now,
@@ -555,8 +592,8 @@ class FailureDrillRunner:
                     connection.execute(LedgerBackfillState.__table__.insert().values(
                         season="2025-26",
                         cutoff=now,
-                        cursor_game_id="restore-game",
-                        completed_game_ids=json.dumps(["restore-game"]),
+                        cursor_game_id=restore_game,
+                        completed_game_ids=json.dumps([restore_game]),
                         failed_game_ids=json.dumps([]),
                         status="complete",
                         updated_at=now,
@@ -564,7 +601,7 @@ class FailureDrillRunner:
                     ))
                 if connection.execute(
                     LedgerPublication.__table__.select().where(
-                        LedgerPublication.stream_key == "restore_stream",
+                        LedgerPublication.stream_key == restore_stream,
                         LedgerPublication.season == "2025-26",
                         LedgerPublication.window_kind == "season",
                         LedgerPublication.window_games == 0,
@@ -572,14 +609,14 @@ class FailureDrillRunner:
                     )
                 ).first() is None:
                     connection.execute(LedgerPublication.__table__.insert().values(
-                        stream_key="restore_stream",
+                        stream_key=restore_stream,
                         season="2025-26",
                         window_kind="season",
                         window_games=0,
                         as_of=now.date(),
                         status="complete",
                         checksum="l" * 64,
-                        payload=json.dumps({"rows": [{"game_id": "restore-game"}]}),
+                        payload=json.dumps({"rows": [{"game_id": restore_game}]}),
                         game_count=1,
                         team_count=2,
                         retrieved_at=now,
@@ -587,12 +624,12 @@ class FailureDrillRunner:
                     ))
                 if connection.execute(
                     CompositionJob.__table__.select().where(
-                        CompositionJob.job_id == "restore-job"
+                        CompositionJob.job_id == restore_job
                     )
                 ).first() is None:
                     connection.execute(CompositionJob.__table__.insert().values(
-                        job_id="restore-job",
-                        stream_key="restore_stream",
+                        job_id=restore_job,
+                        stream_key=restore_stream,
                         manifest_id=None,
                         season="2025-26",
                         cutoff=now,
@@ -608,12 +645,12 @@ class FailureDrillRunner:
                 target = connect(":memory:")
                 source.backup(target)
                 checks = {
-                    "ledger": "SELECT game_id FROM canonical_game_ledger_games WHERE game_id = 'restore-game'",
-                    "pointers": "SELECT stream_key FROM publication_pointers WHERE stream_key = 'restore_stream' AND active_publication_id = 'restore-publication'",
-                    "audit": "SELECT event_id FROM collection_audit_events WHERE event_id = 'restore-audit'",
-                    "provenance": "SELECT publication_id FROM publication_observations WHERE publication_id = 'restore-publication'",
+                    "ledger": f"SELECT game_id FROM canonical_game_ledger_games WHERE game_id = '{restore_game}'",
+                    "pointers": f"SELECT stream_key FROM publication_pointers WHERE stream_key = '{restore_stream}' AND active_publication_id = '{restore_publication}'",
+                    "audit": f"SELECT event_id FROM collection_audit_events WHERE event_id = '{restore_audit}'",
+                    "provenance": f"SELECT publication_id FROM publication_observations WHERE publication_id = '{restore_publication}'",
                     "pbp_repair": "SELECT season FROM canonical_game_ledger_backfill WHERE season = '2025-26' AND status = 'complete'",
-                    "replay": "SELECT job_id FROM composition_jobs WHERE job_id = 'restore-job'",
+                    "replay": f"SELECT job_id FROM composition_jobs WHERE job_id = '{restore_job}'",
                 }
                 restored_checks = {
                     name: bool(target.execute(statement).fetchone())
@@ -640,6 +677,7 @@ class FailureDrillRunner:
                 "replay_validated": restored_checks["replay"],
                 "sla_claimed": False,
                 "adapter": "sqlite_unit",
+                "environment": "unit",
                 "production_evidence": False,
                 "verified": replayed_rows == restored_rows and all(restored_checks.values()),
             }
@@ -655,11 +693,99 @@ class FailureDrillRunner:
         }
         return hooks[name]
 
+    def _query_restored_database(self) -> Mapping[str, Any]:
+        """Validate a disposable restored Postgres database by querying it.
+
+        The operator supplies the URL of the restored isolated database, not a
+        JSON assertion callback.  Every reported check below is measured from
+        rows in that database, so a control-plane command cannot manufacture a
+        passing restore artifact.
+        """
+
+        if not self.restored_database_url:
+            raise ValueError("restored_isolated_database_url_required")
+        started = perf_counter()
+        if str(self.restored_database_url) in {
+            str(self.production_database_url),
+            str(self.engine.url),
+        }:
+            raise ValueError("restored_database_must_be_disposable_and_separate")
+        restored = create_engine(self.restored_database_url)
+        try:
+            if restored.dialect.name != "postgresql":
+                raise ValueError("production_restore_requires_postgres")
+            table_names = set(inspect(restored).get_table_names())
+            required_tables = {
+                "canonical_game_ledger_games",
+                "canonical_game_ledger_backfill",
+                "publication_pointers",
+                "publication_versions",
+                "publication_observations",
+                "collection_audit_events",
+                "composition_jobs",
+            }
+            if not required_tables <= table_names:
+                raise ValueError("restored_database_schema_incomplete")
+            with restored.connect() as connection:
+                measured = {
+                    "ledger_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM canonical_game_ledger_games "
+                        "WHERE status IN ('final', 'completed')"
+                    )).scalar_one()),
+                    "pointer_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM publication_pointers p "
+                        "JOIN publication_versions v "
+                        "ON v.publication_id = p.active_publication_id"
+                    )).scalar_one()),
+                    "provenance_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM publication_observations"
+                    )).scalar_one()),
+                    "audit_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM collection_audit_events"
+                    )).scalar_one()),
+                    "pbp_repair_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM canonical_game_ledger_backfill "
+                        "WHERE status = 'complete'"
+                    )).scalar_one()),
+                    "replay_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM composition_jobs "
+                        "WHERE status IN ('queued', 'succeeded')"
+                    )).scalar_one()),
+                }
+            checks = {
+                "ledger_validated": measured["ledger_rows"] > 0,
+                "pointers_validated": measured["pointer_rows"] > 0,
+                "provenance_validated": measured["provenance_rows"] > 0,
+                "audit_validated": measured["audit_rows"] > 0,
+                "pbp_repair_validated": measured["pbp_repair_rows"] > 0,
+                "replay_validated": measured["replay_rows"] > 0,
+            }
+            recovery_time_ms = round((perf_counter() - started) * 1000, 3)
+            return {
+                **measured,
+                **checks,
+                "adapter": "postgres_disposable_restore",
+                "environment": "postgres_isolated",
+                "recovery_time_ms": recovery_time_ms,
+                "recovery_data_point": {
+                    "observed_at": self.clock().astimezone(UTC).isoformat(),
+                    "query_duration_ms": recovery_time_ms,
+                },
+                "production_evidence": True,
+                "verified": all(checks.values()),
+            }
+        finally:
+            restored.dispose()
+
 
 def run_failure_drills(
     *, hooks: Mapping[str, Callable[[], Any]] | None = None,
     clock: Callable[[], datetime] | None = None,
     database_url: str | None = None,
+    environment: str = "unit",
+    isolated: bool = False,
+    production_database_url: str | None = None,
+    restored_database_url: str | None = None,
     require_production_evidence: bool = False,
     restore_adapter: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -667,6 +793,10 @@ def run_failure_drills(
 
     return FailureDrillRunner(
         database_url=database_url,
+        environment=environment,
+        isolated=isolated,
+        production_database_url=production_database_url,
+        restored_database_url=restored_database_url,
         clock=clock,
         restore_adapter=restore_adapter,
     ).run(
