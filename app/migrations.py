@@ -475,6 +475,24 @@ def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
     ))
 
 
+def _upgrade_collector_release_status(connection: Connection) -> None:
+    """Persist bounded machine release evidence for operator diagnostics."""
+
+    table = "collector_identities"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "release_version": "VARCHAR(64)",
+        "release_checksum": "VARCHAR(64)",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -506,6 +524,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(20, "020_operator_control", _upgrade_operator_control),
     Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
     Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
+    Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
 )
 
 

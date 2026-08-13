@@ -2112,6 +2112,23 @@ incomplete attempts. Maintenance runs publication pruning after reconciliation
 and observation GC, while active/previous/rollback provenance remains
 protected.
 
+Collector release health crosses a separate machine-authenticated status seam.
+It persists only a validated 64-character release identifier/checksum pair and
+the report time on `collector_identities`; arbitrary fields, secrets, payloads,
+and player data do not cross that seam. Migration 023 adds the checksum column
+for existing deployments.
+
+Admin diagnostics join publication streams to their active pointer/version and
+join usage to the database lease. Stream availability is registry-derived:
+`never_schedule` is always `unavailable` and cannot be activated. Otherwise a
+missing active version is `missing`; active versions use the closed freshness
+rule thresholds (`cutoff_current` one hour, `daily_recheck` 24 hours,
+`seven_day` seven days) against the injected clock. Age and retry values are
+clamped to finite non-negative integers. Usage reports the configured 24-hour
+poll/envelope/byte ceilings, one active database lease as concurrency, the
+counter reset instant, and lease retry timing. Diagnostics expose identifiers
+and operational metadata only.
+
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap
 window claims an encrypted one-time delivery; the admin metadata endpoint
