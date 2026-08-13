@@ -2328,6 +2328,8 @@ class PublicationService(_SessionService):
                 if (
                     not isinstance(scope, Mapping)
                     or scope.get("surface") != "canonical_game_ledger"
+                    or str(scope.get("game_id") or "")
+                    != str(provenance[observation.observation_id] or "")
                     or _aware(observation.cutoff) != governed_cutoff
                     or _aware(observation.retrieved_at) > _aware(manifest.collect_before)
                     or _aware(observation.accepted_at) > _aware(manifest.collect_before)

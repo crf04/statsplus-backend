@@ -169,6 +169,11 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
             "player_per36", season="2025-26", cutoff=now, payload=[],
             provenance={"obs-3": "game-3"},
         )
+    with pytest.raises(ControlPlaneError, match="scope_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-1": "game-relabeled"},
+        )
 
     # Composition remains legal after collect_before for evidence accepted
     # before the immutable deadline.
