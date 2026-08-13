@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy import insert, select, update
+from sqlalchemy.engine import Connection
+
+from app.models.collection_control import CompositionJob
 
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -16,6 +22,7 @@ from app.services.canonical_game_ledger import (
 )
 from app.services.ledger_derivations import (
     AssistLocationFact,
+    AssistLocationWindowMaterialization,
     PlayerPer36Fact,
     TeamWindowMaterialization,
     TraditionalOpponentFact,
@@ -23,6 +30,7 @@ from app.services.ledger_derivations import (
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_team_window,
+    materialize_assist_location_window,
 )
 
 
@@ -39,13 +47,22 @@ class LedgerMaterialization:
     player_per36: tuple[PlayerPer36Fact, ...]
     season_window: TeamWindowMaterialization
     l15_window: TeamWindowMaterialization
+    assist_location_season: AssistLocationWindowMaterialization
+    assist_location_l15: AssistLocationWindowMaterialization
 
 
 class LedgerMaterializationService:
     """Compose ledger-derived streams and record inactive publication metadata."""
 
-    def __init__(self, repository: CanonicalGameLedgerRepository, *, clock=None) -> None:
+    def __init__(
+        self,
+        repository: CanonicalGameLedgerRepository,
+        *,
+        publication_service=None,
+        clock=None,
+    ) -> None:
         self.repository = repository
+        self.publication_service = publication_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def compose(
@@ -55,6 +72,7 @@ class LedgerMaterializationService:
         season: str,
         as_of: date,
         expected_game_ids: frozenset[str] | None = None,
+        expected_l15_game_ids: Mapping[int, frozenset[str]] | None = None,
         team_ids: frozenset[int] | None = None,
         require_assist_locations: bool = False,
     ) -> LedgerMaterialization:
@@ -76,6 +94,8 @@ class LedgerMaterializationService:
             season=canonical_season,
             as_of=as_of,
             window_games=15,
+            expected_game_ids=expected_game_ids,
+            expected_team_game_ids=expected_l15_game_ids,
             team_ids=team_ids,
         )
         if not season_window.complete:
@@ -94,6 +114,26 @@ class LedgerMaterializationService:
             assist_status = "unavailable"
             assist_reason = "assist-location evidence is incomplete"
         per36 = derive_player_per36_facts(eligible, season=canonical_season, cutoff=as_of)
+        if team_ids is None or expected_game_ids is None:
+            raise LedgerMaterializationUnavailable(
+                "assist-location windows require exact governed teams and game IDs"
+            )
+        assist_season = materialize_assist_location_window(
+            eligible,
+            season=canonical_season,
+            as_of=as_of,
+            expected_game_ids=expected_game_ids,
+            team_ids=team_ids,
+        )
+        assist_l15 = materialize_assist_location_window(
+            eligible,
+            season=canonical_season,
+            as_of=as_of,
+            window_games=15,
+            expected_game_ids=expected_game_ids,
+            expected_team_game_ids=expected_l15_game_ids,
+            team_ids=team_ids,
+        )
         result = LedgerMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -102,6 +142,8 @@ class LedgerMaterializationService:
             player_per36=per36,
             season_window=season_window,
             l15_window=l15_window,
+            assist_location_season=assist_season,
+            assist_location_l15=assist_l15,
         )
         retrieved_at = self.clock()
         publications = tuple(
@@ -117,22 +159,97 @@ class LedgerMaterializationService:
                 team_count=len(season_window.teams),
                 retrieved_at=retrieved_at,
                 reason=reason,
+                payload=_payload_json(payload),
             )
             for stream_key, payload, window_kind, window_games, status, reason in (
                 ("traditional_opponent", traditional, "season", 0, "complete", None),
-                ("assist_locations", assists, "season", 0, assist_status, assist_reason),
+                ("assist_locations_season", assist_season.teams, "season", 0, assist_status, assist_reason),
+                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, assist_status, assist_reason),
                 ("player_per36", per36, "season", 0, "complete", None),
                 ("team_matchups_season", season_window.teams, "season", 0, "complete", None),
                 ("team_matchups_l15", l15_window.teams, "rolling_games", 15, "complete", None),
             )
         )
         self.repository.publish_metadata_batch(publications)
+        if self.publication_service is not None:
+            provenance = {
+                game.source_observation_id: game.game_id
+                for game in eligible
+            }
+            cutoff = datetime.combine(as_of, datetime.min.time(), timezone.utc)
+            for stream_key, payload in (
+                ("traditional_opponent", traditional),
+                ("assist_locations", {
+                    "season": assist_season.teams,
+                    "l15": assist_l15.teams,
+                }),
+                ("player_per36", per36),
+            ):
+                self.publication_service.compose_inactive_ledger(
+                    stream_key,
+                    season=canonical_season,
+                    cutoff=cutoff,
+                    payload=json.loads(_payload_json(payload)),
+                    provenance=provenance,
+                )
         return result
 
 
+class LedgerCorrectionQueue:
+    """Atomically enqueue every derived slice invalidated by a correction."""
+
+    STREAMS = ("traditional_opponent", "assist_locations", "player_per36")
+
+    def __init__(self, *, clock=None) -> None:
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def __call__(self, connection: Connection, game: CanonicalGame) -> None:
+        table = CompositionJob.__table__
+        cutoff = datetime.combine(game.game_date, datetime.min.time(), timezone.utc)
+        now = self.clock()
+        for stream_key in self.STREAMS:
+            existing = connection.execute(select(table.c.job_id).where(
+                table.c.stream_key == stream_key,
+                table.c.season == game.season,
+                table.c.cutoff == cutoff,
+            )).scalar_one_or_none()
+            if existing is not None:
+                connection.execute(
+                    update(table).where(table.c.job_id == existing).values(
+                        status="queued",
+                        attempts=0,
+                        updated_at=now,
+                        last_error=None,
+                    )
+                )
+            else:
+                connection.execute(insert(table).values(
+                    job_id=str(uuid4()),
+                    stream_key=stream_key,
+                    manifest_id=None,
+                    season=game.season,
+                    cutoff=cutoff,
+                    status="queued",
+                    attempts=0,
+                    created_at=now,
+                    updated_at=now,
+                    last_error=None,
+                ))
+
+
 def _payload_checksum(payload: object) -> str:
-    encoded = json.dumps(payload, default=_json_default, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    encoded = _payload_json(payload).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _payload_json(payload: object) -> str:
+    return json.dumps(
+        payload,
+        default=_json_default,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _json_default(value: object) -> object:
@@ -157,4 +274,5 @@ __all__ = [
     "LedgerMaterialization",
     "LedgerMaterializationService",
     "LedgerMaterializationUnavailable",
+    "LedgerCorrectionQueue",
 ]

@@ -67,6 +67,33 @@ def _catalog_payload(kind, *, future=False):
     }]}
 
 
+def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+
+    version = publications.compose_inactive_ledger(
+        "traditional_opponent",
+        season="2025-26",
+        cutoff=now,
+        payload=[{"team_id": 1, "opponent_points": 99}],
+        provenance={"pbp:game-1": "game-1", "pbp:game-2": "game-2"},
+    )
+
+    assert version.status == "candidate"
+    assert publications.get_historical_payload(version.publication_id) == [
+        {"opponent_points": 99, "team_id": 1}
+    ]
+    with control_db.connect() as connection:
+        evidence = connection.execute(select(PublicationObservation).where(
+            PublicationObservation.publication_id == version.publication_id,
+        )).mappings().all()
+    assert {(row["observation_id"], row["slice_key"]) for row in evidence} == {
+        ("pbp:game-1", "game-1"),
+        ("pbp:game-2", "game-2"),
+    }
+
+
 @pytest.fixture
 def control_db(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")

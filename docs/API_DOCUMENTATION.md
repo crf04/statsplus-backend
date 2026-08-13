@@ -1047,7 +1047,8 @@ The service stores resumable cursor/completed/failed progress and reports an
 incomplete season as unavailable rather than exposing a partial publication.
 
 Each accepted observation is one atomic Canonical Game Ledger unit: one game
-identity, two team fact sets, and all participating player FullGame facts.
+identity, two team fact sets, and exactly the FullGame players named by the
+governed participant evidence, including zero-minute participants.
 Repeated normalized checksums are idempotent. A correction with the same
 canonical game identity replaces the complete game and all dependent facts in
 one transaction. Invalid counts, missing active participants, contradictory
@@ -1061,10 +1062,12 @@ summed. Season and exact Regular Season L15 team windows require League
 Complete evidence for all 30 teams, normalize team count totals to per-48 from
 the retained effective team-minute denominator, use population sigma and deterministic
 competition ranks, and stay unavailable before the L15 15-game floor. These
-streams produce inactive publication metadata only and do not activate a
-public Matchups reader or change frontend behavior. PBP-versus-legacy
-semantic differences are retained as adjudication evidence rather than
-treated as false byte-parity failures.
+streams persist complete derived payloads and inactive candidate publications
+with normalized provenance; they do not activate a public Matchups reader or
+change frontend behavior. Corrections atomically enqueue affected slices.
+PBP-versus-legacy symmetric identity and semantic differences are retained as
+adjudication evidence, and zero or unequal comparison sets cannot claim exact
+parity.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

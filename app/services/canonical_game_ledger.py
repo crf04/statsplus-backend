@@ -16,10 +16,10 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, inspect, select
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -68,6 +68,10 @@ ASSIST_LOCATION_FIELDS = (
 
 class LedgerValidationError(ValueError):
     """A candidate game cannot be published without losing governed facts."""
+
+
+class LedgerSchemaUnavailable(RuntimeError):
+    """Migration 024 has not provisioned the Canonical Game Ledger schema."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,7 @@ class CanonicalGame:
     player_facts: tuple[PlayerGameFact, ...]
     source_observation_id: str
     retrieved_at: datetime
+    participant_ids_by_team: tuple[tuple[int, tuple[int, ...]], ...]
     season_type: str = REGULAR_SEASON_TYPE
     status: str = "final"
     checksum: str | None = None
@@ -389,9 +394,9 @@ def _sum_team_facts(
         if field_name != "rebounds"
     }
     values["rebounds"] = sum(player.rebounds for player in players)
-    # Team-results payloads are authoritative when available, but only for
-    # fields they explicitly publish.  We never invent a total from a
-    # provider's percentage or a derived rate.
+    # Team-results payloads are diagnostic only.  Canonical facts are always
+    # sums of the complete participating-player primitive set; an explicitly
+    # published provider total must agree rather than overwriting those sums.
     aliases = {
         "points": ("Points", "PTS", "points"),
         "field_goals_made": ("FGM", "field_goals_made"),
@@ -414,7 +419,11 @@ def _sum_team_facts(
     for field_name, names in aliases.items():
         raw = _raw_value(total, *names)
         if raw is not None:
-            values[field_name] = _integer(raw, field_name) or 0
+            diagnostic = _integer(raw, field_name) or 0
+            if diagnostic != values[field_name]:
+                raise LedgerValidationError(
+                    f"PBP team aggregate {field_name} does not reconcile with player facts"
+                )
     return TeamGameFact(
         team_id=team_id,
         team_tricode=team_tricode,
@@ -430,6 +439,49 @@ def _sum_team_facts(
     )
 
 
+def _participant_evidence(
+    observation: Mapping[str, Any] | None,
+    *,
+    participant_ids_by_team: Mapping[int, Iterable[int]] | None,
+    home_team_id: int,
+    away_team_id: int,
+) -> dict[int, set[int]]:
+    """Normalize the provider's complete game-participant roster.
+
+    FullGame box-score rows cannot prove they were not truncated.  A separate
+    roster/participant observation is therefore mandatory and must match the
+    retained rows exactly, including zero-minute participants.
+    """
+
+    supplied = participant_ids_by_team
+    if supplied is None and observation is not None:
+        raw = observation.get("participant_ids_by_team")
+        if isinstance(raw, Mapping):
+            supplied = {
+                int(team_id): tuple(values)
+                for team_id, values in raw.items()
+                if isinstance(values, Iterable) and not isinstance(values, (str, bytes, bytearray))
+            }
+    if supplied is None:
+        raise LedgerValidationError("provider participant evidence is required for a complete game")
+    expected_teams = {home_team_id, away_team_id}
+    normalized: dict[int, set[int]] = {}
+    for raw_team_id, raw_players in supplied.items():
+        team_id = _integer(raw_team_id, "participant_team_id") or 0
+        if team_id not in expected_teams:
+            raise LedgerValidationError("participant evidence contains a team outside the game")
+        player_ids = {
+            _integer(player_id, "participant_player_id") or 0
+            for player_id in raw_players
+        }
+        if not player_ids or 0 in player_ids:
+            raise LedgerValidationError("participant evidence contains an invalid player identity")
+        normalized[team_id] = player_ids
+    if set(normalized) != expected_teams:
+        raise LedgerValidationError("participant evidence must cover both exact game teams")
+    return normalized
+
+
 def canonical_game_from_pbp(
     observation: Any,
     *,
@@ -437,6 +489,7 @@ def canonical_game_from_pbp(
     season: str | None = None,
     source_observation_id: str | None = None,
     retrieved_at: datetime | None = None,
+    participant_ids_by_team: Mapping[int, Iterable[int]] | None = None,
 ) -> CanonicalGame:
     """Normalize a recorded/live PBP game-stats observation into a ledger game.
 
@@ -534,6 +587,20 @@ def canonical_game_from_pbp(
     away_players = tuple(player for player in players if player.team_id == away_id)
     if not home_players or not away_players:
         raise LedgerValidationError("a complete game must contain both event teams")
+    participant_evidence = _participant_evidence(
+        raw_observation,
+        participant_ids_by_team=participant_ids_by_team,
+        home_team_id=home_id,
+        away_team_id=away_id,
+    )
+    observed_participants = {
+        home_id: {player.player_id for player in home_players},
+        away_id: {player.player_id for player in away_players},
+    }
+    if participant_evidence != observed_participants:
+        raise LedgerValidationError(
+            "FullGame player facts must exactly match provider participant evidence"
+        )
 
     team_result_map: dict[int, Mapping[str, Any]] = {}
     if isinstance(team_results, Mapping):
@@ -572,6 +639,10 @@ def canonical_game_from_pbp(
         player_facts=tuple(players),
         source_observation_id=observation_id,
         retrieved_at=retrieved,
+        participant_ids_by_team=tuple(
+            (team_id, tuple(sorted(player_ids)))
+            for team_id, player_ids in sorted(participant_evidence.items())
+        ),
     ).with_checksum()
 
 
@@ -596,6 +667,7 @@ def game_checksum(game: CanonicalGame) -> str:
             "away_team_id": game.away_team_id,
             "away_team_tricode": game.away_team_tricode,
             "season_type": game.season_type,
+            "participant_ids_by_team": game.participant_ids_by_team,
         },
         "teams": [_fact_payload(value) for value in sorted(game.team_facts, key=lambda item: item.team_id)],
         "players": [_fact_payload(value) for value in sorted(game.player_facts, key=lambda item: (item.team_id, item.player_id))],
@@ -651,7 +723,7 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             raise LedgerValidationError(f"{label}.possessions must be finite and non-negative")
 
 
-def validate_complete_game(game: CanonicalGame, *, minimum_active_players_per_team: int = 5) -> CanonicalGame:
+def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     """Validate the complete-game invariant at the domain boundary."""
 
     if not isinstance(game.season_type, str) or game.season_type != REGULAR_SEASON_TYPE:
@@ -691,8 +763,6 @@ def validate_complete_game(game: CanonicalGame, *, minimum_active_players_per_te
         raise LedgerValidationError("a complete game must contain exactly two team fact sets")
     if not isinstance(game.player_facts, Sequence) or not game.player_facts:
         raise LedgerValidationError("a complete game must contain player facts")
-    if isinstance(minimum_active_players_per_team, bool) or minimum_active_players_per_team < 1:
-        raise LedgerValidationError("minimum_active_players_per_team must be positive")
     player_ids: set[tuple[int, int]] = set()
     global_player_ids: set[int] = set()
     team_identity = {
@@ -711,7 +781,7 @@ def validate_complete_game(game: CanonicalGame, *, minimum_active_players_per_te
             raise LedgerValidationError("team fact has a contradictory tricode")
         if fact.is_home != expected_home:
             raise LedgerValidationError("team fact has a contradictory home/away identity")
-    active_by_team: dict[int, set[int]] = {game.home_team_id: set(), game.away_team_id: set()}
+    observed_by_team: dict[int, set[int]] = {game.home_team_id: set(), game.away_team_id: set()}
     for fact in game.player_facts:
         _validate_count_primitives(fact, label="player_fact")
         key = (fact.team_id, fact.player_id)
@@ -721,15 +791,61 @@ def validate_complete_game(game: CanonicalGame, *, minimum_active_players_per_te
             raise LedgerValidationError("a player may belong to only one team in a game")
         player_ids.add(key)
         global_player_ids.add(fact.player_id)
-        if fact.team_id not in active_by_team:
+        if fact.team_id not in observed_by_team:
             raise LedgerValidationError("player fact is outside the game identity")
         expected_tricode, _ = team_identity[fact.team_id]
         if fact.team_tricode != expected_tricode:
             raise LedgerValidationError("player fact has a contradictory team tricode")
-        if fact.minutes > 0:
-            active_by_team[fact.team_id].add(fact.player_id)
-    if any(len(players) < minimum_active_players_per_team for players in active_by_team.values()):
-        raise LedgerValidationError("a complete game must cover both teams' active participants")
+        observed_by_team[fact.team_id].add(fact.player_id)
+    if (
+        not isinstance(game.participant_ids_by_team, Sequence)
+        or len(game.participant_ids_by_team) != 2
+    ):
+        raise LedgerValidationError("a complete game requires participant evidence for two teams")
+    participant_evidence: dict[int, set[int]] = {}
+    for team_id, participant_ids in game.participant_ids_by_team:
+        ids = tuple(participant_ids)
+        if team_id in participant_evidence or len(ids) != len(set(ids)):
+            raise LedgerValidationError("participant evidence contains duplicate identities")
+        if (
+            isinstance(team_id, bool)
+            or not isinstance(team_id, int)
+            or any(isinstance(player_id, bool) or not isinstance(player_id, int) or player_id <= 0 for player_id in ids)
+        ):
+            raise LedgerValidationError("participant evidence contains invalid identities")
+        participant_evidence[team_id] = set(ids)
+    if participant_evidence != observed_by_team:
+        raise LedgerValidationError(
+            "player facts must exactly match provider participant evidence"
+        )
+    players_by_team = {
+        team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
+        for team_id in observed_by_team
+    }
+    for team_fact in game.team_facts:
+        team_players = players_by_team[team_fact.team_id]
+        for field_name in COUNT_FIELDS:
+            if getattr(team_fact, field_name) != sum(
+                getattr(player, field_name) for player in team_players
+            ):
+                raise LedgerValidationError(
+                    f"team_fact.{field_name} must reconcile with player primitives"
+                )
+        expected_minutes = sum(player.minutes for player in team_players) / 5.0
+        if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
+            raise LedgerValidationError(
+                "team_fact.team_minutes must reconcile with player minutes"
+            )
+        player_possessions = tuple(player.possessions for player in team_players)
+        expected_possessions = (
+            sum(value for value in player_possessions if value is not None)
+            if player_possessions and all(value is not None for value in player_possessions)
+            else None
+        )
+        if team_fact.possessions != expected_possessions:
+            raise LedgerValidationError(
+                "team_fact.possessions must reconcile with player primitives"
+            )
     if not isinstance(game.source_observation_id, str) or not game.source_observation_id.strip():
         raise LedgerValidationError("source_observation_id is required")
     if not isinstance(game.retrieved_at, datetime):
@@ -746,22 +862,29 @@ def validate_complete_game(game: CanonicalGame, *, minimum_active_players_per_te
 class CanonicalGameLedgerRepository:
     """Temporary-DB friendly atomic repository for complete games and progress."""
 
-    def __init__(self, engine: Engine, *, minimum_active_players_per_team: int = 5) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        correction_sink: Callable[[Connection, CanonicalGame], None] | None = None,
+    ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store ledger facts")
         self.engine = engine
-        self.minimum_active_players_per_team = minimum_active_players_per_team
-        self.ensure_schema()
-
-    def ensure_schema(self) -> None:
-        for model in (
-            CanonicalGameLedgerGame,
-            CanonicalGameLedgerTeamFact,
-            CanonicalGameLedgerPlayerFact,
-            LedgerBackfillState,
-            LedgerPublication,
-        ):
-            model.__table__.create(self.engine, checkfirst=True)
+        self.correction_sink = correction_sink
+        required = {
+            CanonicalGameLedgerGame.__tablename__,
+            CanonicalGameLedgerTeamFact.__tablename__,
+            CanonicalGameLedgerPlayerFact.__tablename__,
+            LedgerBackfillState.__tablename__,
+            LedgerPublication.__tablename__,
+        }
+        missing = sorted(required - set(inspect(engine).get_table_names()))
+        if missing:
+            raise LedgerSchemaUnavailable(
+                "Canonical Game Ledger schema is unavailable; apply migration 024 "
+                f"before constructing the repository (missing: {', '.join(missing)})"
+            )
 
     def replace_game(self, game: CanonicalGame) -> LedgerWriteResult:
         """Insert or atomically replace one complete game.
@@ -771,37 +894,16 @@ class CanonicalGameLedgerRepository:
         game, including the checksum identity record.
         """
 
-        candidate = validate_complete_game(
-            game,
-            minimum_active_players_per_team=self.minimum_active_players_per_team,
-        )
+        candidate = validate_complete_game(game)
         tables = self._tables()
         with self.engine.begin() as connection:
-            existing = connection.execute(
-                select(tables["game"]).where(tables["game"].c.game_id == candidate.game_id)
-            ).mappings().one_or_none()
-            if existing is not None:
-                if self._identity_changed(existing, candidate):
-                    raise LedgerValidationError("a correction cannot change a game's canonical identity")
-                if existing["checksum"] == candidate.checksum:
-                    return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
-            self._delete_game(connection, candidate.game_id, tables)
-            connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
-            connection.execute(insert(tables["team"]), [self._team_values(candidate.game_id, value) for value in candidate.team_facts])
-            connection.execute(insert(tables["player"]), [self._player_values(candidate.game_id, value) for value in candidate.player_facts])
-        return LedgerWriteResult(
-            candidate.game_id,
-            candidate.checksum or "",
-            existing is None,
-            existing is not None,
-            len(candidate.player_facts),
-        )
+            return self._replace_candidate(connection, candidate, tables)
 
     def replace_games_atomic(self, games: Iterable[CanonicalGame]) -> tuple[LedgerWriteResult, ...]:
         """Validate every game before one transaction replaces all candidates."""
 
         candidates = tuple(
-            validate_complete_game(game, minimum_active_players_per_team=self.minimum_active_players_per_team)
+            validate_complete_game(game)
             for game in games
         )
         if not candidates:
@@ -812,20 +914,41 @@ class CanonicalGameLedgerRepository:
         results: list[LedgerWriteResult] = []
         with self.engine.begin() as connection:
             for candidate in candidates:
-                existing = connection.execute(
-                    select(tables["game"]).where(tables["game"].c.game_id == candidate.game_id)
-                ).mappings().one_or_none()
-                if existing is not None and self._identity_changed(existing, candidate):
-                    raise LedgerValidationError("a correction cannot change a game's canonical identity")
-                if existing is not None and existing["checksum"] == candidate.checksum:
-                    results.append(LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0))
-                    continue
-                self._delete_game(connection, candidate.game_id, tables)
-                connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
-                connection.execute(insert(tables["team"]), [self._team_values(candidate.game_id, value) for value in candidate.team_facts])
-                connection.execute(insert(tables["player"]), [self._player_values(candidate.game_id, value) for value in candidate.player_facts])
-                results.append(LedgerWriteResult(candidate.game_id, candidate.checksum or "", existing is None, existing is not None, len(candidate.player_facts)))
+                results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
+
+    def _replace_candidate(
+        self,
+        connection: Connection,
+        candidate: CanonicalGame,
+        tables: Mapping[str, Any],
+    ) -> LedgerWriteResult:
+        existing = connection.execute(
+            select(tables["game"]).where(tables["game"].c.game_id == candidate.game_id)
+        ).mappings().one_or_none()
+        if existing is not None and self._identity_changed(existing, candidate):
+            raise LedgerValidationError("a correction cannot change a game's canonical identity")
+        if existing is not None and existing["checksum"] == candidate.checksum:
+            return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
+        self._delete_game(connection, candidate.game_id, tables)
+        connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
+        connection.execute(
+            insert(tables["team"]),
+            [self._team_values(candidate.game_id, value) for value in candidate.team_facts],
+        )
+        connection.execute(
+            insert(tables["player"]),
+            [self._player_values(candidate.game_id, value) for value in candidate.player_facts],
+        )
+        if existing is not None and self.correction_sink is not None:
+            self.correction_sink(connection, candidate)
+        return LedgerWriteResult(
+            candidate.game_id,
+            candidate.checksum or "",
+            existing is None,
+            existing is not None,
+            len(candidate.player_facts),
+        )
 
     def get_game(self, game_id: str) -> CanonicalGame | None:
         tables = self._tables()
@@ -918,6 +1041,33 @@ class CanonicalGameLedgerRepository:
                 ))
                 connection.execute(insert(table).values(values))
 
+    def get_publication(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        window_kind: str,
+        window_games: int,
+        as_of: date,
+    ) -> LedgerPublicationRecord | None:
+        """Read one historical materialized payload without activating a route."""
+
+        table = LedgerPublication.__table__
+        with self.engine.connect() as connection:
+            row = connection.execute(select(table).where(
+                table.c.stream_key == stream_key,
+                table.c.season == validate_canonical_season(season),
+                table.c.window_kind == window_kind,
+                table.c.window_games == window_games,
+                table.c.as_of == as_of,
+            )).mappings().one_or_none()
+        if row is None:
+            return None
+        return LedgerPublicationRecord(**{
+            field_name: row[field_name]
+            for field_name in LedgerPublicationRecord.__dataclass_fields__
+        })
+
     def _tables(self) -> dict[str, Any]:
         return {
             "game": CanonicalGameLedgerGame.__table__,
@@ -986,6 +1136,7 @@ class LedgerPublicationRecord:
     team_count: int
     retrieved_at: datetime
     reason: str | None = None
+    payload: str = "{}"
 
 
 def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str, Any]], player_rows: Sequence[Mapping[str, Any]]) -> CanonicalGame:
@@ -1003,6 +1154,10 @@ def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str
         player_facts=players,
         source_observation_id=game_row["source_observation_id"],
         retrieved_at=assume_utc(game_row["retrieved_at"]),
+        participant_ids_by_team=tuple(
+            (team_id, tuple(sorted(row["player_id"] for row in player_rows if row["team_id"] == team_id)))
+            for team_id in sorted({row["team_id"] for row in team_rows})
+        ),
         season_type=game_row["season_type"],
         status=game_row["status"],
         checksum=game_row["checksum"],
@@ -1017,6 +1172,7 @@ __all__ = [
     "LedgerBackfillProgress",
     "LedgerGameSummary",
     "LedgerPublicationRecord",
+    "LedgerSchemaUnavailable",
     "LedgerValidationError",
     "LedgerWriteResult",
     "PlayerGameFact",

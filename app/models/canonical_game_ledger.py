@@ -168,6 +168,7 @@ class LedgerPublication(Base):
     as_of = Column(Date, primary_key=True)
     status = Column(String(24), nullable=False)
     checksum = Column(String(64), nullable=False)
+    payload = Column(Text, nullable=False)
     game_count = Column(Integer, nullable=False)
     team_count = Column(Integer, nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)

@@ -15,12 +15,15 @@ from app.models.canonical_game_ledger import (
     CanonicalGameLedgerTeamFact,
     LedgerPublication,
 )
+from app.models.collection_control import CompositionJob
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerValidationError,
     LedgerPublicationRecord,
+    LedgerSchemaUnavailable,
     canonical_game_from_pbp,
 )
+from app.services.ledger_materialization import LedgerCorrectionQueue
 
 
 def _event() -> dict[str, object]:
@@ -47,7 +50,8 @@ def _game():
         {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}},
-      "home_team_abbreviation": "LAL", "away_team_abbreviation": "SAS", "date": "2024-11-15"
+      "home_team_abbreviation": "LAL", "away_team_abbreviation": "SAS", "date": "2024-11-15",
+      "participant_ids_by_team": {"1610612747": [101, 102], "1610612759": [201, 202]}
     }""")
     return canonical_game_from_pbp(
         payload,
@@ -56,16 +60,27 @@ def _game():
     )
 
 
+def test_repository_requires_versioned_ledger_migration(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'unmigrated.sqlite3'}")
+    try:
+        CanonicalGameLedgerRepository(engine)
+    except LedgerSchemaUnavailable as error:
+        assert "migration 024" in str(error)
+    else:
+        raise AssertionError("unmigrated ledger repository unexpectedly constructed")
+
+
 def test_complete_game_is_inserted_idempotently_and_correction_replaces_all_facts(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)
-    repository = CanonicalGameLedgerRepository(engine, minimum_active_players_per_team=2)
+    repository = CanonicalGameLedgerRepository(engine)
     game = _game()
 
     first = repository.replace_game(game)
     repeated = repository.replace_game(game)
     corrected = replace(
         game,
+        team_facts=(replace(game.team_facts[0], points=17), game.team_facts[1]),
         player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
     ).with_checksum()
     correction = repository.replace_game(corrected)
@@ -81,14 +96,15 @@ def test_complete_game_is_inserted_idempotently_and_correction_replaces_all_fact
 
 def test_incomplete_participants_fail_before_any_row_is_written(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
-    repository = CanonicalGameLedgerRepository(engine, minimum_active_players_per_team=2)
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
     game = _game()
     incomplete = replace(game, player_facts=game.player_facts[:-1]).with_checksum()
 
     try:
         repository.replace_game(incomplete)
     except LedgerValidationError as error:
-        assert "active participants" in str(error)
+        assert "participant evidence" in str(error)
     else:
         raise AssertionError("incomplete game unexpectedly published")
     assert repository.get_game(game.game_id) is None
@@ -96,11 +112,13 @@ def test_incomplete_participants_fail_before_any_row_is_written(tmp_path):
 
 def test_failed_batch_keeps_prior_game_and_does_not_leak_staged_correction(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
-    repository = CanonicalGameLedgerRepository(engine, minimum_active_players_per_team=2)
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
     game = _game()
     repository.replace_game(game)
     corrected = replace(
         game,
+        team_facts=(replace(game.team_facts[0], points=18), game.team_facts[1]),
         player_facts=(replace(game.player_facts[0], points=10), *game.player_facts[1:]),
     ).with_checksum()
     bad = replace(game, game_id="0022400002", player_facts=game.player_facts[:-1]).with_checksum()
@@ -118,6 +136,30 @@ def test_failed_batch_keeps_prior_game_and_does_not_leak_staged_correction(tmp_p
         assert connection.execute(select(CanonicalGameLedgerGame)).all()
         assert connection.execute(select(CanonicalGameLedgerTeamFact)).all()
         assert connection.execute(select(CanonicalGameLedgerPlayerFact)).all()
+
+
+def test_correction_atomically_enqueues_every_affected_materialization(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'correction.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(
+            clock=lambda: datetime(2024, 11, 17, tzinfo=timezone.utc)
+        ),
+    )
+    game = _game()
+    repository.replace_game(game)
+    corrected = replace(
+        game,
+        team_facts=(replace(game.team_facts[0], points=17), game.team_facts[1]),
+        player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
+    ).with_checksum()
+
+    repository.replace_game(corrected)
+
+    with engine.connect() as connection:
+        jobs = connection.execute(select(CompositionJob)).scalars().all()
+    assert len(jobs) == 3
 
 
 def test_full_game_preserves_optional_assist_locations_and_fences_envelope_identity():
@@ -222,6 +264,10 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                 "home_team_id": "1610612747",
                 "away_team_id": "1610612759",
                 "date": "2024-11-15",
+                "participant_ids_by_team": {
+                    "1610612747": [101, 102],
+                    "1610612759": [201, 202],
+                },
             }
         )
     )
@@ -240,7 +286,8 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
 
 def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
-    repository = CanonicalGameLedgerRepository(engine, minimum_active_players_per_team=1)
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
     retrieved = datetime(2024, 11, 16, tzinfo=timezone.utc)
     records = tuple(
         LedgerPublicationRecord(

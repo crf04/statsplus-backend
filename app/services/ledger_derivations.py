@@ -113,6 +113,31 @@ class TeamWindowMaterialization:
     teams: tuple[TeamWindowMetric, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AssistLocationWindowMetric:
+    team_id: int
+    team_tricode: str
+    game_ids: tuple[str, ...]
+    game_count: int
+    counts: Mapping[str, int]
+    per48: Mapping[str, float]
+    league_average: Mapping[str, float]
+    population_sigma: Mapping[str, float]
+    competition_rank: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class AssistLocationWindowMaterialization:
+    season: str
+    as_of: date
+    window_kind: str
+    window_games: int
+    complete: bool
+    reason: str | None
+    governed_game_ids: tuple[str, ...]
+    teams: tuple[AssistLocationWindowMetric, ...]
+
+
 TEAM_METRICS = (
     "points",
     "rebounds",
@@ -129,6 +154,15 @@ TEAM_METRICS = (
     "personal_fouls",
 )
 NBA_TEAM_IDS = frozenset(1610612737 + index for index in range(30))
+ASSIST_METRICS = (
+    "two_point_assists",
+    "three_point_assists",
+    "arc3_assists",
+    "corner3_assists",
+    "at_rim_assists",
+    "short_mid_range_assists",
+    "long_mid_range_assists",
+)
 
 
 def _regular_games(games: Iterable[CanonicalGame], *, cutoff: date | None = None) -> tuple[CanonicalGame, ...]:
@@ -297,10 +331,13 @@ def _window_game_ids(
     cutoff: date,
     window_games: int | None,
     expected_game_ids: frozenset[str] | None,
+    expected_team_game_ids: Mapping[int, frozenset[str]] | None,
 ) -> tuple[tuple[str, ...], dict[int, tuple[str, ...]], str | None]:
     governed = tuple(game for game in _regular_games(games, cutoff=cutoff) if game.season == season)
     by_id = {game.game_id: game for game in governed}
-    if expected_game_ids is not None and set(by_id) != set(expected_game_ids):
+    if expected_game_ids is None:
+        return tuple(sorted(by_id)), {}, "exact governed game IDs are required"
+    if set(by_id) != set(expected_game_ids):
         return tuple(sorted(by_id)), {}, "ledger is not complete through the requested cutoff"
     per_team: dict[int, list[CanonicalGame]] = defaultdict(list)
     for game in governed:
@@ -315,6 +352,12 @@ def _window_game_ids(
         }
         if any(len(team_games) < window_games for team_games in per_team.values()):
             return tuple(sorted(by_id)), {}, "L15 is unavailable until every governed team has 15 eligible games"
+        actual = {
+            team_id: frozenset(game.game_id for game in team_games)
+            for team_id, team_games in per_team.items()
+        }
+        if expected_team_game_ids is None or actual != dict(expected_team_game_ids):
+            return tuple(sorted(by_id)), {}, "L15 game IDs do not match the governed exact window"
     return tuple(sorted({game.game_id for team_games in per_team.values() for game in team_games})), {
         team_id: tuple(sorted({game.game_id for game in team_games}))
         for team_id, team_games in per_team.items()
@@ -328,6 +371,7 @@ def materialize_team_window(
     as_of: date,
     window_games: int | None = None,
     expected_game_ids: frozenset[str] | None = None,
+    expected_team_game_ids: Mapping[int, frozenset[str]] | None = None,
     team_ids: frozenset[int] | None = None,
 ) -> TeamWindowMaterialization:
     """Materialize an exact Season or L15 window with 30-team gates."""
@@ -340,6 +384,7 @@ def materialize_team_window(
         cutoff=as_of,
         window_games=window_games,
         expected_game_ids=expected_game_ids,
+        expected_team_game_ids=expected_team_game_ids,
     )
     if team_ids is not None:
         expected_teams = team_ids
@@ -373,11 +418,15 @@ def materialize_team_window(
         team_minutes = 0.0
         for game_id in game_ids:
             game = game_by_id[game_id]
-            fact = next(fact for fact in game.team_facts if fact.team_id == team_id)
-            team_codes[team_id] = fact.team_tricode
-            team_minutes += fact.team_minutes
+            defense = next(fact for fact in game.team_facts if fact.team_id == team_id)
+            opponent = next(
+                fact for fact in game.team_facts
+                if fact.team_id == defense.opponent_team_id
+            )
+            team_codes[team_id] = defense.team_tricode
+            team_minutes += defense.team_minutes
             for metric in TEAM_METRICS:
-                totals[metric] += float(getattr(fact, metric))
+                totals[metric] += float(getattr(opponent, metric))
         # FullGame stores the effective team-game minute denominator (the
         # player-minute total divided by five).  A regulation game is 48
         # minutes; overtime is normalized by its actual retained denominator.
@@ -399,7 +448,13 @@ def materialize_team_window(
         metric: math.sqrt(sum((values[metric] - averages[metric]) ** 2 for values in raw_by_team.values()) / len(raw_by_team))
         for metric in TEAM_METRICS
     }
-    ranks = {metric: competition_ranks({team_id: values[metric] for team_id, values in raw_by_team.items()}) for metric in TEAM_METRICS}
+    ranks = {
+        metric: competition_ranks(
+            {team_id: values[metric] for team_id, values in raw_by_team.items()},
+            descending=False,
+        )
+        for metric in TEAM_METRICS
+    }
     teams = tuple(
         TeamWindowMetric(
             team_id=team_id,
@@ -425,9 +480,119 @@ def materialize_team_window(
     )
 
 
+def materialize_assist_location_window(
+    games: Iterable[CanonicalGame],
+    *,
+    season: str,
+    as_of: date,
+    expected_game_ids: frozenset[str],
+    team_ids: frozenset[int],
+    window_games: int | None = None,
+    expected_team_game_ids: Mapping[int, frozenset[str]] | None = None,
+) -> AssistLocationWindowMaterialization:
+    """Materialize opponent assist locations for one exact governed window."""
+
+    supplied = tuple(games)
+    base = materialize_team_window(
+        supplied,
+        season=season,
+        as_of=as_of,
+        window_games=window_games,
+        expected_game_ids=expected_game_ids,
+        expected_team_game_ids=expected_team_game_ids,
+        team_ids=team_ids,
+    )
+    if not base.complete:
+        return AssistLocationWindowMaterialization(
+            season=base.season,
+            as_of=base.as_of,
+            window_kind=base.window_kind,
+            window_games=base.window_games,
+            complete=False,
+            reason=base.reason,
+            governed_game_ids=base.governed_game_ids,
+            teams=(),
+        )
+    game_by_id = {game.game_id: game for game in supplied}
+    counts_by_team: dict[int, dict[str, int]] = {}
+    values_by_team: dict[int, dict[str, float]] = {}
+    for team in base.teams:
+        counts = {metric: 0 for metric in ASSIST_METRICS}
+        denominator = 0.0
+        for game_id in team.game_ids:
+            game = game_by_id[game_id]
+            defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
+            denominator += defense.team_minutes
+            opponent_id = defense.opponent_team_id
+            for player in game.player_facts:
+                if player.team_id != opponent_id:
+                    continue
+                for metric in ASSIST_METRICS:
+                    value = getattr(player, metric)
+                    if value is None:
+                        raise LedgerDerivationUnavailable(
+                            "assist-location materialization requires complete player counts"
+                        )
+                    counts[metric] += value
+        if denominator <= 0:
+            raise LedgerDerivationUnavailable(
+                "assist-location materialization requires positive team minutes"
+            )
+        counts_by_team[team.team_id] = counts
+        values_by_team[team.team_id] = {
+            metric: counts[metric] * 48.0 / denominator
+            for metric in ASSIST_METRICS
+        }
+    averages = {
+        metric: sum(values[metric] for values in values_by_team.values()) / len(values_by_team)
+        for metric in ASSIST_METRICS
+    }
+    sigma = {
+        metric: math.sqrt(
+            sum((values[metric] - averages[metric]) ** 2 for values in values_by_team.values())
+            / len(values_by_team)
+        )
+        for metric in ASSIST_METRICS
+    }
+    ranks = {
+        metric: competition_ranks(
+            {team_id: values[metric] for team_id, values in values_by_team.items()},
+            descending=False,
+        )
+        for metric in ASSIST_METRICS
+    }
+    base_by_team = {team.team_id: team for team in base.teams}
+    teams = tuple(
+        AssistLocationWindowMetric(
+            team_id=team_id,
+            team_tricode=base_by_team[team_id].team_tricode,
+            game_ids=base_by_team[team_id].game_ids,
+            game_count=base_by_team[team_id].game_count,
+            counts=counts_by_team[team_id],
+            per48=values_by_team[team_id],
+            league_average=averages,
+            population_sigma=sigma,
+            competition_rank={metric: ranks[metric][team_id] for metric in ASSIST_METRICS},
+        )
+        for team_id in sorted(values_by_team)
+    )
+    return AssistLocationWindowMaterialization(
+        season=base.season,
+        as_of=base.as_of,
+        window_kind=base.window_kind,
+        window_games=base.window_games,
+        complete=True,
+        reason=None,
+        governed_game_ids=base.governed_game_ids,
+        teams=teams,
+    )
+
+
 __all__ = [
     "TEAM_METRICS",
     "AssistLocationFact",
+    "AssistLocationWindowMaterialization",
+    "AssistLocationWindowMetric",
     "LedgerDerivationUnavailable",
     "PlayerPer36Fact",
     "TeamWindowMaterialization",
@@ -438,4 +603,5 @@ __all__ = [
     "derive_player_per36_facts",
     "derive_traditional_opponent_facts",
     "materialize_team_window",
+    "materialize_assist_location_window",
 ]

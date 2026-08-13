@@ -784,10 +784,12 @@ counters); plus/minus and permanent period rows are not part of the ledger.
 invariants before deleting anything. A repeated checksum is idempotent; a
 new observation with the same game identity replaces the game, team facts,
 and player facts in one transaction. A failed or incomplete candidate leaves
-the prior correction and its checksum untouched. The repository creates its
-additive tables on an application database (never the read-only demo fixture)
-so historical rehearsal can run against a temporary database without
-activating a public reader.
+the prior correction and its checksum untouched. Provider participant evidence
+must exactly equal the retained player set (including zero-minute participants),
+and team aggregate rows are diagnostics that must reconcile with player count
+primitives rather than overwrite them. Migration `024_canonical_game_ledger`
+is the only schema owner; repository construction fails clearly when it has not
+run, and the read-only demo fixture is never eligible.
 
 `app.services.ledger_backfill.LedgerBackfillService` discovers final,
 non-postponed Regular Season Event Catalog games through an explicit cutoff,
@@ -810,10 +812,14 @@ team values are normalized to per-48 from the retained effective team-minute
 denominator (player minutes divided by five, with count-per-game fallback for
 hand-built replay facts), and competition ranks are deterministic with ties
 represented as `1, 1, 3`.
-`LedgerMaterializationService` records inactive stream metadata and never
-enables public Matchups routes. `ledger_parity` produces semantic PBP-versus-
-legacy differences for adjudication; it deliberately does not claim byte
-parity for provider percentages or rates.
+`LedgerMaterializationService` stores the complete derived payloads and creates
+inactive control-plane candidate versions with normalized game-observation
+provenance; corrections enqueue each affected derived slice in the same
+transaction. Historical rehearsal can read an immutable candidate payload but
+never enables public Matchups routes. `ledger_parity` records symmetric
+ledger-only and legacy-only identities plus traditional-opponent and per-36
+semantic evidence for adjudication; zero or unequal identity sets are never
+reported exact.
 
 ### Database-first game-log reads
 

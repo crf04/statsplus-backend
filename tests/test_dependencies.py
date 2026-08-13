@@ -87,6 +87,7 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
 
     from app.config.settings import RuntimeSettings
     from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
     from app.services.dfs_snapshot_cache import ProviderSnapshotCache
     from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 
@@ -97,6 +98,7 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
         providers={"dfs_enabled_providers": ("dabble", "prizepicks")},
     )
     engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
     monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
@@ -211,8 +213,10 @@ def test_rotowire_provider_is_constructed_only_after_both_runtime_gates(
     from sqlalchemy import create_engine
 
     from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
 
     engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
     monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
     constructor = Mock(return_value=Mock(name="rotowire_provider"))

@@ -55,6 +55,8 @@ class ApplicationDependencies:
     observation_ingestion: Any | None = None
     publication_service: Any | None = None
     collection_operations: Any | None = None
+    canonical_game_ledger_repository: Any | None = None
+    ledger_materialization_service: Any | None = None
 
 
 def build_dependencies(
@@ -130,6 +132,7 @@ def build_dependencies(
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
+    canonical_game_ledger_repository = ledger_materialization_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -157,6 +160,20 @@ def build_dependencies(
             min_event_catalog_games=collection_control.min_event_catalog_games,
             min_event_catalog_teams=collection_control.min_event_catalog_teams,
             min_athlete_catalog_identities=collection_control.min_athlete_catalog_identities,
+        )
+        from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+        from app.services.ledger_materialization import (
+            LedgerCorrectionQueue,
+            LedgerMaterializationService,
+        )
+
+        canonical_game_ledger_repository = CanonicalGameLedgerRepository(
+            engine,
+            correction_sink=LedgerCorrectionQueue(),
+        )
+        ledger_materialization_service = LedgerMaterializationService(
+            canonical_game_ledger_repository,
+            publication_service=publication_service,
         )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
@@ -429,6 +446,8 @@ def build_dependencies(
         observation_ingestion=observation_ingestion,
         publication_service=publication_service,
         collection_operations=collection_operations,
+        canonical_game_ledger_repository=canonical_game_ledger_repository,
+        ledger_materialization_service=ledger_materialization_service,
     )
 
 

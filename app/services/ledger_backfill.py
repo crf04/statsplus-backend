@@ -43,6 +43,10 @@ class LedgerAthleteCatalogReader(Protocol):
     def get_freshness(self, season: str, *, now: datetime) -> Mapping[str, object]: ...
 
 
+class LedgerParticipantCatalogReader(Protocol):
+    def get_participants(self, season: str, game_id: str) -> Mapping[int, Iterable[int]]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class BackfillResult:
     season: str
@@ -73,8 +77,9 @@ class LedgerBackfillService:
         provider: LedgerPBPProvider,
         event_catalog: LedgerEventCatalogReader,
         repository: CanonicalGameLedgerRepository,
-        athlete_catalog: LedgerAthleteCatalogReader | None = None,
-        reconciliation_sink: Callable[[str, Mapping[str, object]], None] | None = None,
+        athlete_catalog: LedgerAthleteCatalogReader,
+        participant_catalog: LedgerParticipantCatalogReader,
+        reconciliation_sink: Callable[[str, Mapping[str, object]], None],
         max_concurrency: int = 3,
         daily_recheck_days: int = 7,
         weekly_recheck_days: int = 30,
@@ -88,7 +93,17 @@ class LedgerBackfillService:
         self.event_catalog = event_catalog
         self.repository = repository
         self.athlete_catalog = athlete_catalog
+        self.participant_catalog = participant_catalog
         self.reconciliation_sink = reconciliation_sink
+        for collaborator, methods, label in (
+            (event_catalog, ("get_events", "get_freshness"), "event_catalog"),
+            (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
+            (participant_catalog, ("get_participants",), "participant_catalog"),
+        ):
+            if any(not callable(getattr(collaborator, method, None)) for method in methods):
+                raise TypeError(f"{label} does not satisfy the governed ledger contract")
+        if not callable(reconciliation_sink):
+            raise TypeError("reconciliation_sink must be callable")
         self.max_concurrency = max_concurrency
         self.daily_recheck_days = daily_recheck_days
         self.weekly_recheck_days = weekly_recheck_days
@@ -135,18 +150,26 @@ class LedgerBackfillService:
             game_id = str(event["nba_game_id"])
             try:
                 observation = self.provider.fetch_game_player_logs(game_id, season, season_type="Regular Season")
+                participants = self.participant_catalog.get_participants(season, game_id)
                 game = canonical_game_from_pbp(
                     observation,
                     event=event,
                     season=season,
                     source_observation_id=f"pbp:{game_id}:{now.isoformat()}",
                     retrieved_at=now,
+                    participant_ids_by_team=participants,
                 )
                 if athlete_ids is not None:
                     unknown = [player.player_id for player in game.player_facts if player.player_id not in athlete_ids]
                     if unknown:
-                        if self.reconciliation_sink is not None:
-                            self.reconciliation_sink(game_id, {"kind": "athlete_identity", "count": len(unknown)})
+                        self.reconciliation_sink(
+                            game_id,
+                            {
+                                "kind": "athlete_identity",
+                                "count": len(unknown),
+                                "player_ids": tuple(sorted(unknown)[:25]),
+                            },
+                        )
                         raise LedgerValidationError("PBP game contains an unresolved Athlete Catalog identity")
                 return game_id, game, None
             except (
@@ -228,18 +251,13 @@ class LedgerBackfillService:
 
     def _governed_events(self, season: str, *, through: datetime) -> tuple[dict[str, object], ...]:
         raw_events = self.event_catalog.get_events(season)
-        freshness_getter = getattr(self.event_catalog, "get_freshness", None)
-        if callable(freshness_getter):
-            try:
-                freshness = freshness_getter(season, now=through)
-            except TypeError:
-                freshness = freshness_getter(season)
-            if not isinstance(freshness, Mapping):
-                raise LedgerValidationError("Event Catalog freshness evidence is malformed")
-            fresh = freshness.get("fresh", freshness.get("is_fresh", False))
-            event_count = freshness.get("event_count")
-            if not fresh or (event_count is not None and int(event_count) != len(raw_events)):
-                raise LedgerValidationError("Event Catalog must be fresh and complete before backfill")
+        freshness = self.event_catalog.get_freshness(season, now=through)
+        if not isinstance(freshness, Mapping):
+            raise LedgerValidationError("Event Catalog freshness evidence is malformed")
+        fresh = freshness.get("fresh", freshness.get("is_fresh", False))
+        event_count = freshness.get("event_count")
+        if not fresh or event_count is None or int(event_count) != len(raw_events):
+            raise LedgerValidationError("Event Catalog must be fresh and complete before backfill")
         events = []
         for raw in raw_events:
             event = dict(raw)
@@ -275,8 +293,10 @@ class LedgerBackfillService:
                 targets.append(_Target(event, 1))
                 continue
             age_days = (now.date() - _event_datetime(event.get("scheduled_at")).date()).days
-            if age_days <= self.daily_recheck_days:
-                targets.append(_Target(event, 1))
+            if age_days <= self.daily_recheck_days and summary is not None:
+                last_fetch = _aware(summary.retrieved_at)
+                if now - last_fetch >= timedelta(hours=24):
+                    targets.append(_Target(event, 1))
             elif age_days <= self.weekly_recheck_days and summary is not None:
                 last_fetch = _aware(summary.retrieved_at)
                 if now - last_fetch >= timedelta(days=7):
@@ -292,19 +312,15 @@ class LedgerBackfillService:
             )
         )
 
-    def _athlete_ids(self, season: str, *, now: datetime) -> frozenset[int] | None:
-        if self.athlete_catalog is None:
-            return None
-        freshness_getter = getattr(self.athlete_catalog, "get_freshness", None)
-        if callable(freshness_getter):
-            try:
-                freshness = freshness_getter(season, now=now)
-            except TypeError:
-                freshness = freshness_getter(season)
-            if not isinstance(freshness, Mapping) or not freshness.get("is_fresh", freshness.get("fresh", False)):
-                raise LedgerValidationError("Athlete Catalog must be fresh before backfill")
+    def _athlete_ids(self, season: str, *, now: datetime) -> frozenset[int]:
+        freshness = self.athlete_catalog.get_freshness(season, now=now)
+        if not isinstance(freshness, Mapping) or not freshness.get("is_fresh", freshness.get("fresh", False)):
+            raise LedgerValidationError("Athlete Catalog must be fresh before backfill")
         rows = self.athlete_catalog.get_catalog(season, active_only=False)
-        return frozenset(int(row["player_id"]) for row in rows if row.get("player_id") is not None)
+        identities = frozenset(int(row["player_id"]) for row in rows if row.get("player_id") is not None)
+        if not identities:
+            raise LedgerValidationError("Athlete Catalog must contain governed identities")
+        return identities
 
     def _save_progress(
         self,
@@ -357,4 +373,5 @@ __all__ = [
     "LedgerBackfillService",
     "LedgerEventCatalogReader",
     "LedgerPBPProvider",
+    "LedgerParticipantCatalogReader",
 ]

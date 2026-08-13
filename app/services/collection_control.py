@@ -2223,6 +2223,66 @@ class PublicationService(_SessionService):
             session.flush()
         return publication
 
+    def compose_inactive_ledger(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        provenance: Mapping[str, str | None],
+        reason: str = "historical ledger rehearsal",
+    ) -> PublicationVersion:
+        """Persist a non-active governed ledger version with normalized provenance."""
+
+        encoded = _json(payload)
+        now = self.clock()
+        with self.session() as session, session.begin():
+            stream = session.get(PublicationStream, stream_key)
+            if stream is None or stream.provider != "ledger" or stream.enabled:
+                raise ControlPlaneError("inactive_ledger_stream_required")
+            if not provenance:
+                raise ControlPlaneError("ledger_provenance_required")
+            next_version = session.scalar(
+                select(PublicationVersion.version).where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                ).order_by(PublicationVersion.version.desc()).limit(1)
+            ) or 0
+            publication = PublicationVersion(
+                publication_id=_uuid(),
+                stream_key=stream_key,
+                season=season,
+                cutoff=_aware(cutoff),
+                version=int(next_version) + 1,
+                status="candidate",
+                checksum=_checksum(encoded),
+                payload=encoded,
+                created_at=now,
+                reason=reason,
+                fence=0,
+            )
+            session.add(publication)
+            for observation_id, slice_key in sorted(provenance.items()):
+                session.add(PublicationObservation(
+                    publication_id=publication.publication_id,
+                    observation_id=str(observation_id),
+                    role="ledger_game",
+                    slice_key=slice_key,
+                    created_at=now,
+                ))
+            session.flush()
+        return publication
+
+    def get_historical_payload(self, publication_id: str) -> Any:
+        """Read one inactive or superseded rehearsal payload by immutable ID."""
+
+        with self.session() as session:
+            publication = session.get(PublicationVersion, publication_id)
+            if publication is None:
+                raise ControlPlaneError("publication_not_found")
+            return json.loads(publication.payload)
+
     @staticmethod
     def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
                              cutoff: datetime, manifest_id: str | None = None) -> set[str]:

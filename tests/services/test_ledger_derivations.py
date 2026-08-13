@@ -1,20 +1,32 @@
 """Pure ledger derivation and ranking contracts."""
 
 from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 
 from app.services.ledger_derivations import (
     competition_ranks,
     derive_assist_location_facts,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
+    materialize_assist_location_window,
+    materialize_team_window,
 )
 from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
 from app.services.ledger_parity import compare_ledger_to_legacy
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from sqlalchemy import create_engine
+from app.services.collection_control import PublicationService
+from app.services.canonical_game_ledger import (
+    CanonicalGame,
+    CanonicalGameLedgerRepository,
+    PlayerGameFact,
+    TeamGameFact,
+)
+from app.migrations import run_migrations
+from sqlalchemy import create_engine, select
+from app.models.collection_control import PublicationVersion
+from app.models.canonical_game_ledger import LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -67,6 +79,168 @@ def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
 
 def test_competition_ranks_are_deterministic_and_leave_gaps_after_ties():
     assert competition_ranks({3: 10.0, 2: 10.0, 1: 7.0}) == {2: 1, 3: 1, 1: 3}
+    assert competition_ranks({3: 10.0, 2: 10.0, 1: 7.0}, descending=False) == {1: 1, 2: 2, 3: 2}
+
+
+def _league_games():
+    teams = list(range(1, 31))
+    games = []
+    for round_index in range(15):
+        for pair_index in range(15):
+            home = teams[pair_index]
+            away = teams[-1 - pair_index]
+            game_id = f"00225{round_index:02d}{pair_index:03d}"
+            facts = []
+            team_facts = []
+            for team_id, opponent_id, is_home in ((home, away, True), (away, home, False)):
+                assists = 4 + (team_id % 3)
+                facts.append(PlayerGameFact(
+                    player_id=1000 + team_id,
+                    player_name=f"Player {team_id}",
+                    team_id=team_id,
+                    team_tricode=f"T{team_id:02d}",
+                    minutes=240.0,
+                    points=10 + team_id,
+                    field_goals_made=5,
+                    field_goals_attempted=10,
+                    two_pointers_made=4,
+                    two_pointers_attempted=8,
+                    three_pointers_made=1,
+                    three_pointers_attempted=2,
+                    free_throws_made=0,
+                    free_throws_attempted=0,
+                    offensive_rebounds=1,
+                    defensive_rebounds=4,
+                    rebounds=5,
+                    assists=assists,
+                    turnovers=1,
+                    steals=1,
+                    blocks=0,
+                    personal_fouls=1,
+                    two_point_assists=2,
+                    three_point_assists=2,
+                    arc3_assists=1,
+                    corner3_assists=1,
+                    at_rim_assists=1,
+                    short_mid_range_assists=0,
+                    long_mid_range_assists=0,
+                ))
+                team_facts.append(TeamGameFact(
+                    team_id=team_id,
+                    team_tricode=f"T{team_id:02d}",
+                    opponent_team_id=opponent_id,
+                    opponent_team_tricode=f"T{opponent_id:02d}",
+                    is_home=is_home,
+                    points=10 + team_id,
+                    field_goals_made=5,
+                    field_goals_attempted=10,
+                    two_pointers_made=4,
+                    two_pointers_attempted=8,
+                    three_pointers_made=1,
+                    three_pointers_attempted=2,
+                    offensive_rebounds=1,
+                    defensive_rebounds=4,
+                    rebounds=5,
+                    assists=assists,
+                    turnovers=1,
+                    steals=1,
+                    personal_fouls=1,
+                    team_minutes=48.0,
+                ))
+            games.append(CanonicalGame(
+                game_id=game_id,
+                season="2025-26",
+                game_date=date(2025, 10, 1) + timedelta(days=round_index),
+                home_team_id=home,
+                home_team_tricode=f"T{home:02d}",
+                away_team_id=away,
+                away_team_tricode=f"T{away:02d}",
+                team_facts=tuple(team_facts),
+                player_facts=tuple(facts),
+                source_observation_id=f"obs:{game_id}",
+                retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
+                participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
+            ).with_checksum())
+        teams = [teams[0], teams[-1], *teams[1:-1]]
+    return tuple(games)
+
+
+def test_exact_l15_is_league_complete_and_defensive_ranks_are_ascending():
+    games = _league_games()
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_team_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert window.complete and len(window.teams) == 30
+    lowest = min(window.teams, key=lambda team: team.per48["points"])
+    assert lowest.competition_rank["points"] == 1
+    assist = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert assist.complete and len(assist.teams) == 30
+    assert all(team.game_count == 15 for team in assist.teams)
+
+
+def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'materialization.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    publications = PublicationService(
+        engine,
+        clock=lambda: datetime(2025, 11, 1, tzinfo=timezone.utc),
+    )
+    publications.register_default_streams()
+    games = _league_games()
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+
+    result = LedgerMaterializationService(
+        repository,
+        publication_service=publications,
+    ).compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+        require_assist_locations=True,
+    )
+
+    assert len(result.assist_location_season.teams) == 30
+    with engine.connect() as connection:
+        ledger_payloads = connection.execute(select(LedgerPublication.payload)).scalars().all()
+        candidates = connection.execute(select(PublicationVersion).where(
+            PublicationVersion.status == "candidate",
+        )).all()
+    assert len(ledger_payloads) == 6
+    assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
+    assert len(candidates) == 3
 
 
 def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():
@@ -77,8 +251,9 @@ def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():
         ({"game_id": game.game_id, "player_id": player.player_id, "PTS": player.points, "FG_PCT": 0.5},),
         season="2024-25",
     )
-    assert report.exact
+    assert not report.exact
     assert report.compared_count == 1
+    assert any(item.classification == "missing_legacy_identity" for item in report.differences)
 
     different = compare_ledger_to_legacy(
         (game,),
@@ -86,17 +261,18 @@ def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():
         season="2024-25",
     )
     assert different.adjudication_required
-    assert different.differences[0].field == "points"
+    assert any(item.field == "points" for item in different.differences)
 
 
 def test_materialization_fails_closed_before_a_30_team_window(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
-    repository = CanonicalGameLedgerRepository(engine, minimum_active_players_per_team=1)
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
     service = LedgerMaterializationService(repository)
 
     try:
         service.compose((_game(),), season="2024-25", as_of=_game().game_date)
     except LedgerMaterializationUnavailable as error:
-        assert "League Complete" in str(error) or "L15" in str(error)
+        assert "governed game IDs" in str(error) or "L15" in str(error)
     else:
         raise AssertionError("partial league window unexpectedly published")
