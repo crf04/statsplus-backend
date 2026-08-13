@@ -161,11 +161,7 @@ class PublicationStream(Base):
 class PublicationVersion(Base):
     __tablename__ = "publication_versions"
 
-    publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    publication_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
     season = Column(String(7), nullable=False)
     cutoff = Column(DateTime(timezone=True), nullable=False)
@@ -194,7 +190,11 @@ class PublicationObservation(Base):
 
     __tablename__ = "publication_observations"
 
-    publication_id = Column(String(36), primary_key=True)
+    publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     observation_id = Column(
         String(36),
         ForeignKey("collection_observations.observation_id", ondelete="RESTRICT"),

@@ -16,7 +16,6 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from app.models.collection_control import CollectionObservation
 from app.models.event_catalog import EventCatalogEntry
 
 from app.domain.nba_events import (
@@ -54,20 +53,24 @@ class LedgerAthleteCatalogReader(Protocol):
 
 
 class LedgerParticipantCatalogReader(Protocol):
-    def get_participants(self, season: str, game_id: str) -> Mapping[int, Iterable[int]]: ...
+    def get_participants(self, observation_id: str) -> Mapping[int, Iterable[int]]: ...
 
 
 class LedgerObservationRecorder(Protocol):
-    def accept(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> str: ...
+    def stage(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> tuple[str, Mapping[str, object]]: ...
+
+    def get_staged(self, observation_id: str) -> object: ...
 
 
 class CollectionObservationLedgerRecorder:
-    """Persist provider retrievals before they are eligible for the ledger."""
+    """Stage provider retrievals for atomic acceptance with a valid ledger game."""
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+        self._staged: dict[str, object] = {}
+        self._lock = threading.Lock()
 
-    def accept(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> str:
+    def stage(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> tuple[str, Mapping[str, object]]:
         document = (
             observation.to_dict(orient="records")
             if isinstance(observation, pd.DataFrame)
@@ -75,45 +78,48 @@ class CollectionObservationLedgerRecorder:
         )
         payload = json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
         observation_id = str(uuid4())
-        with self.engine.begin() as connection:
-            connection.execute(CollectionObservation.__table__.insert().values(
-                observation_id=observation_id,
-                client_observation_id=f"ledger:{game_id}:{observation_id}",
-                collector_id="railway-ledger",
-                manifest_id=None,
-                environment="server",
-                provider="pbp",
-                observation_type="canonical_game_ledger",
-                scope=json.dumps({"game_id": game_id}, sort_keys=True),
-                season=season,
-                cutoff=retrieved_at,
-                schema_version=1,
-                checksum=hashlib.sha256(payload.encode()).hexdigest(),
-                payload=payload,
-                payload_bytes=len(payload.encode()),
-                retrieved_at=retrieved_at,
-                accepted_at=retrieved_at,
-            ))
-        return observation_id
+        values = {
+            "observation_id": observation_id,
+            "client_observation_id": f"ledger:{game_id}:{observation_id}",
+            "collector_id": "railway-ledger",
+            "manifest_id": None,
+            "environment": "server",
+            "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps({"game_id": game_id}, sort_keys=True),
+            "season": season,
+            "cutoff": retrieved_at,
+            "schema_version": 1,
+            "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+            "payload": payload,
+            "payload_bytes": len(payload.encode()),
+            "retrieved_at": retrieved_at,
+            "accepted_at": retrieved_at,
+        }
+        with self._lock:
+            self._staged[observation_id] = document
+        return observation_id, values
+
+    def get_staged(self, observation_id: str) -> object:
+        with self._lock:
+            if observation_id not in self._staged:
+                raise LedgerValidationError("staged participant observation is required")
+            return self._staged[observation_id]
 
 
 class AcceptedObservationParticipantCatalog:
     """Read exact game participants from the accepted provider observation."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, recorder: LedgerObservationRecorder) -> None:
         self.engine = engine
+        self.recorder = recorder
 
-    def get_participants(self, season: str, game_id: str) -> Mapping[int, Iterable[int]]:
-        with self.engine.connect() as connection:
-            row = connection.execute(select(CollectionObservation.payload).where(
-                CollectionObservation.season == season,
-                CollectionObservation.observation_type == "canonical_game_ledger",
-                CollectionObservation.scope == json.dumps({"game_id": game_id}, sort_keys=True),
-            ).order_by(CollectionObservation.accepted_at.desc()).limit(1)).scalar_one_or_none()
-        if row is None:
-            raise LedgerValidationError("accepted participant observation is required")
-        document = json.loads(row)
+    def get_participants(self, observation_id: str) -> Mapping[int, Iterable[int]]:
+        document = self.recorder.get_staged(observation_id)
         rows = document if isinstance(document, list) else []
+        game_id = ""
+        if rows:
+            game_id = str(rows[0].get("GAME_ID", rows[0].get("GameId", "")))
         with self.engine.connect() as connection:
             event = connection.execute(select(
                 EventCatalogEntry.home_team_id,
@@ -191,7 +197,7 @@ class LedgerBackfillService:
             (event_catalog, ("get_events", "get_freshness"), "event_catalog"),
             (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
             (participant_catalog, ("get_participants",), "participant_catalog"),
-            (observation_recorder, ("accept",), "observation_recorder"),
+            (observation_recorder, ("stage", "get_staged"), "observation_recorder"),
         ):
             if any(not callable(getattr(collaborator, method, None)) for method in methods):
                 raise TypeError(f"{label} does not satisfy the governed ledger contract")
@@ -234,22 +240,22 @@ class LedgerBackfillService:
             lower_priority_remaining = 0
 
         athlete_ids = self._athlete_ids(season, now=now)
-        staged: list[CanonicalGame] = []
+        staged: list[tuple[CanonicalGame, Mapping[str, object]]] = []
         failures: list[str] = []
         lock = threading.Lock()
 
-        def fetch(target: _Target) -> tuple[str, CanonicalGame | None, str | None]:
+        def fetch(target: _Target) -> tuple[str, CanonicalGame | None, Mapping[str, object] | None, str | None]:
             event = target.event
             game_id = str(event["nba_game_id"])
             try:
                 observation = self.provider.fetch_game_player_logs(game_id, season, season_type="Regular Season")
-                observation_id = self.observation_recorder.accept(
+                observation_id, observation_values = self.observation_recorder.stage(
                     observation,
                     season=season,
                     game_id=game_id,
                     retrieved_at=now,
                 )
-                participants = self.participant_catalog.get_participants(season, game_id)
+                participants = self.participant_catalog.get_participants(observation_id)
                 game = canonical_game_from_pbp(
                     observation,
                     event=event,
@@ -271,7 +277,7 @@ class LedgerBackfillService:
                             },
                         )
                         raise LedgerValidationError("PBP game contains an unresolved Athlete Catalog identity")
-                return game_id, game, None
+                return game_id, game, observation_values, None
             except (
                 KeyError,
                 TypeError,
@@ -281,20 +287,20 @@ class LedgerBackfillService:
                 ProviderResponseError,
                 ProviderUnavailableError,
             ) as error:
-                return game_id, None, _safe_reason(error)
+                return game_id, None, None, _safe_reason(error)
 
         if selected:
             with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
                 futures = [executor.submit(fetch, target) for target in selected]
                 for future in as_completed(futures):
-                    game_id, game, error = future.result()
+                    game_id, game, observation_values, error = future.result()
                     if error is not None:
                         with lock:
                             failures.append(game_id)
                         continue
-                    if game is not None:
+                    if game is not None and observation_values is not None:
                         with lock:
-                            staged.append(game)
+                            staged.append((game, observation_values))
 
         if failures:
             self._save_progress(
@@ -321,9 +327,15 @@ class LedgerBackfillService:
                 reason="incomplete PBP evidence; prior publication retained",
             )
 
-        writes = self.repository.replace_games_atomic(staged) if staged else ()
+        writes = self.repository.replace_games_atomic(
+            (game for game, _observation in staged),
+            accepted_observations={
+                game.source_observation_id: observation
+                for game, observation in staged
+            },
+        ) if staged else ()
         resulting_ids = set(self.repository.game_checksums(season))
-        complete = expected_ids.issubset(resulting_ids)
+        complete = expected_ids == resulting_ids
         pending = tuple(sorted(expected_ids - resulting_ids))
         status = "complete" if complete else "unavailable"
         self._save_progress(
@@ -333,7 +345,7 @@ class LedgerBackfillService:
             failed=(),
             status=status,
             cursor=selected[-1].event.get("nba_game_id") if selected else None,
-            last_error=None if complete else "ledger is missing governed completed games",
+            last_error=None if complete else "ledger identities differ from governed completed games",
         )
         return BackfillResult(
             season=season,
@@ -346,7 +358,7 @@ class LedgerBackfillService:
             failed_game_ids=(),
             pending_game_ids=pending,
             lower_priority_remaining=lower_priority_remaining,
-            reason=None if complete else "incomplete ledger publication",
+            reason=None if complete else "ledger identities do not exactly match governance",
         )
 
     def _governed_events(self, season: str, *, through: datetime) -> tuple[dict[str, object], ...]:

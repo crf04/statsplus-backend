@@ -4,8 +4,10 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
+from sqlalchemy import select
 
 from app.migrations import run_migrations
+from app.models.collection_control import AuditEvent
 
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
@@ -132,3 +134,16 @@ def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
 
     assert artifact.status == "pending_adjudication"
     assert repository.latest("player_per36", game.season).artifact_id == artifact.artifact_id
+
+    approved = repository.adjudicate(
+        artifact.artifact_id,
+        decision="approved",
+        actor="operator@example.com",
+        reason="semantic differences reviewed",
+    )
+    with engine.connect() as connection:
+        audit = connection.execute(select(AuditEvent).where(
+            AuditEvent.resource == artifact.artifact_id,
+        )).first()
+    assert approved.decision == "approved"
+    assert audit is not None

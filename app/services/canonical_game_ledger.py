@@ -31,6 +31,7 @@ from app.models.canonical_game_ledger import (
     LedgerBackfillState,
     LedgerPublication,
 )
+from app.models.collection_control import CollectionObservation
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs
@@ -899,7 +900,12 @@ class CanonicalGameLedgerRepository:
         with self.engine.begin() as connection:
             return self._replace_candidate(connection, candidate, tables)
 
-    def replace_games_atomic(self, games: Iterable[CanonicalGame]) -> tuple[LedgerWriteResult, ...]:
+    def replace_games_atomic(
+        self,
+        games: Iterable[CanonicalGame],
+        *,
+        accepted_observations: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> tuple[LedgerWriteResult, ...]:
         """Validate every game before one transaction replaces all candidates."""
 
         candidates = tuple(
@@ -913,6 +919,14 @@ class CanonicalGameLedgerRepository:
         tables = self._tables()
         results: list[LedgerWriteResult] = []
         with self.engine.begin() as connection:
+            if accepted_observations is not None:
+                expected_observations = {game.source_observation_id for game in candidates}
+                if set(accepted_observations) != expected_observations:
+                    raise LedgerValidationError("accepted observations must exactly match candidate games")
+                connection.execute(
+                    CollectionObservation.__table__.insert(),
+                    [dict(accepted_observations[observation_id]) for observation_id in sorted(expected_observations)],
+                )
             for candidate in candidates:
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
@@ -940,7 +954,7 @@ class CanonicalGameLedgerRepository:
             insert(tables["player"]),
             [self._player_values(candidate.game_id, value) for value in candidate.player_facts],
         )
-        if existing is not None and self.correction_sink is not None:
+        if self.correction_sink is not None:
             self.correction_sink(connection, candidate)
         return LedgerWriteResult(
             candidate.game_id,

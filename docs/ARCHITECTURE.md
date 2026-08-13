@@ -831,6 +831,14 @@ assist locations Season/L15, and player per-36 Regular Season. Missing assist
 primitives retain only the assist last-good candidates. Migration
 `025_ledger_parity_artifacts` stores mandatory parity evidence, and pending
 adjudication blocks ledger stream activation.
+Migration `026_repair_publication_provenance_foreign_keys` removes the
+transient PublicationVersion self-reference and gives normalized provenance
+its publication cascade and accepted-observation restrict links. PBP responses
+remain staged until complete-game and identity validation succeeds; acceptance,
+ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime
+expectations come only from the active manifest and completed Regular Season
+Event Catalog entries. Traditional Season/L15 candidates contain complete
+30-team per-48, league-average, population-sigma, and ascending-rank payloads.
 
 ### Database-first game-log reads
 

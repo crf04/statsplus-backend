@@ -524,6 +524,68 @@ def _create_ledger_parity_artifacts(connection: Connection) -> None:
     LedgerParityArtifact.__table__.create(connection, checkfirst=True)
 
 
+def _repair_publication_provenance_foreign_keys(connection: Connection) -> None:
+    """Repair the transient #86 self-FK and add both provenance FKs."""
+
+    from app.models.collection_control import PublicationObservation, PublicationVersion
+
+    inspector = inspect(connection)
+    parity_table = "canonical_game_ledger_parity_artifacts"
+    parity_columns = {column["name"] for column in inspector.get_columns(parity_table)}
+    additions = {
+        "decision": "VARCHAR(16)",
+        "adjudicated_by": "VARCHAR(128)",
+        "adjudicated_at": "TIMESTAMP",
+        "adjudication_reason": "VARCHAR(255)",
+    }
+    for name, type_sql in additions.items():
+        if name not in parity_columns:
+            connection.execute(text(f"ALTER TABLE {parity_table} ADD COLUMN {name} {type_sql}"))
+    if connection.dialect.name == "sqlite":
+        version_rows = connection.execute(text("SELECT * FROM publication_versions")).mappings().all()
+        provenance_rows = connection.execute(text("SELECT * FROM publication_observations")).mappings().all()
+        connection.execute(text("DROP TABLE publication_observations"))
+        connection.execute(text("DROP TABLE publication_versions"))
+        PublicationVersion.__table__.create(connection)
+        PublicationObservation.__table__.create(connection)
+        if version_rows:
+            connection.execute(PublicationVersion.__table__.insert(), [dict(row) for row in version_rows])
+        if provenance_rows:
+            accepted = {
+                row["observation_id"]
+                for row in connection.execute(text("SELECT observation_id FROM collection_observations")).mappings()
+            }
+            versions = {row["publication_id"] for row in version_rows}
+            valid = [
+                dict(row) for row in provenance_rows
+                if row["publication_id"] in versions and row["observation_id"] in accepted
+            ]
+            if valid:
+                connection.execute(PublicationObservation.__table__.insert(), valid)
+        return
+    for foreign_key in inspector.get_foreign_keys("publication_versions"):
+        if foreign_key.get("referred_table") == "publication_versions" and foreign_key.get("name"):
+            connection.execute(text(
+                f'ALTER TABLE publication_versions DROP CONSTRAINT "{foreign_key["name"]}"'
+            ))
+    existing = {
+        (tuple(foreign_key.get("constrained_columns") or ()), foreign_key.get("referred_table"))
+        for foreign_key in inspector.get_foreign_keys("publication_observations")
+    }
+    if (("publication_id",), "publication_versions") not in existing:
+        connection.execute(text(
+            "ALTER TABLE publication_observations ADD CONSTRAINT "
+            "fk_publication_observations_publication FOREIGN KEY (publication_id) "
+            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+        ))
+    if (("observation_id",), "collection_observations") not in existing:
+        connection.execute(text(
+            "ALTER TABLE publication_observations ADD CONSTRAINT "
+            "fk_publication_observations_observation FOREIGN KEY (observation_id) "
+            "REFERENCES collection_observations(observation_id) ON DELETE RESTRICT"
+        ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -558,6 +620,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
     Migration(24, "024_canonical_game_ledger", _create_canonical_game_ledger_tables),
     Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
+    Migration(26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys),
 )
 
 

@@ -299,23 +299,30 @@ def build_dependencies(
             LedgerCorrectionQueue,
             LedgerMaterializationService,
         )
-        from app.services.ledger_parity import LedgerParityArtifactRepository
+        from app.services.ledger_parity import (
+            LedgerParityArtifactRepository,
+            LegacyParityDiagnosticReader,
+        )
 
         canonical_game_ledger_repository = CanonicalGameLedgerRepository(
             engine,
-            correction_sink=LedgerCorrectionQueue(),
+            correction_sink=LedgerCorrectionQueue(require_governance=True),
         )
         ledger_materialization_service = LedgerMaterializationService(
             canonical_game_ledger_repository,
             parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=LegacyParityDiagnosticReader(engine),
             publication_service=publication_service,
         )
+        ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
         ledger_backfill_service = LedgerBackfillService(
             provider=pbp_game_logs_provider,
             event_catalog=event_catalog_service,
             athlete_catalog=athlete_catalog_service,
-            participant_catalog=AcceptedObservationParticipantCatalog(engine),
-            observation_recorder=CollectionObservationLedgerRecorder(engine),
+            participant_catalog=AcceptedObservationParticipantCatalog(
+                engine, ledger_observation_recorder
+            ),
+            observation_recorder=ledger_observation_recorder,
             reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
                 season=str(details.get("season", settings.nba.current_season)),
                 kind="ledger_athlete",

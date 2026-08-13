@@ -20,6 +20,14 @@ from app.services.ledger_backfill import (
 )
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.models.event_catalog import EventCatalogEntry
+from app.models.collection_control import (
+    ActiveSeason,
+    CollectionManifest,
+    CollectionObservation,
+    CompositionJob,
+)
+from app.services.ledger_materialization import LedgerCorrectionQueue
+from sqlalchemy import select
 
 
 class _Events:
@@ -42,7 +50,7 @@ class _Athletes:
 
 
 class _Participants:
-    def get_participants(self, season, game_id):
+    def get_participants(self, observation_id):
         return {1610612747: (2544, 203507), 1610612759: (201935,)}
 
 
@@ -61,8 +69,33 @@ class _Provider:
 
 
 class _Recorder:
-    def accept(self, observation, *, season, game_id, retrieved_at):
-        return f"accepted:{game_id}"
+    def __init__(self):
+        self.count = 0
+
+    def stage(self, observation, *, season, game_id, retrieved_at):
+        self.count += 1
+        observation_id = f"accepted:{game_id}:{self.count}"
+        return observation_id, {
+            "observation_id": observation_id,
+            "client_observation_id": observation_id,
+            "collector_id": "test",
+            "manifest_id": None,
+            "environment": "testing",
+            "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": "{}",
+            "season": season,
+            "cutoff": retrieved_at,
+            "schema_version": 1,
+            "checksum": observation_id,
+            "payload": "{}",
+            "payload_bytes": 2,
+            "retrieved_at": retrieved_at,
+            "accepted_at": retrieved_at,
+        }
+
+    def get_staged(self, observation_id):
+        return []
 
 
 def _event():
@@ -110,9 +143,26 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
             first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
             last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
         ))
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2024-25", phase="Regular Season", status="active",
+            cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            activated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2024-25",
+            cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            collect_before=datetime(2024, 11, 17, tzinfo=timezone.utc),
+            accepted_versions="[1]", scopes="[\"canonical_game_ledger\"]",
+            checksum="ledger-manifest", status="active",
+            created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ))
     payload = _payload()
     provider = _Provider(payload)
-    repository = CanonicalGameLedgerRepository(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(require_governance=True),
+    )
     service = LedgerBackfillService(
         provider=provider,
         event_catalog=_Events(_event()),
@@ -134,6 +184,8 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     assert progress is not None
     assert progress.status == "complete"
     assert progress.completed_game_ids == frozenset({"0022400001"})
+    with engine.connect() as connection:
+        assert len(connection.execute(select(CompositionJob)).all()) == 6
 
 
 def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(tmp_path):
@@ -161,7 +213,7 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
             season="2024-25",
             source_observation_id=f"seed:{game_id}",
             retrieved_at=now - retrieved_age,
-            participant_ids_by_team=_Participants().get_participants("2024-25", game_id),
+            participant_ids_by_team=_Participants().get_participants(game_id),
         ))
 
     provider = _Provider(
@@ -212,15 +264,58 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
     frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
     recorder = CollectionObservationLedgerRecorder(engine)
 
-    observation_id = recorder.accept(
+    observation_id, _values = recorder.stage(
         frame,
         season="2024-25",
         game_id="0022400001",
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
-    participants = AcceptedObservationParticipantCatalog(engine).get_participants(
-        "2024-25", "0022400001"
+    participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
+        observation_id
     )
 
     assert observation_id
     assert participants == {1610612747: [2544, 203507], 1610612759: [201935]}
+
+    second = frame.copy()
+    second.loc[second.index[0], "EntityId"] = "999999"
+    second_id, _second_values = recorder.stage(
+        second,
+        season="2024-25",
+        game_id="0022400001",
+        retrieved_at=datetime(2024, 11, 16, 0, 1, tzinfo=timezone.utc),
+    )
+    second_participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
+        second_id
+    )
+
+    assert participants[1610612747][0] == 2544
+    assert second_participants[1610612747][0] == 999999
+
+
+def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'invalid.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+
+    class MissingParticipant:
+        def get_participants(self, observation_id):
+            return {1610612747: (2544,), 1610612759: (201935,)}
+
+    result = LedgerBackfillService(
+        provider=_Provider(_payload()),
+        event_catalog=_Events(_event()),
+        athlete_catalog=_Athletes(),
+        participant_catalog=MissingParticipant(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+    ).refresh("2024-25")
+
+    assert not result.complete
+    with engine.connect() as connection:
+        assert connection.execute(select(CollectionObservation)).all() == []
+        assert connection.execute(select(CompositionJob)).all() == []
+    assert repository.get_game("0022400001") is None

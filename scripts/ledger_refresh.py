@@ -14,7 +14,10 @@ if __package__ in {None, ""}:
 from app.config.settings import RuntimeSettings  # noqa: E402
 from app.dependencies import build_dependencies  # noqa: E402
 from app.migrations import run_migrations  # noqa: E402
-from app.services.ledger_runtime import LedgerRuntime  # noqa: E402
+from app.services.ledger_runtime import (  # noqa: E402
+    ActiveManifestLedgerGovernanceReader,
+    LedgerRuntime,
+)
 from app.utils.db import get_engine  # noqa: E402
 
 
@@ -37,6 +40,7 @@ def main() -> int:
         backfill=dependencies.ledger_backfill_service,
         repository=dependencies.canonical_game_ledger_repository,
         materialization=dependencies.ledger_materialization_service,
+        governance=ActiveManifestLedgerGovernanceReader(dependencies.engine),
     )
     result = runtime.refresh(
         args.season,

@@ -1075,6 +1075,11 @@ L15, assist locations Season and L15, and player per-36 each have independent
 candidate payloads. A missing assist primitive cannot suppress the other
 streams. Durable traditional/per-36 parity artifacts remain
 `pending_adjudication` until reviewed and prevent activation while pending.
+An invalid staged PBP response creates no accepted observation, ledger row, or
+composition job. Successful initial games and corrections atomically enqueue
+every governed slice at the active manifest cutoff. Only traditional-opponent
+and per-36 activation require an exact or operator-approved parity artifact;
+approval or rejection records actor, reason, time, and an audit event.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

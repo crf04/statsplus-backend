@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+import json
 
 from app.services.ledger_derivations import (
     competition_ranks,
@@ -28,6 +29,11 @@ from sqlalchemy import create_engine, select
 from app.models.collection_control import CollectionObservation, PublicationVersion
 from app.models.canonical_game_ledger import LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
+
+
+class _ParityReader:
+    def read(self, stream_key):
+        return ()
 
 
 def test_traditional_opponent_is_derived_from_the_other_team_fact():
@@ -245,6 +251,7 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     result = LedgerMaterializationService(
         repository,
         parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
         publication_service=publications,
     ).compose(
         games,
@@ -265,6 +272,17 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     assert len(ledger_payloads) == 8
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
     assert len(candidates) == 6
+    traditional_payload = json.loads(repository.get_publication(
+        "traditional_opponent_season",
+        season="2025-26",
+        window_kind="season",
+        window_games=0,
+        as_of=date(2025, 10, 15),
+    ).payload)
+    assert len(traditional_payload) == 30
+    assert {"per48", "league_average", "population_sigma", "competition_rank"} <= set(
+        traditional_payload[0]
+    )
 
 
 def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
@@ -304,6 +322,7 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     result = LedgerMaterializationService(
         repository,
         parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
     ).compose(
         games,
         season="2025-26",
@@ -348,6 +367,7 @@ def test_materialization_fails_closed_before_a_30_team_window(tmp_path):
     service = LedgerMaterializationService(
         repository,
         parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
     )
 
     try:
@@ -367,6 +387,7 @@ def test_materialization_rejects_extra_stored_game_identity(tmp_path):
     service = LedgerMaterializationService(
         repository,
         parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
     )
 
     try:

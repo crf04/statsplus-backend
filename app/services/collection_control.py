@@ -2104,11 +2104,18 @@ class PublicationService(_SessionService):
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
-            if row.provider == "ledger":
+            parity_stream = (
+                "traditional_opponent"
+                if stream_key in {"traditional_opponent", "traditional_opponent_season", "traditional_opponent_l15"}
+                else "player_per36" if stream_key == "player_per36" else None
+            )
+            if parity_stream is not None:
                 latest = session.scalar(select(LedgerParityArtifact).where(
-                    LedgerParityArtifact.stream_key == stream_key,
+                    LedgerParityArtifact.stream_key == parity_stream,
                 ).order_by(LedgerParityArtifact.created_at.desc()).limit(1))
-                if latest is None or latest.status == "pending_adjudication":
+                if latest is None or (
+                    latest.status != "exact" and latest.decision != "approved"
+                ):
                     raise ControlPlaneError("ledger_parity_pending")
             row.enabled = True
             return row
@@ -2219,6 +2226,7 @@ class PublicationService(_SessionService):
                 cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=_checksum(encoded), payload=encoded,
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
+            session.flush()
             for observation_id in sorted(provenance_ids):
                 session.add(PublicationObservation(
                     publication_id=publication.publication_id,
@@ -2282,6 +2290,7 @@ class PublicationService(_SessionService):
                 fence=0,
             )
             session.add(publication)
+            session.flush()
             for observation_id, slice_key in sorted(provenance.items()):
                 session.add(PublicationObservation(
                     publication_id=publication.publication_id,
@@ -2451,6 +2460,7 @@ class PublicationService(_SessionService):
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
                 payload=prior.payload, created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
             session.add(version)
+            session.flush()
             source_refs = session.scalars(select(PublicationObservation).where(
                 PublicationObservation.publication_id == prior.publication_id,
             )).all()

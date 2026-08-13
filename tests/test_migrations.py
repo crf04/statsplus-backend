@@ -64,6 +64,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -332,6 +333,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (23, "023_collector_release_status"),
             (24, "024_canonical_game_ledger"),
             (25, "025_ledger_parity_artifacts"),
+            (26, "026_repair_publication_provenance_foreign_keys"),
         ]
 
 
@@ -371,6 +373,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -411,10 +414,27 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
-    assert upgraded.current_version == 25
+    assert upgraded.current_version == 26
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
+
+
+def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'provenance-fks.sqlite3'}")
+    run_migrations(engine)
+    inspector = inspect(engine)
+
+    assert inspector.get_foreign_keys("publication_versions") == []
+    foreign_keys = inspector.get_foreign_keys("publication_observations")
+    assert {
+        (tuple(item["constrained_columns"]), item["referred_table"], item["options"].get("ondelete"))
+        for item in foreign_keys
+    } == {
+        (("publication_id",), "publication_versions", "CASCADE"),
+        (("observation_id",), "collection_observations", "RESTRICT"),
+    }
 
 
 def test_demo_database_validation_is_read_only():
@@ -656,6 +676,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -702,10 +723,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
-    assert upgraded.current_version == 25
+    assert upgraded.current_version == 26
     assert repeated.applied == ()
-    assert repeated.current_version == 25
+    assert repeated.current_version == 26
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -761,6 +783,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "023_collector_release_status",
         "024_canonical_game_ledger",
         "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

@@ -187,6 +187,10 @@ class LedgerParityArtifact(Base):
     status = Column(String(32), nullable=False)
     report = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
+    decision = Column(String(16), nullable=True)
+    adjudicated_by = Column(String(128), nullable=True)
+    adjudicated_at = Column(DateTime(timezone=True), nullable=True)
+    adjudication_reason = Column(String(255), nullable=True)
 
     __table_args__ = (
         CheckConstraint(

@@ -135,6 +135,18 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream("player_per36", reason="reviewed rehearsal")
 
+    unrelated = publications.activate_stream(
+        "player_game_logs", reason="independent rehearsal reviewed"
+    )
+    assert unrelated.enabled
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
+                 adjudication_reason="reviewed differences"))
+    approved = publications.activate_stream("player_per36", reason="reviewed rehearsal")
+    assert approved.enabled
+
 
 @pytest.fixture
 def control_db(tmp_path):

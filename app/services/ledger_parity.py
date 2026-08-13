@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.collection_control import AuditEvent
 
 from app.services.canonical_game_ledger import CanonicalGame, PlayerGameFact, validate_canonical_season
 from app.services.ledger_derivations import (
@@ -99,6 +100,59 @@ class LedgerParityArtifactRepository:
                     LedgerParityArtifact.season == season,
                 ).order_by(LedgerParityArtifact.created_at.desc()).limit(1)
             )
+
+    def adjudicate(
+        self,
+        artifact_id: str,
+        *,
+        decision: str,
+        reason: str,
+        actor: str,
+    ) -> LedgerParityArtifact:
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("decision must be approved or rejected")
+        if len(reason.strip()) < 3 or not actor.strip():
+            raise ValueError("actor and reason are required")
+        now = self.clock()
+        with Session(self.engine, expire_on_commit=False) as session, session.begin():
+            row = session.get(LedgerParityArtifact, artifact_id)
+            if row is None:
+                raise ValueError("parity artifact not found")
+            row.decision = decision
+            row.adjudicated_by = actor
+            row.adjudicated_at = now
+            row.adjudication_reason = reason
+            session.add(AuditEvent(
+                event_id=str(uuid4()),
+                actor=actor,
+                action=f"ledger.parity_{decision}",
+                resource=artifact_id,
+                reason=reason,
+                details=json.dumps({"stream_key": row.stream_key, "season": row.season}, sort_keys=True),
+                created_at=now,
+            ))
+            return row
+
+
+class LegacyParityDiagnosticReader:
+    """Read existing NBA diagnostic tables through an injected DB boundary."""
+
+    TABLES = {
+        "traditional_opponent": "opponent_stats",
+        "player_per36": "player_per36_stats",
+    }
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def read(self, stream_key: str) -> tuple[Mapping[str, object], ...]:
+        from sqlalchemy import inspect, text
+
+        table = self.TABLES[stream_key]
+        if table not in inspect(self.engine).get_table_names():
+            return ()
+        with self.engine.connect() as connection:
+            return tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
 
 _PLAYER_FIELDS = {
     "points": ("points", "PTS"),
@@ -213,7 +267,7 @@ def _values_equal(left: object, right: object, tolerance: float) -> bool:
 
 def _compare_semantic(
     ledger: Mapping[tuple[object, ...], object],
-    legacy_rows: Iterable[Mapping[str, object]],
+    legacy_rows: Iterable[Mapping[str, object]] | None,
     *,
     semantic: str,
     identity_from_row: Callable[[Mapping[str, object]], tuple[object, ...] | None],
@@ -319,15 +373,18 @@ def compare_ledger_to_legacy(
         for game in games_tuple
         for player in game.player_facts
     }
-    compared, differences = _compare_semantic(
-        ledger_players,
-        legacy_rows,
-        semantic="player_game",
-        identity_from_row=_player_identity,
-        identity_text=lambda identity: f"{identity[0]}:{identity[1]}",
-        fields=_PLAYER_FIELDS,
-        tolerance=tolerance,
-    )
+    compared = 0
+    differences: list[SemanticDifference] = []
+    if legacy_rows is not None:
+        compared, differences = _compare_semantic(
+            ledger_players,
+            legacy_rows,
+            semantic="player_game",
+            identity_from_row=_player_identity,
+            identity_text=lambda identity: f"{identity[0]}:{identity[1]}",
+            fields=_PLAYER_FIELDS,
+            tolerance=tolerance,
+        )
     if legacy_traditional_rows is not None:
         traditional: dict[tuple[object, ...], TraditionalOpponentFact] = {
             (fact.game_id, fact.team_id): fact
@@ -408,6 +465,7 @@ def generate_semantic_difference_report(
 
 __all__ = [
     "LedgerParityArtifactRepository",
+    "LegacyParityDiagnosticReader",
     "LedgerParityReport",
     "SemanticDifference",
     "compare_ledger_to_legacy",

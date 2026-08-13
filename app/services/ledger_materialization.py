@@ -12,7 +12,7 @@ from uuid import uuid4
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 
-from app.models.collection_control import CompositionJob
+from app.models.collection_control import CollectionManifest, CompositionJob
 
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -60,11 +60,13 @@ class LedgerMaterializationService:
         repository: CanonicalGameLedgerRepository,
         *,
         parity_repository: LedgerParityArtifactRepository,
+        parity_reader,
         publication_service=None,
         clock=None,
     ) -> None:
         self.repository = repository
         self.parity_repository = parity_repository
+        self.parity_reader = parity_reader
         self.publication_service = publication_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -158,15 +160,6 @@ class LedgerMaterializationService:
             assist_location_l15=assist_l15,
         )
         retrieved_at = self.clock()
-        l15_ids = {
-            (team.team_id, game_id)
-            for team in l15_window.teams
-            for game_id in team.game_ids
-        }
-        traditional_l15 = tuple(
-            fact for fact in traditional
-            if (fact.team_id, fact.game_id) in l15_ids
-        )
         player_game_logs = tuple(
             {"game_id": game.game_id, **_json_default(player)}
             for game in eligible
@@ -174,8 +167,8 @@ class LedgerMaterializationService:
         )
         publication_specs = [
             ("player_game_logs", player_game_logs, "season", 0, "complete", None),
-            ("traditional_opponent_season", traditional, "season", 0, "complete", None),
-            ("traditional_opponent_l15", traditional_l15, "rolling_games", 15, "complete", None),
+            ("traditional_opponent_season", season_window.teams, "season", 0, "complete", None),
+            ("traditional_opponent_l15", l15_window.teams, "rolling_games", 15, "complete", None),
             ("player_per36", per36, "season", 0, "complete", None),
             ("team_matchups_season", season_window.teams, "season", 0, "complete", None),
             ("team_matchups_l15", l15_window.teams, "rolling_games", 15, "complete", None),
@@ -209,9 +202,9 @@ class LedgerMaterializationService:
             cutoff=cutoff,
             report=compare_ledger_to_legacy(
                 eligible,
-                (),
+                None,
                 season=canonical_season,
-                legacy_traditional_rows=(),
+                legacy_traditional_rows=self.parity_reader.read("traditional_opponent"),
             ),
         )
         self.parity_repository.record(
@@ -219,9 +212,9 @@ class LedgerMaterializationService:
             cutoff=cutoff,
             report=compare_ledger_to_legacy(
                 eligible,
-                (),
+                None,
                 season=canonical_season,
-                legacy_per36_rows=(),
+                legacy_per36_rows=self.parity_reader.read("player_per36"),
             ),
         )
         if self.publication_service is not None:
@@ -231,8 +224,8 @@ class LedgerMaterializationService:
             }
             candidates = [
                 ("player_game_logs", player_game_logs),
-                ("traditional_opponent_season", traditional),
-                ("traditional_opponent_l15", traditional_l15),
+                ("traditional_opponent_season", season_window.teams),
+                ("traditional_opponent_l15", l15_window.teams),
                 ("player_per36", per36),
             ]
             if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
@@ -263,13 +256,21 @@ class LedgerCorrectionQueue:
         "player_per36",
     )
 
-    def __init__(self, *, clock=None) -> None:
+    def __init__(self, *, clock=None, require_governance: bool = False) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.require_governance = require_governance
 
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
         now = self.clock()
-        cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
+        cutoff = connection.execute(select(CollectionManifest.cutoff).where(
+            CollectionManifest.season == game.season,
+            CollectionManifest.status == "active",
+        ).order_by(CollectionManifest.cutoff.desc()).limit(1)).scalar_one_or_none()
+        if cutoff is None:
+            if self.require_governance:
+                raise LedgerMaterializationUnavailable("active manifest cutoff is required")
+            cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
         for stream_key in self.STREAMS:
             existing = connection.execute(select(table.c.job_id).where(
                 table.c.stream_key == stream_key,
