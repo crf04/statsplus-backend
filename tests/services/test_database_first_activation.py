@@ -19,6 +19,10 @@ from app.services.database_first_activation import (
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
 from app.services.database_first_drills import FailureDrillRunner
+from app.services.database_first_drills import (
+    connected_database_identity,
+    same_database_identity,
+)
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 
 
@@ -215,6 +219,38 @@ def test_legacy_write_fence_fails_only_after_stream_activation(tmp_path):
         raise AssertionError("activated stream accepted a legacy write")
 
 
+def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from app.config.settings import load_settings
+    from app.services.data_service import DataService
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "traditional_opponent_season",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    data_service = DataService(
+        engine,
+        settings=load_settings(),
+        write_fence=LegacyWriteFence(engine),
+    )
+    frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
+    monkeypatch.setattr(data_service, "_fetch_opponent_data", lambda *args, **kwargs: frame)
+    monkeypatch.setattr(data_service, "_collect_all_frames", lambda: {
+        "general_opponent_stats": frame,
+    })
+
+    assert data_service.update_all_data() is False
+    with pytest.raises(Exception, match="legacy_write_fenced"):
+        data_service.process_opponent_scoring()
+
+
 def test_provider_guard_is_fail_closed():
     guard = DatabaseOnlyProviderGuard("nba")
     try:
@@ -318,6 +354,79 @@ def test_url_drill_requires_out_of_band_marker_not_isolated_assertion(tmp_path):
         isolated=True,
     )
     assert runner.configuration_error == "out_of_band_disposable_marker_nonce_required"
+
+
+def test_marked_railway_named_disposable_target_is_allowed(tmp_path):
+    from sqlalchemy import text
+
+    database_path = tmp_path / "railway-disposable.sqlite3"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE statsplus_disposable_control ("
+            "marker_nonce VARCHAR(128) NOT NULL, "
+            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO statsplus_disposable_control "
+            "(marker_nonce, purpose, schema_name) "
+            "VALUES ('drill-marker', 'database_first_drill', NULL)"
+        ))
+
+    runner = FailureDrillRunner(
+        database_url=database_url,
+        disposable_marker_nonce="drill-marker",
+        isolated=True,
+    )
+
+    assert runner.configuration_error is None
+
+
+def test_database_identity_canonicalizes_sqlite_aliases(tmp_path):
+    database_path = tmp_path / "identity.sqlite3"
+    absolute_url = f"sqlite:///{database_path.resolve()}"
+    relative_url = (
+        "sqlite:///"
+        + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+    )
+
+    left = connected_database_identity(absolute_url, schema=None)
+    right = connected_database_identity(relative_url, schema=None)
+
+    assert same_database_identity(left, right)
+
+
+def test_runner_rejects_same_connected_drill_and_restore_target(tmp_path):
+    from sqlalchemy import text
+
+    database_path = tmp_path / "same-target.sqlite3"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE statsplus_disposable_control ("
+            "marker_nonce VARCHAR(128) NOT NULL, "
+            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO statsplus_disposable_control "
+            "(marker_nonce, purpose, schema_name) "
+            "VALUES ('drill-marker', 'database_first_drill', NULL)"
+        ))
+
+    runner = FailureDrillRunner(
+        database_url=database_url,
+        restored_database_url=(
+            "sqlite:///"
+            + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+        ),
+        disposable_marker_nonce="drill-marker",
+    )
+
+    assert runner.configuration_error == "restored_database_must_be_separate"
 
 
 def test_unit_restore_drill_replays_outbox_and_repairs_ledger():

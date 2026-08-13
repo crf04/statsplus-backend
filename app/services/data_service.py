@@ -89,7 +89,7 @@ class DataService:
                 if not callable(checker):
                     return
                 table_streams = {
-                    "general_opponent_stats": "traditional_opponent",
+                    "general_opponent_stats": "traditional_opponent_season",
                     "player_per36_stats": "player_per36",
                     "team_play_types": "synergy_play_types_opponent_season",
                     "player_play_types": "synergy_play_types",
@@ -133,7 +133,7 @@ class DataService:
 
         if isinstance(self.engine, Engine):
             stream_by_table = {
-                "general_opponent_stats": "traditional_opponent",
+                "general_opponent_stats": "traditional_opponent_season",
                 "player_per36_stats": "player_per36",
                 "team_play_types": "synergy_play_types_opponent_season",
                 "player_play_types": "synergy_play_types",

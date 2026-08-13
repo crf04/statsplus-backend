@@ -72,6 +72,102 @@ class DrillResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DatabaseIdentity:
+    """Non-secret identity facts read from one connected database target."""
+
+    dialect: str
+    server: str
+    port: int | None
+    database: str
+    schema: str
+
+    @property
+    def database_key(self) -> tuple[str, str, int | None, str]:
+        """Return the identity used to enforce target separation."""
+
+        return self.dialect, self.server, self.port, self.database
+
+
+def _connected_database_identity(
+    engine: Engine,
+    *,
+    schema: str | None,
+) -> DatabaseIdentity:
+    """Read a canonical, credential-free identity from an open connection."""
+
+    dialect = engine.dialect.name
+    if dialect == "postgresql":
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT current_database() AS database_name, "
+                    "current_schema() AS current_schema, "
+                    "inet_server_addr()::text AS server_address, "
+                    "inet_server_port() AS server_port"
+                )
+            ).mappings().one()
+        server = str(row.get("server_address") or engine.url.host or "")
+        database = str(row.get("database_name") or "")
+        current_schema = str(row.get("current_schema") or "")
+        port = row.get("server_port")
+        return DatabaseIdentity(
+            dialect=dialect,
+            server=server,
+            port=int(port) if port is not None else None,
+            database=database,
+            schema=str(schema or current_schema),
+        )
+    if dialect == "sqlite":
+        with engine.connect() as connection:
+            row = connection.exec_driver_sql("PRAGMA database_list").fetchone()
+        database = str(row[2] if row is not None and len(row) > 2 and row[2] else engine.url.database or "")
+        if database == ":memory:":
+            # Separate in-memory engines have no server/database name.  The
+            # pool identity is process-local but still distinguishes targets.
+            database = f":memory:{id(engine.pool)}"
+        return DatabaseIdentity(
+            dialect=dialect,
+            server="",
+            port=None,
+            database=database,
+            schema=str(schema or "main"),
+        )
+    return DatabaseIdentity(
+        dialect=dialect,
+        server=str(engine.url.host or ""),
+        port=engine.url.port,
+        database=str(engine.url.database or ""),
+        schema=str(schema or ""),
+    )
+
+
+def connected_database_identity(
+    database_url: str,
+    *,
+    schema: str | None = None,
+) -> DatabaseIdentity:
+    """Connect once and return non-secret identity facts for a database URL."""
+
+    try:
+        engine = create_engine(database_url)
+        try:
+            return _connected_database_identity(engine, schema=schema)
+        finally:
+            engine.dispose()
+    except Exception as error:
+        raise ValueError("database_identity_unavailable") from error
+
+
+def same_database_identity(
+    left: DatabaseIdentity,
+    right: DatabaseIdentity,
+) -> bool:
+    """Compare connected targets without comparing URLs or credentials."""
+
+    return left.database_key == right.database_key
+
+
+@dataclass(frozen=True, slots=True)
 class FailureDrillReport:
     status: str
     started_at: str
@@ -180,6 +276,8 @@ class FailureDrillRunner:
         self.restore_ingestion = restore_ingestion
         self.restore_started = restore_started
         self.restore_command_evidence = dict(restore_command_evidence or {})
+        self._drill_identity: DatabaseIdentity | None = None
+        self._production_identity: DatabaseIdentity | None = None
         self._drill_cutoff: datetime | None = None
         requested_url = database_url or (str(engine.url) if engine is not None else None)
         self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
@@ -198,6 +296,44 @@ class FailureDrillRunner:
                 schema=self.disposable_schema,
                 label="drill",
             )
+        if self.configuration_error is None and requested_url is not None:
+            try:
+                self._drill_identity = _connected_database_identity(
+                    self.engine,
+                    schema=self.disposable_schema,
+                )
+                if production_database_url:
+                    self._production_identity = connected_database_identity(
+                        str(production_database_url),
+                        schema=None,
+                    )
+                    if same_database_identity(
+                        self._drill_identity,
+                        self._production_identity,
+                    ):
+                        self.configuration_error = (
+                            "drill_database_must_be_separate_from_production"
+                        )
+                if self.configuration_error is None and restored_database_url:
+                    restored_identity = connected_database_identity(
+                        str(restored_database_url),
+                        schema=self.restored_schema,
+                    )
+                    if same_database_identity(
+                        self._drill_identity,
+                        restored_identity,
+                    ) or (
+                        self._production_identity is not None
+                        and same_database_identity(
+                            self._production_identity,
+                            restored_identity,
+                        )
+                    ):
+                        self.configuration_error = (
+                            "restored_database_must_be_separate"
+                        )
+            except Exception:
+                self.configuration_error = "database_identity_unavailable"
         if self.configuration_error is not None:
             self.production_evidence = False
             self.publications = None
@@ -242,22 +378,13 @@ class FailureDrillRunner:
     ) -> str | None:
         if database_url is None:
             return None
-        normalized = str(database_url).lower()
         # ``isolated=True`` is retained only for source compatibility.  It is
         # an assertion supplied by the caller, not isolation evidence.  A
         # marker row is checked against the opened database before migrations.
-        if any(marker in normalized for marker in ("prod", "production", "railway")):
-            return "drill database URL identifies a production/control plane"
         if not disposable_marker_nonce or not str(disposable_marker_nonce).strip():
             return "out_of_band_disposable_marker_nonce_required"
-        if str(database_url).startswith("postgres") and not str(disposable_schema or "").strip():
+        if str(database_url).lower().startswith("postgres") and not str(disposable_schema or "").strip():
             return "postgres_disposable_schema_required"
-        if production_database_url and str(database_url) == str(production_database_url):
-            return "drill database cannot equal production/control database"
-        if restored_database_url and str(restored_database_url) in {
-            str(database_url), str(production_database_url)
-        }:
-            return "restored drill database must be a separate disposable database"
         return None
 
     @staticmethod
@@ -331,9 +458,6 @@ class FailureDrillRunner:
     ) -> None:
         """Check a marked target before an operator can restore into it."""
 
-        normalized = str(database_url).lower()
-        if any(marker in normalized for marker in ("prod", "production", "railway")):
-            raise ValueError(f"{label}_database_url_identifies_production")
         engine = create_engine(database_url)
         try:
             if engine.dialect.name != "postgresql":
@@ -1297,14 +1421,6 @@ class FailureDrillRunner:
         if not self.restored_database_url:
             raise ValueError("restored_isolated_database_url_required")
         restore_started = started if started is not None else perf_counter()
-        if str(self.restored_database_url) in {
-            str(self.production_database_url),
-            str(self.engine.url),
-        }:
-            raise ValueError("restored_database_must_be_disposable_and_separate")
-        normalized = str(self.restored_database_url).lower()
-        if any(marker in normalized for marker in ("prod", "production", "railway")):
-            raise ValueError("restored_database_url_identifies_production")
         if not self.restored_marker_nonce:
             raise ValueError("restored_out_of_band_disposable_marker_nonce_required")
         if not self.restored_schema:
@@ -1322,6 +1438,21 @@ class FailureDrillRunner:
         try:
             if restored.dialect.name != "postgresql":
                 raise ValueError("production_restore_requires_postgres")
+            restored_identity = _connected_database_identity(
+                restored,
+                schema=self.restored_schema,
+            )
+            drill_identity = self._drill_identity or _connected_database_identity(
+                self.engine,
+                schema=self.disposable_schema,
+            )
+            if same_database_identity(drill_identity, restored_identity):
+                raise ValueError("restored_database_must_be_disposable_and_separate")
+            if self._production_identity is not None and same_database_identity(
+                self._production_identity,
+                restored_identity,
+            ):
+                raise ValueError("restored_database_must_be_separate_from_production")
             if not self.restore_expectations:
                 raise ValueError("restore_expectations_required")
             preflight = self._preflight_target(
@@ -1561,12 +1692,15 @@ def run_restore_drill(
 
 
 __all__ = [
+    "DatabaseIdentity",
     "DrillResult",
     "FailureDrillReport",
     "FailureDrillRunner",
+    "connected_database_identity",
     "preflight_disposable_database",
     "run_failure_drills",
     "run_restore_drill",
+    "same_database_identity",
 ]
 
 

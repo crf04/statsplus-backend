@@ -13,19 +13,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from sqlalchemy.engine import make_url
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.database_first_drills import (
+    connected_database_identity,
     preflight_disposable_database,
     run_failure_drills,
+    same_database_identity,
 )
 
 
@@ -50,15 +56,163 @@ def _render(command: list[str], *, replacements: Mapping[str, str]) -> list[str]
     ]
 
 
+_SENSITIVE_OPTIONS = frozenset(
+    {
+        "--access-token",
+        "--api-key",
+        "--apikey",
+        "--credential",
+        "--database-url",
+        "--dbname",
+        "--dsn",
+        "--password",
+        "--production-database-url",
+        "--refresh-token",
+        "--restored-database-url",
+        "--secret",
+        "--token",
+        "-p",
+    }
+)
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "credential",
+        "password",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+_SENSITIVE_ASSIGNMENT_NAMES = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "credential",
+        "database_url",
+        "password",
+        "pgpassword",
+        "production_database_url",
+        "refresh_token",
+        "restored_database_url",
+        "secret",
+        "token",
+    }
+)
+_SAFE_COMMAND_STATUSES = frozenset(
+    {"complete", "completed", "error", "failed", "ok", "success", "succeeded"}
+)
+_URL_OPTIONS = frozenset(
+    {
+        "--database-url",
+        "--dbname",
+        "--dsn",
+        "--production-database-url",
+        "--restored-database-url",
+    }
+)
+_URL_START = re.compile(r"(?i)(?:postgres(?:ql)?|rediss?|https?)://")
+_URL_PASSWORD = re.compile(
+    r"(?i)(?P<scheme>(?:postgres(?:ql)?|rediss?|https?)://)"
+    r"(?P<user>[^/@\s:]+):(?P<password>[^/@\s]*)@"
+)
+
+
+def _redact_url(value: str) -> str:
+    """Keep URL routing facts while removing password and secret queries."""
+
+    try:
+        rendered = make_url(value).render_as_string(hide_password=True)
+    except Exception:
+        rendered = _URL_PASSWORD.sub(r"\g<scheme>\g<user>:<redacted>@", value)
+    parsed = urlsplit(rendered)
+    if not parsed.scheme or not parsed.netloc:
+        return rendered
+    query = urlencode(
+        [
+            (
+                key,
+                "<redacted>"
+                if key.casefold() in _SENSITIVE_QUERY_KEYS
+                else item,
+            )
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ],
+        doseq=True,
+    )
+    return urlunsplit(parsed._replace(query=query))
+
+
+def _redact_url_fragment(value: str) -> str:
+    """Redact a URL embedded in an argv token such as ``--dsn=URL``."""
+
+    match = _URL_START.search(value)
+    if match is None:
+        return value
+    start = match.start()
+    return value[:start] + _redact_url(value[start:])
+
+
+def _option_name(value: str) -> str:
+    return value.partition("=")[0].casefold()
+
+
+def _is_sensitive_option(value: str) -> bool:
+    option = _option_name(value)
+    if option in _SENSITIVE_OPTIONS:
+        return True
+    if option.removeprefix("--") in _SENSITIVE_ASSIGNMENT_NAMES:
+        return True
+    if option.startswith("--"):
+        return option.removeprefix("--") in {
+            name.removeprefix("--") for name in _SENSITIVE_OPTIONS if name.startswith("--")
+        }
+    return False
+
+
+def _safe_command_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain only bounded status facts from untrusted command output."""
+
+    safe: dict[str, Any] = {}
+    complete = result.get("complete")
+    if isinstance(complete, bool):
+        safe["complete"] = complete
+    status = result.get("status")
+    if isinstance(status, str) and status.casefold() in _SAFE_COMMAND_STATUSES:
+        safe["status"] = status.casefold()
+    return safe
+
+
 def _redact(command: list[str]) -> list[str]:
+    """Redact URL credentials and both inline and paired secret arguments."""
+
     redacted: list[str] = []
+    redact_next: str | None = None
     for value in command:
-        lowered = value.lower()
-        if any(marker in lowered for marker in ("password", "token", "secret", "credential")):
+        if redact_next is not None:
+            redacted.append(
+                _redact_url_fragment(value) if redact_next == "url" else "<redacted>"
+            )
+            redact_next = None
+            continue
+        if _is_sensitive_option(value):
             key, separator, _ = value.partition("=")
-            redacted.append(f"{key}=<redacted>" if separator else "<redacted>")
-        else:
-            redacted.append(value)
+            if separator:
+                if key.casefold() in _URL_OPTIONS:
+                    redacted.append(f"{key}={_redact_url_fragment(value.split('=', 1)[1])}")
+                else:
+                    redacted.append(f"{key}=<redacted>")
+            else:
+                redacted.append(value)
+                redact_next = "url" if value.casefold() in _URL_OPTIONS else "secret"
+            continue
+        assignment_key, separator, _ = value.partition("=")
+        if separator and _is_sensitive_option(assignment_key):
+            redacted.append(f"{assignment_key}=<redacted>")
+            continue
+        redacted.append(_redact_url_fragment(value))
     return redacted
 
 
@@ -139,7 +293,7 @@ def _build_pbp_repair_callback(
                 "adapter": "ledger_refresh_historical_repair",
                 "command": _redact(rendered),
                 "returncode": completed.returncode,
-                "command_result": dict(command_result),
+                "command_result": _safe_command_result(command_result),
             }
         from sqlalchemy import text
 
@@ -180,7 +334,7 @@ def _build_pbp_repair_callback(
             "checksum": str(observation["checksum"]),
             "updated_rows": 1,
             "manifest_id": expected_manifest,
-            "command_result": dict(command_result),
+            "command_result": _safe_command_result(command_result),
         }
 
     return repair
@@ -281,6 +435,25 @@ def main() -> int:
                 label="restored",
                 require_empty=True,
             )
+            drill_identity = connected_database_identity(
+                str(args.database_url),
+                schema=str(args.schema) if args.schema else None,
+            )
+            restored_identity = connected_database_identity(
+                str(args.restored_database_url),
+                schema=str(args.restored_schema),
+            )
+            if same_database_identity(drill_identity, restored_identity):
+                raise ValueError("restored target must be separate from drill database")
+            if args.production_database_url:
+                production_identity = connected_database_identity(
+                    str(args.production_database_url),
+                    schema=None,
+                )
+                if same_database_identity(production_identity, restored_identity):
+                    raise ValueError("restored target must be separate from production database")
+                if same_database_identity(production_identity, drill_identity):
+                    raise ValueError("drill target must be separate from production database")
             rendered_restore = _render(
                 restore_command,
                 replacements={
@@ -301,13 +474,13 @@ def main() -> int:
             completed_at = datetime.now(timezone.utc).isoformat()
             restore_evidence = {
                 "status": "succeeded" if completed.returncode == 0 else "failed",
-                "backup_artifact": str(backup),
+                "backup_artifact": backup.name,
                 "command": _redact(rendered_restore),
                 "returncode": completed.returncode,
                 "started_at": started_at,
                 "completed_at": completed_at,
-                "stdout_tail": completed.stdout[-2000:],
-                "stderr_tail": completed.stderr[-2000:],
+                "output_captured": bool(completed.stdout or completed.stderr),
+                "command_result": _safe_command_result(_json_output(completed.stdout)),
             }
             if completed.returncode != 0:
                 report = _failed_report(reason="restore_command_failed", evidence=restore_evidence)
