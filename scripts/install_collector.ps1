@@ -46,5 +46,6 @@ $principal = New-ScheduledTaskPrincipal -UserId $RunAsUser -LogonType S4U -RunLe
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 8)
 if ($PSCmdlet.ShouldProcess($TaskName, 'register one non-overlapping scheduled task')) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($daily,$startup) -Principal $principal -Settings $settings -Force | Out-Null
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
 }
-Write-Output "Installed staged collector $ReleaseVersion. Credential provisioning and a historical rehearsal are required before production enablement."
+Write-Output "Installed disabled staged collector $ReleaseVersion. Use promote_collector.ps1 after all gates pass."

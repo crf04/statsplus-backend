@@ -25,7 +25,7 @@ $existingPythonPath = if ($env:PYTHONPATH) { $env:PYTHONPATH } else { '' }
 $env:PYTHONPATH = $releaseRoot + [IO.Path]::PathSeparator + $existingPythonPath
 $deadline = (Get-Date).ToUniversalTime().AddHours([Math]::Max(1, $RecoveryHours))
 do {
-    & $PythonExe -m app.collector run
+    & $PythonExe -m statsplus_collector run
     $exitCode = $LASTEXITCODE
     if ($exitCode -notin @(10, 11)) { exit $exitCode }
     if (((Get-Date).ToUniversalTime()) -ge $deadline) { exit $exitCode }

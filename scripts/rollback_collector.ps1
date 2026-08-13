@@ -13,9 +13,10 @@ if ($previous -notmatch '^[A-Za-z0-9._-]+$') { throw 'Previous release marker is
 $target = Join-Path (Join-Path $root 'releases') $previous
 if (-not (Test-Path -LiteralPath $target -PathType Container)) { throw "Previous release directory is missing: $previous" }
 if ($PSCmdlet.ShouldProcess($root, "rollback to $previous")) {
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
     $current = Join-Path $root 'current.txt'
     $currentValue = if (Test-Path -LiteralPath $current) { Get-Content -LiteralPath $current -Raw } else { '' }
     Set-Content -LiteralPath (Join-Path $root 'previous.txt') -Value $currentValue.Trim() -Encoding ASCII
     Set-Content -LiteralPath $current -Value $previous -Encoding ASCII
 }
-Write-Output "Rolled back the staged pointer to $previous. Verify release checksum before enabling the task."
+Write-Output "Rolled back the staged pointer to $previous with task disabled. Promote only after validation."

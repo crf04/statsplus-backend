@@ -25,10 +25,10 @@ Validate without contacting Railway:
 The CLI has no database option by design:
 
 ```powershell
-python -m app.collector validate-config
-python -m app.collector status
-python -m app.collector release
-python -m app.collector run
+python -m statsplus_collector validate-config
+python -m statsplus_collector status
+python -m statsplus_collector release
+python -m statsplus_collector run
 ```
 
 For a credential-free rehearsal, set the secret only in the process environment
@@ -65,7 +65,10 @@ codes; player facts and provider response bodies do not enter diagnostics.
 The outbox is a WAL-mode SQLite file with full synchronous writes. It stores
 only compressed normalized envelopes plus bounded routing metadata. It orders
 newer cutoffs first, rejects a hard-limit write rather than deleting current
-work, and refuses to silently discard unsent entries older than 30 days.
+work, measuring the allocated database plus WAL footprint with page overhead,
+and refuses to silently discard unsent entries older than 30 days. Aged entries
+are attempted before current work but cannot hide the newer drain; only a
+server-governed obsolete cutoff may remove an unsent row.
 Restarting the process reopens the same file and replays pending items. A stale
 process lease expires and can be recovered; a live lease prevents overlapping
 instances. The product database remains Railway Postgres.
@@ -87,8 +90,10 @@ Install with `-WhatIf` first, then provision the secret in Credential Manager
 and run a foreground historical rehearsal. `upgrade_collector.ps1` copies an
 immutable staged release and preserves the previous version. After the
 compatible Railway reader is deployed, perform one bounded foreground run and
-explicitly enable the task. `rollback_collector.ps1` switches only to the
-previous immutable release; verify its `python -m app.collector release`
+run `promote_collector.ps1`, which checks configuration, protected credential
+availability, release checksum, and the full compatibility rehearsal before it
+enables the named task. `rollback_collector.ps1` disables the task and switches
+only to the previous immutable release; verify its `python -m statsplus_collector release`
 checksum before enabling the task. It never performs an unattended update.
 
 Keep Windows Update active hours around the collection window, enable firmware
@@ -109,6 +114,6 @@ probed as a supported surface.
 
 ## Release identity
 
-`python -m app.collector release` emits a deterministic SHA-256 over the staged
+`python -m statsplus_collector release` emits a deterministic SHA-256 over the staged
 files and their relative names. Railway should record that version/checksum.
 Keep old release directories until the rehearsal and rollback drill pass.

@@ -130,7 +130,7 @@ def test_sanitized_recorded_nba_json_is_normalized_without_network():
 
 
 def test_outbox_is_newest_cutoff_first_and_receipt_gated(tmp_path: Path):
-    outbox = OutboxRepository(tmp_path / "outbox.sqlite3", max_bytes=4096, max_item_bytes=2048, clock=lambda: NOW)
+    outbox = OutboxRepository(tmp_path / "outbox.sqlite3", max_bytes=128 * 1024, max_item_bytes=2048, clock=lambda: NOW)
     older_checksum = _wire_checksum("a")
     newer_checksum = _wire_checksum("b")
     older = outbox.enqueue(kind="observation", client_observation_id="old", checksum=older_checksum, cutoff=NOW - timedelta(days=1), payload=_wire("old", "a"), metadata={"observation_type": "x"})
@@ -146,7 +146,7 @@ def test_outbox_is_newest_cutoff_first_and_receipt_gated(tmp_path: Path):
 
 def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path):
     first_payload = _wire("one", "a")
-    outbox = OutboxRepository(tmp_path / "outbox.sqlite3", max_bytes=len(first_payload) + 1, max_item_bytes=len(first_payload) + 1, clock=lambda: NOW)
+    outbox = OutboxRepository(tmp_path / "outbox.sqlite3", max_bytes=20 * 1024, max_item_bytes=2048, clock=lambda: NOW)
     outbox.enqueue(kind="observation", client_observation_id="one", checksum=_wire_checksum("a"), cutoff=NOW, payload=first_payload, metadata={})
     with pytest.raises(OutboxFull):
         outbox.enqueue(kind="observation", client_observation_id="two", checksum=_wire_checksum("b"), cutoff=NOW, payload=_wire("two", "b"), metadata={})
@@ -155,6 +155,80 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
     with pytest.raises(OutboxBusy):
         outbox.acquire_lease(owner="second", ttl_seconds=60)
     outbox.release_lease(owner)
+    assert outbox.durability_pragmas() == {"journal_mode": "wal", "synchronous": 2, "foreign_keys": 1}
+    assert outbox.storage_footprint_bytes() >= (tmp_path / "outbox.sqlite3").stat().st_size
+    outbox.close()
+
+
+def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
+    from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
+
+    descriptors = _collector_scope_descriptors({"grouped_shot_types", "exact_shot_zones"}, NOW)
+    opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
+    assert {str(item["parameters"]["team_id"]) for item in opponent} == NBA_TEAM_IDS
+    assert {item["parameters"]["window"] for item in opponent} == {"season", "l15"}
+    assert {item["parameters"]["date_to"] for item in opponent} == {NOW.date().isoformat()}
+    assert all(item["parameters"]["date_from"] is None for item in opponent)
+
+
+def test_windows_task_lifecycle_requires_explicit_named_promotion():
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    install = (root / "install_collector.ps1").read_text(encoding="utf-8")
+    upgrade = (root / "upgrade_collector.ps1").read_text(encoding="utf-8")
+    rollback = (root / "rollback_collector.ps1").read_text(encoding="utf-8")
+    promote = (root / "promote_collector.ps1").read_text(encoding="utf-8")
+    assert "Disable-ScheduledTask -TaskName $TaskName" in install
+    assert "Disable-ScheduledTask -TaskName $TaskName" in upgrade
+    assert "Disable-ScheduledTask -TaskName $TaskName" in rollback
+    assert "credential-check" in promote and "validate-config" in promote
+    assert "rehearsal --season $Season --cutoff $Cutoff" in promote
+    assert "Enable-ScheduledTask -TaskName $TaskName" in promote
+
+
+def test_cli_rehearsal_command_invokes_compatibility_probes(monkeypatch, capsys):
+    from app.collector import cli
+    from app.collector.rehearsal import ProbeResult
+
+    calls = []
+
+    class FakeProbes:
+        def __init__(self, provider):
+            assert provider is not None
+
+        def run(self, *, season, cutoff, opponent_team_id):
+            calls.append((season, cutoff, opponent_team_id))
+            return (ProbeResult("event_catalog", True, {"season": season}),)
+
+    monkeypatch.setattr(cli, "ResidentialCompatibilityProbes", FakeProbes)
+    monkeypatch.setattr(cli, "NBAStatsProviderAdapter", lambda: object())
+    monkeypatch.setattr(cli, "NBA_TEAM_IDS", (1610612737, 1610612738))
+    monkeypatch.setenv("COLLECTOR_RAILWAY_URL", "https://railway.example")
+    monkeypatch.setenv("COLLECTOR_IDENTITY_ID", "collector")
+    assert cli.main(["rehearsal", "--season", "2025-26", "--cutoff", NOW.isoformat()]) == 0
+    assert [call[2] for call in calls] == [1610612737, 1610612738]
+    assert json.loads(capsys.readouterr().out)["status"] == "passed"
+
+
+def test_runner_spools_verified_responses_before_later_category_failure(tmp_path: Path):
+    class PartialProvider(FakeProvider):
+        calls = 0
+
+        def fetch_synergy_play_types(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise ValueError("later schema failure")
+            return super().fetch_synergy_play_types(*args, **kwargs)
+
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": "m-partial", "season": "2025-26", "cutoff": NOW.isoformat(),
+        "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": ["synergy_play_types"],
+    }]}
+    collector, _, outbox = _collector(tmp_path, discovery=discovery, provider=PartialProvider())
+    result = collector.run()
+    assert result.spooled == 1
+    assert result.uploaded == 1
+    assert result.disposition is RunDisposition.NON_RETRYABLE
     outbox.close()
 
 
@@ -170,6 +244,8 @@ class FakeTransport:
             return HTTPResponse(201, {"token": "token", "expires_in": 300})
         if "/api/collector/discovery" in url:
             return HTTPResponse(200, self.discovery)
+        if url.endswith("/api/collector/status"):
+            return HTTPResponse(200, {**dict(json_body or {}), "last_seen_at": NOW.isoformat()})
         if "/api/collector/observations" in url or "/api/collector/catalog/" in url:
             document = json.loads(gzip.decompress(body or b"{}"))
             checksum = hashlib.sha256(json.dumps(document["payload"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
@@ -188,7 +264,7 @@ class FakeProvider:
         return _stats(args[0] if args else kwargs.get("play_type", "Transition"))
 
 
-def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW):
+def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW, release_checksum=None):
     fake_transport = transport or FakeTransport(discovery=discovery)
     client = RailwayClient("http://127.0.0.1", identity_id="collector", environment="testing", transport=fake_transport, allow_insecure_localhost=True)
     outbox = OutboxRepository(tmp_path / "outbox.sqlite3", clock=lambda: now)
@@ -197,6 +273,7 @@ def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW):
         identity_id="collector", environment="testing", secret="machine-secret",
         clock=lambda: now,
         instruction_cache=InstructionCache(tmp_path / "instructions.json", clock=lambda: now),
+        release_checksum=release_checksum,
     ), fake_transport, outbox
 
 
@@ -206,6 +283,18 @@ def test_runner_no_work_has_distinct_control_disposition(tmp_path: Path):
     assert result.disposition is RunDisposition.NO_WORK
     assert result.exit_code == EXIT_NO_WORK
     assert len(transport.calls) == 2  # token + discovery
+    outbox.close()
+
+
+def test_runner_reports_bounded_start_and_terminal_status(tmp_path: Path):
+    collector, transport, outbox = _collector(
+        tmp_path, discovery={"environment": "testing", "bootstrap_requests": [], "manifests": []},
+        release_checksum="a" * 64,
+    )
+    assert collector.run().disposition is RunDisposition.NO_WORK
+    status_calls = [call for call in transport.calls if call[1].endswith("/api/collector/status")]
+    assert [call[4]["state"] for call in status_calls] == ["running", "no_work"]
+    assert all(set(call[4]) == {"state", "reason", "release_version", "release_checksum"} for call in status_calls)
     outbox.close()
 
 
@@ -388,3 +477,22 @@ def test_outbox_replay_survives_repository_restart_and_live_lease_is_busy(tmp_pa
     second.release_lease(owner)
     assert second.acknowledge(item.item_id, checksum=restart_checksum)
     second.close()
+
+
+def test_aged_unsent_work_is_preserved_and_does_not_hide_newer_drain(tmp_path: Path):
+    path = tmp_path / "retention.sqlite3"
+    old_clock = NOW - timedelta(days=31)
+    old = OutboxRepository(path, clock=lambda: old_clock)
+    old.enqueue(kind="observation", client_observation_id="aged", checksum=_wire_checksum("aged"),
+                cutoff=old_clock, payload=_wire("aged", "aged"), metadata={})
+    old.close()
+    current = OutboxRepository(path, clock=lambda: NOW)
+    current.enqueue(kind="observation", client_observation_id="current", checksum=_wire_checksum("current"),
+                    cutoff=NOW, payload=_wire("current", "current"), metadata={})
+    assert [item.client_observation_id for item in current.aged_pending(now=NOW)] == ["aged"]
+    with pytest.raises(Exception, match="older than"):
+        current.enforce_retention(now=NOW)
+    assert [item.client_observation_id for item in current.pending()] == ["current", "aged"]
+    assert current.prune_obsolete(governed_before_cutoff=NOW - timedelta(days=1)) == 1
+    assert [item.client_observation_id for item in current.pending()] == ["current"]
+    current.close()

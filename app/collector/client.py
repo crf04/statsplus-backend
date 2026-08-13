@@ -265,6 +265,17 @@ class RailwayClient:
             raise CollectorHTTPError("malformed_receipt")
         return dict(value)
 
+    def report_status(self, token: CollectorToken | str, *, state: str, reason: str,
+                      release_version: str, release_checksum: str) -> dict[str, Any]:
+        response = self._request("POST", "/api/collector/status", token=token, json_body={
+            "state": state, "reason": reason, "release_version": release_version,
+            "release_checksum": release_checksum,
+        })
+        value = response.json()
+        if not isinstance(value, Mapping):
+            raise CollectorHTTPError("malformed_control_response")
+        return dict(value)
+
 
 __all__ = [
     "CollectorHTTPError", "CollectorToken", "HTTPResponse", "RailwayClient",

@@ -208,9 +208,9 @@ SQLite Outbox, and deletes each item only after a matching durable receipt.
 
 ```powershell
 python -m pip install .
-python -m app.collector validate-config
-python -m app.collector status
-python -m app.collector run
+python -m statsplus_collector validate-config
+python -m statsplus_collector status
+python -m statsplus_collector run
 ```
 
 Use [docs/RESIDENTIAL_COLLECTOR.md](docs/RESIDENTIAL_COLLECTOR.md) and the

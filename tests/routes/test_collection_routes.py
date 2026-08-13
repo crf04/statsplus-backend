@@ -124,6 +124,26 @@ def test_machine_discovery_returns_bounded_authorized_work(client, app):
     )
 
 
+def test_collector_status_accepts_only_bounded_release_metadata(client, app):
+    dependencies = _install_collection_services(app)
+    expected = {
+        "state": "complete", "reason": "work_complete", "release_version": "0.1.0",
+        "release_checksum": "a" * 64, "last_seen_at": "2026-08-13T08:00:00Z",
+    }
+    dependencies.collection_control.report_collector_status.return_value = expected
+    response = client.post(
+        "/api/collector/status", headers={"Authorization": "Bearer token"},
+        json={key: expected[key] for key in ("state", "reason", "release_version", "release_checksum")},
+    )
+    assert response.status_code == 200
+    assert response.json == expected
+    malformed = client.post(
+        "/api/collector/status", headers={"Authorization": "Bearer token"},
+        json={**expected, "raw_response": {}},
+    )
+    assert malformed.status_code == 400
+
+
 def test_machine_secret_exchange_is_reachable_and_never_returns_secret(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.issue_for_secret.return_value = "short-lived-token"

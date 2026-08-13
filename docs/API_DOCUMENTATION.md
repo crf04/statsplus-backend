@@ -1442,6 +1442,7 @@ GET /api/collector/bootstrap/<request_id>/status
 POST /api/collector/catalog/<request_id>
 GET /api/collector/manifest/<manifest_id>
 POST /api/collector/observations
+POST /api/collector/status
 POST /api/collector/credential-deliveries/<delivery_id>/claim
 POST /api/admin/collection/seasons/<season>
 POST /api/admin/collection/streams/<stream_key>/rollback
@@ -1478,7 +1479,15 @@ identity's persisted binding, while an empty or unauthorized set is rejected.
 `GET /api/collector/discovery` (also available as `GET /api/collector/bootstrap`)
 is the machine-authenticated, bounded polling seam: it returns pending bootstrap
 requests and active manifests authorized for the caller's owner/provider/surface
-binding, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
+binding, in deterministic newest-first order.
+Each returned manifest also contains additive `scope_descriptors`. Every
+descriptor is bound to one authorized frozen scope and fixes its subject,
+category, all-30-team opponent identity, Season/exact-L15 window, and
+cutoff-derived `date_to`; the collector does not invent those parameters.
+`POST /api/collector/status` accepts exactly `state`, stable `reason`,
+`release_version`, and a 64-character `release_checksum`. Railway supplies
+`last_seen_at`; facts, provider responses, and arbitrary diagnostics are rejected.
+Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
 facts. A collector with the bootstrap/catalog scope publishes one catalog using
 the same gzip-compressed Observation Envelope contract at

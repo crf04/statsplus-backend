@@ -139,6 +139,7 @@ class OutboxRepository:
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._initialize()
+        self._baseline_footprint = self._initialize_footprint_baseline()
 
     def _initialize(self) -> None:
         with self._lock:
@@ -166,8 +167,35 @@ class OutboxRepository:
                     owner TEXT NOT NULL,
                     expires_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS collector_outbox_meta (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
                 """
             )
+
+    def _initialize_footprint_baseline(self) -> int:
+        row = self._connection.execute(
+            "SELECT value FROM collector_outbox_meta WHERE key = 'baseline_footprint'"
+        ).fetchone()
+        if row is not None:
+            return int(row["value"])
+        has_work = int(self._connection.execute("SELECT COUNT(*) FROM collector_outbox").fetchone()[0]) > 0
+        if not has_work and self.path != ":memory:":
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        baseline = 0 if has_work else self.storage_footprint_bytes()
+        self._connection.execute(
+            "INSERT INTO collector_outbox_meta(key, value) VALUES('baseline_footprint', ?)",
+            (baseline,),
+        )
+        if not has_work and self.path != ":memory:":
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            baseline = self.storage_footprint_bytes()
+            self._connection.execute(
+                "UPDATE collector_outbox_meta SET value = ? WHERE key = 'baseline_footprint'", (baseline,)
+            )
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return baseline
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -184,6 +212,28 @@ class OutboxRepository:
     def _total_bytes(self, connection: sqlite3.Connection) -> int:
         row = connection.execute("SELECT COALESCE(SUM(payload_bytes), 0) AS total FROM collector_outbox").fetchone()
         return int(row["total"])
+
+    def storage_footprint_bytes(self) -> int:
+        """Return allocated SQLite database plus WAL bytes (SHM is transient)."""
+
+        with self._lock:
+            page_size = int(self._connection.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(self._connection.execute("PRAGMA page_count").fetchone()[0])
+        logical = page_size * page_count
+        if self.path == ":memory:":
+            return logical
+        database = Path(self.path)
+        return max(logical, database.stat().st_size if database.exists() else 0) + (
+            Path(self.path + "-wal").stat().st_size if Path(self.path + "-wal").exists() else 0
+        )
+
+    def durability_pragmas(self) -> Mapping[str, Any]:
+        with self._lock:
+            return {
+                "journal_mode": str(self._connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold(),
+                "synchronous": int(self._connection.execute("PRAGMA synchronous").fetchone()[0]),
+                "foreign_keys": int(self._connection.execute("PRAGMA foreign_keys").fetchone()[0]),
+            }
 
     @staticmethod
     def _row(row: sqlite3.Row) -> OutboxItem:
@@ -239,8 +289,9 @@ class OutboxRepository:
             ).fetchone()
             if conflict is not None:
                 raise OutboxError("client observation ID is already bound to a different checksum")
-            total = self._total_bytes(connection)
-            if total + len(payload_bytes) > self.max_bytes:
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            reserved = len(payload_bytes) + len(encoded_metadata.encode("utf-8")) + (3 * page_size)
+            if self.storage_footprint_bytes() - self._baseline_footprint + reserved > self.max_bytes:
                 raise OutboxFull("the outbox hard limit would discard unsent work")
             cursor = connection.execute(
                 """INSERT INTO collector_outbox
@@ -252,6 +303,8 @@ class OutboxRepository:
             )
             row = connection.execute("SELECT * FROM collector_outbox WHERE item_id = ?", (cursor.lastrowid,)).fetchone()
             assert row is not None
+            if self.storage_footprint_bytes() - self._baseline_footprint > self.max_bytes:
+                raise OutboxFull("the outbox hard limit would discard unsent work")
             return self._row(row)
 
     def _validate_wire_payload(self, payload: bytes, *, kind: str, expected_checksum: str) -> None:
@@ -307,9 +360,6 @@ class OutboxRepository:
             metadata=envelope.as_outbox_metadata(),
         )
 
-    add = enqueue
-    put = enqueue
-
     def enqueue_catalog(self, envelope: CatalogEnvelope) -> OutboxItem:
         return self.enqueue(
             kind="catalog",
@@ -335,7 +385,15 @@ class OutboxRepository:
             ).fetchall()
             return tuple(self._row(row) for row in rows)
 
-    list_ready = pending
+    def aged_pending(self, *, now: datetime | str | None = None, limit: int = 1000) -> tuple[OutboxItem, ...]:
+        threshold = _utc(now or self.clock()) - self.retention
+        bounded = max(1, min(int(limit), 1000))
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM collector_outbox WHERE created_at < ? ORDER BY created_at ASC, item_id ASC LIMIT ?",
+                (_iso(threshold), bounded),
+            ).fetchall()
+            return tuple(self._row(row) for row in rows)
 
     def count(self) -> int:
         with self._lock:
@@ -366,8 +424,6 @@ class OutboxRepository:
             connection.execute("DELETE FROM collector_outbox WHERE item_id = ?", (int(item_id),))
             return True
 
-    delete_after_receipt = acknowledge
-
     def enforce_retention(self, *, now: datetime | str | None = None) -> None:
         current = _utc(now or self.clock())
         threshold = current - self.retention
@@ -378,16 +434,12 @@ class OutboxRepository:
         if row is not None and int(row["count"]) > 0:
             raise OutboxRetentionError("unsent outbox work is older than the 30-day retention bound")
 
-    def prune_expired(self, *, now: datetime | str | None = None, acknowledge_loss: bool = False) -> int:
-        """Explicitly remove aged unsent work only with operator acknowledgement."""
+    def prune_obsolete(self, *, governed_before_cutoff: datetime | str) -> int:
+        """Remove only work made obsolete by an explicit governed cutoff."""
 
-        if not acknowledge_loss:
-            self.enforce_retention(now=now)
-            return 0
-        current = _utc(now or self.clock())
-        threshold = current - self.retention
+        threshold = _utc(governed_before_cutoff)
         with self._transaction() as connection:
-            cursor = connection.execute("DELETE FROM collector_outbox WHERE created_at < ?", (_iso(threshold),))
+            cursor = connection.execute("DELETE FROM collector_outbox WHERE cutoff < ?", (_iso(threshold),))
             return int(cursor.rowcount)
 
     def acquire_lease(self, *, owner: str | None = None, ttl_seconds: int = LEASE_SECONDS) -> str:

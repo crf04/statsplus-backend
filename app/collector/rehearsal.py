@@ -19,6 +19,8 @@ from .normalizers import (
 )
 from .provider import ProviderTransientError, _call
 
+NBA_TEAM_IDS = tuple(range(1610612737, 1610612767))
+
 
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
@@ -37,6 +39,8 @@ class ResidentialCompatibilityProbes:
 
     def run(self, *, season: str, cutoff: datetime | str, opponent_team_id: int) -> tuple[ProbeResult, ...]:
         results: list[ProbeResult] = []
+        cutoff_value = datetime.fromisoformat(str(cutoff).replace("Z", "+00:00")) if isinstance(cutoff, str) else cutoff
+        date_to = cutoff_value.date().isoformat()
         results.append(self._probe(
             "event_catalog", {"season": season, "season_type": "Regular Season"},
             lambda: normalize_schedule_response(
@@ -97,10 +101,11 @@ class ResidentialCompatibilityProbes:
                     f"opponent_shot_types_{window}:{category}", {
                         "season": season, "season_type": "Regular Season", "team_id": int(opponent_team_id),
                         "last_n_games": last_n_games, "window": window, "general_range": category,
+                        "date_from": None, "date_to": date_to,
                     },
                     lambda category=category, window=window, last_n_games=last_n_games: normalize_opponent_grouped_shot_response(
                         _call(self.provider, "fetch_opponent_shot_chart", category, None,
-                              date_to=None, season=season, season_type="Regular Season",
+                              date_to=date_to, season=season, season_type="Regular Season",
                               team_id=int(opponent_team_id), last_n_games=last_n_games),
                         season=season, cutoff=cutoff, team_id=int(opponent_team_id), window=window,
                         category=category,
@@ -109,11 +114,11 @@ class ResidentialCompatibilityProbes:
             results.append(self._probe(
                 f"opponent_shot_zones_{window}", {
                     "season": season, "season_type": "Regular Season", "team_id": int(opponent_team_id),
-                    "last_n_games": last_n_games, "window": window,
+                    "last_n_games": last_n_games, "window": window, "date_from": None, "date_to": date_to,
                 },
                 lambda window=window, last_n_games=last_n_games: normalize_opponent_zone_response(
                     _call(self.provider, "fetch_opponent_shooting_zone", None,
-                          date_to=None, season=season, season_type="Regular Season",
+                          date_to=date_to, season=season, season_type="Regular Season",
                           team_id=int(opponent_team_id), last_n_games=last_n_games),
                     season=season, cutoff=cutoff, team_id=int(opponent_team_id), window=window,
                 ),
@@ -135,4 +140,4 @@ class ResidentialCompatibilityProbes:
 CompatibilityProbe = ResidentialCompatibilityProbes
 
 
-__all__ = ["CompatibilityProbe", "ProbeResult", "ResidentialCompatibilityProbes"]
+__all__ = ["CompatibilityProbe", "NBA_TEAM_IDS", "ProbeResult", "ResidentialCompatibilityProbes"]

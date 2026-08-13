@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import os
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from .contracts import NormalizedObservation, ProviderContractError
 from .normalizers import (
@@ -119,6 +119,18 @@ class ResidentialScopeExecutor:
         self, work: ScopeWork, *, collector_id: str, environment: str,
         retrieved_at: datetime | str,
     ) -> tuple[NormalizedObservation, ...]:
+        return tuple(self.iter_scope(
+            work, collector_id=collector_id, environment=environment,
+            retrieved_at=retrieved_at,
+        ))
+
+    def iter_scope(
+        self, work: ScopeWork, *, collector_id: str, environment: str,
+        retrieved_at: datetime | str,
+    ) -> Iterator[NormalizedObservation]:
+        """Yield immediately after each independently validated response."""
+
+        del collector_id, environment, retrieved_at
         scope = work.scope.strip()
         parameters = _scope_mapping(work.parameters)
         window = str(parameters.get("window") or "season").strip().casefold()
@@ -127,7 +139,6 @@ class ResidentialScopeExecutor:
                 raise ProviderContractError("provider_window_unsupported")
             requested = parameters.get("play_type")
             categories = (str(requested),) if requested else PLAY_TYPES
-            results: list[NormalizedObservation] = []
             for category in categories:
                 raw = _call(
                     self.provider, "fetch_synergy_play_types", category,
@@ -136,11 +147,11 @@ class ResidentialScopeExecutor:
                     season=work.season,
                     season_type="Regular Season",
                 )
-                results.append(normalize_synergy_response(
+                yield normalize_synergy_response(
                     raw, season=work.season, cutoff=work.cutoff,
                     scope={"window": "season", "phase": "Regular Season", "play_type": category},
-                ))
-            return tuple(results)
+                )
+            return
         if scope in {"grouped_shot_types", "shot_types", "player_shot_types"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
@@ -151,7 +162,6 @@ class ResidentialScopeExecutor:
                 team_id = parameters.get("team_id")
                 if team_id is None:
                     raise ProviderContractError("scope_team_required")
-                results: list[NormalizedObservation] = []
                 for category in categories:
                     raw = _call(
                         self.provider, "fetch_opponent_shot_chart", category,
@@ -159,22 +169,21 @@ class ResidentialScopeExecutor:
                         season=work.season, season_type="Regular Season",
                         team_id=int(team_id), last_n_games=15 if window == "l15" else None,
                     )
-                    results.append(normalize_opponent_grouped_shot_response(
+                    yield normalize_opponent_grouped_shot_response(
                         raw, season=work.season, cutoff=work.cutoff,
                         team_id=int(team_id), window=window, category=category,
-                    ))
-                return tuple(results)
-            results = []
+                    )
+                return
             for category in categories:
                 raw = _call(
                     self.provider, "fetch_player_shot_type", category,
                     season=work.season, season_type="Regular Season",
                 )
-                results.append(normalize_grouped_shot_response(
+                yield normalize_grouped_shot_response(
                     raw, season=work.season, cutoff=work.cutoff,
                     scope={"window": window, "subject": "player", "category": category, "phase": "Regular Season"},
-                ))
-            return tuple(results)
+                )
+            return
         if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
@@ -189,19 +198,21 @@ class ResidentialScopeExecutor:
                     season=work.season, season_type="Regular Season",
                     team_id=int(team_id), last_n_games=15 if window == "l15" else None,
                 )
-                return (normalize_opponent_zone_response(
+                yield normalize_opponent_zone_response(
                     raw, season=work.season, cutoff=work.cutoff,
                     team_id=int(team_id), window=window,
-                ),)
+                )
+                return
             raw = _call(
                 self.provider, "fetch_player_shooting_zone",
                 parameters.get("date_from"), season=work.season,
                 season_type="Regular Season",
             )
-            return (normalize_zone_response(
+            yield normalize_zone_response(
                 raw, season=work.season, cutoff=work.cutoff,
                 scope={"window": window, "subject": "player", "phase": "Regular Season"},
-            ),)
+            )
+            return
         if scope in {"synergy:l15", "synergy_l15"}:
             raise ProviderContractError("provider_window_unsupported")
         raise ProviderContractError("scope_not_registered")

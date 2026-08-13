@@ -19,6 +19,7 @@ New-Item -ItemType Directory -Force -Path $releases | Out-Null
 $target = Join-Path $releases $ReleaseVersion
 if (Test-Path -LiteralPath $target) { throw "Release version already exists: $ReleaseVersion" }
 if ($PSCmdlet.ShouldProcess($target, 'copy immutable staged release')) {
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
     $temporary = Join-Path $releases ('.' + $ReleaseVersion + '.staging.' + [guid]::NewGuid().ToString('N'))
     try {
         Copy-Item -LiteralPath $staged -Destination $temporary -Recurse -Force
@@ -30,4 +31,4 @@ if ($PSCmdlet.ShouldProcess($target, 'copy immutable staged release')) {
     if (Test-Path -LiteralPath $previous) { Copy-Item -LiteralPath $previous -Destination (Join-Path $root 'previous.txt') -Force }
     Set-Content -LiteralPath $previous -Value $ReleaseVersion -Encoding ASCII
 }
-Write-Output "Staged $ReleaseVersion. Run one foreground rehearsal, then enable the task explicitly."
+Write-Output "Staged $ReleaseVersion with task disabled. Use promote_collector.ps1 after all gates pass."

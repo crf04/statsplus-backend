@@ -15,7 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-statsplus-residential-collector = "app.collector.cli:main"
+statsplus-residential-collector = "statsplus_collector.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["app*"]
+[tool.setuptools]
+packages = ["statsplus_collector"]
+package-dir = {statsplus_collector = "app/collector"}

@@ -478,6 +478,29 @@ def test_discovery_is_environment_and_scope_bound(control_db):
         )
 
 
+def test_collector_status_persists_only_safe_release_metadata(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    identity = tokens.create_identity(
+        "status", scopes=["poll"], owner="residential_collector",
+        providers=["nba"], surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["poll"],
+    ))
+    control = CollectionControlService(control_db, environment="testing", clock=lambda: now)
+    result = control.report_collector_status(
+        claims=claims, state="complete", reason="work_complete",
+        release_version="0.1.0", release_checksum="a" * 64,
+    )
+    assert result["last_seen_at"] == "2026-08-12T00:00:00+00:00"
+    with pytest.raises(ControlPlaneError, match="invalid_collector_status"):
+        control.report_collector_status(
+            claims=claims, state="complete", reason="raw provider facts",
+            release_version="0.1.0", release_checksum="a" * 64,
+        )
+
+
 def test_surface_authorization_denies_cross_collector_and_cross_provider_ingest(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)

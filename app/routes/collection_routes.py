@@ -190,6 +190,20 @@ def discover_collection_work():
     return jsonify(result)
 
 
+@collection_bp.post("/collector/status")
+@route_error_boundary("Failed to update collector status.")
+def update_collector_status():
+    claims = _collector_claims_any(("poll", "ingest", "bootstrap"))
+    body = _body()
+    if set(body) != {"state", "reason", "release_version", "release_checksum"}:
+        raise InvalidInputError("Collector status is malformed.", detail="invalid_collector_status")
+    try:
+        result = _service("collection_control").report_collector_status(claims=claims, **body)
+    except (ControlPlaneError, TypeError) as error:
+        raise _control_error(error) from error
+    return jsonify(result)
+
+
 @collection_bp.post("/collector/catalog/<request_id>")
 @route_error_boundary("Failed to publish the bootstrap catalog.")
 def publish_bootstrap_catalog(request_id: str):
@@ -323,6 +337,7 @@ def get_manifest(manifest_id: str):
         "collect_before": manifest.collect_before.isoformat(),
         "accepted_versions": __import__("json").loads(manifest.accepted_versions),
         "scopes": getattr(manifest, "_authorized_scopes", __import__("json").loads(manifest.scopes)),
+        "scope_descriptors": getattr(manifest, "_scope_descriptors", []),
         "checksum": manifest.checksum,
     })
 

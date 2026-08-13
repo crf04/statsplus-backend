@@ -161,6 +161,39 @@ SURFACE_REGISTRY: tuple[SurfaceDefinition, ...] = tuple(
 )
 
 
+def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> list[dict[str, Any]]:
+    """Expand frozen surface authority into exact, executable NBA requests."""
+
+    authorized = {str(value) for value in scopes}
+    descriptors: list[dict[str, Any]] = []
+    synergy = next((value for value in ("synergy_play_types", "synergy") if value in authorized), None)
+    shots = next((value for value in ("grouped_shot_types", "shot_types") if value in authorized), None)
+    zones = next((value for value in ("exact_shot_zones", "shot_zones") if value in authorized), None)
+    if synergy:
+        descriptors.extend({"scope": synergy, "parameters": {
+            "window": "season", "subject": "player", "play_type": category,
+            "subject_code": "P", "type_grouping": "season",
+        }} for category in PLAY_TYPES)
+    if shots:
+        descriptors.extend({"scope": shots, "parameters": {
+            "window": "season", "subject": "player", "general_range": category,
+        }} for category in SHOOTING_TYPES)
+    if zones:
+        descriptors.append({"scope": zones, "parameters": {"window": "season", "subject": "player"}})
+    date_to = _aware(cutoff).date().isoformat()
+    for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
+        for window in ("season", "l15"):
+            governed = {"window": window, "subject": "opponent", "team_id": team_id,
+                        "date_from": None, "date_to": date_to}
+            if shots:
+                descriptors.extend({"scope": shots, "parameters": {
+                    **governed, "general_range": category,
+                }} for category in SHOOTING_TYPES)
+            if zones:
+                descriptors.append({"scope": zones, "parameters": dict(governed)})
+    return descriptors
+
+
 def _surface_definition(surface: str) -> SurfaceDefinition | None:
     normalized = str(surface or "").strip()
     return next(
@@ -1276,6 +1309,7 @@ class CollectionControlService(_SessionService):
                     ):
                         authorized_scopes.update(frozen_scopes.intersection(_surface_names(definition)))
                 if authorized_scopes:
+                    scope_descriptors = _collector_scope_descriptors(authorized_scopes, manifest.cutoff)
                     visible_manifests.append({
                         "manifest_id": manifest.manifest_id,
                         "season": manifest.season,
@@ -1283,6 +1317,7 @@ class CollectionControlService(_SessionService):
                         "collect_before": _iso(manifest.collect_before),
                         "accepted_versions": json.loads(manifest.accepted_versions),
                         "scopes": sorted(authorized_scopes),
+                        "scope_descriptors": scope_descriptors,
                         "checksum": manifest.checksum,
                         "status": manifest.status,
                     })
@@ -1292,6 +1327,37 @@ class CollectionControlService(_SessionService):
             "environment": self.environment,
             "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
+        }
+
+    def report_collector_status(
+        self, *, claims: CollectorClaims, state: str, reason: str,
+        release_version: str, release_checksum: str,
+    ) -> dict[str, Any]:
+        """Record bounded operational metadata without accepting collection facts."""
+
+        allowed_states = {"running", "no_work", "pending", "complete", "retry", "non_retryable", "busy"}
+        state = str(state).strip()
+        reason = str(reason).strip()
+        version = str(release_version).strip()
+        checksum = str(release_checksum).strip().casefold()
+        if (
+            state not in allowed_states
+            or not reason or len(reason) > 80 or not reason.replace("_", "").isalnum()
+            or not version or len(version) > 64
+            or len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum)
+        ):
+            raise ControlPlaneError("invalid_collector_status")
+        now = _aware(self.clock())
+        with self.session() as session, session.begin():
+            identity = self._assert_claims_identity(session, claims)
+            identity.last_seen_at = now
+            identity.release_version = version
+            identity.release_checksum = checksum
+            identity.collector_status = state
+            identity.status_reason = reason
+        return {
+            "state": state, "reason": reason, "release_version": version,
+            "release_checksum": checksum, "last_seen_at": _iso(now),
         }
 
     @staticmethod
@@ -1440,6 +1506,7 @@ class CollectionControlService(_SessionService):
                 if not authorized_scopes:
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
+                row._scope_descriptors = _collector_scope_descriptors(authorized_scopes, row.cutoff)
             return row
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,

@@ -15,6 +15,7 @@ from .diagnostics import build_safe_logger
 from .outbox import OutboxRepository
 from .provider import NBAStatsProviderAdapter
 from .release import release_metadata
+from .rehearsal import NBA_TEAM_IDS, ResidentialCompatibilityProbes
 from .runner import EnvironmentCredentialProvider, ResidentialCollector, WindowsCredentialProvider
 
 
@@ -23,7 +24,7 @@ def _release_root() -> Path:
     if configured:
         return Path(configured).resolve()
     repository_root = Path(__file__).resolve().parents[2]
-    return repository_root if (repository_root / "pyproject.toml").exists() else Path(__file__).resolve().parents[1]
+    return repository_root if (repository_root / "pyproject.toml").exists() else Path(__file__).resolve().parent
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,8 +32,10 @@ def _parser() -> argparse.ArgumentParser:
         prog="statsplus-residential-collector",
         description="Run one bounded, pull-only StatsPlus residential collection invocation.",
     )
-    parser.add_argument("command", nargs="?", choices=("run", "status", "release", "validate-config"), default="run")
+    parser.add_argument("command", nargs="?", choices=("run", "status", "release", "validate-config", "rehearsal", "credential-check"), default="run")
     parser.add_argument("--credential-env", help=argparse.SUPPRESS)
+    parser.add_argument("--season", help="NBA season for the compatibility rehearsal")
+    parser.add_argument("--cutoff", help="ISO cutoff governing rehearsal date_to")
     parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
     return parser
 
@@ -103,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate-config":
         print(json.dumps({"status": "valid", "environment": config.environment, "identity_id": config.identity_id}, sort_keys=True))
         return 0
+    if args.command == "credential-check":
+        WindowsCredentialProvider().get_secret(config.identity_id)
+        print(json.dumps({"status": "available", "identity_id": config.identity_id}, sort_keys=True))
+        return 0
     if args.command == "status":
         outbox = OutboxRepository(config.outbox_path, max_bytes=config.outbox_max_bytes, max_item_bytes=config.outbox_max_item_bytes)
         try:
@@ -118,6 +125,19 @@ def main(argv: list[str] | None = None) -> int:
         metadata = release_metadata(_release_root(), version=config.release_version)
         print(metadata.to_json())
         return 0
+    if args.command == "rehearsal":
+        if not args.season or not args.cutoff:
+            parser.error("rehearsal requires --season and --cutoff")
+        probes = ResidentialCompatibilityProbes(NBAStatsProviderAdapter())
+        results = tuple(
+            result
+            for team_id in NBA_TEAM_IDS
+            for result in probes.run(season=args.season, cutoff=args.cutoff, opponent_team_id=team_id)
+        )
+        failures = sorted({result.scope for result in results if not result.passed})
+        print(json.dumps({"status": "passed" if not failures else "failed", "teams": len(NBA_TEAM_IDS),
+                          "probes": len(results), "failed_scopes": failures}, sort_keys=True))
+        return 0 if not failures else 20
     credential_provider = EnvironmentCredentialProvider(variable=args.credential_env) if args.credential_env else None
     if credential_provider is not None and config.environment not in {"testing", "test", "development", "historical_rehearsal"}:
         parser.error("--credential-env is limited to non-production rehearsal environments")

@@ -33,7 +33,7 @@ class InstructionCache:
         "request_id", "catalog_type", "season", "cutoff", "expires_at", "catalog_version",
         "status", "completed_at", "failure_reason",
     })
-    _allowed_manifest = frozenset({"manifest_id", "season", "cutoff", "collect_before", "accepted_versions", "scopes", "checksum", "scope_parameters", "parameters", "status"})
+    _allowed_manifest = frozenset({"manifest_id", "season", "cutoff", "collect_before", "accepted_versions", "scopes", "checksum", "scope_descriptors", "status"})
     _max_bytes = 256 * 1024
 
     def __init__(self, path: str | os.PathLike[str], *, clock: Any | None = None) -> None:
