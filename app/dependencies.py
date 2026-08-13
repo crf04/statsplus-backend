@@ -289,7 +289,10 @@ def build_dependencies(
         team_matchup_query_service = TeamMatchupQueryService(
             TeamMatchupRepository(engine)
         )
-        from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+        from app.services.canonical_game_ledger import (
+            CanonicalGameLedgerRepository,
+            LedgerSchemaUnavailable,
+        )
         from app.services.ledger_backfill import (
             AcceptedObservationParticipantCatalog,
             CollectionObservationLedgerRecorder,
@@ -304,31 +307,40 @@ def build_dependencies(
             LegacyParityDiagnosticReader,
         )
 
-        canonical_game_ledger_repository = CanonicalGameLedgerRepository(
-            engine,
-            correction_sink=LedgerCorrectionQueue(require_governance=True),
-        )
-        ledger_materialization_service = LedgerMaterializationService(
-            canonical_game_ledger_repository,
-            parity_repository=LedgerParityArtifactRepository(engine),
-            parity_reader=LegacyParityDiagnosticReader(engine),
-            publication_service=publication_service,
-        )
-        ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
-        ledger_backfill_service = LedgerBackfillService(
-            provider=pbp_game_logs_provider,
-            athlete_catalog=athlete_catalog_service,
-            participant_catalog=AcceptedObservationParticipantCatalog(
-                engine, ledger_observation_recorder
-            ),
-            observation_recorder=ledger_observation_recorder,
-            reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
-                season=str(details.get("season", settings.nba.current_season)),
-                kind="ledger_athlete",
-                details={"game_id": game_id, **details},
-            ),
-            repository=canonical_game_ledger_repository,
-        )
+        try:
+            canonical_game_ledger_repository = CanonicalGameLedgerRepository(
+                engine,
+                correction_sink=LedgerCorrectionQueue(require_governance=True),
+            )
+        except LedgerSchemaUnavailable:
+            # Narrow route tests intentionally bind the app to minimal fixture
+            # databases while disabling schema creation.  Ledger workers are
+            # not part of those request seams; production/staging must still
+            # fail startup when migration 024 has not been applied.
+            if settings.environment != "testing":
+                raise
+        else:
+            ledger_materialization_service = LedgerMaterializationService(
+                canonical_game_ledger_repository,
+                parity_repository=LedgerParityArtifactRepository(engine),
+                parity_reader=LegacyParityDiagnosticReader(engine),
+                publication_service=publication_service,
+            )
+            ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
+            ledger_backfill_service = LedgerBackfillService(
+                provider=pbp_game_logs_provider,
+                athlete_catalog=athlete_catalog_service,
+                participant_catalog=AcceptedObservationParticipantCatalog(
+                    engine, ledger_observation_recorder
+                ),
+                observation_recorder=ledger_observation_recorder,
+                reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
+                    season=str(details.get("season", settings.nba.current_season)),
+                    kind="ledger_athlete",
+                    details={"game_id": game_id, **details},
+                ),
+                repository=canonical_game_ledger_repository,
+            )
 
     dfs_board_service = DFSBoardService(
         provider_registry=cached_dfs_providers,
