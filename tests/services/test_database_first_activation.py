@@ -429,6 +429,84 @@ def test_runner_rejects_same_connected_drill_and_restore_target(tmp_path):
     assert runner.configuration_error == "restored_database_must_be_separate"
 
 
+def test_operator_runner_requires_production_snapshot_url():
+    runner = FailureDrillRunner(environment="operator")
+
+    assert runner.configuration_error == "production_database_url_required"
+    report = runner.run(require_production_evidence=True)
+    assert report.status == "failed"
+    assert report.production_evidence is False
+
+
+def test_runner_rejects_production_alias_of_drill_target(tmp_path):
+    from sqlalchemy import text
+
+    database_path = tmp_path / "same-production.sqlite3"
+    database_url = f"sqlite:///{database_path}"
+    alias_url = (
+        "sqlite:///"
+        + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+    )
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE statsplus_disposable_control ("
+            "marker_nonce VARCHAR(128) NOT NULL, "
+            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO statsplus_disposable_control "
+            "(marker_nonce, purpose, schema_name) "
+            "VALUES ('drill-marker', 'database_first_drill', NULL)"
+        ))
+
+    runner = FailureDrillRunner(
+        database_url=database_url,
+        production_database_url=alias_url,
+        disposable_marker_nonce="drill-marker",
+    )
+
+    assert runner.configuration_error == (
+        "drill_database_must_be_separate_from_production"
+    )
+
+
+def test_runner_rejects_production_alias_of_restored_target(tmp_path):
+    from sqlalchemy import text
+
+    drill_path = tmp_path / "drill.sqlite3"
+    restored_path = tmp_path / "restored.sqlite3"
+    drill_url = f"sqlite:///{drill_path}"
+    restored_url = f"sqlite:///{restored_path}"
+    production_alias = (
+        "sqlite:///"
+        + str(restored_path.parent / ".." / restored_path.parent.name / restored_path.name)
+    )
+    engine = create_engine(drill_url)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE statsplus_disposable_control ("
+            "marker_nonce VARCHAR(128) NOT NULL, "
+            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO statsplus_disposable_control "
+            "(marker_nonce, purpose, schema_name) "
+            "VALUES ('drill-marker', 'database_first_drill', NULL)"
+        ))
+
+    runner = FailureDrillRunner(
+        database_url=drill_url,
+        production_database_url=production_alias,
+        restored_database_url=restored_url,
+        disposable_marker_nonce="drill-marker",
+    )
+
+    assert runner.configuration_error == "restored_database_must_be_separate"
+
+
 def test_unit_restore_drill_replays_outbox_and_repairs_ledger():
     report = FailureDrillRunner(clock=lambda: NOW).run()
     details = next(item.details for item in report.drills if item.name == "isolated_restore_replay")

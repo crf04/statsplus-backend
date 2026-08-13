@@ -380,6 +380,8 @@ def main() -> int:
     if not args.marker_nonce:
         parser.error("--marker-nonce or STATPLUS_DISPOSABLE_MARKER_NONCE is required")
     if not args.sqlite_unit:
+        if not args.production_database_url:
+            parser.error("operator drills require --production-database-url")
         if not args.restored_database_url:
             parser.error("operator drills require --restored-database-url")
         if not args.restored_marker_nonce:
@@ -423,11 +425,6 @@ def main() -> int:
                 raise ValueError("restore command must target {database_url}")
             if "--historical-repair" not in pbp_command:
                 raise ValueError("pbp repair command must invoke --historical-repair")
-            if str(args.restored_database_url) in {
-                str(args.database_url),
-                str(args.production_database_url),
-            }:
-                raise ValueError("restored target must be separate from drill and production URLs")
             preflight_disposable_database(
                 str(args.restored_database_url),
                 marker_nonce=str(args.restored_marker_nonce),

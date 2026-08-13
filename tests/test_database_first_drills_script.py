@@ -6,6 +6,8 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
 from app.services.database_first_drills import DatabaseIdentity
@@ -157,3 +159,26 @@ def test_restore_report_omits_raw_subprocess_output(monkeypatch, tmp_path):
         "restore-error-secret",
     ):
         assert secret not in rendered
+
+
+def test_operator_cli_requires_an_explicit_production_snapshot_url(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "database_first_drills.py",
+            "--database-url",
+            "postgresql://operator:drill-password@example.invalid/drill",
+            "--marker-nonce",
+            "drill-marker",
+            "--report",
+            str(tmp_path / "report.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        drill_script.main()
+
+    assert "--production-database-url" in capsys.readouterr().err

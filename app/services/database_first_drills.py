@@ -281,14 +281,20 @@ class FailureDrillRunner:
         self._drill_cutoff: datetime | None = None
         requested_url = database_url or (str(engine.url) if engine is not None else None)
         self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
-        self.configuration_error = self._validate_configuration(
-            requested_url,
-            isolated=isolated,
-            production_database_url=production_database_url,
-            restored_database_url=restored_database_url,
-            disposable_marker_nonce=self.disposable_marker_nonce,
-            disposable_schema=self.disposable_schema,
-        )
+        production_mode = self.environment not in {"unit", "test_unit"}
+        if production_mode and not production_database_url:
+            self.configuration_error = "production_database_url_required"
+        else:
+            self.configuration_error = None
+        if self.configuration_error is None:
+            self.configuration_error = self._validate_configuration(
+                requested_url,
+                isolated=isolated,
+                production_database_url=production_database_url,
+                restored_database_url=restored_database_url,
+                disposable_marker_nonce=self.disposable_marker_nonce,
+                disposable_schema=self.disposable_schema,
+            )
         if self.configuration_error is None and requested_url is not None:
             self.configuration_error = self._preflight_target(
                 self.engine,
@@ -340,8 +346,9 @@ class FailureDrillRunner:
             self.ingestion = None
             return
         self.production_evidence = (
-            self.environment not in {"unit", "test_unit"}
+            production_mode
             and self.engine.dialect.name == "postgresql"
+            and self._production_identity is not None
         )
         run_migrations(self.engine)
         self.publications = PublicationService(self.engine, clock=self.clock)
@@ -484,6 +491,8 @@ class FailureDrillRunner:
         results: list[DrillResult] = []
         if self.configuration_error is not None:
             return self._failed_report(started, self.configuration_error)
+        if require_production_evidence and not self.production_database_url:
+            return self._failed_report(started, "production_database_url_required")
         if require_production_evidence and not self.production_evidence:
             completed = self.clock().astimezone(UTC).isoformat()
             return self._failed_report(started, "postgres isolated drill database required")
