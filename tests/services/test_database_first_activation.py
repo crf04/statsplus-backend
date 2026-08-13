@@ -18,7 +18,7 @@ from app.services.database_first_activation import (
     decode_player_game_logs,
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
-from app.services.database_first_drills import FailureDrillRunner
+from app.services.database_first_drills import DrillResult, FailureDrillReport, FailureDrillRunner
 from app.services.database_first_drills import (
     connected_database_identity,
     same_database_identity,
@@ -374,6 +374,37 @@ def test_failure_drill_database_ids_fit_postgres_uuid_columns():
 
     assert len(values) == 3
     assert all(len(value) <= 36 for value in values)
+
+
+def test_production_failure_drill_report_satisfies_its_required_fields():
+    report = FailureDrillReport(
+        status="passed",
+        started_at=NOW.isoformat(),
+        completed_at=(NOW + timedelta(seconds=1)).isoformat(),
+        drills=(
+            DrillResult(
+                name="isolated_restore_replay",
+                status="passed",
+                attempts=1,
+                details={
+                    "restore_command_evidence": {"status": "succeeded"},
+                    "restore_duration_ms": 123.0,
+                    "recovery_time_ms": 123.0,
+                    "pbp_repair_observation_id": "observation-id",
+                    "pbp_repair_job_id": "job-id",
+                    "recovery_data_point": {"query_duration_ms": 123.0},
+                },
+            ),
+        ),
+        environment="operator",
+        production_evidence=True,
+    )
+
+    artifact = report.to_dict()
+
+    required = artifact["artifact_schema"]["required_fields"]
+    assert all(field in artifact for field in required)
+    assert artifact["recovery_time_ms"] == artifact["restore_duration_ms"]
 
 
 def test_url_drill_requires_out_of_band_marker_not_isolated_assertion(tmp_path):

@@ -249,6 +249,7 @@
   "pbp_repair_job_id": "2076a3a9-9c01-444c-a6b9-9cef489b0cda",
   "pbp_repair_observation_id": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",
   "production_evidence": true,
+  "recovery_time_ms": 203018.929,
   "recovery_data_point": {
     "latest_governed_cutoff": "2025-10-21T23:59:00+00:00",
     "latest_observation": "cfc0c995-d0a6-409f-95e2-4f2c767381ab",

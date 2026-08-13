@@ -361,6 +361,7 @@ class FailureDrillReport:
                     "engine": "postgresql",
                     "restore_command_evidence": restore_drill.get("restore_command_evidence"),
                     "restore_duration_ms": restore_drill.get("restore_duration_ms"),
+                    "recovery_time_ms": restore_drill.get("recovery_time_ms"),
                     "pbp_repair_observation_id": restore_drill.get("pbp_repair_observation_id"),
                     "pbp_repair_job_id": restore_drill.get("pbp_repair_job_id"),
                     "recovery_data_point": restore_drill.get("recovery_data_point"),
