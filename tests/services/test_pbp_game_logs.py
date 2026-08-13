@@ -83,7 +83,6 @@ def _pbp_row(**overrides):
         "Steals": 2,
         "Blocks": 1,
         "Fouls": 2,
-        "PlusMinus": 5,
         "Points": 24,
     }
     row.update(overrides)
@@ -364,10 +363,8 @@ def test_normalize_pbp_game_logs_builds_the_canonical_frame():
     assert row["STL"] == 2
     assert row["BLK"] == 1
     assert row["PF"] == 2
-    assert row["PLUS_MINUS"] == 5
     assert row["NBA_FANTASY_PTS"] == pytest.approx(48.6)
     assert row["FD_PTS"] == pytest.approx(48.6)
-    assert row["+/-"] == 5
     assert row["FG2M"] == 6
     assert row["FG2A"] == 11
     assert row["PRA"] == 38
@@ -416,16 +413,6 @@ def test_normalize_pbp_game_logs_zero_fills_omitted_counting_fields():
     assert row_out["FT_PCT"] == 0.0
     assert row_out["TOV"] == 0
     assert row_out["NBA_FANTASY_PTS"] == 0.0
-
-
-def test_normalize_pbp_game_logs_treats_absent_plus_minus_as_null_not_zero():
-    row = _pbp_row()
-    del row["PlusMinus"]
-
-    frame, _ = normalize_pbp_game_logs(_pbp_frame(row), _events())
-
-    assert pd.isna(frame.iloc[0]["PLUS_MINUS"])
-    assert pd.isna(frame.iloc[0]["+/-"])
 
 
 @pytest.mark.parametrize(
@@ -640,12 +627,8 @@ class FakeRepository:
         self.reads.append(season)
         return self.complete
 
-    def has_complete_route_publication(self, season):
-        self.reads.append(season)
-        return self.complete
 
-
-def test_database_first_router_serves_route_complete_seasons_from_storage():
+def test_database_first_router_serves_complete_seasons_from_storage():
     class StoredSource:
         def get_player_logs(self, player_id, season, *, cache_status):
             return "stored-frame"
@@ -660,7 +643,7 @@ def test_database_first_router_serves_route_complete_seasons_from_storage():
     assert router.cached("2025-26") is False
 
 
-def test_database_first_router_falls_back_to_live_when_route_not_complete():
+def test_database_first_router_falls_back_to_live_when_not_complete():
     class LiveSource:
         def get_player_logs(self, player_id, season, *, cache_status):
             return "live-frame"
@@ -695,7 +678,6 @@ def test_derive_game_log_frame_computes_shared_values_and_rounds_minutes():
                 "STL": 2,
                 "BLK": 1,
                 "TOV": 3,
-                "PLUS_MINUS": 5,
             }
         ]
     )
@@ -710,7 +692,6 @@ def test_derive_game_log_frame_computes_shared_values_and_rounds_minutes():
     assert derived.loc[0, "FG2M"] == 6
     assert derived.loc[0, "FG2A"] == 11
     assert derived.loc[0, "FD_PTS"] == pytest.approx(48.6)
-    assert derived.loc[0, "+/-"] == 5
 
 
 def test_derive_game_log_frame_handles_empty_denominators_and_exact_minutes():
@@ -730,7 +711,6 @@ def test_derive_game_log_frame_handles_empty_denominators_and_exact_minutes():
                 "STL": 0,
                 "BLK": 0,
                 "TOV": 0,
-                "PLUS_MINUS": None,
             }
         ]
     )
@@ -741,7 +721,6 @@ def test_derive_game_log_frame_handles_empty_denominators_and_exact_minutes():
     assert derived.loc[0, "FG_PCT"] == 0.0
     assert derived.loc[0, "FT_PCT"] == 0.0
     assert derived.loc[0, "NBA_FANTASY_PTS"] == 0.0
-    assert pd.isna(derived.loc[0, "+/-"])
 
 
 def telemetry_pbp_counts(**values):

@@ -303,9 +303,6 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
         "offensive_rebounds": "INTEGER NOT NULL DEFAULT 0",
         "defensive_rebounds": "INTEGER NOT NULL DEFAULT 0",
         "personal_fouls": "INTEGER NOT NULL DEFAULT 0",
-        # PBP's per-game boxscore seam exposes no plus/minus, so the durable
-        # fact is nullable and honestly absent rather than a fabricated zero.
-        "plus_minus": "INTEGER",
     }
     for name, type_sql in additions.items():
         if name in existing_logs:
@@ -326,13 +323,6 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
             text(
                 f"ALTER TABLE {refreshes_table} ADD COLUMN "
                 "publication_status VARCHAR(16) NOT NULL DEFAULT 'in_progress'"
-            )
-        )
-    if "route_complete" not in existing_refreshes:
-        connection.execute(
-            text(
-                f"ALTER TABLE {refreshes_table} ADD COLUMN "
-                "route_complete BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
 

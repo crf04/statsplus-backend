@@ -1,11 +1,8 @@
 """Stage 3 parity between the live PBP path and the durable stored path.
 
-The DB-first route cutover requires typed publication evidence that every
-public game-log primitive including ``plus_minus`` is complete.  PBP's per-game
-boxscore seam exposes no plus/minus, so its otherwise complete publications
-stay on the cached live PBP path; a season is cut over only when the stored
-facts truthfully carry every public primitive, and then strict parity — every
-field including ``+/-`` and the ``PLUS_MINUS`` average — must hold.
+The #66 contract amendment removes plus/minus from the game-log contract
+entirely, so an ingestion-complete, valid durable publication is again
+database-first, and live and stored documents compare strictly.
 """
 
 from __future__ import annotations
@@ -43,42 +40,34 @@ AAA_PLAYERS = (101, 103, 104, 105, 106)
 BBB_PLAYERS = (202, 107, 108, 109, 110)
 
 
-def _game_rows(
-    game_id: str,
-    game_date: str,
-    home_id: int,
-    away_id: int,
-    *,
-    plus_minus: bool = True,
-):
+def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
     rows = []
     for index, player_id in enumerate((*AAA_PLAYERS, *BBB_PLAYERS)):
-        row = {
-            "EntityId": player_id,
-            "Name": f"Player {player_id}",
-            "GameId": game_id,
-            "Date": game_date,
-            "Team": "AAA" if index < 5 else "BBB",
-            "Opponent": "BBB" if index < 5 else "AAA",
-            "Minutes": f"{20 + index}:00",
-            "FG2M": 4 + index,
-            "FG2A": 8 + index,
-            "FG3M": index,
-            "FG3A": index + 2,
-            "FtPoints": 2,
-            "FTA": 3,
-            "OffRebounds": 1,
-            "DefRebounds": 3,
-            "Assists": 2 + index,
-            "Turnovers": 1,
-            "Steals": 1,
-            "Blocks": 0,
-            "Fouls": 1,
-            "Points": 12 + 2 * index,
-        }
-        if plus_minus:
-            row["PlusMinus"] = 4 - index
-        rows.append(row)
+        rows.append(
+            {
+                "EntityId": player_id,
+                "Name": f"Player {player_id}",
+                "GameId": game_id,
+                "Date": game_date,
+                "Team": "AAA" if index < 5 else "BBB",
+                "Opponent": "BBB" if index < 5 else "AAA",
+                "Minutes": f"{20 + index}:00",
+                "FG2M": 4 + index,
+                "FG2A": 8 + index,
+                "FG3M": index,
+                "FG3A": index + 2,
+                "FtPoints": 2,
+                "FTA": 3,
+                "OffRebounds": 1,
+                "DefRebounds": 3,
+                "Assists": 2 + index,
+                "Turnovers": 1,
+                "Steals": 1,
+                "Blocks": 0,
+                "Fouls": 1,
+                "Points": 12 + 2 * index,
+            }
+        )
     return rows
 
 
@@ -92,21 +81,14 @@ def _frame(rows) -> pd.DataFrame:
 
 
 class PlayerLogProvider:
-    """Serves the per-player view of the same canonical game facts.
+    """Serves the per-player and per-game views of the same game facts."""
 
-    The live per-player seam always exposes ``PlusMinus`` and returns only the
-    requested Regular Season games.  ``durable_plus_minus`` models whether the
-    durable per-game source carries plus/minus evidence: the real PBP per-game
-    seam does not, so its publication is route-incomplete by typed evidence.
-    """
-
-    def __init__(self, games, regular_season_game_ids=None, durable_plus_minus=False):
+    def __init__(self, games, regular_season_game_ids=None):
         self.games = games
         self.regular_season_game_ids = (
             regular_season_game_ids if regular_season_game_ids is not None
             else frozenset(games)
         )
-        self.durable_plus_minus = durable_plus_minus
 
     def fetch_player_game_logs(self, player_id, season, *, season_type, cache_status):
         rows = [
@@ -119,16 +101,7 @@ class PlayerLogProvider:
         return _frame(rows)
 
     def fetch_game_player_logs(self, game_id, season, *, season_type):
-        rows = [
-            dict(row)
-            for row in self.games[game_id]
-        ]
-        if not self.durable_plus_minus:
-            rows = [
-                {key: value for key, value in row.items() if key != "PlusMinus"}
-                for row in rows
-            ]
-        return _frame(rows)
+        return _frame(self.games[game_id])
 
     def record_cache_hit(self, operation):
         return None
@@ -152,7 +125,8 @@ class _EventsFromDb:
         return [dict(row) for row in rows]
 
 
-def _make_world(tmp_path, *, durable_plus_minus):
+@pytest.fixture
+def durable_world(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'parity.sqlite3'}")
     run_migrations(engine)
     repository = PlayerGameLogRepository(
@@ -174,7 +148,7 @@ def _make_world(tmp_path, *, durable_plus_minus):
         "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2),
         "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2),
     }
-    provider = PlayerLogProvider(games, durable_plus_minus=durable_plus_minus)
+    provider = PlayerLogProvider(games)
     ingest = PlayerGameLogIngestService(
         pbp_provider=provider,
         repository=repository,
@@ -188,18 +162,6 @@ def _make_world(tmp_path, *, durable_plus_minus):
     )
     ingest.refresh(SEASON)
     return engine, repository, provider, games
-
-
-@pytest.fixture
-def route_incomplete_world(tmp_path):
-    """A PBP per-game publication whose facts lack plus/minus."""
-    return _make_world(tmp_path, durable_plus_minus=False)
-
-
-@pytest.fixture
-def route_complete_world(tmp_path):
-    """A durable publication that truthfully carries every public primitive."""
-    return _make_world(tmp_path, durable_plus_minus=True)
 
 
 def _settings():
@@ -232,52 +194,20 @@ def _stored_service(engine, repository):
     )
 
 
-def _router_service(engine, repository, provider):
+def test_complete_publication_is_database_first_with_strict_parity(durable_world):
+    engine, repository, provider, _games = durable_world
+
+    assert repository.get_freshness(SEASON).publication_status == "complete"
+    assert repository.has_complete_publication(SEASON) is True
+
     router = DatabaseFirstGameLogsSource(
         LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
         StoredGameLogsSource(repository),
         repository,
     )
-    return _service(engine, router)
-
-
-def test_route_keeps_plus_minus_incomplete_publication_on_live_pbp(
-    route_incomplete_world,
-):
-    engine, repository, provider, _games = route_incomplete_world
-
-    assert repository.get_freshness(SEASON).publication_status == "complete"
-    assert repository.has_complete_publication(SEASON) is True
-    # The stored facts carry no plus/minus, so the route gate stays closed.
-    assert repository.has_complete_route_publication(SEASON) is False
-
-    router = _router_service(engine, repository, provider)
+    route_service = _service(engine, router)
     query = GameLogQuery(season_filter=SEASON)
-    route_doc = router.get_filtered_logs("Player One", query)
-    live_doc = _live_service(engine, provider).get_filtered_logs(
-        "Player One", query
-    )
-    stored_doc = _stored_service(engine, repository).get_filtered_logs(
-        "Player One", query
-    )
-
-    # The route serves the live PBP path, so documents and filters are
-    # unchanged, while the stored document is not what a DB cutover would serve.
-    assert route_doc == live_doc
-    assert stored_doc["game_logs"][0]["+/-"] is None
-    assert live_doc["game_logs"][0]["+/-"] == 4
-
-
-def test_route_eligible_publication_serves_stored_with_strict_parity(
-    route_complete_world,
-):
-    engine, repository, provider, _games = route_complete_world
-
-    assert repository.has_complete_route_publication(SEASON) is True
-
-    router = _router_service(engine, repository, provider)
-    query = GameLogQuery(season_filter=SEASON)
-    route_doc = router.get_filtered_logs("Player One", query)
+    route_doc = route_service.get_filtered_logs("Player One", query)
     stored_doc = _stored_service(engine, repository).get_filtered_logs(
         "Player One", query
     )
@@ -285,15 +215,16 @@ def test_route_eligible_publication_serves_stored_with_strict_parity(
         "Player One", query
     )
 
-    # Strict parity, including plus/minus, is the cutover expectation.
+    # An ingestion-complete valid publication serves database-first, and the
+    # stored document strictly equals the live document (no plus/minus at all).
+    assert router.cached(SEASON) is False
     assert route_doc == stored_doc == live_doc
     assert len(stored_doc["game_logs"]) == 2
     assert stored_doc["game_logs"][0]["MATCHUP"] == "AAA vs. BBB"
-    assert stored_doc["game_logs"][0]["+/-"] == 4
 
 
-def test_route_eligible_paths_agree_under_filters(route_complete_world):
-    engine, repository, provider, _games = route_complete_world
+def test_stored_and_live_paths_agree_under_filters(durable_world):
+    engine, repository, provider, _games = durable_world
     query = GameLogQuery(
         season_filter=SEASON,
         minutes_filter="15,48",
@@ -310,8 +241,8 @@ def test_route_eligible_paths_agree_under_filters(route_complete_world):
     assert stored["game_logs"]
 
 
-def test_route_eligible_paths_agree_on_recent_game_filter(route_complete_world):
-    engine, repository, provider, _games = route_complete_world
+def test_stored_and_live_paths_agree_on_recent_game_filter(durable_world):
+    engine, repository, provider, _games = durable_world
     query = GameLogQuery(season_filter=SEASON, game_filter=1)
 
     stored = _stored_service(engine, repository).get_filtered_logs(
@@ -351,7 +282,6 @@ def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
             "0042500001": _game_rows("0042500001", "2026-01-15", 1, 2),
         },
         regular_season_game_ids={"0022500001", "0022500004"},
-        durable_plus_minus=True,
     )
     ingest = PlayerGameLogIngestService(
         pbp_provider=provider,
@@ -379,10 +309,8 @@ def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
     assert len(stored["game_logs"]) == 2
 
 
-def test_database_first_router_serves_route_complete_season_from_storage(
-    route_complete_world,
-):
-    engine, repository, provider, _games = route_complete_world
+def test_database_first_router_serves_complete_season_from_storage(durable_world):
+    engine, repository, provider, _games = durable_world
     router = DatabaseFirstGameLogsSource(
         LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
         StoredGameLogsSource(repository),
@@ -393,3 +321,35 @@ def test_database_first_router_serves_route_complete_season_from_storage(
     frame = router.get_player_logs(101, SEASON)
     assert len(frame) == 2
     assert frame.iloc[0]["GAME_ID"] == "0022500004"  # newest first
+
+
+def test_database_first_router_falls_back_to_live_before_complete_publication(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'parity-live.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: RETRIEVED_AT,
+        stats_surface_max_age=timedelta(hours=30),
+    )
+    _seed_identities(repository)
+    provider = PlayerLogProvider(
+        {
+            "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2),
+            "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2),
+        }
+    )
+    live = LivePBPGameLogsSource(provider, _EventsFromDb(engine))
+    router = DatabaseFirstGameLogsSource(
+        live,
+        StoredGameLogsSource(repository),
+        repository,
+    )
+
+    assert router.cached(SEASON) is True
+    frame = router.get_player_logs(101, SEASON)
+    assert len(frame) == 2
+    assert frame.iloc[0]["GAME_ID"] == "0022500004"

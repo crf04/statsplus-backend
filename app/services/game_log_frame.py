@@ -25,7 +25,6 @@ CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS = (
     "STL",
     "BLK",
     "TOV",
-    "PLUS_MINUS",
     "MIN",
 )
 
@@ -56,7 +55,6 @@ GAME_LOG_FRAME_COLUMNS = (
     "STL",
     "BLK",
     "PF",
-    "PLUS_MINUS",
 )
 
 #: Derived columns added by :func:`derive_game_log_frame`.
@@ -70,7 +68,6 @@ DERIVED_GAME_LOG_COLUMNS = (
     "RA",
     "STKS",
     "FD_PTS",
-    "+/-",
     "FG2M",
     "FG2A",
 )
@@ -125,7 +122,6 @@ def derive_game_log_frame(
     derived["RA"] = derived["REB"] + derived["AST"]
     derived["STKS"] = derived["STL"] + derived["BLK"]
     derived["FD_PTS"] = derived["NBA_FANTASY_PTS"]
-    derived["+/-"] = derived["PLUS_MINUS"]
     derived["FG2M"] = derived["FGM"] - derived["FG3M"]
     derived["FG2A"] = derived["FGA"] - derived["FG3A"]
     return derived

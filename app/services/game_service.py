@@ -445,7 +445,7 @@ class GameService:
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA',
                          'FD_PTS', 'FGM', 'FGA', 'FG_PCT', 'FG2A', 'FG2M', 'FG3M', 'FG3A', 'FTM', 'FTA',
-                         'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS', 'PLUS_MINUS']
+                         'OREB', 'DREB', 'TOV', 'STL', 'BLK', 'PF', 'STKS']
         filtered_logs['GAME_DATE'] = pd.to_datetime(filtered_logs['GAME_DATE'], errors='coerce').dt.date
         if not filtered_logs.empty:
             filtered_averages = filtered_logs[average_columns].mean().round(2)
@@ -456,7 +456,7 @@ class GameService:
         if not full_game_logs.empty:
             season_averages = full_game_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
-        filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
+        filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', '+/-', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
 
         result = GameLogResponse(

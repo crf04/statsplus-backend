@@ -11,7 +11,6 @@ from sqlalchemy import (
     Integer,
     String,
 )
-from sqlalchemy.sql import expression
 
 from . import Base
 
@@ -50,10 +49,6 @@ class PlayerGameLog(Base):
     steals = Column(Integer, nullable=False)
     blocks = Column(Integer, nullable=False)
     personal_fouls = Column(Integer, nullable=False)
-    #: PBP's per-game boxscore seam exposes no plus/minus evidence, so the
-    #: durable fact is nullable and honestly absent rather than a fabricated
-    #: zero; the request-time per-player seam does carry it.
-    plus_minus = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -95,17 +90,6 @@ class PlayerGameLogRefresh(Base):
     #: database-first read never mistakes unverified data for a complete one.
     publication_status = Column(
         String(16), nullable=False, server_default="in_progress"
-    )
-    #: Typed cutover evidence: whether the stored publication proves every
-    #: public game-log primitive including ``plus_minus`` is complete.  PBP's
-    #: per-game boxscore seam exposes no plus/minus, so its publications carry
-    #: null values and this stays false, keeping the request-time route on the
-    #: live PBP path with unchanged documents and filters.
-    route_complete = Column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=expression.false(),
     )
 
     __table_args__ = (

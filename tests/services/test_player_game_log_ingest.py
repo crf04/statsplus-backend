@@ -45,42 +45,34 @@ def _repository(tmp_path) -> PlayerGameLogRepository:
     )
 
 
-def _game_rows(
-    game_id: str,
-    game_date: str,
-    home_id: int,
-    away_id: int,
-    *,
-    plus_minus: bool = False,
-):
+def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
     rows = []
     for index, player_id in enumerate((*AAA_PLAYERS, *BBB_PLAYERS)):
-        row = {
-            "EntityId": player_id,
-            "Name": f"Player {player_id}",
-            "GameId": game_id,
-            "Date": game_date,
-            "Team": "AAA" if index < 5 else "BBB",
-            "Opponent": "BBB" if index < 5 else "AAA",
-            "Minutes": f"{20 + index}:00",
-            "FG2M": 4 + index,
-            "FG2A": 8 + index,
-            "FG3M": index,
-            "FG3A": index + 2,
-            "FtPoints": 2,
-            "FTA": 3,
-            "OffRebounds": 1,
-            "DefRebounds": 3,
-            "Assists": 2 + index,
-            "Turnovers": 1,
-            "Steals": 1,
-            "Blocks": 0,
-            "Fouls": 1,
-            "Points": 12 + 2 * index,
-        }
-        if plus_minus:
-            row["PlusMinus"] = 4 - index
-        rows.append(row)
+        rows.append(
+            {
+                "EntityId": player_id,
+                "Name": f"Player {player_id}",
+                "GameId": game_id,
+                "Date": game_date,
+                "Team": "AAA" if index < 5 else "BBB",
+                "Opponent": "BBB" if index < 5 else "AAA",
+                "Minutes": f"{20 + index}:00",
+                "FG2M": 4 + index,
+                "FG2A": 8 + index,
+                "FG3M": index,
+                "FG3A": index + 2,
+                "FtPoints": 2,
+                "FTA": 3,
+                "OffRebounds": 1,
+                "DefRebounds": 3,
+                "Assists": 2 + index,
+                "Turnovers": 1,
+                "Steals": 1,
+                "Blocks": 0,
+                "Fouls": 1,
+                "Points": 12 + 2 * index,
+            }
+        )
     return rows
 
 
@@ -158,41 +150,16 @@ def test_ingest_publishes_each_missing_completed_game_atomically(tmp_path):
     assert rows[0].free_throws_made == 2
     assert rows[0].offensive_rebounds == 1
     assert rows[0].personal_fouls == 1
-    # The per-game boxscore seam exposes no plus/minus evidence.
-    assert rows[0].plus_minus is None
 
     freshness = repository.get_freshness(SEASON)
     assert freshness.publication_status == "complete"
     assert repository.has_complete_publication(SEASON) is True
-    # The per-game boxscore seam exposes no plus/minus, so the DB-first route
-    # cutover gate stays closed and the request-time path keeps using live PBP.
-    assert repository.has_complete_route_publication(SEASON) is False
 
     sync = repository.get_sync_status(SEASON, "0022500001")
     assert sync.status == "complete"
     assert sync.row_count == 10
     assert sync.source_provider == "pbp_stats"
     assert len(sync.checksum) == 64
-
-
-def test_ingest_marks_route_complete_only_with_truthful_plus_minus_evidence(
-    tmp_path,
-):
-    repository = _repository(tmp_path)
-    _seed_identities(repository)
-    games = {
-        "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2, plus_minus=True),
-        "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2, plus_minus=True),
-    }
-    provider = FakeGameLogProvider(games)
-
-    _service(repository, provider).refresh(SEASON)
-
-    assert repository.get_freshness(SEASON).publication_status == "complete"
-    # A provider that truthfully carries plus/minus proves the public
-    # primitives complete, so the cutover gate may open.
-    assert repository.get_freshness(SEASON).route_complete is True
-    assert repository.has_complete_route_publication(SEASON) is True
 
 
 def test_failed_run_preserves_the_last_complete_publication(tmp_path):

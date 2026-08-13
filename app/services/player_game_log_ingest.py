@@ -332,11 +332,6 @@ class PlayerGameLogIngestService:
                 steals=int(row["STL"]),
                 blocks=int(row["BLK"]),
                 personal_fouls=int(row["PF"]),
-                plus_minus=(
-                    None
-                    if pd.isna(row["PLUS_MINUS"])
-                    else int(row["PLUS_MINUS"])
-                ),
             )
             existing = records.get(player_id)
             if existing is not None:

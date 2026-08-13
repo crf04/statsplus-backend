@@ -97,23 +97,6 @@ def _counting_value(row: Mapping[str, Any], field: str) -> int:
     return _integer_value(row, field, minimum=0)
 
 
-def _signed_value(row: Mapping[str, Any], field: str) -> int:
-    return _integer_value(row, field, minimum=None)
-
-
-def _nullable_signed_value(row: Mapping[str, Any], field: str) -> int | None:
-    """Return one signed value, or ``None`` when the provider omits it.
-
-    Plus/minus is a differential, not a counted field: an absent value means
-    the provider exposes no evidence (the per-game boxscore seam), never a
-    fabricated zero.
-    """
-    value = row.get(field)
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    return _integer_value(row, field, minimum=None)
-
-
 def _integer_value(
     row: Mapping[str, Any], field: str, *, minimum: int | None
 ) -> int:
@@ -257,7 +240,6 @@ def normalize_pbp_game_logs(
                 "STL": _counting_value(row, "Steals"),
                 "BLK": _counting_value(row, "Blocks"),
                 "PF": _counting_value(row, "Fouls"),
-                "PLUS_MINUS": _nullable_signed_value(row, "PlusMinus"),
             }
         )
 

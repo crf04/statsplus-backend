@@ -243,8 +243,6 @@ def test_recorded_pbp_game_stats_parse_exclude_team_summary_and_attach_identity(
     assert frame.loc[2, "Team"] == "SAS"
     assert frame.loc[2, "Opponent"] == "LAL"
     assert frame.loc[2, "Points"] == 25
-    # The per-game boxscore seam exposes no plus/minus evidence.
-    assert frame.loc[0, "PlusMinus"] is None
 
 
 @pytest.mark.parametrize(

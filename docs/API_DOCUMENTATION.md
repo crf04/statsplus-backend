@@ -804,15 +804,19 @@ Matchup notation; any unjoinable or contradictory row fails the request rather
 than being guessed or dropped. The HTTP
 parameters, success payload, filter vocabulary, authentication, error schema,
 and Redis caching behavior are unchanged, and cache telemetry is attributed to
-PBP Stats. A season with a complete, valid durable publication that also proves
-every public primitive including `PLUS_MINUS` is stored is served
+PBP Stats. A season with a complete, valid durable publication is served
 database-first from the stored `player_game_logs` facts with strictly identical
-values; every other valid season — including PBP per-game publications, which
-carry no plus/minus evidence — continues through the cached live PBP path, so
-route documents and filters remain unchanged. Both paths
+values; every other valid season continues through the cached live PBP path.
+Both paths
 return the same whole-minute presentation and the same composite/fantasy
-averages, and any season cut over to the database must satisfy strict parity
-including plus-minus.
+averages, and any season cut over to the database must satisfy strict parity.
+
+Explicit contract amendment (#66): plus/minus is removed from the game-log
+contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the
+averages no longer include a `PLUS_MINUS` cell, and response rows carry no
+`+/-` value. This is a deliberate simplification of the previously pinned
+contract so the durable PBP per-game path (whose upstream boxscore seam exposes
+no plus/minus) is database-first without fabricating evidence.
 
 ### Contract and migration note (#9)
 
@@ -845,7 +849,7 @@ Query parameters:
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
 | `playstyle_RTG_min` | No | Finite numeric lower bound. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -1458,7 +1462,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an

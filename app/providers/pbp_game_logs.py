@@ -77,7 +77,6 @@ PBP_GAME_LOG_COUNTING_COLUMNS: tuple[str, ...] = (
     "Steals",
     "Blocks",
     "Fouls",
-    "PlusMinus",
     "Points",
 )
 PBP_GAME_LOG_COLUMNS: tuple[str, ...] = (
