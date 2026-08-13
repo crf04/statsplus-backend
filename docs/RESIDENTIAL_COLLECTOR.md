@@ -71,6 +71,14 @@ are marked for operator attention and skipped while the newer-cutoff-first
 drain continues; only a server-governed obsolete cutoff may remove an unsent
 row. Use the governed cutoff with the repository's `prune_obsolete` recovery
 operation, never filesystem deletion.
+The collector invokes that operation only from Railway discovery's
+`obsolete_before_cutoff`; local age alone can alert but never delete.
+SQLite cannot atomically roll back filesystem allocation after commit. The
+repository therefore treats `COLLECTOR_OUTBOX_MAX_BYTES` as a conservative
+allocation budget above its fixed empty-schema baseline: `max_page_count`, a
+reserved worst-case frame allowance, pre-write WAL truncation, and fail-closed
+post-write verification keep every accepted write inside that budget. The
+SHM mapping is included in footprint checks but contains no durable facts.
 Restarting the process reopens the same file and replays pending items. A stale
 process lease expires and can be recovered; a live lease prevents overlapping
 instances. The product database remains Railway Postgres.

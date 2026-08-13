@@ -233,7 +233,13 @@ class RailwayClient:
         manifests = value.get("manifests", [])
         if not isinstance(requests_value, list) or not isinstance(manifests, list):
             raise CollectorHTTPError("malformed_discovery")
-        return {"environment": self.environment, "bootstrap_requests": list(requests_value), "manifests": list(manifests)}
+        result = {"environment": self.environment, "bootstrap_requests": list(requests_value), "manifests": list(manifests)}
+        obsolete = value.get("obsolete_before_cutoff")
+        if obsolete is not None:
+            if not isinstance(obsolete, str):
+                raise CollectorHTTPError("malformed_discovery")
+            result["obsolete_before_cutoff"] = obsolete
+        return result
 
     def get_manifest(self, token: CollectorToken | str, manifest_id: str) -> dict[str, Any]:
         if not manifest_id.strip():
@@ -273,6 +279,16 @@ class RailwayClient:
             "state": state, "reason": reason,
         })
         value = response.json()
+        if not isinstance(value, Mapping):
+            raise CollectorHTTPError("malformed_control_response")
+        return dict(value)
+
+    def rehearsal_evidence(self, token: CollectorToken | str, *, release_version: str,
+                           release_checksum: str, season: str, cutoff: str) -> dict[str, Any]:
+        value = self._request("POST", "/api/collector/rehearsal-evidence", token=token, json_body={
+            "release_version": release_version, "release_checksum": release_checksum,
+            "season": season, "cutoff": cutoff,
+        }).json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_control_response")
         return dict(value)

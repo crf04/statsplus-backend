@@ -338,6 +338,36 @@ def report_collector_status():
     })
 
 
+@collection_bp.post("/collector/rehearsal-evidence")
+@route_error_boundary("Failed to verify collector rehearsal evidence.")
+def collector_rehearsal_evidence():
+    claims = _collector_claims_any(("poll", "ingest", "catalog_publish"))
+    if not {"poll", "ingest", "catalog_publish"} <= set(claims.scopes):
+        raise _control_error(ControlPlaneError("scope_denied"))
+    body = _body()
+    if set(body) != {"release_version", "release_checksum", "season", "cutoff"}:
+        raise InvalidInputError("Rehearsal evidence is malformed.", detail="invalid_release_status")
+    try:
+        row = _service("collector_tokens").report_status(
+            claims, release_version=body["release_version"], release_checksum=body["release_checksum"],
+            state="running", reason="rehearsal_verified",
+        )
+        cutoff = datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00"))
+    except (ControlPlaneError, ValueError, TypeError) as error:
+        raise _control_error(error) from error
+    now = row.last_seen_at
+    return jsonify({
+        "contract_version": 1, "identity_id": claims.collector_id,
+        "evidence_id": __import__("uuid").uuid4().hex,
+        "environment": claims.environment, "audience": claims.audience,
+        "endpoint": request.host_url.rstrip("/"),
+        "release_version": row.release_version, "release_checksum": row.release_checksum,
+        "season": str(body["season"]), "cutoff": cutoff.isoformat(),
+        "operations": ["credential", "auth", "discovery", "status", "ingestion"],
+        "issued_at": now.isoformat(), "expires_at": (now + __import__("datetime").timedelta(minutes=10)).isoformat(),
+    })
+
+
 @collection_bp.get("/collector/manifest/<manifest_id>")
 @route_error_boundary("Failed to retrieve the collection manifest.")
 def get_manifest(manifest_id: str):

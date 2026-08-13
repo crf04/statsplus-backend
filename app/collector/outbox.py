@@ -245,6 +245,11 @@ class OutboxRepository:
             Path(self.path + "-wal").stat().st_size if Path(self.path + "-wal").exists() else 0
         ) + (Path(self.path + "-shm").stat().st_size if Path(self.path + "-shm").exists() else 0)
 
+    def within_hard_limit(self) -> bool:
+        """Check the conservative allocation budget above the fixed schema baseline."""
+
+        return self.storage_footprint_bytes() - self._baseline_footprint <= self.max_bytes
+
     def durability_pragmas(self) -> Mapping[str, Any]:
         with self._lock:
             return {

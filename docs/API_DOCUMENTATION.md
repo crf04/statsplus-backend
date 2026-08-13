@@ -1436,6 +1436,7 @@ idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 ```http
 POST /api/collector/token
 POST /api/collector/status
+POST /api/collector/rehearsal-evidence
 GET /api/collector/discovery
 GET /api/collector/bootstrap
 GET /api/collector/bootstrap/<request_id>
@@ -1549,6 +1550,11 @@ checksum is exactly 64 hexadecimal characters. The authenticated identity's
 `last_seen_at` and release evidence are persisted. Lifecycle reports append an
 immutable transition, including an explicit recovery after retry/failure;
 payloads, secrets, player data, and arbitrary status fields are rejected.
+`POST /api/collector/rehearsal-evidence` is machine-authenticated and requires
+the complete poll/ingest/catalog capability set. Its short-lived response binds
+identity, environment, endpoint, audience, release version/checksum,
+season/cutoff, contract version, operations, and issuance/expiry. Promotion
+obtains this evidence directly; caller-authored evidence files are not trusted.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this

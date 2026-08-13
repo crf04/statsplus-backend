@@ -1381,6 +1381,9 @@ class CollectionControlService(_SessionService):
             "environment": self.environment,
             "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
+            "obsolete_before_cutoff": max(
+                (item["cutoff"] for item in visible_manifests), default=None,
+            ),
         }
 
     @staticmethod

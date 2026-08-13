@@ -166,6 +166,7 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
     outbox.release_lease(owner)
     assert outbox.durability_pragmas() == {"journal_mode": "wal", "synchronous": 2, "foreign_keys": 1}
     assert outbox.storage_footprint_bytes() >= (tmp_path / "outbox.sqlite3").stat().st_size
+    assert outbox.within_hard_limit()
     outbox.close()
 
 
@@ -191,9 +192,8 @@ def test_windows_task_lifecycle_requires_explicit_named_promotion():
     assert "Disable-ScheduledTask -TaskName $TaskName" in rollback
     assert "credential-check" in promote and "validate-config" in promote
     assert "rehearsal --season $Season --cutoff $Cutoff" in promote
-    assert "RailwayRehearsalResult" in promote and "RailwayEvidenceChecksum" in promote
-    assert "'credential','auth','discovery','status','ingestion'" in promote
-    assert "$evidence.environment -eq 'production'" in promote
+    assert "railway-rehearsal --season $Season --cutoff $Cutoff" in promote
+    assert "RailwayRehearsalResult" not in promote
     assert "Enable-ScheduledTask -TaskName $TaskName" in promote
 
 
@@ -564,6 +564,7 @@ def test_outbox_replay_survives_repository_restart_and_live_lease_is_busy(tmp_pa
         second.acquire_lease(owner="new", ttl_seconds=60)
     second.release_lease(owner)
     assert second.acknowledge(item.item_id, checksum=restart_checksum)
+    assert second.within_hard_limit()
     second.close()
 
 
@@ -607,6 +608,29 @@ def test_runner_skips_aged_item_but_uploads_newest_priority_first(tmp_path: Path
     assert current.pending()[0].client_observation_id == "aged"
     assert "outbox_retention" in result.failures
     current.close()
+
+
+def test_runner_prunes_only_server_governed_obsolete_cutoff(tmp_path: Path):
+    path = tmp_path / "governed.sqlite3"
+    old = OutboxRepository(path, clock=lambda: NOW - timedelta(days=31))
+    old.enqueue(kind="observation", client_observation_id="obsolete", checksum=_wire_checksum("obsolete"),
+                cutoff=NOW - timedelta(days=10), payload=_wire("obsolete", "obsolete"), metadata={})
+    old.close()
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [],
+                 "obsolete_before_cutoff": (NOW - timedelta(days=1)).isoformat()}
+    collector, _, outbox = _collector(tmp_path / "unused", discovery=discovery)
+    outbox.close()
+    transport = FakeTransport(discovery=discovery)
+    governed = OutboxRepository(path, clock=lambda: NOW)
+    runner = ResidentialCollector(
+        client=RailwayClient("http://127.0.0.1", identity_id="collector", environment="testing",
+                             transport=transport, allow_insecure_localhost=True),
+        outbox=governed, provider=FakeProvider(), identity_id="collector", environment="testing",
+        secret="machine-secret", clock=lambda: NOW,
+    )
+    assert runner.run().disposition in {RunDisposition.NO_WORK, RunDisposition.COMPLETE}
+    assert governed.count() == 0
+    governed.close()
 
 
 def test_outbox_fails_closed_when_wal_durability_is_unavailable(monkeypatch, tmp_path: Path):

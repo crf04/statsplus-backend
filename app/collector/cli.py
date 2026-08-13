@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="statsplus-residential-collector",
         description="Run one bounded, pull-only StatsPlus residential collection invocation.",
     )
-    parser.add_argument("command", nargs="?", choices=("run", "status", "release", "validate-config", "rehearsal", "credential-check"), default="run")
+    parser.add_argument("command", nargs="?", choices=("run", "status", "release", "validate-config", "rehearsal", "railway-rehearsal", "credential-check"), default="run")
     parser.add_argument("--credential-env", help=argparse.SUPPRESS)
     parser.add_argument("--season", help="NBA season for the compatibility rehearsal")
     parser.add_argument("--cutoff", help="ISO cutoff governing rehearsal date_to")
@@ -141,6 +141,43 @@ def main(argv: list[str] | None = None) -> int:
                     "teams": len(NBA_TEAM_IDS), "probes": len(results), "failed_scopes": failures}
         print(json.dumps(evidence, sort_keys=True))
         return 0 if not failures else 20
+    if args.command == "railway-rehearsal":
+        if not args.season or not args.cutoff or config.environment == "production":
+            parser.error("railway-rehearsal requires season/cutoff and a non-production environment")
+        metadata = release_metadata(_release_root(), version=config.release_version)
+        credential = WindowsCredentialProvider()
+        client = RailwayClient(
+            config.railway_url, identity_id=config.identity_id, environment=config.environment,
+            timeout=config.http_timeout_seconds, release_version=config.release_version,
+        )
+        token = client.exchange_token(credential.get_secret(config.identity_id))
+        client.discover(token, limit=1)
+        client.report_status(token, release_version=config.release_version,
+                             release_checksum=metadata.checksum, state="running", reason="rehearsal_started")
+        evidence = client.rehearsal_evidence(
+            token, release_version=config.release_version, release_checksum=metadata.checksum,
+            season=args.season, cutoff=args.cutoff,
+        )
+        expected = {
+            "identity_id": config.identity_id, "environment": config.environment,
+            "release_version": config.release_version, "release_checksum": metadata.checksum,
+            "season": args.season,
+        }
+        if any(str(evidence.get(key)) != str(value) for key, value in expected.items()):
+            raise CollectorConfigurationError("Railway rehearsal evidence binding mismatch")
+        endpoint = str(evidence.get("endpoint") or "").rstrip("/")
+        if not endpoint or not config.railway_url.rstrip("/").startswith(endpoint):
+            raise CollectorConfigurationError("Railway rehearsal endpoint mismatch")
+        if not evidence.get("audience") or not evidence.get("evidence_id") or evidence.get("contract_version") != 1:
+            raise CollectorConfigurationError("Railway rehearsal contract mismatch")
+        if set(evidence.get("operations") or ()) != {"credential", "auth", "discovery", "status", "ingestion"}:
+            raise CollectorConfigurationError("Railway rehearsal operations mismatch")
+        issued = __import__("datetime").datetime.fromisoformat(str(evidence["issued_at"]).replace("Z", "+00:00"))
+        expires = __import__("datetime").datetime.fromisoformat(str(evidence["expires_at"]).replace("Z", "+00:00"))
+        if not issued < expires or expires <= __import__("datetime").datetime.now(__import__("datetime").timezone.utc):
+            raise CollectorConfigurationError("Railway rehearsal evidence is stale")
+        print(json.dumps(evidence, sort_keys=True))
+        return 0
     credential_provider = EnvironmentCredentialProvider(variable=args.credential_env) if args.credential_env else None
     if credential_provider is not None and config.environment not in {"testing", "test", "development", "historical_rehearsal"}:
         parser.error("--credential-env is limited to non-production rehearsal environments")

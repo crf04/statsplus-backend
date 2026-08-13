@@ -229,6 +229,18 @@ class ResidentialCollector:
             raise OutboxError("Railway returned no durable receipt checksum")
         return value
 
+    def _terminal(self, token: CollectorToken | None, disposition: RunDisposition, *,
+                  failures: tuple[str, ...], uploaded: int = 0) -> RunResult:
+        if token is not None:
+            try:
+                self._report_status(
+                    token, state=disposition.value,
+                    reason=(failures[0] if failures else disposition.value),
+                )
+            except CollectorHTTPError:
+                pass
+        return self._result(disposition, uploaded=uploaded, failures=failures)
+
     def _drain(self, token: CollectorToken) -> tuple[int, bool, tuple[str, ...], CollectorToken]:
         uploaded = 0
         retry = False
@@ -395,10 +407,10 @@ class ResidentialCollector:
             except CollectorHTTPError as error:
                 token_failure = safe_code(error.reason, fallback="token_failure")
                 if not error.retryable:
-                    return self._result(RunDisposition.NON_RETRYABLE, failures=(token_failure,))
+                    return self._terminal(token, RunDisposition.NON_RETRYABLE, failures=(token_failure,))
                 self.status.record(token_failure)
             except (ValueError, TypeError):
-                return self._result(RunDisposition.NON_RETRYABLE, failures=("credential_unavailable",))
+                return self._terminal(token, RunDisposition.NON_RETRYABLE, failures=("credential_unavailable",))
             if token is not None:
                 try:
                     token = self._report_status(token, state="running", reason="run_started")
@@ -409,8 +421,9 @@ class ResidentialCollector:
             initial_transient = False
             if token is not None:
                 uploaded, retry, failures, token = self._drain(token)
-                if failures and not retry:
-                    return self._result(RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures)
+                blocking_failures = tuple(code for code in failures if code != "outbox_retention")
+                if blocking_failures and not retry:
+                    return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures)
                 initial_transient = retry
 
             discovery: Mapping[str, Any] | None = None
@@ -432,7 +445,7 @@ class ResidentialCollector:
                 except CollectorHTTPError as error:
                     code = safe_code(error.reason, fallback="discovery_failure")
                     if not error.retryable:
-                        return self._result(RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures + (code,))
+                        return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures + (code,))
                     failures += (code,)
             if discovery is None and self.instruction_cache is not None:
                 cached = self.instruction_cache.load(now=_now(self.clock), environment=self.environment)
@@ -442,11 +455,18 @@ class ResidentialCollector:
                     "manifests": list(cached.manifests),
                 }
             if discovery is None:
-                return self._result(RunDisposition.RETRY, uploaded=uploaded, failures=failures + ((token_failure,) if token_failure else ("discovery_failure",)))
+                return self._terminal(token, RunDisposition.RETRY, uploaded=uploaded, failures=failures + ((token_failure,) if token_failure else ("discovery_failure",)))
             bootstraps = discovery.get("bootstrap_requests", [])
             manifests = discovery.get("manifests", [])
             if not isinstance(bootstraps, list) or not isinstance(manifests, list):
-                return self._result(RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=("malformed_discovery",))
+                return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=("malformed_discovery",))
+            obsolete_before = discovery.get("obsolete_before_cutoff")
+            if obsolete_before is not None:
+                try:
+                    self.outbox.prune_obsolete(governed_before_cutoff=str(obsolete_before))
+                    failures = tuple(code for code in failures if code != "outbox_retention")
+                except (ValueError, OutboxError):
+                    failures += ("malformed_discovery",)
             attempted = spooled = 0
             skipped: list[str] = []
             local_failures: list[str] = []

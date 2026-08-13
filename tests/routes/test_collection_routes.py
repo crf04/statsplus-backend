@@ -19,7 +19,7 @@ def _install_collection_services(app):
     dependencies.collection_operations.list_reconciliation.return_value = []
     dependencies.collection_operations.record_usage.return_value = None
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"poll", "ingest"}), "jti", None,
+        "collector-1", "statsplus-collector", "testing", frozenset({"poll", "ingest", "catalog_publish"}), "jti", None,
         "residential_collector", frozenset({"nba"}),
         frozenset({"event_catalog", "athlete_catalog", "synergy_play_types"}),
     )
@@ -95,6 +95,27 @@ def test_collector_status_report_is_machine_authenticated_and_bounded(client, ap
         "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
     })
     assert unauthenticated.status_code == 401
+
+
+def test_rehearsal_evidence_is_machine_authenticated_and_release_bound(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collector_tokens.report_status.return_value = SimpleNamespace(
+        identity_id="collector-1", last_seen_at=datetime(2026, 8, 12),
+        release_version="collector-1.2.3", release_checksum="a" * 64,
+    )
+    response = client.post(
+        "/api/collector/rehearsal-evidence", headers={"Authorization": "Bearer token"},
+        json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+              "season": "2025-26", "cutoff": "2026-08-11T00:00:00Z"},
+    )
+    assert response.status_code == 200
+    assert response.json["identity_id"] == "collector-1"
+    assert response.json["environment"] == "testing"
+    assert response.json["contract_version"] == 1
+    assert response.json["audience"] == "statsplus-collector"
+    assert response.json["endpoint"]
+    assert set(response.json["operations"]) == {"credential", "auth", "discovery", "status", "ingestion"}
+    assert response.json["expires_at"] > response.json["issued_at"]
 
 
 def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
