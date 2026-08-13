@@ -332,7 +332,7 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
         connection.execute(
             text(
                 f"ALTER TABLE {refreshes_table} ADD COLUMN "
-                "route_complete BOOLEAN NOT NULL DEFAULT 0"
+                "route_complete BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
 

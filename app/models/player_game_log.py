@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
 )
+from sqlalchemy.sql import expression
 
 from . import Base
 
@@ -101,7 +102,10 @@ class PlayerGameLogRefresh(Base):
     #: null values and this stays false, keeping the request-time route on the
     #: live PBP path with unchanged documents and filters.
     route_complete = Column(
-        Boolean, nullable=False, server_default="0"
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=expression.false(),
     )
 
     __table_args__ = (

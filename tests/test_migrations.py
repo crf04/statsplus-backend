@@ -287,6 +287,25 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         ]
 
 
+def test_player_game_log_route_complete_uses_dialect_neutral_boolean_default():
+    """The cutover gate's boolean default is valid on PostgreSQL and SQLite.
+
+    The raw migration DDL and the model-side server default must not emit a
+    bare ``DEFAULT 0``; the SQLAlchemy ``false()`` expression compiles to the
+    boolean literal each dialect accepts.
+    """
+    from sqlalchemy.dialects import postgresql, sqlite
+    from sqlalchemy.sql import expression
+
+    from app.models.player_game_log import PlayerGameLogRefresh
+
+    server_default = PlayerGameLogRefresh.__table__.c.route_complete.server_default
+    assert server_default is not None
+    assert isinstance(server_default.arg, expression.False_)
+    assert str(server_default.arg.compile(dialect=postgresql.dialect())) == "false"
+    assert str(server_default.arg.compile(dialect=sqlite.dialect())) == "0"
+
+
 def test_run_migrations_upgrades_existing_app_database(tmp_path):
     database_path = tmp_path / "existing.sqlite3"
     engine = create_engine(f"sqlite:///{database_path}")
