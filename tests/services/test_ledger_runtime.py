@@ -201,15 +201,15 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
             status="active", created_at=now,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), [{
-            "nba_game_id": f"game-{index}", "season": "2025-26",
-            "home_team_id": index + 1, "home_team_name": f"Team {index + 1}",
-            "home_team_tricode": f"T{index + 1:02d}",
-            "away_team_id": 30 - index, "away_team_name": f"Team {30 - index}",
-            "away_team_tricode": f"T{30 - index:02d}",
+            "nba_game_id": "game-1", "season": "2025-26",
+            "home_team_id": 1, "home_team_name": "Team 1",
+            "home_team_tricode": "T01",
+            "away_team_id": 2, "away_team_name": "Team 2",
+            "away_team_tricode": "T02",
             "scheduled_at": now - timedelta(days=1), "status_text": "Final",
             "status_code": 3, "classification": "Regular Season",
             "first_seen_at": now - timedelta(days=1), "last_seen_at": now,
-        } for index in range(15)])
+        }])
 
     class Backfill:
         calls = 0

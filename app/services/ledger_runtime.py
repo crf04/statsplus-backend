@@ -85,7 +85,7 @@ class ActiveManifestLedgerGovernanceReader:
             for event in events
             for team_id in (event["home_team_id"], event["away_team_id"])
         )
-        if len(team_ids) != 30:
+        if require_l15 and len(team_ids) != 30:
             raise ValueError("governed Event Catalog must contain exactly 30 teams")
         expected = frozenset(str(event["nba_game_id"]) for event in events)
         by_team = {
