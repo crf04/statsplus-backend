@@ -59,6 +59,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
+from app.models.canonical_game_ledger import LedgerParityArtifact
 
 
 UTC = timezone.utc
@@ -162,6 +163,10 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     {"stream_key": "traditional_opponent", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "assist_locations", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "player_per36", "provider": "ledger", "owner": "railway", "scope": "full_regular_season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": False},
+    {"stream_key": "traditional_opponent_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "traditional_opponent_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": "assist_locations_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "assist_locations_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
@@ -2213,6 +2218,9 @@ class PublicationService(_SessionService):
         return tuple(rows)
 
     def activate_stream(self, stream_key: str, *, reason: str,
+                        season: str | None = None, cutoff: datetime | None = None,
+                        parity_artifact_id: str | None = None,
+                        candidate_publication_id: str | None = None,
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -2223,6 +2231,51 @@ class PublicationService(_SessionService):
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
+            parity_stream = stream_key if stream_key in {
+                "traditional_opponent",
+                "traditional_opponent_season",
+                "traditional_opponent_l15",
+                "player_per36",
+            } else None
+            if parity_stream is not None:
+                if (
+                    season is None
+                    or cutoff is None
+                    or parity_artifact_id is None
+                    or candidate_publication_id is None
+                ):
+                    raise ControlPlaneError("ledger_parity_evidence_required")
+                if (
+                    not _valid_season(season)
+                    or cutoff.tzinfo is None
+                    or not parity_artifact_id.strip()
+                    or not candidate_publication_id.strip()
+                ):
+                    raise ControlPlaneError("ledger_parity_evidence_required")
+                candidate = session.scalar(select(PublicationVersion).where(
+                    PublicationVersion.publication_id == candidate_publication_id,
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.cutoff == _aware(cutoff),
+                    PublicationVersion.status == "candidate",
+                ).order_by(PublicationVersion.version.desc()).limit(1))
+                artifact = session.scalar(select(LedgerParityArtifact).where(
+                    LedgerParityArtifact.artifact_id == parity_artifact_id,
+                    LedgerParityArtifact.stream_key == parity_stream,
+                    LedgerParityArtifact.season == season,
+                    LedgerParityArtifact.cutoff == _aware(cutoff),
+                    LedgerParityArtifact.publication_id == candidate_publication_id,
+                ))
+                if (
+                    candidate is None
+                    or artifact is None
+                    or artifact.payload_checksum != candidate.checksum
+                    or artifact.decision == "rejected"
+                    or (
+                    artifact.status != "exact" and artifact.decision != "approved"
+                    )
+                ):
+                    raise ControlPlaneError("ledger_parity_pending")
             row.enabled = True
             return row
 
@@ -2332,6 +2385,7 @@ class PublicationService(_SessionService):
                 cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=_checksum(encoded), payload=encoded,
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
+            session.flush()
             for observation_id in sorted(provenance_ids):
                 session.add(PublicationObservation(
                     publication_id=publication.publication_id,
@@ -2346,6 +2400,106 @@ class PublicationService(_SessionService):
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
             session.flush()
         return publication
+
+    def compose_inactive_ledger(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        provenance: Mapping[str, str | None],
+        reason: str = "historical ledger rehearsal",
+    ) -> PublicationVersion:
+        """Persist a non-active governed ledger version with normalized provenance."""
+
+        encoded = _json(payload)
+        now = self.clock()
+        with self.session() as session, session.begin():
+            stream = session.get(PublicationStream, stream_key)
+            if stream is None or stream.provider != "ledger" or stream.enabled:
+                raise ControlPlaneError("inactive_ledger_stream_required")
+            if not provenance:
+                raise ControlPlaneError("ledger_provenance_required")
+            accepted_rows = session.scalars(select(CollectionObservation).where(
+                CollectionObservation.observation_id.in_(tuple(provenance)),
+                CollectionObservation.season == season,
+                CollectionObservation.provider == "pbp",
+                CollectionObservation.observation_type == "canonical_game_ledger",
+            )).all()
+            accepted = {row.observation_id for row in accepted_rows}
+            if accepted != set(provenance):
+                raise ControlPlaneError("ledger_provenance_not_accepted")
+            manifest_ids = {row.manifest_id for row in accepted_rows}
+            if len(manifest_ids) != 1 or None in manifest_ids:
+                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            manifest_id = str(next(iter(manifest_ids)))
+            manifest = session.get(CollectionManifest, manifest_id)
+            governed_cutoff = _aware(cutoff)
+            if (
+                manifest is None
+                or manifest.season != season
+                or _aware(manifest.cutoff) != governed_cutoff
+                or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
+                or 1 not in set(json.loads(manifest.accepted_versions))
+            ):
+                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            for observation in accepted_rows:
+                try:
+                    scope = json.loads(observation.scope)
+                except (TypeError, ValueError) as error:
+                    raise ControlPlaneError("ledger_provenance_scope_mismatch") from error
+                if (
+                    not isinstance(scope, Mapping)
+                    or scope.get("surface") != "canonical_game_ledger"
+                    or str(scope.get("game_id") or "")
+                    != str(provenance[observation.observation_id] or "")
+                    or _aware(observation.cutoff) != governed_cutoff
+                    or _aware(observation.retrieved_at) > _aware(manifest.collect_before)
+                    or _aware(observation.accepted_at) > _aware(manifest.collect_before)
+                    or observation.schema_version not in set(json.loads(manifest.accepted_versions))
+                ):
+                    raise ControlPlaneError("ledger_provenance_scope_mismatch")
+            next_version = session.scalar(
+                select(PublicationVersion.version).where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                ).order_by(PublicationVersion.version.desc()).limit(1)
+            ) or 0
+            publication = PublicationVersion(
+                publication_id=_uuid(),
+                stream_key=stream_key,
+                season=season,
+                cutoff=_aware(cutoff),
+                version=int(next_version) + 1,
+                status="candidate",
+                checksum=_checksum(encoded),
+                payload=encoded,
+                created_at=now,
+                reason=reason,
+                fence=0,
+            )
+            session.add(publication)
+            session.flush()
+            for observation_id, slice_key in sorted(provenance.items()):
+                session.add(PublicationObservation(
+                    publication_id=publication.publication_id,
+                    observation_id=str(observation_id),
+                    role="ledger_game",
+                    slice_key=slice_key,
+                    created_at=now,
+                ))
+            session.flush()
+        return publication
+
+    def get_historical_payload(self, publication_id: str) -> Any:
+        """Read one inactive or superseded rehearsal payload by immutable ID."""
+
+        with self.session() as session:
+            publication = session.get(PublicationVersion, publication_id)
+            if publication is None:
+                raise ControlPlaneError("publication_not_found")
+            return json.loads(publication.payload)
 
     @staticmethod
     def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
@@ -2496,6 +2650,7 @@ class PublicationService(_SessionService):
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
                 payload=prior.payload, created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
             session.add(version)
+            session.flush()
             source_refs = session.scalars(select(PublicationObservation).where(
                 PublicationObservation.publication_id == prior.publication_id,
             )).all()
@@ -2619,13 +2774,29 @@ class CollectionOperationsService(_SessionService):
             ),
         )
 
-    def activate_stream(self, stream_key: str, *, actor: str, reason: str) -> OperatorActionResult:
+    def activate_stream(
+        self,
+        stream_key: str,
+        *,
+        actor: str,
+        reason: str,
+        season: str | None = None,
+        cutoff: datetime | None = None,
+        parity_artifact_id: str | None = None,
+        candidate_publication_id: str | None = None,
+    ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
             actor=actor, action="stream.activate", resource=stream_key, reason=reason,
             mutation=lambda session: self.publication_service.activate_stream(
-                stream_key, reason=reason, session=session
+                stream_key,
+                reason=reason,
+                season=season,
+                cutoff=cutoff,
+                parity_artifact_id=parity_artifact_id,
+                candidate_publication_id=candidate_publication_id,
+                session=session,
             ),
         )
 

@@ -62,7 +62,11 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
         "023_collector_release_status",
-        "024_collector_status_transitions",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -120,6 +124,12 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "player_diet_surface_observations",
             "injury_snapshots",
             "injury_source_snapshots",
+            "canonical_game_ledger_games",
+            "canonical_game_ledger_team_facts",
+            "canonical_game_ledger_player_facts",
+            "canonical_game_ledger_backfill",
+            "canonical_game_ledger_publications",
+            "canonical_game_ledger_parity_artifacts",
         ]
     )
     collector_columns = {
@@ -324,7 +334,11 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (21, "021_collector_surface_authorization"),
             (22, "022_publication_provenance_reconciliation"),
             (23, "023_collector_release_status"),
-            (24, "024_collector_status_transitions"),
+            (24, "024_canonical_game_ledger"),
+            (25, "025_ledger_parity_artifacts"),
+            (26, "026_repair_publication_provenance_foreign_keys"),
+            (27, "027_bind_ledger_parity_to_publications"),
+            (28, "028_collector_status_transitions"),
         ]
 
 
@@ -362,7 +376,11 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
         "023_collector_release_status",
-        "024_collector_status_transitions",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -377,6 +395,11 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("player_diet_surface_observations")
     assert inspect(engine).has_table("injury_snapshots")
     assert inspect(engine).has_table("injury_source_snapshots")
+    assert inspect(engine).has_table("canonical_game_ledger_games")
+    assert inspect(engine).has_table("canonical_game_ledger_team_facts")
+    assert inspect(engine).has_table("canonical_game_ledger_player_facts")
+    assert inspect(engine).has_table("canonical_game_ledger_backfill")
+    assert inspect(engine).has_table("canonical_game_ledger_publications")
 
 
 def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp_path):
@@ -394,10 +417,81 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
 
     upgraded = run_migrations(engine)
 
-    assert upgraded.applied == ("023_collector_release_status", "024_collector_status_transitions")
-    assert upgraded.current_version == 24
+    assert upgraded.applied == (
+        "023_collector_release_status",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
+    )
+    assert upgraded.current_version == 28
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
+
+
+def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'provenance-fks.sqlite3'}")
+    run_migrations(engine)
+    inspector = inspect(engine)
+
+    assert inspector.get_foreign_keys("publication_versions") == []
+    foreign_keys = inspector.get_foreign_keys("publication_observations")
+    assert {
+        (tuple(item["constrained_columns"]), item["referred_table"], item["options"].get("ondelete"))
+        for item in foreign_keys
+    } == {
+        (("publication_id",), "publication_versions", "CASCADE"),
+        (("observation_id",), "collection_observations", "RESTRICT"),
+    }
+    parity_columns = {
+        column["name"]
+        for column in inspector.get_columns("canonical_game_ledger_parity_artifacts")
+    }
+    assert {"publication_id", "payload_checksum"} <= parity_columns
+    assert any(
+        item["constrained_columns"] == ["publication_id"]
+        and item["referred_table"] == "publication_versions"
+        and item["options"].get("ondelete") == "CASCADE"
+        for item in inspector.get_foreign_keys("canonical_game_ledger_parity_artifacts")
+    )
+
+
+def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'parity-026.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 26),
+        )
+        run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE canonical_game_ledger_parity_artifacts"))
+        connection.execute(text(
+            "CREATE TABLE canonical_game_ledger_parity_artifacts ("
+            "artifact_id VARCHAR(36) PRIMARY KEY, stream_key VARCHAR(96) NOT NULL, "
+            "season VARCHAR(7) NOT NULL, cutoff TIMESTAMP NOT NULL, status VARCHAR(32) NOT NULL, "
+            "report TEXT NOT NULL, created_at TIMESTAMP NOT NULL, decision VARCHAR(16), "
+            "adjudicated_by VARCHAR(128), adjudicated_at TIMESTAMP, adjudication_reason VARCHAR(255))"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_parity_artifacts "
+            "(artifact_id, stream_key, season, cutoff, status, report, created_at) VALUES "
+            "('legacy', 'player_per36', '2025-26', '2026-08-12', 'exact', '{}', '2026-08-12')"
+        ))
+
+    result = run_migrations(engine)
+
+    assert result.applied == (
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
+    )
+    with engine.connect() as connection:
+        assert connection.scalar(text(
+            "SELECT count(*) FROM canonical_game_ledger_parity_artifacts"
+        )) == 0
 
 
 def test_demo_database_validation_is_read_only():
@@ -508,6 +602,12 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "player_diet_surface_observations",
             "injury_snapshots",
             "injury_source_snapshots",
+            "canonical_game_ledger_games",
+            "canonical_game_ledger_team_facts",
+            "canonical_game_ledger_player_facts",
+            "canonical_game_ledger_backfill",
+            "canonical_game_ledger_publications",
+            "canonical_game_ledger_parity_artifacts",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -632,7 +732,11 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
         "023_collector_release_status",
-        "024_collector_status_transitions",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -677,11 +781,15 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
         "023_collector_release_status",
-        "024_collector_status_transitions",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
     )
-    assert upgraded.current_version == 24
+    assert upgraded.current_version == 28
     assert repeated.applied == ()
-    assert repeated.current_version == 24
+    assert repeated.current_version == 28
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -735,7 +843,11 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "021_collector_surface_authorization",
         "022_publication_provenance_reconciliation",
         "023_collector_release_status",
-        "024_collector_status_transitions",
+        "024_canonical_game_ledger",
+        "025_ledger_parity_artifacts",
+        "026_repair_publication_provenance_foreign_keys",
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

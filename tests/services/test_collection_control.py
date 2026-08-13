@@ -26,6 +26,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
+from app.models.canonical_game_ledger import LedgerParityArtifact
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -65,6 +66,185 @@ def _catalog_payload(kind, *, future=False):
         "player_id": "1", "team_id": team_ids[0], "status": "active",
         "event_ids": [f"game-{index}" for index in range(15)],
     }]}
+
+
+def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            status="active", created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": observation_id,
+                "client_observation_id": observation_id,
+                "collector_id": "test",
+                "manifest_id": "ledger-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": observation_id.removeprefix("pbp:"),
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": now,
+                "schema_version": 1,
+                "checksum": observation_id,
+                "payload": "{}",
+                "payload_bytes": 2,
+                "retrieved_at": now,
+                "accepted_at": now,
+            }
+            for observation_id in ("pbp:game-1", "pbp:game-2")
+        ])
+
+    version = publications.compose_inactive_ledger(
+        "traditional_opponent",
+        season="2025-26",
+        cutoff=now,
+        payload=[{"team_id": 1, "opponent_points": 99}],
+        provenance={"pbp:game-1": "game-1", "pbp:game-2": "game-2"},
+    )
+
+    assert version.status == "candidate"
+    assert publications.get_historical_payload(version.publication_id) == [
+        {"opponent_points": 99, "team_id": 1}
+    ]
+    with control_db.connect() as connection:
+        evidence = connection.execute(select(PublicationObservation).where(
+            PublicationObservation.publication_id == version.publication_id,
+        )).mappings().all()
+    assert {(row["observation_id"], row["slice_key"]) for row in evidence} == {
+        ("pbp:game-1", "game-1"),
+        ("pbp:game-2", "game-2"),
+    }
+
+
+def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now + timedelta(days=2))
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert(), [{
+            "manifest_id": manifest_id, "season": "2025-26", "cutoff": now,
+            "collect_before": now + timedelta(hours=1), "accepted_versions": "[1]",
+            "scopes": '["canonical_game_ledger"]', "checksum": manifest_id,
+            "status": status, "created_at": now,
+        } for manifest_id, status in (
+            ("ledger-manifest-a", "expired"),
+            ("ledger-manifest-b", "superseded"),
+        )])
+        connection.execute(CollectionObservation.__table__.insert(), [{
+            "observation_id": f"obs-{index}", "client_observation_id": f"obs-{index}",
+            "collector_id": "test", "manifest_id": manifest_id,
+            "environment": "testing", "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps({
+                "game_id": f"game-{index}", "surface": "canonical_game_ledger",
+            }),
+            "season": "2025-26",
+            "cutoff": now if index != 3 else now + timedelta(days=1),
+            "schema_version": 1, "checksum": str(index) * 64,
+            "payload": "{}", "payload_bytes": 2,
+            "retrieved_at": now, "accepted_at": now,
+        } for index, manifest_id in (
+            (1, "ledger-manifest-a"),
+            (2, "ledger-manifest-b"),
+            (3, "ledger-manifest-a"),
+        )])
+
+    with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-1": "game-1", "obs-2": "game-2"},
+        )
+    with pytest.raises(ControlPlaneError, match="scope_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-3": "game-3"},
+        )
+    with pytest.raises(ControlPlaneError, match="scope_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-1": "game-relabeled"},
+        )
+
+    # Composition remains legal after collect_before for evidence accepted
+    # before the immutable deadline.
+    version = publications.compose_inactive_ledger(
+        "player_per36", season="2025-26", cutoff=now, payload=[],
+        provenance={"obs-1": "game-1"},
+    )
+    assert version.status == "candidate"
+
+
+def test_pending_parity_blocks_ledger_stream_activation(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="parity-candidate", stream_key="player_per36",
+            season="2025-26", cutoff=now, version=1, status="candidate",
+            checksum="a" * 64, payload="{}", created_at=now, fence=0,
+        ))
+        connection.execute(LedgerParityArtifact.__table__.insert().values(
+            artifact_id="pending-parity", publication_id="parity-candidate",
+            payload_checksum="a" * 64, stream_key="player_per36",
+            season="2025-26", cutoff=now, status="pending_adjudication",
+            report="{}", created_at=now,
+        ))
+
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream(
+            "player_per36", reason="reviewed rehearsal", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
+
+    unrelated = publications.activate_stream(
+        "player_game_logs", reason="independent rehearsal reviewed"
+    )
+    assert unrelated.enabled
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
+                 adjudication_reason="reviewed differences"))
+    approved = publications.activate_stream(
+        "player_per36", reason="reviewed rehearsal", season="2025-26",
+        cutoff=now, parity_artifact_id="pending-parity",
+        candidate_publication_id="parity-candidate",
+    )
+    assert approved.enabled
+    with control_db.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="corrected-candidate", stream_key="player_per36",
+            season="2025-26", cutoff=now, version=2, status="candidate",
+            checksum="b" * 64, payload="{\"corrected\":true}", created_at=now, fence=0,
+        ))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream(
+            "player_per36", reason="old evidence cannot authorize correction",
+            season="2025-26", cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="corrected-candidate",
+        )
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(status="exact", decision="rejected"))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream(
+            "player_per36", reason="cannot override rejection", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
 
 
 @pytest.fixture

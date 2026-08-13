@@ -5,7 +5,7 @@ collector is allowed to write only immutable observations; publications are
 advanced by the server under a database fence.
 """
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Integer, String, Text, Index
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text, Index
 
 from . import Base
 
@@ -210,8 +210,16 @@ class PublicationObservation(Base):
 
     __tablename__ = "publication_observations"
 
-    publication_id = Column(String(36), primary_key=True)
-    observation_id = Column(String(36), primary_key=True)
+    publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    observation_id = Column(
+        String(36),
+        ForeignKey("collection_observations.observation_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
     role = Column(String(64), nullable=False, default="source")
     slice_key = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)

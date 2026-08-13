@@ -55,6 +55,9 @@ class ApplicationDependencies:
     observation_ingestion: Any | None = None
     publication_service: Any | None = None
     collection_operations: Any | None = None
+    canonical_game_ledger_repository: Any | None = None
+    ledger_materialization_service: Any | None = None
+    ledger_backfill_service: Any | None = None
 
 
 def build_dependencies(
@@ -130,6 +133,7 @@ def build_dependencies(
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
+    canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -285,6 +289,58 @@ def build_dependencies(
         team_matchup_query_service = TeamMatchupQueryService(
             TeamMatchupRepository(engine)
         )
+        from app.services.canonical_game_ledger import (
+            CanonicalGameLedgerRepository,
+            LedgerSchemaUnavailable,
+        )
+        from app.services.ledger_backfill import (
+            AcceptedObservationParticipantCatalog,
+            CollectionObservationLedgerRecorder,
+            LedgerBackfillService,
+        )
+        from app.services.ledger_materialization import (
+            LedgerCorrectionQueue,
+            LedgerMaterializationService,
+        )
+        from app.services.ledger_parity import (
+            LedgerParityArtifactRepository,
+            LegacyParityDiagnosticReader,
+        )
+
+        try:
+            canonical_game_ledger_repository = CanonicalGameLedgerRepository(
+                engine,
+                correction_sink=LedgerCorrectionQueue(require_governance=True),
+            )
+        except LedgerSchemaUnavailable:
+            # Narrow route tests intentionally bind the app to minimal fixture
+            # databases while disabling schema creation.  Ledger workers are
+            # not part of those request seams; production/staging must still
+            # fail startup when migration 024 has not been applied.
+            if settings.environment != "testing":
+                raise
+        else:
+            ledger_materialization_service = LedgerMaterializationService(
+                canonical_game_ledger_repository,
+                parity_repository=LedgerParityArtifactRepository(engine),
+                parity_reader=LegacyParityDiagnosticReader(engine),
+                publication_service=publication_service,
+            )
+            ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
+            ledger_backfill_service = LedgerBackfillService(
+                provider=pbp_game_logs_provider,
+                athlete_catalog=athlete_catalog_service,
+                participant_catalog=AcceptedObservationParticipantCatalog(
+                    engine, ledger_observation_recorder
+                ),
+                observation_recorder=ledger_observation_recorder,
+                reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
+                    season=str(details.get("season", settings.nba.current_season)),
+                    kind="ledger_athlete",
+                    details={"game_id": game_id, **details},
+                ),
+                repository=canonical_game_ledger_repository,
+            )
 
     dfs_board_service = DFSBoardService(
         provider_registry=cached_dfs_providers,
@@ -429,6 +485,9 @@ def build_dependencies(
         observation_ingestion=observation_ingestion,
         publication_service=publication_service,
         collection_operations=collection_operations,
+        canonical_game_ledger_repository=canonical_game_ledger_repository,
+        ledger_materialization_service=ledger_materialization_service,
+        ledger_backfill_service=ledger_backfill_service,
     )
 
 

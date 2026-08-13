@@ -475,6 +475,29 @@ def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
     ))
 
 
+def _create_canonical_game_ledger_tables(connection: Connection) -> None:
+    """Create the inactive Canonical Game Ledger publication family (#86)."""
+
+    from app.models.canonical_game_ledger import (
+        CanonicalGameLedgerGame,
+        CanonicalGameLedgerPlayerFact,
+        CanonicalGameLedgerTeamFact,
+        LedgerBackfillState,
+        LedgerPublication,
+    )
+
+    # The game row is the parent for both complete fact sets.  Explicit order
+    # keeps PostgreSQL foreign-key additions safe when the models gain them.
+    for model in (
+        CanonicalGameLedgerGame,
+        CanonicalGameLedgerTeamFact,
+        CanonicalGameLedgerPlayerFact,
+        LedgerBackfillState,
+        LedgerPublication,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
 def _upgrade_collector_release_status(connection: Connection) -> None:
     """Persist bounded machine release evidence for operator diagnostics."""
 
@@ -491,6 +514,119 @@ def _upgrade_collector_release_status(connection: Connection) -> None:
                 f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
                 f"{preparer.quote(name)} {type_sql}"
             ))
+
+
+def _create_ledger_parity_artifacts(connection: Connection) -> None:
+    """Persist required semantic parity adjudication evidence (#86)."""
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    LedgerParityArtifact.__table__.create(connection, checkfirst=True)
+
+
+def _repair_publication_provenance_foreign_keys(connection: Connection) -> None:
+    """Repair the transient #86 self-FK and add both provenance FKs."""
+
+    from app.models.collection_control import PublicationObservation, PublicationVersion
+
+    inspector = inspect(connection)
+    parity_table = "canonical_game_ledger_parity_artifacts"
+    parity_columns = {column["name"] for column in inspector.get_columns(parity_table)}
+    additions = {
+        "decision": "VARCHAR(16)",
+        "adjudicated_by": "VARCHAR(128)",
+        "adjudicated_at": "TIMESTAMP",
+        "adjudication_reason": "VARCHAR(255)",
+    }
+    for name, type_sql in additions.items():
+        if name not in parity_columns:
+            connection.execute(text(f"ALTER TABLE {parity_table} ADD COLUMN {name} {type_sql}"))
+    if connection.dialect.name == "sqlite":
+        version_rows = connection.execute(text("SELECT * FROM publication_versions")).mappings().all()
+        provenance_rows = connection.execute(text("SELECT * FROM publication_observations")).mappings().all()
+        connection.execute(text("DROP TABLE publication_observations"))
+        connection.execute(text("DROP TABLE publication_versions"))
+        PublicationVersion.__table__.create(connection)
+        PublicationObservation.__table__.create(connection)
+        if version_rows:
+            connection.execute(PublicationVersion.__table__.insert(), [dict(row) for row in version_rows])
+        if provenance_rows:
+            accepted = {
+                row["observation_id"]
+                for row in connection.execute(text("SELECT observation_id FROM collection_observations")).mappings()
+            }
+            versions = {row["publication_id"] for row in version_rows}
+            valid = [
+                dict(row) for row in provenance_rows
+                if row["publication_id"] in versions and row["observation_id"] in accepted
+            ]
+            if valid:
+                connection.execute(PublicationObservation.__table__.insert(), valid)
+        return
+    for foreign_key in inspector.get_foreign_keys("publication_versions"):
+        if foreign_key.get("referred_table") == "publication_versions" and foreign_key.get("name"):
+            connection.execute(text(
+                f'ALTER TABLE publication_versions DROP CONSTRAINT "{foreign_key["name"]}"'
+            ))
+    existing = {
+        (tuple(foreign_key.get("constrained_columns") or ()), foreign_key.get("referred_table"))
+        for foreign_key in inspector.get_foreign_keys("publication_observations")
+    }
+    if (("publication_id",), "publication_versions") not in existing:
+        connection.execute(text(
+            "ALTER TABLE publication_observations ADD CONSTRAINT "
+            "fk_publication_observations_publication FOREIGN KEY (publication_id) "
+            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+        ))
+    if (("observation_id",), "collection_observations") not in existing:
+        connection.execute(text(
+            "ALTER TABLE publication_observations ADD CONSTRAINT "
+            "fk_publication_observations_observation FOREIGN KEY (observation_id) "
+            "REFERENCES collection_observations(observation_id) ON DELETE RESTRICT"
+        ))
+
+
+def _bind_ledger_parity_to_publications(connection: Connection) -> None:
+    """Bind new parity evidence to the exact candidate payload it rehearsed."""
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    table = "canonical_game_ledger_parity_artifacts"
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns(table)}
+    if connection.dialect.name == "sqlite":
+        legacy_rows = connection.execute(text(f"SELECT * FROM {table}")).mappings().all()
+        connection.execute(text(f"DROP TABLE {table}"))
+        LedgerParityArtifact.__table__.create(connection)
+        # Evidence produced before candidate binding cannot authorize a
+        # publication.  Deliberately do not copy it into the stricter table.
+        del legacy_rows
+        return
+    preparer = connection.dialect.identifier_preparer
+    if "publication_id" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN publication_id VARCHAR(36)"
+        ))
+    if "payload_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN payload_checksum VARCHAR(64)"
+        ))
+    # Old unbound evidence is intentionally retired because it cannot prove
+    # the semantics of a current candidate.
+    connection.execute(text(f"DELETE FROM {preparer.quote(table)} WHERE publication_id IS NULL"))
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN publication_id SET NOT NULL"
+    ))
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN payload_checksum SET NOT NULL"
+    ))
+    foreign_keys = inspect(connection).get_foreign_keys(table)
+    if not any(key.get("referred_table") == "publication_versions" for key in foreign_keys):
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD CONSTRAINT "
+            "fk_ledger_parity_publication FOREIGN KEY (publication_id) "
+            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+        ))
 
 
 def _create_collector_status_transitions(connection: Connection) -> None:
@@ -533,7 +669,14 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
     Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
     Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
-    Migration(24, "024_collector_status_transitions", _create_collector_status_transitions),
+    Migration(24, "024_canonical_game_ledger", _create_canonical_game_ledger_tables),
+    Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
+    Migration(26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys),
+    Migration(27, "027_bind_ledger_parity_to_publications", _bind_ledger_parity_to_publications),
+    # #85 was developed in parallel with #86.  Keep its additive lifecycle
+    # evidence migration after the ledger migrations so both histories remain
+    # replayable on one linear schema.
+    Migration(28, "028_collector_status_transitions", _create_collector_status_transitions),
 )
 
 

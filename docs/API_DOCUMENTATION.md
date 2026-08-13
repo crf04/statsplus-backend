@@ -1034,6 +1034,62 @@ governed only by their season sidecar and are not hidden by missing, stale, or
 newer current-season observations.
 These stored facts back future matchup rail and selection reads; this slice
 adds no public matchup route and does not change `GET /api/games/game_logs`.
+
+### Canonical Game Ledger rehearsal (#86)
+
+The #86 ledger is an inactive scheduled/materialization seam, not an HTTP
+surface. `LedgerBackfillService` reads only final, non-postponed Regular
+Season Event Catalog games through an explicit cutoff and fetches PBP
+`/get-game-stats` observations newest first with bounded concurrency. Missing
+games are fetched before daily rechecks (through day seven); weekly rechecks
+continue through day 30; older games require an explicit historical repair.
+The service stores resumable cursor/completed/failed progress and reports an
+incomplete season as unavailable rather than exposing a partial publication.
+
+Each accepted observation is one atomic Canonical Game Ledger unit: one game
+identity, two team fact sets, and exactly the FullGame players named by the
+governed participant evidence, including zero-minute participants.
+Repeated normalized checksums are idempotent. A correction with the same
+canonical game identity replaces the complete game and all dependent facts in
+one transaction. Invalid counts, missing active participants, contradictory
+phase/team identity, or unresolved athletes fail closed and retain the prior
+valid game.
+
+Traditional opponent, assist-location, and player per-36 facts are derived
+from ledger count primitives. Traded players aggregate counts by canonical
+identity while retaining team-at-game evidence; provider percentages are never
+summed. Season and exact Regular Season L15 team windows require League
+Complete evidence for all 30 teams, normalize team count totals to per-48 from
+the retained effective team-minute denominator, use population sigma and deterministic
+competition ranks, and stay unavailable before the L15 15-game floor. These
+streams persist complete derived payloads and inactive candidate publications
+with normalized provenance; they do not activate a public Matchups reader or
+change frontend behavior. Corrections atomically enqueue affected slices.
+PBP-versus-legacy symmetric identity and semantic differences are retained as
+adjudication evidence, and zero or unequal comparison sets cannot claim exact
+parity.
+PBP retrievals are accepted into immutable collection observations before a
+ledger replacement; inactive publication provenance must resolve exactly to
+those accepted rows and to one authorizing canonical-ledger manifest/cutoff.
+Collection stops at that manifest's `collect_before`; later composition of
+evidence accepted before the deadline remains allowed for repair and
+rehearsal. Player game logs Season, traditional opponent Season and
+L15, assist locations Season and L15, and player per-36 each have independent
+candidate payloads. A missing assist primitive cannot suppress the other
+streams. Durable traditional/per-36 parity artifacts remain
+`pending_adjudication` until reviewed and prevent activation while pending.
+An invalid staged PBP response creates no accepted observation, ledger row, or
+composition job. Successful initial games and corrections atomically enqueue
+every governed slice at the active manifest cutoff. Only traditional-opponent
+and per-36 activation require an exact or operator-approved parity artifact;
+approval or rejection records actor, reason, time, and an audit event.
+Parity-gated activation identifies the exact artifact, season, cutoff, and
+candidate publication. The JSON body uses `artifact_id`,
+`candidate_publication_id`, `season`, `cutoff`, and `reason`; the artifact's
+bound publication ID and payload checksum must match that candidate. A
+rejected artifact always blocks, including when its
+raw comparison was exact; another season or cutoff is never reused. Unrelated
+ledger streams do not require parity adjudication.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

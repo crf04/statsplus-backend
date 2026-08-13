@@ -210,6 +210,7 @@ def build_data_refresh_job_service(
 ) -> "DataRefreshJobService":
     """Build the canonical app-scoped durable refresh coordinator."""
 
+    testing = settings.environment == "testing"
     return DataRefreshJobService(
         engine,
         settings=settings,
@@ -219,6 +220,8 @@ def build_data_refresh_job_service(
             data_service=data_service,
             player_service=player_service,
         ),
+        dispatch_on_startup=not testing,
+        start_poller=not testing,
     )
 
 
