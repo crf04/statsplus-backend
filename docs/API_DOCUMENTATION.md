@@ -1499,6 +1499,17 @@ Athlete Catalog rows must have unique canonical identities, team and
 season-coverage evidence, and exactly cover the active governed roster plus
 identities derived from accepted Event/Railway evidence. Caller-supplied
 identity lists and `completed_game_count` values do not establish completeness.
+Catalog publication also performs keyed reconciliation into the governed
+EventCatalog/AthleteCatalog tables in the same transaction as the publication.
+Additions and corrections are accepted into the next complete snapshot;
+omitted rows are never destructively removed unless the payload explicitly
+sets `complete_snapshot: true` and names matching `tombstones`. An incomplete
+attempt is retained as `complete: false` and leaves governed rows, manifests,
+and cycles unchanged. A changed event identity or completed-game set
+supersedes affected active manifests/cycles rather than mutating their frozen
+cutoff facts. Manifest selection orders only complete publications and skips
+newer incomplete attempts; Athlete Catalog selection additionally requires all
+Event-derived identities within its seven-day freshness window.
 
 Observation ingestion uses a database-backed per-collector lease. PostgreSQL
 acquires the identity row with `SELECT ... FOR UPDATE`; the short lease expires

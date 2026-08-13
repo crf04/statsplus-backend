@@ -77,6 +77,19 @@ ATTENTION_ALERT_SECONDS = 6 * 60 * 60
 MAX_EVENT_CATALOG_GAMES = 3_000
 MAX_ATHLETE_CATALOG_IDENTITIES = 100_000
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
+NBA_TEAM_ID_TO_TRICODE = {
+    "1610612737": "ATL", "1610612738": "BOS", "1610612739": "CLE",
+    "1610612740": "NOP", "1610612741": "CHI", "1610612742": "DAL",
+    "1610612743": "DEN", "1610612744": "GSW", "1610612745": "HOU",
+    "1610612746": "LAC", "1610612747": "LAL", "1610612748": "MIA",
+    "1610612749": "MIL", "1610612750": "MIN", "1610612751": "BKN",
+    "1610612752": "NYK", "1610612753": "ORL", "1610612754": "IND",
+    "1610612755": "PHI", "1610612756": "PHX", "1610612757": "POR",
+    "1610612758": "SAC", "1610612759": "SAS", "1610612760": "OKC",
+    "1610612761": "TOR", "1610612762": "UTA", "1610612763": "MEM",
+    "1610612764": "WAS", "1610612765": "DET", "1610612766": "CHA",
+}
+NBA_TRICODE_TO_TEAM_ID = {value: int(key) for key, value in NBA_TEAM_ID_TO_TRICODE.items()}
 REGISTERED_BASES = frozenset({"play_types", "shot_zones", "shot_types", "assist_locations"})
 STREAM_BASES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset({"play_types"}),
@@ -794,6 +807,225 @@ class CollectionControlService(_SessionService):
             return False
         return True
 
+    @staticmethod
+    def _catalog_tombstones(payload: Any) -> set[str]:
+        if not isinstance(payload, Mapping):
+            return set()
+        values = payload.get("tombstones", ())
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            return set()
+        return {str(value).strip() for value in values if str(value).strip()}
+
+    @staticmethod
+    def _catalog_team_id(value: Any) -> int:
+        candidate = value
+        if isinstance(candidate, Mapping):
+            candidate = candidate.get("team_id", candidate.get("id"))
+        try:
+            team_id = int(candidate)
+        except (TypeError, ValueError):
+            code = canonical_nba_team_abbreviation(candidate)
+            team_id = NBA_TRICODE_TO_TEAM_ID.get(code, 0)
+        if str(team_id) not in NBA_TEAM_IDS:
+            raise ValueError("canonical team ID required")
+        return team_id
+
+    @classmethod
+    def _catalog_team_tricode(cls, value: Any, *, team_id: int) -> str:
+        candidate = value
+        if isinstance(candidate, Mapping):
+            candidate = candidate.get(
+                "tricode", candidate.get("abbreviation", candidate.get("team"))
+            )
+        code = canonical_nba_team_abbreviation(candidate)
+        if code not in NBA_TEAM_TRICODES:
+            code = NBA_TEAM_ID_TO_TRICODE.get(str(team_id), "")
+        if code not in NBA_TEAM_TRICODES:
+            raise ValueError("canonical team tricode required")
+        return code
+
+    @staticmethod
+    def _catalog_event_id(row: Mapping[str, Any]) -> str:
+        value = row.get("nba_game_id", row.get("game_id", row.get("id")))
+        if value in (None, ""):
+            raise ValueError("event identity required")
+        return str(value).strip()
+
+    @classmethod
+    def _catalog_completed_ids(cls, payload: Any) -> set[str]:
+        rows = _catalog_rows(payload, catalog_type="event") or []
+        completed: set[str] = set()
+        terminal = {"final", "finished", "completed", "closed", "game over", "3"}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            identity = cls._catalog_event_id(row)
+            status = str(row.get("status", row.get("status_text", row.get("status_code", "")))).strip().lower()
+            if status in terminal or status.startswith("final") or row.get("completed") is True:
+                completed.add(identity)
+        return completed
+
+    @classmethod
+    def _upsert_event_catalog_row(cls, session: Session, season: str,
+                                   row: Mapping[str, Any], now: datetime) -> str:
+        game_id = cls._catalog_event_id(row)
+        home_id = cls._catalog_team_id(row.get("home_team_id", row.get("home_team")))
+        away_id = cls._catalog_team_id(row.get("away_team_id", row.get("away_team")))
+        if home_id == away_id:
+            raise ValueError("distinct event teams required")
+        home_value = row.get("home_team_tricode", row.get("home_tricode", row.get("home_team")))
+        away_value = row.get("away_team_tricode", row.get("away_tricode", row.get("away_team")))
+        scheduled = row.get("scheduled_at", row.get("date", row.get("game_date")))
+        scheduled_at = _parse_datetime(str(scheduled))
+        status = str(row.get("status", row.get("status_text", "Scheduled"))).strip()
+        status_code = row.get("status_code")
+        try:
+            status_code = int(status_code) if status_code not in (None, "") else None
+        except (TypeError, ValueError):
+            status_code = None
+        existing = session.get(EventCatalogEntry, game_id)
+        values = {
+            "season": season, "home_team_id": home_id,
+            "home_team_name": str(row.get("home_team_name", home_value)).strip()[:128],
+            "home_team_tricode": cls._catalog_team_tricode(home_value, team_id=home_id),
+            "away_team_id": away_id,
+            "away_team_name": str(row.get("away_team_name", away_value)).strip()[:128],
+            "away_team_tricode": cls._catalog_team_tricode(away_value, team_id=away_id),
+            "scheduled_at": scheduled_at, "status_text": status[:128],
+            "status_code": status_code, "postponed_status": row.get("postponed_status"),
+            "postponement_evidence": _json(row["postponement_evidence"])
+            if isinstance(row.get("postponement_evidence"), (dict, list))
+            else row.get("postponement_evidence"),
+            "classification": "Regular Season", "last_seen_at": now,
+        }
+        if existing is None:
+            session.add(EventCatalogEntry(
+                nba_game_id=game_id, first_seen_at=now, **values,
+            ))
+        else:
+            for key, value in values.items():
+                setattr(existing, key, value)
+            if existing.first_seen_at is None:
+                existing.first_seen_at = now
+        return game_id
+
+    @staticmethod
+    def _upsert_athlete_catalog_row(session: Session, season: str,
+                                    row: Mapping[str, Any], now: datetime) -> str:
+        value = row.get("player_id", row.get("id", row.get("identity_id")))
+        try:
+            player_id = int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("athlete identity required") from error
+        team_id = CollectionControlService._catalog_team_id(
+            row.get("team_id", row.get("team", row.get("tricode")))
+        )
+        existing = session.get(AthleteCatalog, (season, player_id))
+        values = {
+            "display_name": str(row.get("display_name", row.get("name", player_id))).strip()[:255],
+            "roster_status": str(row.get("status", row.get("roster_status", "active"))).strip()[:16],
+            "is_active": str(row.get("status", "active")).strip().lower() not in {"inactive", "waived", "tombstone"},
+            "is_active_for_season": str(row.get("status", "active")).strip().lower() not in {"inactive", "waived", "tombstone"},
+            "team_id": team_id,
+            "team_name": str(row.get("team_name", row.get("team", team_id))).strip()[:255],
+            "team_abbreviation": CollectionControlService._catalog_team_tricode(
+                row.get("team_abbreviation", row.get("tricode", row.get("team"))),
+                team_id=team_id,
+            ),
+            "published_at": now,
+        }
+        if existing is None:
+            session.add(AthleteCatalog(season=season, player_id=player_id, **values))
+        else:
+            for key, item in values.items():
+                setattr(existing, key, item)
+        return str(player_id)
+
+    def _supersede_changed_collection_state(self, session: Session, *, season: str,
+                                            cutoff: datetime, now: datetime) -> None:
+        manifests = session.scalars(select(CollectionManifest).where(
+            CollectionManifest.season == season,
+            CollectionManifest.cutoff == cutoff,
+            CollectionManifest.status == "active",
+        )).all()
+        manifest_ids = [row.manifest_id for row in manifests]
+        for row in manifests:
+            row.status, row.superseded_at = "superseded", now
+        if manifest_ids:
+            cycles = session.scalars(select(CollectionCycle).where(
+                CollectionCycle.manifest_id.in_(manifest_ids),
+                CollectionCycle.status != "superseded",
+            )).all()
+            for cycle in cycles:
+                cycle.status, cycle.superseded_at = "superseded", now
+
+    def _reconcile_catalog(self, session: Session, *, request: BootstrapRequest,
+                           payload: Any, now: datetime) -> bool:
+        """Reconcile one validated complete snapshot without destructive gaps."""
+
+        catalog_type = request.catalog_type
+        rows = _catalog_rows(payload, catalog_type=catalog_type) or []
+        supplied = self._catalog_payload_ids(payload, catalog_type)
+        tombstones = self._catalog_tombstones(payload)
+        complete_snapshot = isinstance(payload, Mapping) and payload.get("complete_snapshot") is True
+        current = (
+            self._governed_event_ids(session, request.season)
+            if catalog_type == "event"
+            else self._governed_athlete_ids(session, request.season)
+        )
+        missing = current - supplied
+        if tombstones & supplied or tombstones - current != set():
+            raise ValueError("invalid catalog tombstones")
+        if missing and (not complete_snapshot or tombstones != missing):
+            return False
+        if tombstones and (not complete_snapshot or tombstones != missing):
+            return False
+        if not current and not complete_snapshot:
+            return False
+        previous_ids = set(current)
+        previous_completed: set[str] = set()
+        if catalog_type == "event" and current:
+            for event in session.scalars(select(EventCatalogEntry).where(
+                EventCatalogEntry.season == request.season,
+                EventCatalogEntry.classification == "Regular Season",
+            )):
+                status = str(event.status_text or "").strip().lower()
+                if status in {"final", "finished", "completed", "closed", "game over", "3"} or status.startswith("final"):
+                    previous_completed.add(event.nba_game_id)
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("catalog row required")
+            if catalog_type == "event":
+                self._upsert_event_catalog_row(session, request.season, row, now)
+            else:
+                self._upsert_athlete_catalog_row(session, request.season, row, now)
+        if missing:
+            if catalog_type == "event":
+                for game_id in sorted(missing):
+                    event = session.get(EventCatalogEntry, game_id)
+                    if event is not None:
+                        event.classification = "Tombstone"
+                        event.status_text = "Canceled"
+                        event.last_seen_at = now
+            else:
+                for player_id in sorted(missing):
+                    athlete = session.get(AthleteCatalog, (request.season, int(player_id)))
+                    if athlete is not None:
+                        athlete.is_active = False
+                        athlete.is_active_for_season = False
+                        athlete.roster_status = "tombstone"
+                        athlete.published_at = now
+        changed_set = previous_ids != supplied
+        completed_changed = (
+            catalog_type == "event"
+            and previous_completed != self._catalog_completed_ids(payload)
+        )
+        if catalog_type == "event" and (changed_set or completed_changed):
+            self._supersede_changed_collection_state(
+                session, season=request.season, cutoff=request.cutoff, now=now,
+            )
+        return True
+
     def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
                         session: Session | None = None) -> ActiveSeason:
         if not _valid_season(season):
@@ -899,29 +1131,24 @@ class CollectionControlService(_SessionService):
                                      "missing_count": len(required_ids - catalog_ids)},
                         )
                         raise ControlPlaneError("identity_unresolved")
-                if not self._catalog_complete_against_governed_evidence(
-                    session, payload, request.catalog_type, request.season,
-                ):
-                    # The shape is valid, but the provider did not reconcile
-                    # every governed schedule/identity row.  Persist it as an
-                    # explicitly incomplete publication; manifests and cycles
-                    # only consider complete=True publications.
-                    publication = CatalogPublication(
-                        publication_id=_uuid(), season=request.season,
-                        catalog_type=request.catalog_type, cutoff=request.cutoff,
-                        version=version, checksum=checksum, payload=encoded,
-                        complete=False, published_at=now, expires_at=expires_at,
-                    )
-                    session.add(publication)
-                    request.status, request.completed_at, request.catalog_version = "succeeded", now, version
-                    return publication
+                complete = self._reconcile_catalog(
+                    session, request=request, payload=payload, now=now,
+                )
             except ControlPlaneError:
                 raise
             except ValueError as error:
                 raise ControlPlaneError("catalog_payload_invalid") from error
+            latest_published = session.scalar(select(CatalogPublication.published_at).where(
+                CatalogPublication.season == request.season,
+                CatalogPublication.catalog_type == request.catalog_type,
+                CatalogPublication.cutoff == request.cutoff,
+            ).order_by(CatalogPublication.published_at.desc()).limit(1))
+            published_at = now
+            if latest_published is not None and _aware(latest_published) >= _aware(published_at):
+                published_at = _aware(latest_published) + timedelta(microseconds=1)
             publication = CatalogPublication(publication_id=_uuid(), season=request.season, catalog_type=request.catalog_type,
                 cutoff=request.cutoff, version=version, checksum=checksum, payload=encoded,
-                complete=True, published_at=now, expires_at=expires_at)
+                complete=complete, published_at=published_at, expires_at=expires_at)
             session.add(publication)
             request.status, request.completed_at, request.catalog_version = "succeeded", now, version
         return publication
@@ -1065,19 +1292,30 @@ class CollectionControlService(_SessionService):
         }
 
     def latest_catalog(self, season: str, catalog_type: str, *, cutoff: datetime | None = None,
-                       now: datetime | None = None) -> CatalogPublication | None:
+                       now: datetime | None = None,
+                       required_ids: Iterable[str] = ()) -> CatalogPublication | None:
         now = _aware(now or self.clock())
         with self.session() as session:
             stmt = select(CatalogPublication).where(
                 CatalogPublication.season == season,
                 CatalogPublication.catalog_type == catalog_type,
+                CatalogPublication.complete.is_(True),
             )
             if cutoff is not None:
                 stmt = stmt.where(CatalogPublication.cutoff <= _aware(cutoff))
             rows = list(session.scalars(stmt.order_by(CatalogPublication.cutoff.desc(), CatalogPublication.published_at.desc())))
+            required = {str(value) for value in required_ids}
             for row in rows:
-                if row.expires_at is None or _aware(row.expires_at) > now:
-                    return row
+                if row.expires_at is not None and _aware(row.expires_at) <= now:
+                    continue
+                if required:
+                    try:
+                        document = json.loads(row.payload)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not required <= _catalog_identity_ids(document):
+                        continue
+                return row
             return None
 
     def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
@@ -1092,7 +1330,10 @@ class CollectionControlService(_SessionService):
             if active is None or active.status != "active":
                 raise ControlPlaneError("season_not_active")
         event = self.latest_catalog(season, "event", cutoff=cutoff, now=now)
-        athlete = self.latest_catalog(season, "athlete", cutoff=cutoff, now=now)
+        required_ids = _required_athlete_ids(event.payload) if event is not None else set()
+        athlete = self.latest_catalog(
+            season, "athlete", cutoff=cutoff, now=now, required_ids=required_ids,
+        )
         # A newer cutoff can never inherit an old Event Catalog.  Athlete
         # identity may reuse the last-good publication for at most seven days,
         # but only after its required identities are derived from the governed
@@ -1119,7 +1360,6 @@ class CollectionControlService(_SessionService):
             )
         except (TypeError, json.JSONDecodeError, ValueError) as error:
             raise ControlPlaneError("catalog_incomplete") from error
-        required_ids = _required_athlete_ids(event.payload)
         catalog_ids = _catalog_identity_ids(athlete_document)
         if not required_ids or not required_ids <= catalog_ids:
             self.record_identity_unresolved(
@@ -2080,6 +2320,17 @@ class PublicationService(_SessionService):
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
                 payload=prior.payload, created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
             session.add(version)
+            source_refs = session.scalars(select(PublicationObservation).where(
+                PublicationObservation.publication_id == prior.publication_id,
+            )).all()
+            for source_ref in source_refs:
+                session.add(PublicationObservation(
+                    publication_id=version.publication_id,
+                    observation_id=source_ref.observation_id,
+                    role=source_ref.role,
+                    slice_key=source_ref.slice_key,
+                    created_at=now,
+                ))
             current.status = "superseded"
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
@@ -2394,6 +2645,10 @@ class CollectionOperationsService(_SessionService):
         current = _aware(now or self.clock())
         enqueued = self.publication_service.reconcile_pending(season=season, cutoff=cutoff) if self.publication_service else 0
         deleted = self.gc_observations(now=current)
+        publications_pruned = (
+            self.publication_service.prune_history(season=season)
+            if self.publication_service is not None else 0
+        )
         attention = 0
         with self.session() as session, session.begin():
             cycles = session.scalars(select(CollectionCycle).where(CollectionCycle.status.in_(
@@ -2443,7 +2698,12 @@ class CollectionOperationsService(_SessionService):
                         severity="critical", code="cycle_attention", now=current,
                     ):
                         attention += 1
-        return {"jobs_enqueued": enqueued, "observations_deleted": deleted, "cycles_attention": attention}
+        return {
+            "jobs_enqueued": enqueued,
+            "observations_deleted": deleted,
+            "publications_pruned": publications_pruned,
+            "cycles_attention": attention,
+        }
 
     def record_usage(self, collector_id: str, *, envelopes: int = 0, bytes_received: int = 0,
                      polls: int = 0, max_polls: int = 100, max_envelopes: int = 1000, max_bytes: int = 50 * 1024 * 1024) -> CollectorUsage:

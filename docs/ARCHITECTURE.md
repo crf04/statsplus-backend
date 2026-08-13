@@ -2100,6 +2100,18 @@ JSON, and pruning removes old rendered facts while preserving immutable
 provenance/audit metadata. Identity-unresolved validation writes one bounded,
 deduplicated Reconciliation Item before rejecting the input.
 
+Catalog publication and keyed reconciliation share one transaction. Additions
+and corrections update governed EventCatalog/AthleteCatalog rows for the next
+complete snapshot; missing rows remain untouched unless an explicit complete
+snapshot supplies an exact tombstone set. Incomplete attempts are retained as
+incomplete evidence without destructive reconciliation. A changed event ID or
+completed-game set supersedes affected frozen manifests/cycles. Catalog reads
+select the newest complete Event publication and the newest fresh complete
+Athlete publication that covers every Event-derived identity, skipping newer
+incomplete attempts. Maintenance runs publication pruning after reconciliation
+and observation GC, while active/previous/rollback provenance remains
+protected.
+
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap
 window claims an encrypted one-time delivery; the admin metadata endpoint

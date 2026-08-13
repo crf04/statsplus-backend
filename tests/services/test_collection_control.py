@@ -9,6 +9,7 @@ from app.models.collection_control import (
     ActiveSeason,
     AuditEvent,
     CollectionAlert,
+    CollectionCycle,
     CompositionJob,
     CollectionObservation,
     CollectionManifest,
@@ -734,9 +735,108 @@ def test_catalog_completion_requires_regular_governed_schedule_and_roster_eviden
     partial = {"events": event_rows[:-1]}
     partial_publication = control.publish_catalog(partial_request.request_id, partial, version="partial")
     assert partial_publication.complete is False
-    with pytest.raises(ControlPlaneError, match="event_catalog_required"):
-        control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"],
-                                collect_before=now + timedelta(hours=1))
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        collect_before=now + timedelta(hours=1),
+    )
+    assert manifest.status == "active"
+
+
+def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    baseline = _catalog_payload("event")
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(request.request_id, baseline, version="baseline").complete
+
+    expanded = {"events": [*baseline["events"], {
+        "nba_game_id": "game-15", "home_team_id": sorted(NBA_TEAM_IDS)[0],
+        "away_team_id": sorted(NBA_TEAM_IDS)[1], "phase": "Regular Season",
+        "status": "Final", "scheduled_at": cutoff.isoformat(),
+        "athlete_ids": ["1"],
+    }]}
+    addition = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    added = control.publish_catalog(addition.request_id, expanded, version="expanded")
+    assert added.complete is True
+    with control_db.connect() as connection:
+        assert connection.execute(select(EventCatalogEntry).where(
+            EventCatalogEntry.nba_game_id == "game-15"
+        )).first() is not None
+
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        collect_before=now + timedelta(hours=1),
+    )
+    cycle = control.open_cycle(manifest.manifest_id)
+
+    corrected = json.loads(json.dumps(expanded))
+    corrected["events"][0]["status"] = "Scheduled"
+    correction = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(correction.request_id, corrected, version="correction").complete
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionManifest.status).where(
+            CollectionManifest.manifest_id == manifest.manifest_id
+        )).scalar_one() == "superseded"
+        assert connection.execute(select(CollectionCycle.status).where(
+            CollectionCycle.cycle_id == cycle.cycle_id
+        )).scalar_one() == "superseded"
+    with control_db.connect() as connection:
+        row = connection.execute(select(EventCatalogEntry.status_text).where(
+            EventCatalogEntry.nba_game_id == "game-0"
+        )).scalar_one()
+        assert row == "Scheduled"
+
+    incomplete = {"events": corrected["events"][:-1]}
+    incomplete_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(incomplete_request.request_id, incomplete, version="incomplete").complete is False
+    with control_db.connect() as connection:
+        assert connection.execute(select(EventCatalogEntry.status_text).where(
+            EventCatalogEntry.nba_game_id == "game-15"
+        )).scalar_one() == "Final"
+
+    tombstoned = {
+        "complete_snapshot": True,
+        "tombstones": ["game-15"],
+        "events": corrected[:-1] if isinstance(corrected, list) else corrected["events"][:-1],
+    }
+    tombstone_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    tombstone = control.publish_catalog(tombstone_request.request_id, tombstoned, version="tombstone")
+    assert tombstone.complete is True
+    with control_db.connect() as connection:
+        removed = connection.execute(select(EventCatalogEntry.classification).where(
+            EventCatalogEntry.nba_game_id == "game-15"
+        )).scalar_one()
+        assert removed == "Tombstone"
+
+
+def test_catalog_reconciliation_is_idempotent_for_roster_changes(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event")
+    roster = _catalog_payload("athlete")
+    roster["identities"].append({
+        "player_id": "2", "team_id": sorted(NBA_TEAM_IDS)[1], "status": "active",
+        "event_ids": [f"game-{index}" for index in range(15)],
+    })
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    assert control.publish_catalog(athlete_request.request_id, roster, version="roster").complete
+    repeat_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    assert control.publish_catalog(repeat_request.request_id, roster, version="roster-repeat").complete
+    incomplete = {"identities": roster["identities"][:1]}
+    incomplete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    assert control.publish_catalog(incomplete_request.request_id, incomplete, version="roster-incomplete").complete is False
+    with control_db.connect() as connection:
+        rows = connection.execute(select(AthleteCatalog).where(
+            AthleteCatalog.season == "2025-26", AthleteCatalog.player_id == 2
+        )).all()
+    assert len(rows) == 1
 
 
 def test_catalog_rejects_playoffs_and_identity_unresolved_is_reconciled(control_db):
@@ -845,6 +945,49 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     assert operations.gc_observations(now=now, retention_days=30) == 0
 
 
+def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_history(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "rollback-provenance", provider="nba", owner="collector",
+        required_observations=["league_obs"], publication_strategy="replace",
+        supported_windows=["season"], completeness_rule="league_complete", enabled=True,
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="rollback-obs", client_observation_id="rollback-client",
+            collector_id="collector", manifest_id="rollback-manifest", environment="testing",
+            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2, checksum="r" * 64,
+            payload=json.dumps({"rows": [{"team_id": team} for team in sorted(NBA_TEAM_IDS)]}),
+            payload_bytes=2, retrieved_at=now, accepted_at=now - timedelta(days=31),
+        ))
+    first = publication.compose(
+        "rollback-provenance", season="2025-26", cutoff=now,
+        payload={"published": "first"}, manifest_id="rollback-manifest",
+    )
+    second = publication.compose(
+        "rollback-provenance", season="2025-26", cutoff=now,
+        payload={"published": "second"}, expected_fence=first.fence,
+        manifest_id="rollback-manifest",
+    )
+    assert second.payload == '{"published":"second"}'
+    rollback = publication.rollback("rollback-provenance", reason="restore first")
+    with control_db.connect() as connection:
+        refs = connection.execute(select(PublicationObservation).where(
+            PublicationObservation.publication_id == rollback.publication_id
+        )).all()
+        assert [(row.observation_id, row.role) for row in refs] == [("rollback-obs", "completeness_evidence")]
+    operations = CollectionOperationsService(control_db, publication_service=publication, clock=lambda: now)
+    result = operations.run_maintenance(season="2025-26", cutoff=now)
+    assert result["publications_pruned"] >= 0
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionObservation).where(
+            CollectionObservation.observation_id == "rollback-obs"
+        )).first() is not None
+        assert connection.execute(select(PublicationVersion).where(
+            PublicationVersion.publication_id == first.publication_id
+        )).first() is None
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, clock=lambda: now)
