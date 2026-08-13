@@ -493,6 +493,14 @@ def _upgrade_collector_release_status(connection: Connection) -> None:
             ))
 
 
+def _create_collector_status_transitions(connection: Connection) -> None:
+    """Create append-only bounded machine lifecycle evidence."""
+
+    from app.models.collection_control import CollectorStatusTransition
+
+    CollectorStatusTransition.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -525,6 +533,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
     Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
     Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
+    Migration(24, "024_collector_status_transitions", _create_collector_status_transitions),
 )
 
 

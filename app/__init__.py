@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from dotenv import load_dotenv
-from flask import Flask, g, request
-from flask_cors import CORS
-
-from app.config.settings import (
-    RuntimeSettings,
-    load_settings,
-    set_runtime_settings,
-)
-from app.utils.request_id import HEADER_NAME, resolve_request_id
+if TYPE_CHECKING:
+    from flask import Flask
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
+def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     """Create and configure the Flask application."""
+    from dotenv import load_dotenv
+    from flask import Flask
+    from flask_cors import CORS
+    from app.config.settings import RuntimeSettings, load_settings, set_runtime_settings
+
     load_dotenv()
 
     config_overrides = config_overrides or {}
@@ -56,8 +53,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     return app
 
 
-def _register_request_headers(app: Flask) -> None:
+def _register_request_headers(app: "Flask") -> None:
     """Correlate every request with one safe ID and echo it to callers."""
+
+    from flask import g, request
+    from app.utils.request_id import HEADER_NAME, resolve_request_id
 
     @app.before_request
     def bind_request_id() -> None:
@@ -72,7 +72,7 @@ def _register_request_headers(app: Flask) -> None:
         return response
 
 
-def _assemble_dependencies(app: Flask) -> None:
+def _assemble_dependencies(app: "Flask") -> None:
     """Construct or accept the one dependency graph used by all routes."""
 
     supplied_dependencies = app.config.get("DEPENDENCIES")
@@ -90,7 +90,7 @@ def _assemble_dependencies(app: Flask) -> None:
     _expose_legacy_service_aliases(app, dependencies)
 
 
-def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
+def _expose_legacy_service_aliases(app: "Flask", dependencies: Any) -> None:
     """Expose read-only aliases for older diagnostics without lazy factories.
 
     Route code resolves ``app.extensions['dependencies']`` exclusively.  The
@@ -114,7 +114,7 @@ def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
     }
 
 
-def _initialize_dependencies(app: Flask) -> None:
+def _initialize_dependencies(app: "Flask") -> None:
     """Initialize optional runtime dependencies without making imports fail."""
     if not app.config.get("SKIP_TABLE_CREATE", False):
         try:
@@ -134,7 +134,7 @@ def _initialize_dependencies(app: Flask) -> None:
 
 
 
-def _register_blueprints(app: Flask) -> None:
+def _register_blueprints(app: "Flask") -> None:
     """Register the public API blueprints in one place."""
     from app.routes.data_update_routes import data_bp
     from app.routes.dfs_routes import dfs_bp
@@ -157,7 +157,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(collection_bp, url_prefix="/api")
 
 
-def _register_error_handlers(app: Flask) -> None:
+def _register_error_handlers(app: "Flask") -> None:
     """Register consistent JSON error responses."""
     from app.errors import register_error_handlers
 

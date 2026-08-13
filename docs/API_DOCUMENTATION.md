@@ -1436,6 +1436,8 @@ idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 ```http
 POST /api/collector/token
 POST /api/collector/status
+POST /api/collector/rehearsal-evidence
+POST /api/collector/rehearsal-manifest
 GET /api/collector/discovery
 GET /api/collector/bootstrap
 GET /api/collector/bootstrap/<request_id>
@@ -1479,7 +1481,12 @@ identity's persisted binding, while an empty or unauthorized set is rejected.
 `GET /api/collector/discovery` (also available as `GET /api/collector/bootstrap`)
 is the machine-authenticated, bounded polling seam: it returns pending bootstrap
 requests and active manifests authorized for the caller's owner/provider/surface
-binding, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
+binding, in deterministic newest-first order.
+Each returned manifest also contains additive `scope_descriptors`. Every
+descriptor is bound to one authorized frozen scope and fixes its subject,
+category, all-30-team opponent identity, Season/exact-L15 window, and
+cutoff-derived `date_to`; the collector does not invent those parameters.
+Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
 facts. A collector with the bootstrap/catalog scope publishes one catalog using
 the same gzip-compressed Observation Envelope contract at
@@ -1537,12 +1544,25 @@ alert, one stale-threshold alert, a six-hour `cycle_attention` alert, and one
 `recovery` alert when state clears; queued/running work suppresses failure and
 stale false positives.
 
-`POST /api/collector/status` accepts exactly `release_version` and
-`release_checksum`. The version is 1-64 characters from the bounded release
+`POST /api/collector/status` accepts the authoritative `release_version` and
+`release_checksum` plus an optional closed `state`/stable `reason` pair. The version is 1-64 characters from the bounded release
 identifier vocabulary (`A-Z`, `a-z`, digits, `.`, `_`, `+`, `-`), and the
 checksum is exactly 64 hexadecimal characters. The authenticated identity's
-`last_seen_at` and release evidence are persisted; payloads, secrets, player
-data, and arbitrary status fields are rejected.
+`last_seen_at` and release evidence are persisted. Lifecycle reports append an
+immutable transition, including an explicit recovery after retry/failure;
+payloads, secrets, player data, and arbitrary status fields are rejected.
+`POST /api/collector/rehearsal-evidence` is machine-authenticated and requires
+the complete poll/ingest/catalog capability set. Its short-lived response binds
+identity, environment, endpoint, audience, release version/checksum,
+season/cutoff, contract version, operations, and issuance/expiry. Promotion
+obtains this evidence directly; caller-authored evidence files are not trusted.
+Railway first issues a ten-minute `rehearsal_validation` manifest in a
+non-production environment. The collector submits one sanitized compressed
+Observation Envelope twice. Normal observation persistence and the unique
+collector/client ID constraint produce the durable receipt and replay receipt;
+the validation scope is explicitly excluded from publication composition.
+Evidence operations are derived from the persisted manifest audit, status
+transition, and observation receipt rather than asserted by the caller.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this
