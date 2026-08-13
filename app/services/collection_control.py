@@ -58,6 +58,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
+from app.models.canonical_game_ledger import LedgerParityArtifact
 
 
 UTC = timezone.utc
@@ -161,6 +162,10 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     {"stream_key": "traditional_opponent", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "assist_locations", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "player_per36", "provider": "ledger", "owner": "railway", "scope": "full_regular_season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": False},
+    {"stream_key": "traditional_opponent_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "traditional_opponent_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": "assist_locations_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "assist_locations_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
@@ -2099,6 +2104,12 @@ class PublicationService(_SessionService):
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
+            if row.provider == "ledger":
+                latest = session.scalar(select(LedgerParityArtifact).where(
+                    LedgerParityArtifact.stream_key == stream_key,
+                ).order_by(LedgerParityArtifact.created_at.desc()).limit(1))
+                if latest is None or latest.status == "pending_adjudication":
+                    raise ControlPlaneError("ledger_parity_pending")
             row.enabled = True
             return row
 
@@ -2243,6 +2254,14 @@ class PublicationService(_SessionService):
                 raise ControlPlaneError("inactive_ledger_stream_required")
             if not provenance:
                 raise ControlPlaneError("ledger_provenance_required")
+            accepted = set(session.scalars(select(CollectionObservation.observation_id).where(
+                CollectionObservation.observation_id.in_(tuple(provenance)),
+                CollectionObservation.season == season,
+                CollectionObservation.provider == "pbp",
+                CollectionObservation.observation_type == "canonical_game_ledger",
+            )))
+            if accepted != set(provenance):
+                raise ControlPlaneError("ledger_provenance_not_accepted")
             next_version = session.scalar(
                 select(PublicationVersion.version).where(
                     PublicationVersion.stream_key == stream_key,

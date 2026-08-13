@@ -159,7 +159,7 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
 
     with engine.connect() as connection:
         jobs = connection.execute(select(CompositionJob)).scalars().all()
-    assert len(jobs) == 3
+    assert len(jobs) == 6
 
 
 def test_full_game_preserves_optional_assist_locations_and_fences_envelope_identity():

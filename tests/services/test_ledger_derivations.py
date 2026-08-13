@@ -15,7 +15,7 @@ from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
-from app.services.ledger_parity import compare_ledger_to_legacy
+from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
 from app.services.collection_control import PublicationService
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -25,7 +25,7 @@ from app.services.canonical_game_ledger import (
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
-from app.models.collection_control import PublicationVersion
+from app.models.collection_control import CollectionObservation, PublicationVersion
 from app.models.canonical_game_ledger import LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
 
@@ -210,6 +210,29 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     )
     publications.register_default_streams()
     games = _league_games()
+    repository.replace_games_atomic(games)
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": game.source_observation_id,
+                "client_observation_id": game.source_observation_id,
+                "collector_id": "test",
+                "manifest_id": None,
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": "{}",
+                "season": game.season,
+                "cutoff": game.retrieved_at,
+                "schema_version": 1,
+                "checksum": game.checksum,
+                "payload": "{}",
+                "payload_bytes": 2,
+                "retrieved_at": game.retrieved_at,
+                "accepted_at": game.retrieved_at,
+            }
+            for game in games
+        ])
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
@@ -221,6 +244,7 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
 
     result = LedgerMaterializationService(
         repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
         publication_service=publications,
     ).compose(
         games,
@@ -238,9 +262,62 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         candidates = connection.execute(select(PublicationVersion).where(
             PublicationVersion.status == "candidate",
         )).all()
-    assert len(ledger_payloads) == 6
+    assert len(ledger_payloads) == 8
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
-    assert len(candidates) == 3
+    assert len(candidates) == 6
+
+
+def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'independent.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = tuple(
+        replace(
+            game,
+            player_facts=tuple(
+                replace(
+                    player,
+                    two_point_assists=None,
+                    three_point_assists=None,
+                    arc3_assists=None,
+                    corner3_assists=None,
+                    at_rim_assists=None,
+                    short_mid_range_assists=None,
+                    long_mid_range_assists=None,
+                )
+                for player in game.player_facts
+            ),
+            checksum=None,
+        ).with_checksum()
+        for game in _league_games()
+    )
+    repository.replace_games_atomic(games)
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+
+    result = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+    ).compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+
+    assert result.assist_location_season is None
+    with engine.connect() as connection:
+        streams = set(connection.execute(select(LedgerPublication.stream_key)).scalars())
+    assert {"player_game_logs", "traditional_opponent_season", "traditional_opponent_l15", "player_per36"} <= streams
+    assert not {"assist_locations_season", "assist_locations_l15"} & streams
 
 
 def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():
@@ -268,7 +345,10 @@ def test_materialization_fails_closed_before_a_30_team_window(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    service = LedgerMaterializationService(repository)
+    service = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+    )
 
     try:
         service.compose((_game(),), season="2024-25", as_of=_game().game_date)
@@ -276,3 +356,27 @@ def test_materialization_fails_closed_before_a_30_team_window(tmp_path):
         assert "governed game IDs" in str(error) or "L15" in str(error)
     else:
         raise AssertionError("partial league window unexpectedly published")
+
+
+def test_materialization_rejects_extra_stored_game_identity(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'extra.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    repository.replace_game(game)
+    service = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+    )
+
+    try:
+        service.compose(
+            (),
+            season=game.season,
+            as_of=game.game_date,
+            expected_game_ids=frozenset(),
+        )
+    except LedgerMaterializationUnavailable as error:
+        assert "exactly equal" in str(error)
+    else:
+        raise AssertionError("extra stored game unexpectedly accepted")

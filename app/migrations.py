@@ -516,6 +516,14 @@ def _upgrade_collector_release_status(connection: Connection) -> None:
             ))
 
 
+def _create_ledger_parity_artifacts(connection: Connection) -> None:
+    """Persist required semantic parity adjudication evidence (#86)."""
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    LedgerParityArtifact.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -549,6 +557,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
     Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
     Migration(24, "024_canonical_game_ledger", _create_canonical_game_ledger_tables),
+    Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
 )
 
 

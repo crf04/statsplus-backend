@@ -175,10 +175,33 @@ class LedgerPublication(Base):
     reason = Column(String(128), nullable=True)
 
 
+class LedgerParityArtifact(Base):
+    """Durable activation evidence for one derived semantic rehearsal."""
+
+    __tablename__ = "canonical_game_ledger_parity_artifacts"
+
+    artifact_id = Column(String(36), primary_key=True)
+    stream_key = Column(String(96), nullable=False)
+    season = Column(String(7), nullable=False)
+    cutoff = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(32), nullable=False)
+    report = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('exact', 'pending_adjudication')",
+            name="ck_ledger_parity_status",
+        ),
+        Index("ix_ledger_parity_activation", "stream_key", "season", "cutoff"),
+    )
+
+
 __all__ = [
     "CanonicalGameLedgerGame",
     "CanonicalGameLedgerPlayerFact",
     "CanonicalGameLedgerTeamFact",
     "LedgerBackfillState",
     "LedgerPublication",
+    "LedgerParityArtifact",
 ]

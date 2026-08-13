@@ -13,7 +13,13 @@ from app.services.canonical_game_ledger import (
     canonical_game_from_pbp,
 )
 from app.migrations import run_migrations
-from app.services.ledger_backfill import LedgerBackfillService
+from app.services.ledger_backfill import (
+    AcceptedObservationParticipantCatalog,
+    CollectionObservationLedgerRecorder,
+    LedgerBackfillService,
+)
+from app.providers.pbp_game_logs import PBPGameLogAdapter
+from app.models.event_catalog import EventCatalogEntry
 
 
 class _Events:
@@ -54,6 +60,11 @@ class _Provider:
         return payload
 
 
+class _Recorder:
+    def accept(self, observation, *, season, game_id, retrieved_at):
+        return f"accepted:{game_id}"
+
+
 def _event():
     return {
         "nba_game_id": "0022400001",
@@ -82,6 +93,23 @@ def _payload():
 def test_backfill_is_resumable_and_newest_first(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(EventCatalogEntry.__table__.insert().values(
+            nba_game_id="0022400001",
+            season="2024-25",
+            home_team_id=1610612747,
+            home_team_name="Lakers",
+            home_team_tricode="LAL",
+            away_team_id=1610612759,
+            away_team_name="Spurs",
+            away_team_tricode="SAS",
+            scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            status_text="Final",
+            status_code=3,
+            classification="Regular Season",
+            first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ))
     payload = _payload()
     provider = _Provider(payload)
     repository = CanonicalGameLedgerRepository(engine)
@@ -91,6 +119,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
         repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
@@ -145,6 +174,7 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
         repository=repository,
         max_concurrency=1,
         clock=lambda: now,
@@ -163,3 +193,34 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
     assert repaired.lower_priority_remaining == 0
     assert [call[0] for call in provider.calls][:2] == ["daily-due", "daily-not-due"]
     assert {call[0] for call in provider.calls} == {case[0] for case in cases}
+
+
+def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'observations.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(EventCatalogEntry.__table__.insert().values(
+            nba_game_id="0022400001", season="2024-25",
+            home_team_id=1610612747, home_team_name="Lakers", home_team_tricode="LAL",
+            away_team_id=1610612759, away_team_name="Spurs", away_team_tricode="SAS",
+            scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            status_text="Final", status_code=3, classification="Regular Season",
+            first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ))
+    payload = _payload()
+    frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
+    recorder = CollectionObservationLedgerRecorder(engine)
+
+    observation_id = recorder.accept(
+        frame,
+        season="2024-25",
+        game_id="0022400001",
+        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+    )
+    participants = AcceptedObservationParticipantCatalog(engine).get_participants(
+        "2024-25", "0022400001"
+    )
+
+    assert observation_id
+    assert participants == {1610612747: [2544, 203507], 1610612759: [201935]}

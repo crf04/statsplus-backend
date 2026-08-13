@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import math
+import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TypeAlias
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+
+from app.models.canonical_game_ledger import LedgerParityArtifact
 
 from app.services.canonical_game_ledger import CanonicalGame, PlayerGameFact, validate_canonical_season
 from app.services.ledger_derivations import (
@@ -46,7 +54,51 @@ class LedgerParityReport:
         return "adjudication_required" if self.adjudication_required else "exact"
 
 
-ParityArtifactSink: TypeAlias = Callable[[LedgerParityReport], None]
+class LedgerParityArtifactRepository:
+    """Required durable sink for activation-facing parity evidence."""
+
+    def __init__(self, engine: Engine, *, clock=None) -> None:
+        self.engine = engine
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def record(
+        self,
+        stream_key: str,
+        *,
+        cutoff: datetime,
+        report: LedgerParityReport,
+    ) -> LedgerParityArtifact:
+        row = LedgerParityArtifact(
+            artifact_id=str(uuid4()),
+            stream_key=stream_key,
+            season=report.season,
+            cutoff=cutoff,
+            status="pending_adjudication" if report.adjudication_required else "exact",
+            report=json.dumps(
+                {
+                    "game_count": report.game_count,
+                    "compared_count": report.compared_count,
+                    "differences": [asdict(difference) for difference in report.differences],
+                },
+                sort_keys=True,
+                default=str,
+            ),
+            created_at=self.clock(),
+        )
+        with self.engine.begin() as connection:
+            connection.execute(LedgerParityArtifact.__table__.insert().values(
+                **{column.name: getattr(row, column.name) for column in LedgerParityArtifact.__table__.columns}
+            ))
+        return row
+
+    def latest(self, stream_key: str, season: str) -> LedgerParityArtifact | None:
+        with Session(self.engine) as session:
+            return session.scalar(
+                select(LedgerParityArtifact).where(
+                    LedgerParityArtifact.stream_key == stream_key,
+                    LedgerParityArtifact.season == season,
+                ).order_by(LedgerParityArtifact.created_at.desc()).limit(1)
+            )
 
 _PLAYER_FIELDS = {
     "points": ("points", "PTS"),
@@ -244,9 +296,8 @@ def compare_ledger_to_legacy(
     tolerance: float = 1e-9,
     legacy_traditional_rows: Iterable[Mapping[str, object]] | None = None,
     legacy_per36_rows: Iterable[Mapping[str, object]] | None = None,
-    artifact_sink: ParityArtifactSink | None = None,
 ) -> LedgerParityReport:
-    """Compare governed ledger semantics and persist optional evidence.
+    """Compare governed ledger semantics.
 
     ``legacy_rows`` compares player game primitives. The optional inputs add
     independent comparisons for traditional opponent and season per-36
@@ -326,8 +377,6 @@ def compare_ledger_to_legacy(
         differences=tuple(differences),
         adjudication_required=bool(differences),
     )
-    if artifact_sink is not None:
-        artifact_sink(report)
     return report
 
 
@@ -339,24 +388,27 @@ def generate_semantic_difference_report(
     tolerance: float = 1e-9,
     legacy_traditional_rows: Iterable[Mapping[str, object]] | None = None,
     legacy_per36_rows: Iterable[Mapping[str, object]] | None = None,
-    artifact_sink: ParityArtifactSink | None = None,
+    artifact_repository: LedgerParityArtifactRepository,
+    stream_key: str,
+    cutoff: datetime,
 ) -> LedgerParityReport:
-    """Named artifact seam used by backfill verification and offline fixtures."""
+    """Generate and durably persist required activation evidence."""
 
-    return compare_ledger_to_legacy(
+    report = compare_ledger_to_legacy(
         games,
         legacy_rows,
         season=season,
         tolerance=tolerance,
         legacy_traditional_rows=legacy_traditional_rows,
         legacy_per36_rows=legacy_per36_rows,
-        artifact_sink=artifact_sink,
     )
+    artifact_repository.record(stream_key, cutoff=cutoff, report=report)
+    return report
 
 
 __all__ = [
+    "LedgerParityArtifactRepository",
     "LedgerParityReport",
-    "ParityArtifactSink",
     "SemanticDifference",
     "compare_ledger_to_legacy",
     "generate_semantic_difference_report",

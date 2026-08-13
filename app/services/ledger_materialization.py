@@ -32,6 +32,7 @@ from app.services.ledger_derivations import (
     materialize_team_window,
     materialize_assist_location_window,
 )
+from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -47,8 +48,8 @@ class LedgerMaterialization:
     player_per36: tuple[PlayerPer36Fact, ...]
     season_window: TeamWindowMaterialization
     l15_window: TeamWindowMaterialization
-    assist_location_season: AssistLocationWindowMaterialization
-    assist_location_l15: AssistLocationWindowMaterialization
+    assist_location_season: AssistLocationWindowMaterialization | None
+    assist_location_l15: AssistLocationWindowMaterialization | None
 
 
 class LedgerMaterializationService:
@@ -58,10 +59,12 @@ class LedgerMaterializationService:
         self,
         repository: CanonicalGameLedgerRepository,
         *,
+        parity_repository: LedgerParityArtifactRepository,
         publication_service=None,
         clock=None,
     ) -> None:
         self.repository = repository
+        self.parity_repository = parity_repository
         self.publication_service = publication_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -77,6 +80,10 @@ class LedgerMaterializationService:
         require_assist_locations: bool = False,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
+        if expected_game_ids is None or set(self.repository.game_checksums(canonical_season)) != set(expected_game_ids):
+            raise LedgerMaterializationUnavailable(
+                "stored eligible game IDs must exactly equal governed game IDs"
+            )
         supplied = tuple(games)
         eligible = tuple(
             game for game in supplied
@@ -104,7 +111,6 @@ class LedgerMaterializationService:
             raise LedgerMaterializationUnavailable(l15_window.reason or "L15 ledger is incomplete")
         traditional = derive_traditional_opponent_facts(eligible)
         assist_status = "complete"
-        assist_reason = None
         try:
             assists = derive_assist_location_facts(eligible)
         except ValueError as error:
@@ -112,28 +118,34 @@ class LedgerMaterializationService:
                 raise LedgerMaterializationUnavailable(str(error)) from error
             assists = ()
             assist_status = "unavailable"
-            assist_reason = "assist-location evidence is incomplete"
         per36 = derive_player_per36_facts(eligible, season=canonical_season, cutoff=as_of)
         if team_ids is None or expected_game_ids is None:
             raise LedgerMaterializationUnavailable(
                 "assist-location windows require exact governed teams and game IDs"
             )
-        assist_season = materialize_assist_location_window(
-            eligible,
-            season=canonical_season,
-            as_of=as_of,
-            expected_game_ids=expected_game_ids,
-            team_ids=team_ids,
-        )
-        assist_l15 = materialize_assist_location_window(
-            eligible,
-            season=canonical_season,
-            as_of=as_of,
-            window_games=15,
-            expected_game_ids=expected_game_ids,
-            expected_team_game_ids=expected_l15_game_ids,
-            team_ids=team_ids,
-        )
+        assist_season = assist_l15 = None
+        if assist_status == "complete":
+            try:
+                assist_season = materialize_assist_location_window(
+                    eligible,
+                    season=canonical_season,
+                    as_of=as_of,
+                    expected_game_ids=expected_game_ids,
+                    team_ids=team_ids,
+                )
+                assist_l15 = materialize_assist_location_window(
+                    eligible,
+                    season=canonical_season,
+                    as_of=as_of,
+                    window_games=15,
+                    expected_game_ids=expected_game_ids,
+                    expected_team_game_ids=expected_l15_game_ids,
+                    team_ids=team_ids,
+                )
+            except ValueError as error:
+                if require_assist_locations:
+                    raise LedgerMaterializationUnavailable(str(error)) from error
+                assist_status = "unavailable"
         result = LedgerMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -146,6 +158,33 @@ class LedgerMaterializationService:
             assist_location_l15=assist_l15,
         )
         retrieved_at = self.clock()
+        l15_ids = {
+            (team.team_id, game_id)
+            for team in l15_window.teams
+            for game_id in team.game_ids
+        }
+        traditional_l15 = tuple(
+            fact for fact in traditional
+            if (fact.team_id, fact.game_id) in l15_ids
+        )
+        player_game_logs = tuple(
+            {"game_id": game.game_id, **_json_default(player)}
+            for game in eligible
+            for player in game.player_facts
+        )
+        publication_specs = [
+            ("player_game_logs", player_game_logs, "season", 0, "complete", None),
+            ("traditional_opponent_season", traditional, "season", 0, "complete", None),
+            ("traditional_opponent_l15", traditional_l15, "rolling_games", 15, "complete", None),
+            ("player_per36", per36, "season", 0, "complete", None),
+            ("team_matchups_season", season_window.teams, "season", 0, "complete", None),
+            ("team_matchups_l15", l15_window.teams, "rolling_games", 15, "complete", None),
+        ]
+        if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
+            publication_specs.extend((
+                ("assist_locations_season", assist_season.teams, "season", 0, "complete", None),
+                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, "complete", None),
+            ))
         publications = tuple(
             LedgerPublicationRecord(
                 stream_key=stream_key,
@@ -161,30 +200,47 @@ class LedgerMaterializationService:
                 reason=reason,
                 payload=_payload_json(payload),
             )
-            for stream_key, payload, window_kind, window_games, status, reason in (
-                ("traditional_opponent", traditional, "season", 0, "complete", None),
-                ("assist_locations_season", assist_season.teams, "season", 0, assist_status, assist_reason),
-                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, assist_status, assist_reason),
-                ("player_per36", per36, "season", 0, "complete", None),
-                ("team_matchups_season", season_window.teams, "season", 0, "complete", None),
-                ("team_matchups_l15", l15_window.teams, "rolling_games", 15, "complete", None),
-            )
+            for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
         self.repository.publish_metadata_batch(publications)
+        cutoff = datetime.combine(as_of, datetime.min.time(), timezone.utc)
+        self.parity_repository.record(
+            "traditional_opponent",
+            cutoff=cutoff,
+            report=compare_ledger_to_legacy(
+                eligible,
+                (),
+                season=canonical_season,
+                legacy_traditional_rows=(),
+            ),
+        )
+        self.parity_repository.record(
+            "player_per36",
+            cutoff=cutoff,
+            report=compare_ledger_to_legacy(
+                eligible,
+                (),
+                season=canonical_season,
+                legacy_per36_rows=(),
+            ),
+        )
         if self.publication_service is not None:
             provenance = {
                 game.source_observation_id: game.game_id
                 for game in eligible
             }
-            cutoff = datetime.combine(as_of, datetime.min.time(), timezone.utc)
-            for stream_key, payload in (
-                ("traditional_opponent", traditional),
-                ("assist_locations", {
-                    "season": assist_season.teams,
-                    "l15": assist_l15.teams,
-                }),
+            candidates = [
+                ("player_game_logs", player_game_logs),
+                ("traditional_opponent_season", traditional),
+                ("traditional_opponent_l15", traditional_l15),
                 ("player_per36", per36),
-            ):
+            ]
+            if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
+                candidates.extend((
+                    ("assist_locations_season", assist_season.teams),
+                    ("assist_locations_l15", assist_l15.teams),
+                ))
+            for stream_key, payload in candidates:
                 self.publication_service.compose_inactive_ledger(
                     stream_key,
                     season=canonical_season,
@@ -198,15 +254,22 @@ class LedgerMaterializationService:
 class LedgerCorrectionQueue:
     """Atomically enqueue every derived slice invalidated by a correction."""
 
-    STREAMS = ("traditional_opponent", "assist_locations", "player_per36")
+    STREAMS = (
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
+    )
 
     def __init__(self, *, clock=None) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
-        cutoff = datetime.combine(game.game_date, datetime.min.time(), timezone.utc)
         now = self.clock()
+        cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
         for stream_key in self.STREAMS:
             existing = connection.execute(select(table.c.job_id).where(
                 table.c.stream_key == stream_key,

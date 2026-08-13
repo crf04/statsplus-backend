@@ -821,6 +821,17 @@ ledger-only and legacy-only identities plus traditional-opponent and per-36
 semantic evidence for adjudication; zero or unequal identity sets are never
 reported exact.
 
+The executable `scripts/ledger_refresh.py` assembles the injected PBP, Event
+Catalog, Athlete Catalog, accepted-observation participant, reconciliation,
+repository, and composition seams. Every provider response is first stored as
+an accepted `CollectionObservation`; its durable ID is the ledger source and
+the only provenance allowed on an inactive candidate. Candidate truth is
+independent for player game logs Season, traditional opponent Season/L15,
+assist locations Season/L15, and player per-36 Regular Season. Missing assist
+primitives retain only the assist last-good candidates. Migration
+`025_ledger_parity_artifacts` stores mandatory parity evidence, and pending
+adjudication blocks ledger stream activation.
+
 ### Database-first game-log reads
 
 Stage 3 makes Postgres the preferred read path.  `PlayerGameLogRepository`

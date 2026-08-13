@@ -1,12 +1,18 @@
 """Canonical ledger semantic-parity evidence contracts."""
 
 from dataclasses import asdict
+from datetime import datetime, timezone
+
+from sqlalchemy import create_engine
+
+from app.migrations import run_migrations
 
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
 )
 from app.services.ledger_parity import (
+    LedgerParityArtifactRepository,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
 )
@@ -87,9 +93,11 @@ def test_traditional_opponent_and_per36_compare_derived_semantics():
     }
 
 
-def test_generated_report_persists_status_through_injected_artifact_sink():
+def test_generated_report_persists_required_artifact(tmp_path):
     game = _game()
-    artifacts = []
+    engine = create_engine(f"sqlite:///{tmp_path / 'generated.sqlite3'}")
+    run_migrations(engine)
+    repository = LedgerParityArtifactRepository(engine)
     legacy = list(_legacy_player_rows(game))
     legacy[0] = {**legacy[0], "PTS": 999}
 
@@ -97,9 +105,30 @@ def test_generated_report_persists_status_through_injected_artifact_sink():
         (game,),
         legacy,
         season=game.season,
-        artifact_sink=artifacts.append,
+        artifact_repository=repository,
+        stream_key="traditional_opponent",
+        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
 
-    assert artifacts == [report]
-    assert artifacts[0].status == "adjudication_required"
-    assert artifacts[0].adjudication_required
+    artifact = repository.latest("traditional_opponent", game.season)
+    assert report.adjudication_required
+    assert artifact.status == "pending_adjudication"
+
+
+def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'parity.sqlite3'}")
+    run_migrations(engine)
+    game = _game()
+    report = compare_ledger_to_legacy(
+        (game,), (), season=game.season, legacy_per36_rows=(),
+    )
+    repository = LedgerParityArtifactRepository(engine)
+
+    artifact = repository.record(
+        "player_per36",
+        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        report=report,
+    )
+
+    assert artifact.status == "pending_adjudication"
+    assert repository.latest("player_per36", game.season).artifact_id == artifact.artifact_id

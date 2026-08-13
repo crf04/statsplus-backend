@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import threading
+import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
+from uuid import uuid4
+
+import pandas as pd
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+
+from app.models.collection_control import CollectionObservation
+from app.models.event_catalog import EventCatalogEntry
 
 from app.domain.nba_events import (
     is_final_event,
@@ -47,6 +57,86 @@ class LedgerParticipantCatalogReader(Protocol):
     def get_participants(self, season: str, game_id: str) -> Mapping[int, Iterable[int]]: ...
 
 
+class LedgerObservationRecorder(Protocol):
+    def accept(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> str: ...
+
+
+class CollectionObservationLedgerRecorder:
+    """Persist provider retrievals before they are eligible for the ledger."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def accept(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> str:
+        document = (
+            observation.to_dict(orient="records")
+            if isinstance(observation, pd.DataFrame)
+            else observation
+        )
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
+        observation_id = str(uuid4())
+        with self.engine.begin() as connection:
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=f"ledger:{game_id}:{observation_id}",
+                collector_id="railway-ledger",
+                manifest_id=None,
+                environment="server",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": game_id}, sort_keys=True),
+                season=season,
+                cutoff=retrieved_at,
+                schema_version=1,
+                checksum=hashlib.sha256(payload.encode()).hexdigest(),
+                payload=payload,
+                payload_bytes=len(payload.encode()),
+                retrieved_at=retrieved_at,
+                accepted_at=retrieved_at,
+            ))
+        return observation_id
+
+
+class AcceptedObservationParticipantCatalog:
+    """Read exact game participants from the accepted provider observation."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def get_participants(self, season: str, game_id: str) -> Mapping[int, Iterable[int]]:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(CollectionObservation.payload).where(
+                CollectionObservation.season == season,
+                CollectionObservation.observation_type == "canonical_game_ledger",
+                CollectionObservation.scope == json.dumps({"game_id": game_id}, sort_keys=True),
+            ).order_by(CollectionObservation.accepted_at.desc()).limit(1)).scalar_one_or_none()
+        if row is None:
+            raise LedgerValidationError("accepted participant observation is required")
+        document = json.loads(row)
+        rows = document if isinstance(document, list) else []
+        with self.engine.connect() as connection:
+            event = connection.execute(select(
+                EventCatalogEntry.home_team_id,
+                EventCatalogEntry.home_team_tricode,
+                EventCatalogEntry.away_team_id,
+                EventCatalogEntry.away_team_tricode,
+            ).where(EventCatalogEntry.nba_game_id == game_id)).mappings().one_or_none()
+        team_ids_by_code = {} if event is None else {
+            str(event["home_team_tricode"]): int(event["home_team_id"]),
+            str(event["away_team_tricode"]): int(event["away_team_id"]),
+        }
+        participants: dict[int, list[int]] = {}
+        for item in rows:
+            team_id = int(item.get(
+                "TEAM_ID",
+                item.get("TeamId", item.get("team_id", team_ids_by_code.get(str(item.get("Team")), 0))),
+            ))
+            player_id = int(item.get("PLAYER_ID", item.get("EntityId", 0)))
+            if team_id > 0 and player_id > 0:
+                participants.setdefault(team_id, []).append(player_id)
+        return participants
+
+
 @dataclass(frozen=True, slots=True)
 class BackfillResult:
     season: str
@@ -80,6 +170,7 @@ class LedgerBackfillService:
         athlete_catalog: LedgerAthleteCatalogReader,
         participant_catalog: LedgerParticipantCatalogReader,
         reconciliation_sink: Callable[[str, Mapping[str, object]], None],
+        observation_recorder: LedgerObservationRecorder,
         max_concurrency: int = 3,
         daily_recheck_days: int = 7,
         weekly_recheck_days: int = 30,
@@ -95,10 +186,12 @@ class LedgerBackfillService:
         self.athlete_catalog = athlete_catalog
         self.participant_catalog = participant_catalog
         self.reconciliation_sink = reconciliation_sink
+        self.observation_recorder = observation_recorder
         for collaborator, methods, label in (
             (event_catalog, ("get_events", "get_freshness"), "event_catalog"),
             (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
             (participant_catalog, ("get_participants",), "participant_catalog"),
+            (observation_recorder, ("accept",), "observation_recorder"),
         ):
             if any(not callable(getattr(collaborator, method, None)) for method in methods):
                 raise TypeError(f"{label} does not satisfy the governed ledger contract")
@@ -150,12 +243,18 @@ class LedgerBackfillService:
             game_id = str(event["nba_game_id"])
             try:
                 observation = self.provider.fetch_game_player_logs(game_id, season, season_type="Regular Season")
+                observation_id = self.observation_recorder.accept(
+                    observation,
+                    season=season,
+                    game_id=game_id,
+                    retrieved_at=now,
+                )
                 participants = self.participant_catalog.get_participants(season, game_id)
                 game = canonical_game_from_pbp(
                     observation,
                     event=event,
                     season=season,
-                    source_observation_id=f"pbp:{game_id}:{now.isoformat()}",
+                    source_observation_id=observation_id,
                     retrieved_at=now,
                     participant_ids_by_team=participants,
                 )
@@ -166,6 +265,7 @@ class LedgerBackfillService:
                             game_id,
                             {
                                 "kind": "athlete_identity",
+                                "season": season,
                                 "count": len(unknown),
                                 "player_ids": tuple(sorted(unknown)[:25]),
                             },
@@ -374,4 +474,7 @@ __all__ = [
     "LedgerEventCatalogReader",
     "LedgerPBPProvider",
     "LedgerParticipantCatalogReader",
+    "LedgerObservationRecorder",
+    "CollectionObservationLedgerRecorder",
+    "AcceptedObservationParticipantCatalog",
 ]

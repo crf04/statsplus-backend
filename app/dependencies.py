@@ -57,6 +57,7 @@ class ApplicationDependencies:
     collection_operations: Any | None = None
     canonical_game_ledger_repository: Any | None = None
     ledger_materialization_service: Any | None = None
+    ledger_backfill_service: Any | None = None
 
 
 def build_dependencies(
@@ -132,7 +133,7 @@ def build_dependencies(
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
-    canonical_game_ledger_repository = ledger_materialization_service = None
+    canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -160,20 +161,6 @@ def build_dependencies(
             min_event_catalog_games=collection_control.min_event_catalog_games,
             min_event_catalog_teams=collection_control.min_event_catalog_teams,
             min_athlete_catalog_identities=collection_control.min_athlete_catalog_identities,
-        )
-        from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-        from app.services.ledger_materialization import (
-            LedgerCorrectionQueue,
-            LedgerMaterializationService,
-        )
-
-        canonical_game_ledger_repository = CanonicalGameLedgerRepository(
-            engine,
-            correction_sink=LedgerCorrectionQueue(),
-        )
-        ledger_materialization_service = LedgerMaterializationService(
-            canonical_game_ledger_repository,
-            publication_service=publication_service,
         )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
@@ -301,6 +288,40 @@ def build_dependencies(
         )
         team_matchup_query_service = TeamMatchupQueryService(
             TeamMatchupRepository(engine)
+        )
+        from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+        from app.services.ledger_backfill import (
+            AcceptedObservationParticipantCatalog,
+            CollectionObservationLedgerRecorder,
+            LedgerBackfillService,
+        )
+        from app.services.ledger_materialization import (
+            LedgerCorrectionQueue,
+            LedgerMaterializationService,
+        )
+        from app.services.ledger_parity import LedgerParityArtifactRepository
+
+        canonical_game_ledger_repository = CanonicalGameLedgerRepository(
+            engine,
+            correction_sink=LedgerCorrectionQueue(),
+        )
+        ledger_materialization_service = LedgerMaterializationService(
+            canonical_game_ledger_repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            publication_service=publication_service,
+        )
+        ledger_backfill_service = LedgerBackfillService(
+            provider=pbp_game_logs_provider,
+            event_catalog=event_catalog_service,
+            athlete_catalog=athlete_catalog_service,
+            participant_catalog=AcceptedObservationParticipantCatalog(engine),
+            observation_recorder=CollectionObservationLedgerRecorder(engine),
+            reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
+                season=str(details.get("season", settings.nba.current_season)),
+                kind="ledger_athlete",
+                details={"game_id": game_id, **details},
+            ),
+            repository=canonical_game_ledger_repository,
         )
 
     dfs_board_service = DFSBoardService(
@@ -448,6 +469,7 @@ def build_dependencies(
         collection_operations=collection_operations,
         canonical_game_ledger_repository=canonical_game_ledger_repository,
         ledger_materialization_service=ledger_materialization_service,
+        ledger_backfill_service=ledger_backfill_service,
     )
 
 

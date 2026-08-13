@@ -83,6 +83,7 @@ from .canonical_game_ledger import (  # noqa: E402
     CanonicalGameLedgerPlayerFact,
     LedgerBackfillState,
     LedgerPublication,
+    LedgerParityArtifact,
 )
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
@@ -145,7 +146,7 @@ __all__ = [
     'CanonicalGameLedgerTeamFact',
     'CanonicalGameLedgerPlayerFact',
     'LedgerBackfillState',
-    'LedgerPublication',
+    'LedgerPublication', 'LedgerParityArtifact',
     'TeamMatchupFactRow',
     'TeamMatchupSurfaceObservationRow',
     'InjurySnapshot',

@@ -1068,6 +1068,13 @@ change frontend behavior. Corrections atomically enqueue affected slices.
 PBP-versus-legacy symmetric identity and semantic differences are retained as
 adjudication evidence, and zero or unequal comparison sets cannot claim exact
 parity.
+PBP retrievals are accepted into immutable collection observations before a
+ledger replacement; inactive publication provenance must resolve exactly to
+those accepted rows. Player game logs Season, traditional opponent Season and
+L15, assist locations Season and L15, and player per-36 each have independent
+candidate payloads. A missing assist primitive cannot suppress the other
+streams. Durable traditional/per-36 parity artifacts remain
+`pending_adjudication` until reviewed and prevent activation while pending.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

@@ -26,6 +26,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
+from app.models.canonical_game_ledger import LedgerParityArtifact
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -71,6 +72,28 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": observation_id,
+                "client_observation_id": observation_id,
+                "collector_id": "test",
+                "manifest_id": None,
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": "{}",
+                "season": "2025-26",
+                "cutoff": now,
+                "schema_version": 1,
+                "checksum": observation_id,
+                "payload": "{}",
+                "payload_bytes": 2,
+                "retrieved_at": now,
+                "accepted_at": now,
+            }
+            for observation_id in ("pbp:game-1", "pbp:game-2")
+        ])
 
     version = publications.compose_inactive_ledger(
         "traditional_opponent",
@@ -92,6 +115,25 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         ("pbp:game-1", "game-1"),
         ("pbp:game-2", "game-2"),
     }
+
+
+def test_pending_parity_blocks_ledger_stream_activation(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.insert().values(
+            artifact_id="pending-parity",
+            stream_key="player_per36",
+            season="2025-26",
+            cutoff=now,
+            status="pending_adjudication",
+            report="{}",
+            created_at=now,
+        ))
+
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream("player_per36", reason="reviewed rehearsal")
 
 
 @pytest.fixture
