@@ -82,7 +82,9 @@ class LedgerMaterializationService:
         require_assist_locations: bool = False,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
-        if expected_game_ids is None or set(self.repository.game_checksums(canonical_season)) != set(expected_game_ids):
+        if expected_game_ids is None or set(
+            self.repository.game_checksums(canonical_season, through=as_of)
+        ) != set(expected_game_ids):
             raise LedgerMaterializationUnavailable(
                 "stored eligible game IDs must exactly equal governed game IDs"
             )
@@ -263,14 +265,21 @@ class LedgerCorrectionQueue:
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
         now = self.clock()
-        cutoff = connection.execute(select(CollectionManifest.cutoff).where(
+        manifest = connection.execute(select(CollectionManifest).where(
             CollectionManifest.season == game.season,
             CollectionManifest.status == "active",
-        ).order_by(CollectionManifest.cutoff.desc()).limit(1)).scalar_one_or_none()
-        if cutoff is None:
+            CollectionManifest.collect_before > now,
+        ).order_by(CollectionManifest.cutoff.desc()).limit(1)).mappings().one_or_none()
+        valid_manifest = manifest is not None and (
+            "canonical_game_ledger" in set(json.loads(manifest["scopes"]))
+            and 1 in set(json.loads(manifest["accepted_versions"]))
+        )
+        if not valid_manifest:
             if self.require_governance:
                 raise LedgerMaterializationUnavailable("active manifest cutoff is required")
             cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
+        else:
+            cutoff = manifest["cutoff"]
         for stream_key in self.STREAMS:
             existing = connection.execute(select(table.c.job_id).where(
                 table.c.stream_key == stream_key,

@@ -131,9 +131,17 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             report="{}",
             created_at=now,
         ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="parity-candidate", stream_key="player_per36",
+            season="2025-26", cutoff=now, version=1, status="candidate",
+            checksum="candidate", payload="{}", created_at=now, fence=0,
+        ))
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
-        publications.activate_stream("player_per36", reason="reviewed rehearsal")
+        publications.activate_stream(
+            "player_per36", reason="reviewed rehearsal", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+        )
 
     unrelated = publications.activate_stream(
         "player_game_logs", reason="independent rehearsal reviewed"
@@ -144,8 +152,20 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             LedgerParityArtifact.artifact_id == "pending-parity",
         ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
                  adjudication_reason="reviewed differences"))
-    approved = publications.activate_stream("player_per36", reason="reviewed rehearsal")
+    approved = publications.activate_stream(
+        "player_per36", reason="reviewed rehearsal", season="2025-26",
+        cutoff=now, parity_artifact_id="pending-parity",
+    )
     assert approved.enabled
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(status="exact", decision="rejected"))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream(
+            "player_per36", reason="cannot override rejection", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+        )
 
 
 @pytest.fixture

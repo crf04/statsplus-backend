@@ -218,10 +218,9 @@ class LedgerBackfillService:
     ) -> BackfillResult:
         """Run one bounded pass and persist resumable progress.
 
-        Missing games always outrank scheduled rechecks.  A failed target
-        causes no candidate game to be written in this pass; this is what
-        preserves the previous valid publication when a correction batch is
-        incomplete.
+        Missing games always outrank scheduled rechecks. Each valid target is
+        accepted as its own transaction; a failed target leaves that game
+        untouched without rolling back other valid progress from the pass.
         """
 
         now = _aware(cutoff or self.clock())
@@ -302,39 +301,19 @@ class LedgerBackfillService:
                         with lock:
                             staged.append((game, observation_values))
 
-        if failures:
-            self._save_progress(
-                season,
-                cutoff=now,
-                completed=checksums.keys(),
-                failed=failures,
-                status="incomplete",
-                cursor=selected[-1].event.get("nba_game_id") if selected else None,
-                last_error="one or more PBP game observations failed",
-            )
-            missing = tuple(sorted(expected_ids - set(checksums)))
-            return BackfillResult(
-                season=season,
-                cutoff=now,
-                status="unavailable",
-                complete=False,
-                games_processed=len(staged),
-                games_replaced=0,
-                games_skipped=max(0, len(checksums) - len(targets)),
-                failed_game_ids=tuple(sorted(failures)),
-                pending_game_ids=missing,
-                lower_priority_remaining=lower_priority_remaining,
-                reason="incomplete PBP evidence; prior publication retained",
-            )
-
-        writes = self.repository.replace_games_atomic(
-            (game for game, _observation in staged),
-            accepted_observations={
-                game.source_observation_id: observation
-                for game, observation in staged
-            },
-        ) if staged else ()
-        resulting_ids = set(self.repository.game_checksums(season))
+        writes = []
+        for game, observation in sorted(staged, key=lambda item: item[0].game_id):
+            try:
+                writes.extend(self.repository.replace_games_atomic(
+                    (game,),
+                    accepted_observations={game.source_observation_id: observation},
+                ))
+            except Exception:
+                failures.append(game.game_id)
+        resulting_ids = {
+            summary.game_id
+            for summary in self.repository.list_games(season, through=now.date())
+        }
         complete = expected_ids == resulting_ids
         pending = tuple(sorted(expected_ids - resulting_ids))
         status = "complete" if complete else "unavailable"
@@ -342,10 +321,10 @@ class LedgerBackfillService:
             season,
             cutoff=now,
             completed=resulting_ids,
-            failed=(),
+            failed=failures,
             status=status,
             cursor=selected[-1].event.get("nba_game_id") if selected else None,
-            last_error=None if complete else "ledger identities differ from governed completed games",
+            last_error=None if complete else "one or more governed games are unavailable or identities differ",
         )
         return BackfillResult(
             season=season,
@@ -355,7 +334,7 @@ class LedgerBackfillService:
             games_processed=len(staged),
             games_replaced=sum(1 for write in writes if write.replaced),
             games_skipped=sum(1 for write in writes if not write.inserted and not write.replaced) + max(0, len(checksums) - len(targets)),
-            failed_game_ids=(),
+            failed_game_ids=tuple(sorted(set(failures))),
             pending_game_ids=pending,
             lower_priority_remaining=lower_priority_remaining,
             reason=None if complete else "ledger identities do not exactly match governance",

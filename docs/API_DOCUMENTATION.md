@@ -1080,6 +1080,10 @@ composition job. Successful initial games and corrections atomically enqueue
 every governed slice at the active manifest cutoff. Only traditional-opponent
 and per-36 activation require an exact or operator-approved parity artifact;
 approval or rejection records actor, reason, time, and an audit event.
+Parity-gated activation identifies the exact artifact, season, cutoff, and
+candidate publication. A rejected artifact always blocks, including when its
+raw comparison was exact; another season or cutoff is never reused. Unrelated
+ledger streams do not require parity adjudication.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

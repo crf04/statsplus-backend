@@ -161,7 +161,10 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     provider = _Provider(payload)
     repository = CanonicalGameLedgerRepository(
         engine,
-        correction_sink=LedgerCorrectionQueue(require_governance=True),
+        correction_sink=LedgerCorrectionQueue(
+            require_governance=True,
+            clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ),
     )
     service = LedgerBackfillService(
         provider=provider,
@@ -319,3 +322,34 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
         assert connection.execute(select(CollectionObservation)).all() == []
         assert connection.execute(select(CompositionJob)).all() == []
     assert repository.get_game("0022400001") is None
+
+
+def test_valid_game_commits_when_later_target_fails(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'partial.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    valid_event = _event()
+    invalid_event = {**_event(), "nba_game_id": "0022400002"}
+
+    class PartialProvider:
+        def fetch_game_player_logs(self, game_id, season, *, season_type="Regular Season"):
+            return _payload() if game_id == "0022400001" else {"stats": {}}
+
+    result = LedgerBackfillService(
+        provider=PartialProvider(),
+        event_catalog=_Events((valid_event, invalid_event)),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+    ).refresh("2024-25")
+
+    assert not result.complete
+    assert result.failed_game_ids == ("0022400002",)
+    assert repository.get_game("0022400001") is not None
+    assert repository.get_game("0022400002") is None
+    with engine.connect() as connection:
+        assert len(connection.execute(select(CollectionObservation)).all()) == 1

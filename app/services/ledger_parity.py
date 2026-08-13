@@ -138,7 +138,7 @@ class LegacyParityDiagnosticReader:
     """Read existing NBA diagnostic tables through an injected DB boundary."""
 
     TABLES = {
-        "traditional_opponent": "opponent_stats",
+        "traditional_opponent": "general_opponent_stats",
         "player_per36": "player_per36_stats",
     }
 
@@ -150,9 +150,12 @@ class LegacyParityDiagnosticReader:
 
         table = self.TABLES[stream_key]
         if table not in inspect(self.engine).get_table_names():
-            return ()
+            raise ValueError(f"required legacy parity table {table} is unavailable")
         with self.engine.connect() as connection:
-            return tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
+            rows = tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
+        if not rows:
+            raise ValueError(f"required legacy parity table {table} is empty")
+        return rows
 
 _PLAYER_FIELDS = {
     "points": ("points", "PTS"),

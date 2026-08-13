@@ -401,3 +401,39 @@ def test_materialization_rejects_extra_stored_game_identity(tmp_path):
         assert "exactly equal" in str(error)
     else:
         raise AssertionError("extra stored game unexpectedly accepted")
+
+
+def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'historical.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    later = replace(
+        games[0],
+        game_id="later-game",
+        game_date=date(2025, 10, 16),
+        source_observation_id="later-observation",
+        checksum=None,
+    ).with_checksum()
+    repository.replace_games_atomic((*games, later))
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+
+    result = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
+    ).compose(
+        (*games, later), season="2025-26", as_of=date(2025, 10, 15),
+        expected_game_ids=expected, expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+
+    assert result.season_window.complete
+    assert "later-game" not in result.season_window.governed_game_ids

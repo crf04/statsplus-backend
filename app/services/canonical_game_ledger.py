@@ -991,11 +991,19 @@ class CanonicalGameLedgerRepository:
                 summaries.append(LedgerGameSummary(row["game_id"], row["season"], row["game_date"], row["checksum"], assume_utc(row["retrieved_at"]), player_count, team_count))
         return tuple(summaries)
 
-    def game_checksums(self, season: str) -> dict[str, str]:
+    def game_checksums(
+        self,
+        season: str,
+        *,
+        through: date | datetime | None = None,
+    ) -> dict[str, str]:
         canonical_season = validate_canonical_season(season)
         table = CanonicalGameLedgerGame.__table__
+        statement = select(table.c.game_id, table.c.checksum).where(table.c.season == canonical_season)
+        if through is not None:
+            statement = statement.where(table.c.game_date <= _canonical_date(through))
         with self.engine.connect() as connection:
-            rows = connection.execute(select(table.c.game_id, table.c.checksum).where(table.c.season == canonical_season)).all()
+            rows = connection.execute(statement).all()
         return {str(game_id): str(checksum) for game_id, checksum in rows}
 
     def save_progress(self, progress: LedgerBackfillProgress) -> None:

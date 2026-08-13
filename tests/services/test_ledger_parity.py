@@ -4,7 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.migrations import run_migrations
 from app.models.collection_control import AuditEvent
@@ -15,6 +15,7 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
+    LegacyParityDiagnosticReader,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
 )
@@ -147,3 +148,32 @@ def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
         )).first()
     assert approved.decision == "approved"
     assert audit is not None
+
+
+def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite3'}")
+    game = _game()
+    facts = derive_traditional_opponent_facts((game,))
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE general_opponent_stats ("
+            "GAME_ID TEXT, TEAM_ID INTEGER, OPP_PTS INTEGER, OPP_REB INTEGER, OPP_AST INTEGER)"
+        ))
+        for fact in facts:
+            connection.execute(text(
+                "INSERT INTO general_opponent_stats VALUES "
+                "(:game_id, :team_id, :points, :rebounds, :assists)"
+            ), {
+                "game_id": fact.game_id, "team_id": fact.team_id,
+                "points": fact.opponent_points, "rebounds": fact.opponent_rebounds,
+                "assists": fact.opponent_assists,
+            })
+
+    report = compare_ledger_to_legacy(
+        (game,), None, season=game.season,
+        legacy_traditional_rows=LegacyParityDiagnosticReader(engine).read(
+            "traditional_opponent"
+        ),
+    )
+
+    assert report.exact

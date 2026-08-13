@@ -2094,6 +2094,8 @@ class PublicationService(_SessionService):
         return tuple(rows)
 
     def activate_stream(self, stream_key: str, *, reason: str,
+                        season: str | None = None, cutoff: datetime | None = None,
+                        parity_artifact_id: str | None = None,
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -2110,11 +2112,22 @@ class PublicationService(_SessionService):
                 else "player_per36" if stream_key == "player_per36" else None
             )
             if parity_stream is not None:
-                latest = session.scalar(select(LedgerParityArtifact).where(
+                if season is None or cutoff is None or parity_artifact_id is None:
+                    raise ControlPlaneError("ledger_parity_evidence_required")
+                candidate = session.scalar(select(PublicationVersion).where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.cutoff == _aware(cutoff),
+                    PublicationVersion.status == "candidate",
+                ).order_by(PublicationVersion.version.desc()).limit(1))
+                artifact = session.scalar(select(LedgerParityArtifact).where(
+                    LedgerParityArtifact.artifact_id == parity_artifact_id,
                     LedgerParityArtifact.stream_key == parity_stream,
-                ).order_by(LedgerParityArtifact.created_at.desc()).limit(1))
-                if latest is None or (
-                    latest.status != "exact" and latest.decision != "approved"
+                    LedgerParityArtifact.season == season,
+                    LedgerParityArtifact.cutoff == _aware(cutoff),
+                ))
+                if candidate is None or artifact is None or artifact.decision == "rejected" or (
+                    artifact.status != "exact" and artifact.decision != "approved"
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
             row.enabled = True

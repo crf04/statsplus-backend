@@ -839,6 +839,15 @@ ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime
 expectations come only from the active manifest and completed Regular Season
 Event Catalog entries. Traditional Season/L15 candidates contain complete
 30-team per-48, league-average, population-sigma, and ascending-rank payloads.
+Each valid game commits independently, so a later failed target cannot erase
+earlier accepted progress. Governance requires an active, unexpired manifest
+at the shared cutoff with exact `canonical_game_ledger` scope and envelope
+version; final/postponed decisions use canonical Event Catalog helpers.
+Historical equality considers only ledger game dates through that cutoff.
+Composition jobs finish independently: incomplete assist evidence leaves its
+jobs retryable while unrelated candidates advance. Traditional parity reads
+`general_opponent_stats`; missing diagnostics are unavailable evidence, never
+a fabricated empty comparison.
 
 ### Database-first game-log reads
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from typing import Protocol
 
 from sqlalchemy import select, update
 
 from app.models.collection_control import ActiveSeason, CollectionManifest, CompositionJob
 from app.models.event_catalog import EventCatalogEntry
+from app.domain.nba_events import is_final_event, is_postponed_event
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterializationService
@@ -31,8 +33,9 @@ class LedgerGovernanceReader(Protocol):
 class ActiveManifestLedgerGovernanceReader:
     """Derive exact composition truth only from active control-plane state."""
 
-    def __init__(self, engine) -> None:
+    def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         with self.engine.connect() as connection:
@@ -45,15 +48,26 @@ class ActiveManifestLedgerGovernanceReader:
                 CollectionManifest.season == season,
                 CollectionManifest.cutoff == cutoff,
                 CollectionManifest.status == "active",
-            )).first()
+                CollectionManifest.collect_before > self.clock(),
+            )).mappings().one_or_none()
             events = connection.execute(select(EventCatalogEntry).where(
                 EventCatalogEntry.season == season,
                 EventCatalogEntry.classification == "Regular Season",
-                EventCatalogEntry.status_code == 3,
                 EventCatalogEntry.scheduled_at <= cutoff,
             ).order_by(EventCatalogEntry.scheduled_at, EventCatalogEntry.nba_game_id)).mappings().all()
-        if active is None or manifest is None or not events:
+        if (
+            active is None
+            or manifest is None
+            or "canonical_game_ledger" not in set(json.loads(manifest["scopes"]))
+            or 1 not in set(json.loads(manifest["accepted_versions"]))
+        ):
             raise ValueError("active manifest and completed Event Catalog governance are required")
+        events = tuple(
+            event for event in events
+            if is_final_event(event) and not is_postponed_event(event)
+        )
+        if not events:
+            raise ValueError("completed Regular Season Event Catalog governance is required")
         team_ids = frozenset(
             int(team_id)
             for event in events
@@ -130,7 +144,7 @@ class LedgerRuntime:
                 for summary in self.repository.list_games(season, through=cutoff.date())
                 if (game := self.repository.get_game(summary.game_id)) is not None
             )
-            self.materialization.compose(
+            materialized = self.materialization.compose(
                 games,
                 season=season,
                 as_of=cutoff.date(),
@@ -138,13 +152,28 @@ class LedgerRuntime:
                 expected_l15_game_ids=governance.expected_l15_game_ids,
                 team_ids=governance.team_ids,
             )
+            succeeded = {
+                "player_game_logs",
+                "traditional_opponent_season",
+                "traditional_opponent_l15",
+                "player_per36",
+            }
+            if (
+                materialized.assist_location_season is not None
+                and materialized.assist_location_l15 is not None
+            ):
+                succeeded |= {"assist_locations_season", "assist_locations_l15"}
             with self.repository.engine.begin() as connection:
-                result = connection.execute(update(table).where(
-                    table.c.season == season,
-                    table.c.cutoff == cutoff,
-                    table.c.status == "queued",
-                ).values(status="succeeded", updated_at=self.clock()))
-                completed += int(result.rowcount or 0)
+                for job in (row for row in jobs if row["cutoff"] == cutoff):
+                    success = job["stream_key"] in succeeded
+                    connection.execute(update(table).where(
+                        table.c.job_id == job["job_id"],
+                    ).values(
+                        status="succeeded" if success else "failed",
+                        updated_at=self.clock(),
+                        last_error=None if success else "assist_location_evidence_incomplete",
+                    ))
+                    completed += int(success)
         return completed
 
 
