@@ -2096,6 +2096,7 @@ class PublicationService(_SessionService):
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
                         parity_artifact_id: str | None = None,
+                        candidate_publication_id: str | None = None,
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -2106,15 +2107,29 @@ class PublicationService(_SessionService):
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
-            parity_stream = (
-                "traditional_opponent"
-                if stream_key in {"traditional_opponent", "traditional_opponent_season", "traditional_opponent_l15"}
-                else "player_per36" if stream_key == "player_per36" else None
-            )
+            parity_stream = stream_key if stream_key in {
+                "traditional_opponent",
+                "traditional_opponent_season",
+                "traditional_opponent_l15",
+                "player_per36",
+            } else None
             if parity_stream is not None:
-                if season is None or cutoff is None or parity_artifact_id is None:
+                if (
+                    season is None
+                    or cutoff is None
+                    or parity_artifact_id is None
+                    or candidate_publication_id is None
+                ):
+                    raise ControlPlaneError("ledger_parity_evidence_required")
+                if (
+                    not _valid_season(season)
+                    or cutoff.tzinfo is None
+                    or not parity_artifact_id.strip()
+                    or not candidate_publication_id.strip()
+                ):
                     raise ControlPlaneError("ledger_parity_evidence_required")
                 candidate = session.scalar(select(PublicationVersion).where(
+                    PublicationVersion.publication_id == candidate_publication_id,
                     PublicationVersion.stream_key == stream_key,
                     PublicationVersion.season == season,
                     PublicationVersion.cutoff == _aware(cutoff),
@@ -2125,9 +2140,16 @@ class PublicationService(_SessionService):
                     LedgerParityArtifact.stream_key == parity_stream,
                     LedgerParityArtifact.season == season,
                     LedgerParityArtifact.cutoff == _aware(cutoff),
+                    LedgerParityArtifact.publication_id == candidate_publication_id,
                 ))
-                if candidate is None or artifact is None or artifact.decision == "rejected" or (
+                if (
+                    candidate is None
+                    or artifact is None
+                    or artifact.payload_checksum != candidate.checksum
+                    or artifact.decision == "rejected"
+                    or (
                     artifact.status != "exact" and artifact.decision != "approved"
+                    )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
             row.enabled = True
@@ -2597,13 +2619,29 @@ class CollectionOperationsService(_SessionService):
             ),
         )
 
-    def activate_stream(self, stream_key: str, *, actor: str, reason: str) -> OperatorActionResult:
+    def activate_stream(
+        self,
+        stream_key: str,
+        *,
+        actor: str,
+        reason: str,
+        season: str | None = None,
+        cutoff: datetime | None = None,
+        parity_artifact_id: str | None = None,
+        candidate_publication_id: str | None = None,
+    ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
             actor=actor, action="stream.activate", resource=stream_key, reason=reason,
             mutation=lambda session: self.publication_service.activate_stream(
-                stream_key, reason=reason, session=session
+                stream_key,
+                reason=reason,
+                season=season,
+                cutoff=cutoff,
+                parity_artifact_id=parity_artifact_id,
+                candidate_publication_id=candidate_publication_id,
+                session=session,
             ),
         )
 

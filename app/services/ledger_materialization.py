@@ -32,7 +32,12 @@ from app.services.ledger_derivations import (
     materialize_team_window,
     materialize_assist_location_window,
 )
-from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
+from app.services.ledger_parity import (
+    LedgerParityArtifactRepository,
+    LedgerParityReport,
+    SemanticDifference,
+    compare_ledger_to_legacy,
+)
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -199,26 +204,6 @@ class LedgerMaterializationService:
         )
         self.repository.publish_metadata_batch(publications)
         cutoff = datetime.combine(as_of, datetime.min.time(), timezone.utc)
-        self.parity_repository.record(
-            "traditional_opponent",
-            cutoff=cutoff,
-            report=compare_ledger_to_legacy(
-                eligible,
-                None,
-                season=canonical_season,
-                legacy_traditional_rows=self.parity_reader.read("traditional_opponent"),
-            ),
-        )
-        self.parity_repository.record(
-            "player_per36",
-            cutoff=cutoff,
-            report=compare_ledger_to_legacy(
-                eligible,
-                None,
-                season=canonical_season,
-                legacy_per36_rows=self.parity_reader.read("player_per36"),
-            ),
-        )
         if self.publication_service is not None:
             provenance = {
                 game.source_observation_id: game.game_id
@@ -235,13 +220,61 @@ class LedgerMaterializationService:
                     ("assist_locations_season", assist_season.teams),
                     ("assist_locations_l15", assist_l15.teams),
                 ))
+            candidate_versions = {}
             for stream_key, payload in candidates:
-                self.publication_service.compose_inactive_ledger(
+                candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                     stream_key,
                     season=canonical_season,
                     cutoff=cutoff,
                     payload=json.loads(_payload_json(payload)),
                     provenance=provenance,
+                )
+            parity_specs = (
+                (
+                    "traditional_opponent_season",
+                    "traditional_opponent",
+                    "legacy_traditional_rows",
+                ),
+                (
+                    "traditional_opponent_l15",
+                    None,
+                    None,
+                ),
+                ("player_per36", "player_per36", "legacy_per36_rows"),
+            )
+            for candidate_key, diagnostic_key, comparison_key in parity_specs:
+                candidate = candidate_versions.get(candidate_key)
+                if candidate is None:
+                    continue
+                if diagnostic_key is None or comparison_key is None:
+                    report = _unavailable_parity_report(
+                        canonical_season,
+                        len(eligible),
+                        candidate_key,
+                        ValueError("legacy diagnostic has no equivalent L15 window"),
+                    )
+                else:
+                    try:
+                        diagnostic_rows = self.parity_reader.read(diagnostic_key)
+                        report = compare_ledger_to_legacy(
+                            eligible,
+                            None,
+                            season=canonical_season,
+                            **{comparison_key: diagnostic_rows},
+                        )
+                    except (KeyError, RuntimeError, ValueError) as error:
+                        report = _unavailable_parity_report(
+                            canonical_season,
+                            len(eligible),
+                            diagnostic_key,
+                            error,
+                        )
+                self.parity_repository.record(
+                    candidate_key,
+                    cutoff=cutoff,
+                    report=report,
+                    publication_id=candidate.publication_id,
+                    payload_checksum=candidate.checksum,
                 )
         return result
 
@@ -335,6 +368,27 @@ def _json_default(value: object) -> object:
     if isinstance(value, tuple):
         return list(value)
     raise TypeError(f"cannot serialize {type(value).__name__}")
+
+
+def _unavailable_parity_report(
+    season: str,
+    game_count: int,
+    diagnostic_key: str,
+    error: Exception,
+) -> LedgerParityReport:
+    return LedgerParityReport(
+        season=season,
+        game_count=game_count,
+        compared_count=0,
+        differences=(SemanticDifference(
+            identity=diagnostic_key,
+            field="diagnostic",
+            pbp_value="candidate_persisted",
+            legacy_value=None,
+            classification=f"diagnostic_unavailable:{type(error).__name__}",
+        ),),
+        adjudication_required=True,
+    )
 
 
 # Friendly aliases for callers that describe this seam as composition rather

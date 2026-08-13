@@ -122,25 +122,23 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     with control_db.begin() as connection:
-        connection.execute(LedgerParityArtifact.__table__.insert().values(
-            artifact_id="pending-parity",
-            stream_key="player_per36",
-            season="2025-26",
-            cutoff=now,
-            status="pending_adjudication",
-            report="{}",
-            created_at=now,
-        ))
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="parity-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum="candidate", payload="{}", created_at=now, fence=0,
+            checksum="a" * 64, payload="{}", created_at=now, fence=0,
+        ))
+        connection.execute(LedgerParityArtifact.__table__.insert().values(
+            artifact_id="pending-parity", publication_id="parity-candidate",
+            payload_checksum="a" * 64, stream_key="player_per36",
+            season="2025-26", cutoff=now, status="pending_adjudication",
+            report="{}", created_at=now,
         ))
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
             "player_per36", reason="reviewed rehearsal", season="2025-26",
             cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
         )
 
     unrelated = publications.activate_stream(
@@ -155,8 +153,21 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
     approved = publications.activate_stream(
         "player_per36", reason="reviewed rehearsal", season="2025-26",
         cutoff=now, parity_artifact_id="pending-parity",
+        candidate_publication_id="parity-candidate",
     )
     assert approved.enabled
+    with control_db.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="corrected-candidate", stream_key="player_per36",
+            season="2025-26", cutoff=now, version=2, status="candidate",
+            checksum="b" * 64, payload="{\"corrected\":true}", created_at=now, fence=0,
+        ))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
+        publications.activate_stream(
+            "player_per36", reason="old evidence cannot authorize correction",
+            season="2025-26", cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="corrected-candidate",
+        )
     with control_db.begin() as connection:
         connection.execute(LedgerParityArtifact.__table__.update().where(
             LedgerParityArtifact.artifact_id == "pending-parity",
@@ -165,6 +176,7 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
         publications.activate_stream(
             "player_per36", reason="cannot override rejection", season="2025-26",
             cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
         )
 
 

@@ -331,6 +331,41 @@ def test_admin_and_collector_security_boundaries_have_stable_errors(client, app,
     assert conflict.json["error"]["code"] == "operation_conflict"
 
 
+def test_activation_route_forwards_candidate_bound_parity_evidence(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.activate_stream.return_value = SimpleNamespace(
+        job_id="activation", resource=SimpleNamespace(stream_key="player_per36", enabled=True)
+    )
+
+    response = client.post("/api/admin/collection/streams/player_per36/activate", json={
+        "reason": "reviewed exact candidate",
+        "season": "2025-26",
+        "cutoff": "2026-08-12T00:00:00Z",
+        "artifact_id": "artifact-1",
+        "candidate_publication_id": "publication-1",
+    })
+
+    assert response.status_code == 202
+    assert dependencies.collection_operations.activate_stream.call_args.args == (
+        "player_per36",
+    )
+    assert dependencies.collection_operations.activate_stream.call_args.kwargs == {
+        "actor": "dev-user",
+        "reason": "reviewed exact candidate",
+        "season": "2025-26",
+        "cutoff": datetime.fromisoformat("2026-08-12T00:00:00+00:00"),
+        "parity_artifact_id": "artifact-1",
+        "candidate_publication_id": "publication-1",
+    }
+
+    invalid = client.post("/api/admin/collection/streams/player_per36/activate", json={
+        "reason": "reviewed exact candidate",
+        "cutoff": "2026-08-12T00:00:00",
+    })
+    assert invalid.status_code == 400
+    assert dependencies.collection_operations.activate_stream.call_count == 1
+
+
 def test_admin_domain_errors_and_credential_claim_contract(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collection_operations.retry_composition.side_effect = ControlPlaneError("composition_not_found")

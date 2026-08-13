@@ -83,6 +83,9 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     assert len(governance.expected_game_ids) == 225
     assert len(governance.team_ids) == 30
     assert all(len(game_ids) == 15 for game_ids in governance.expected_l15_game_ids.values())
+    assert ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: cutoff - timedelta(hours=1)
+    ).read_active("2025-26").expected_game_ids == governance.expected_game_ids
 
     with engine.begin() as connection:
         connection.execute(update(EventCatalogEntry).where(
@@ -162,3 +165,80 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+
+
+def test_refresh_fails_governance_before_any_backfill_or_provider_work():
+    class Governance:
+        def read_active(self, season):
+            raise ValueError("active manifest required")
+
+    class Backfill:
+        def refresh(self, *args, **kwargs):
+            raise AssertionError("provider-capable backfill must not be entered")
+
+    runtime = LedgerRuntime(
+        backfill=Backfill(), repository=None, materialization=None,
+        governance=Governance(),
+    )
+
+    with pytest.raises(ValueError, match="active manifest"):
+        runtime.refresh("2025-26")
+
+
+def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'authorization.sqlite3'}")
+    run_migrations(engine)
+    now = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=now, activated_at=now, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="manifest",
+            status="active", created_at=now,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), [{
+            "nba_game_id": f"game-{index}", "season": "2025-26",
+            "home_team_id": index + 1, "home_team_name": f"Team {index + 1}",
+            "home_team_tricode": f"T{index + 1:02d}",
+            "away_team_id": 30 - index, "away_team_name": f"Team {30 - index}",
+            "away_team_tricode": f"T{30 - index:02d}",
+            "scheduled_at": now - timedelta(days=1), "status_text": "Final",
+            "status_code": 3, "classification": "Regular Season",
+            "first_seen_at": now - timedelta(days=1), "last_seen_at": now,
+        } for index in range(15)])
+
+    class Backfill:
+        calls = 0
+
+        def refresh(self, *args, **kwargs):
+            self.calls += 1
+            return object()
+
+    backfill = Backfill()
+    runtime = LedgerRuntime(
+        backfill=backfill, repository=None, materialization=None,
+        governance=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: now,
+        ),
+    )
+    for values in (
+        {"scopes": '["player_game_logs"]'},
+        {"scopes": '["canonical_game_ledger"]', "accepted_versions": "[2]"},
+        {"accepted_versions": "[1]", "collect_before": now},
+    ):
+        with engine.begin() as connection:
+            connection.execute(update(CollectionManifest).values(**values))
+        with pytest.raises(ValueError, match="active manifest"):
+            runtime.refresh("2025-26")
+
+    assert backfill.calls == 0
+    with engine.begin() as connection:
+        connection.execute(update(CollectionManifest).values(
+            collect_before=now + timedelta(hours=1),
+        ))
+    runtime.refresh("2025-26")
+    assert backfill.calls == 1

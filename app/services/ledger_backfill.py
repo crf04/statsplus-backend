@@ -215,6 +215,7 @@ class LedgerBackfillService:
         cutoff: datetime | None = None,
         max_games: int | None = None,
         historical_repair: bool = False,
+        governed_events: Iterable[Mapping[str, object]] | None = None,
     ) -> BackfillResult:
         """Run one bounded pass and persist resumable progress.
 
@@ -224,7 +225,11 @@ class LedgerBackfillService:
         """
 
         now = _aware(cutoff or self.clock())
-        events = self._governed_events(season, through=now)
+        events = (
+            self._authorized_events(governed_events, season=season, through=now)
+            if governed_events is not None
+            else self._governed_events(season, through=now)
+        )
         expected_ids = frozenset(str(event["nba_game_id"]) for event in events)
         checksums = self.repository.game_checksums(season)
         summaries = {summary.game_id: summary for summary in self.repository.list_games(season, through=now.date())}
@@ -339,6 +344,34 @@ class LedgerBackfillService:
             lower_priority_remaining=lower_priority_remaining,
             reason=None if complete else "ledger identities do not exactly match governance",
         )
+
+    @staticmethod
+    def _authorized_events(
+        governed_events: Iterable[Mapping[str, object]],
+        *,
+        season: str,
+        through: datetime,
+    ) -> tuple[dict[str, object], ...]:
+        events = []
+        for raw in governed_events:
+            event = dict(raw)
+            if (
+                str(event.get("season")) != season
+                or player_game_log_season_type(event) != "Regular Season"
+                or not is_final_event(event)
+                or is_postponed_event(event)
+                or _event_datetime(event.get("scheduled_at")) > through
+                or not event.get("nba_game_id")
+            ):
+                raise LedgerValidationError("authorized Event Catalog snapshot is invalid")
+            events.append(event)
+        if not events:
+            raise LedgerValidationError("authorized Event Catalog snapshot is empty")
+        return tuple(sorted(
+            events,
+            key=lambda event: (str(event.get("scheduled_at")), str(event.get("nba_game_id"))),
+            reverse=True,
+        ))
 
     def _governed_events(self, season: str, *, through: datetime) -> tuple[dict[str, object], ...]:
         raw_events = self.event_catalog.get_events(season)

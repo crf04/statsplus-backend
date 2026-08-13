@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from sqlalchemy import select, update
 
@@ -24,10 +24,13 @@ class LedgerGovernance:
     expected_game_ids: frozenset[str]
     team_ids: frozenset[int]
     expected_l15_game_ids: dict[int, frozenset[str]]
+    events: tuple[Mapping[str, object], ...] = ()
 
 
 class LedgerGovernanceReader(Protocol):
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance: ...
+
+    def read_active(self, season: str) -> LedgerGovernance: ...
 
 
 class ActiveManifestLedgerGovernanceReader:
@@ -38,6 +41,15 @@ class ActiveManifestLedgerGovernanceReader:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
+        return self._read(season, cutoff, require_l15=True)
+
+    def _read(
+        self,
+        season: str,
+        cutoff: datetime,
+        *,
+        require_l15: bool,
+    ) -> LedgerGovernance:
         with self.engine.connect() as connection:
             active = connection.execute(select(ActiveSeason).where(
                 ActiveSeason.season == season,
@@ -84,7 +96,7 @@ class ActiveManifestLedgerGovernanceReader:
             )
             for team_id in team_ids
         }
-        if any(len(game_ids) < 15 for game_ids in by_team.values()):
+        if require_l15 and any(len(game_ids) < 15 for game_ids in by_team.values()):
             raise ValueError("governed L15 requires 15 games for every team")
         return LedgerGovernance(
             season=season,
@@ -92,9 +104,26 @@ class ActiveManifestLedgerGovernanceReader:
             expected_game_ids=expected,
             team_ids=team_ids,
             expected_l15_game_ids={
-                team_id: frozenset(game_ids[:15]) for team_id, game_ids in by_team.items()
+                team_id: frozenset(game_ids[:15])
+                for team_id, game_ids in by_team.items()
+                if len(game_ids) >= 15
             },
+            events=events,
         )
+
+    def read_active(self, season: str) -> LedgerGovernance:
+        """Resolve the newest executable manifest before any provider I/O."""
+
+        now = self.clock()
+        with self.engine.connect() as connection:
+            cutoff = connection.scalar(select(CollectionManifest.cutoff).where(
+                CollectionManifest.season == season,
+                CollectionManifest.status == "active",
+                CollectionManifest.collect_before > now,
+            ).order_by(CollectionManifest.cutoff.desc()).limit(1))
+        if cutoff is None:
+            raise ValueError("active manifest and completed Event Catalog governance are required")
+        return self._read(season, cutoff, require_l15=False)
 
 
 class LedgerRuntime:
@@ -122,10 +151,13 @@ class LedgerRuntime:
         max_games: int | None = None,
         historical_repair: bool = False,
     ) -> BackfillResult:
+        governance = self.governance.read_active(season)
         return self.backfill.refresh(
             season,
+            cutoff=governance.cutoff,
             max_games=max_games,
             historical_repair=historical_repair,
+            governed_events=governance.events,
         )
 
     def compose_queued(self, season: str) -> int:

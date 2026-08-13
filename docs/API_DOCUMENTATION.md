@@ -1081,7 +1081,10 @@ every governed slice at the active manifest cutoff. Only traditional-opponent
 and per-36 activation require an exact or operator-approved parity artifact;
 approval or rejection records actor, reason, time, and an audit event.
 Parity-gated activation identifies the exact artifact, season, cutoff, and
-candidate publication. A rejected artifact always blocks, including when its
+candidate publication. The JSON body uses `artifact_id`,
+`candidate_publication_id`, `season`, `cutoff`, and `reason`; the artifact's
+bound publication ID and payload checksum must match that candidate. A
+rejected artifact always blocks, including when its
 raw comparison was exact; another season or cutoff is never reused. Unrelated
 ledger streams do not require parity adjudication.
 Internal season rates default to Regular Season only unless a caller explicitly

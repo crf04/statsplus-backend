@@ -27,13 +27,13 @@ from app.services.canonical_game_ledger import (
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
 from app.models.collection_control import CollectionObservation, PublicationVersion
-from app.models.canonical_game_ledger import LedgerPublication
+from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
 
 
 class _ParityReader:
     def read(self, stream_key):
-        return ()
+        raise ValueError(f"{stream_key} diagnostic unavailable")
 
 
 def test_traditional_opponent_is_derived_from_the_other_team_fact():
@@ -269,9 +269,18 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         candidates = connection.execute(select(PublicationVersion).where(
             PublicationVersion.status == "candidate",
         )).all()
+        parity = connection.execute(
+            select(LedgerParityArtifact.__table__)
+        ).mappings().all()
     assert len(ledger_payloads) == 8
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
     assert len(candidates) == 6
+    assert len(parity) == 3
+    assert all(row["status"] == "pending_adjudication" for row in parity)
+    assert all(
+        row["publication_id"] and len(row["payload_checksum"]) == 64
+        for row in parity
+    )
     traditional_payload = json.loads(repository.get_publication(
         "traditional_opponent_season",
         season="2025-26",

@@ -833,7 +833,11 @@ primitives retain only the assist last-good candidates. Migration
 adjudication blocks ledger stream activation.
 Migration `026_repair_publication_provenance_foreign_keys` removes the
 transient PublicationVersion self-reference and gives normalized provenance
-its publication cascade and accepted-observation restrict links. PBP responses
+its publication cascade and accepted-observation restrict links.
+Migration `027_bind_ledger_parity_to_publications` binds each new parity
+artifact to the exact inactive PublicationVersion and payload checksum it
+rehearsed; pre-binding artifacts are retired and cannot authorize cutover.
+PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime
 expectations come only from the active manifest and completed Regular Season
@@ -846,8 +850,11 @@ version; final/postponed decisions use canonical Event Catalog helpers.
 Historical equality considers only ledger game dates through that cutoff.
 Composition jobs finish independently: incomplete assist evidence leaves its
 jobs retryable while unrelated candidates advance. Traditional parity reads
-`general_opponent_stats`; missing diagnostics are unavailable evidence, never
-a fabricated empty comparison.
+the season-level `general_opponent_stats` 30-team Per48 semantics keyed by
+`TEAM_ID`; missing diagnostics are unavailable evidence, never a fabricated
+empty comparison. Runtime refresh resolves the active unexpired manifest and
+its exact authorized Event Catalog snapshot before entering the
+provider-capable backfill boundary.
 
 ### Database-first game-log reads
 

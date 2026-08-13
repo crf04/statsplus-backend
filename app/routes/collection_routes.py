@@ -436,9 +436,29 @@ def rollback_publication(stream_key: str):
 @route_error_boundary("Failed to activate the publication stream.")
 def activate_stream(stream_key: str):
     body = _body()
+    cutoff = None
+    if body.get("cutoff") is not None:
+        try:
+            cutoff = datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise InvalidInputError("cutoff must be an ISO-8601 timestamp") from error
+        if cutoff.tzinfo is None:
+            raise InvalidInputError("cutoff must include a timezone")
     try:
         result = _service("collection_operations").activate_stream(
-            stream_key, actor=_actor(), reason=str(body.get("reason", ""))
+            stream_key,
+            actor=_actor(),
+            reason=str(body.get("reason", "")),
+            season=None if body.get("season") is None else str(body["season"]),
+            cutoff=cutoff,
+            parity_artifact_id=(
+                None if body.get("artifact_id") is None else str(body["artifact_id"])
+            ),
+            candidate_publication_id=(
+                None
+                if body.get("candidate_publication_id") is None
+                else str(body["candidate_publication_id"])
+            ),
         )
         row = result.resource
     except ControlPlaneError as error:

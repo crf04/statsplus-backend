@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, make_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -68,9 +68,15 @@ class LedgerParityArtifactRepository:
         *,
         cutoff: datetime,
         report: LedgerParityReport,
+        publication_id: str,
+        payload_checksum: str,
     ) -> LedgerParityArtifact:
+        if not publication_id or len(payload_checksum) != 64:
+            raise ValueError("candidate publication and payload checksum are required")
         row = LedgerParityArtifact(
             artifact_id=str(uuid4()),
+            publication_id=publication_id,
+            payload_checksum=payload_checksum,
             stream_key=stream_key,
             season=report.season,
             cutoff=cutoff,
@@ -335,9 +341,8 @@ def _player_identity(row: Mapping[str, object]) -> tuple[object, ...] | None:
 
 
 def _traditional_identity(row: Mapping[str, object]) -> tuple[object, ...] | None:
-    game_id = str(_first(row, ("game_id", "GAME_ID")) or "").strip()
     team_id = _integer_identity(_first(row, ("team_id", "TEAM_ID")))
-    return (game_id, team_id) if game_id and team_id is not None else None
+    return (team_id,) if team_id is not None else None
 
 
 def _per36_identity(row: Mapping[str, object]) -> tuple[object, ...] | None:
@@ -389,16 +394,13 @@ def compare_ledger_to_legacy(
             tolerance=tolerance,
         )
     if legacy_traditional_rows is not None:
-        traditional: dict[tuple[object, ...], TraditionalOpponentFact] = {
-            (fact.game_id, fact.team_id): fact
-            for fact in derive_traditional_opponent_facts(games_tuple)
-        }
+        traditional = _season_traditional_opponent(games_tuple)
         count, found = _compare_semantic(
             traditional,
             legacy_traditional_rows,
             semantic="traditional_opponent",
             identity_from_row=_traditional_identity,
-            identity_text=lambda identity: f"traditional:{identity[0]}:{identity[1]}",
+            identity_text=lambda identity: f"traditional:{identity[0]}",
             fields=_TRADITIONAL_FIELDS,
             tolerance=tolerance,
         )
@@ -451,6 +453,8 @@ def generate_semantic_difference_report(
     artifact_repository: LedgerParityArtifactRepository,
     stream_key: str,
     cutoff: datetime,
+    publication_id: str,
+    payload_checksum: str,
 ) -> LedgerParityReport:
     """Generate and durably persist required activation evidence."""
 
@@ -462,8 +466,51 @@ def generate_semantic_difference_report(
         legacy_traditional_rows=legacy_traditional_rows,
         legacy_per36_rows=legacy_per36_rows,
     )
-    artifact_repository.record(stream_key, cutoff=cutoff, report=report)
+    artifact_repository.record(
+        stream_key,
+        cutoff=cutoff,
+        report=report,
+        publication_id=publication_id,
+        payload_checksum=payload_checksum,
+    )
     return report
+
+
+_TraditionalSeasonMetric = make_dataclass(
+    "_TraditionalSeasonMetric",
+    [(field, float) for field in _TRADITIONAL_FIELDS],
+    frozen=True,
+    slots=True,
+)
+
+
+def _season_traditional_opponent(
+    games: Iterable[CanonicalGame],
+) -> dict[tuple[object, ...], object]:
+    """Aggregate ledger opponent counts to legacy ``Per48`` team semantics."""
+
+    games_tuple = tuple(games)
+    facts = derive_traditional_opponent_facts(games_tuple)
+    games_by_id = {game.game_id: game for game in games_tuple}
+    grouped: dict[int, list[TraditionalOpponentFact]] = {}
+    for fact in facts:
+        grouped.setdefault(fact.team_id, []).append(fact)
+    result: dict[tuple[object, ...], object] = {}
+    for team_id, team_facts in grouped.items():
+        team_minutes = sum(
+            next(
+                row.team_minutes
+                for row in games_by_id[fact.game_id].team_facts
+                if row.team_id == team_id
+            )
+            for fact in team_facts
+        )
+        scale = 48.0 / team_minutes if team_minutes > 0 else 1.0 / len(team_facts)
+        result[(team_id,)] = _TraditionalSeasonMetric(**{
+            field: sum(float(getattr(fact, field)) for fact in team_facts) * scale
+            for field in _TRADITIONAL_FIELDS
+        })
+    return result
 
 
 __all__ = [

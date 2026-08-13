@@ -586,6 +586,49 @@ def _repair_publication_provenance_foreign_keys(connection: Connection) -> None:
         ))
 
 
+def _bind_ledger_parity_to_publications(connection: Connection) -> None:
+    """Bind new parity evidence to the exact candidate payload it rehearsed."""
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    table = "canonical_game_ledger_parity_artifacts"
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns(table)}
+    if connection.dialect.name == "sqlite":
+        legacy_rows = connection.execute(text(f"SELECT * FROM {table}")).mappings().all()
+        connection.execute(text(f"DROP TABLE {table}"))
+        LedgerParityArtifact.__table__.create(connection)
+        # Evidence produced before candidate binding cannot authorize a
+        # publication.  Deliberately do not copy it into the stricter table.
+        del legacy_rows
+        return
+    preparer = connection.dialect.identifier_preparer
+    if "publication_id" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN publication_id VARCHAR(36)"
+        ))
+    if "payload_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN payload_checksum VARCHAR(64)"
+        ))
+    # Old unbound evidence is intentionally retired because it cannot prove
+    # the semantics of a current candidate.
+    connection.execute(text(f"DELETE FROM {preparer.quote(table)} WHERE publication_id IS NULL"))
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN publication_id SET NOT NULL"
+    ))
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN payload_checksum SET NOT NULL"
+    ))
+    foreign_keys = inspect(connection).get_foreign_keys(table)
+    if not any(key.get("referred_table") == "publication_versions" for key in foreign_keys):
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD CONSTRAINT "
+            "fk_ledger_parity_publication FOREIGN KEY (publication_id) "
+            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+        ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -621,6 +664,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(24, "024_canonical_game_ledger", _create_canonical_game_ledger_tables),
     Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
     Migration(26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys),
+    Migration(27, "027_bind_ledger_parity_to_publications", _bind_ledger_parity_to_publications),
 )
 
 
