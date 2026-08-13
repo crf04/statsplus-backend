@@ -797,6 +797,27 @@ array contains one object per game, and `averages` / `season_averages` are
 arrays holding a single averages object; all three fields are ordinary JSON
 arrays, never JSON strings.
 
+Provider migration (#66): the request-time game-log source is PBP Stats, not
+`stats.nba.com`. Each row joins the governed Event Catalog by game ID to
+recover team/opponent identity, home/away, and the `TEAM vs. OPP` / `TEAM @ OPP`
+Matchup notation; any unjoinable or contradictory row fails the request rather
+than being guessed or dropped. The HTTP
+parameters, success payload, filter vocabulary, authentication, error schema,
+and Redis caching behavior are unchanged, and cache telemetry is attributed to
+PBP Stats. A season with a complete, valid durable publication is served
+database-first from the stored `player_game_logs` facts with strictly identical
+values; every other valid season continues through the cached live PBP path.
+Both paths
+return the same whole-minute presentation and the same composite/fantasy
+averages, and any season cut over to the database must satisfy strict parity.
+
+Explicit contract amendment (#66): plus/minus is removed from the game-log
+contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the
+averages no longer include a `PLUS_MINUS` cell, and response rows carry no
+`+/-` value. This is a deliberate simplification of the previously pinned
+contract so the durable PBP per-game path (whose upstream boxscore seam exposes
+no plus/minus) is database-first without fabricating evidence.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
@@ -828,7 +849,7 @@ Query parameters:
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
 | `playstyle_RTG_min` | No | Finite numeric lower bound. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS` |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -926,15 +947,32 @@ The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
 endpoint. It refreshes the stats tables, current-season Event Catalog,
 current-season Athlete Catalog, durable current-season player game logs,
 Season player Diet facts, and then team matchup facts,
-retrying that ordered unit once. The player-log step uses exactly two
-season-wide provider reads—one `Regular Season`, one `Playoffs`—and publishes
-their normalized player/game facts plus the season sidecar as one transaction.
-For the configured current season, that transaction
-also advances the named `player_game_logs` stats freshness; historical
+retrying that ordered unit once. The player-log step uses the PBP-based
+incremental ingestion: it discovers governed completed `Regular Season` and
+`Playoffs` games and requests one PBP per-game player observation per missing
+game, plus a bounded recent-game reconciliation window
+(`PLAYER_GAME_LOG_RECONCILIATION_DAYS`, default three days) that atomically
+replaces a game's rows when upstream stat corrections change its checksum.
+Each game must cover both exact teams with at least
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players;
+every target game is fetched, normalized, and validated before anything is
+written, and a single transaction then replaces the staged games' rows and
+advances season publication. An unchanged game is idempotently skipped. A
+malformed, incomplete, identity-removing (including any unjoined athlete or
+contradictory team), or provider-failed game fails the whole refresh, so
+prior fact rows and the last complete publication are preserved exactly.
+The season publication and the configured current season's
+`player_game_logs` stats freshness advance only inside that same final
+transaction, so a failed or incomplete refresh never stamps a partial union
+fresh or leaks a staged correction; historical
 backfills retain independent season freshness and never replace or gate the
 current observation. Every result requires a present, fresh, nonempty Event
 Catalog whose freshness count agrees with its actual season rows; a nonempty
 result also requires a present, fresh, nonempty Athlete Catalog.
+The season sidecar carries an explicit `complete`/`in_progress`
+`publication_status`; legacy NBA-derived publications remain `in_progress`
+until real PBP backfill verifies them, and a season serves database-first
+game-log reads only when its publication is complete and valid.
 `update_database` does not
 publish the season-owned Athlete Catalog or its freshness, so Nightly's named
 Athlete Catalog step is required. Schedule precedes that step, so an Athlete
@@ -1424,7 +1462,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PLUS_MINUS`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an

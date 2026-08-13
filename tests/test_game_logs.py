@@ -89,6 +89,9 @@ def test_game_log_query_rejects_malformed_filters(kwargs):
     [
         {"teams_against": ["NOT_A_FILTER"]},
         {"self_filters": {"YOLO": "1,10"}},
+        # The explicit #66 contract amendment removes plus-minus from the
+        # game-log self-filter vocabulary.
+        {"self_filters": {"PLUS_MINUS": "1,10"}},
     ],
 )
 def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
@@ -102,12 +105,13 @@ def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
 
     assert "OPP_PTS" in SUPPORTED_TEAM_FILTERS
     assert "PTS" in SUPPORTED_SELF_FILTER_STATS
+    assert "PLUS_MINUS" not in SUPPORTED_SELF_FILTER_STATS
 
 
 @pytest.mark.parametrize(
     "stat",
     [
-        "MIN", "FG_PCT", "OREB", "DREB", "PF", "PLUS_MINUS", "PRA",
+        "MIN", "FG_PCT", "OREB", "DREB", "PF", "PRA",
         "PA", "PR", "RA", "STKS", "FD_PTS",
     ],
 )
@@ -253,18 +257,18 @@ def _game_logs_frame():
         "MATCHUP", "MIN", "PTS", "REB", "AST", "PRA", "PA", "PR", "RA", "STKS",
         "FD_PTS", "NBA_FANTASY_PTS", "FGM", "FGA", "FG_PCT", "FG2M", "FG2A",
         "FG3M", "FG3A", "FTM", "FTA", "OREB", "DREB", "TOV", "STL", "BLK", "PF",
-        "PLUS_MINUS", "MIN_SEC",
+        "MIN_SEC",
     ]
     rows = [
         ["2024-01-15", "001", "LeBron James", 1610612738, "BOS", "BOS vs. LAL",
          30, 25, 8, 7, 40, 32, 33, 15, 2, 44.2, 44.2, 9, 16, 56.3, 6, 9,
-         3, 7, 4, 5, 1, 7, 2, 1, 1, 2, 12, 1800],
+         3, 7, 4, 5, 1, 7, 2, 1, 1, 2, 1800],
         ["2024-01-17", "002", "LeBron James", 1610612738, "BOS", "BOS @ MIA",
          20, 15, 4, 5, 24, 20, 19, 9, 0, 27.0, 27.0, 6, 12, 50.0, 4, 6,
-         2, 6, 1, 2, 0, 4, 3, 0, 0, 3, -4, 1200],
+         2, 6, 1, 2, 0, 4, 3, 0, 0, 3, 1200],
         ["2024-01-19", "003", "LeBron James", 1610612738, "BOS", "BOS vs. CHI",
          40, 30, 10, 9, 49, 39, 40, 19, 3, 52.0, 52.0, 11, 20, 55.0, 7, 11,
-         4, 9, 4, 4, 2, 8, 1, 2, 1, 1, 18, 2400],
+         4, 9, 4, 4, 2, 8, 1, 2, 1, 1, 2400],
     ]
     return pd.DataFrame(rows, columns=columns)
 

@@ -1,0 +1,62 @@
+{
+  "single_row_table_data": {
+    "EntityId": null,
+    "Name": "LeBron James",
+    "TeamId": null,
+    "Team": null,
+    "GamesPlayed": 2,
+    "Minutes": 66
+  },
+  "multi_row_table_data": [
+    {
+      "GameId": "0022400001",
+      "Date": "2024-11-15",
+      "Team": "LAL",
+      "Opponent": "SAS",
+      "Minutes": "34:12",
+      "PlusMinus": 12,
+      "FG2M": 6,
+      "FG2A": 12,
+      "FG3M": 3,
+      "FG3A": 7,
+      "FGM": 9,
+      "FGA": 19,
+      "FtPoints": 4,
+      "FTA": 4,
+      "OffRebounds": 1,
+      "DefRebounds": 7,
+      "Rebounds": 8,
+      "Assists": 8,
+      "Turnovers": 3,
+      "Steals": 2,
+      "Blocks": 1,
+      "Fouls": 2,
+      "Points": 25
+    },
+    {
+      "GameId": "0022400002",
+      "Date": "2024-11-17",
+      "Team": "LAL",
+      "Opponent": "DEN",
+      "Minutes": "31:48",
+      "PlusMinus": -5,
+      "FG2M": 5,
+      "FG2A": 9,
+      "FG3M": 2,
+      "FG3A": 6,
+      "FGM": 7,
+      "FGA": 15,
+      "FtPoints": 2,
+      "FTA": 3,
+      "OffRebounds": null,
+      "DefRebounds": 5,
+      "Rebounds": 5,
+      "Assists": 6,
+      "Turnovers": 2,
+      "Steals": 1,
+      "Blocks": 0,
+      "Fouls": 3,
+      "Points": 18
+    }
+  ]
+}

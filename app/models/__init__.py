@@ -72,7 +72,11 @@ from .event_mapping import (  # noqa: E402
     ProviderEventMapping,
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
-from .player_game_log import PlayerGameLog, PlayerGameLogRefresh  # noqa: E402
+from .player_game_log import (  # noqa: E402
+    PlayerGameLog,
+    PlayerGameLogRefresh,
+    PlayerGameLogSync,
+)
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
@@ -105,6 +109,7 @@ __all__ = [
     'PlayerPoolSnapshot',
     'PlayerGameLog',
     'PlayerGameLogRefresh',
+    'PlayerGameLogSync',
     'TeamMatchupFactRow',
     'TeamMatchupSurfaceObservationRow',
     'InjurySnapshot',

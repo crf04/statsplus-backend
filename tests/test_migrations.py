@@ -54,6 +54,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "013_create_player_diet_facts",
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
+        "016_pbp_game_log_primitives",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -81,6 +82,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "player_pool_snapshots",
             "player_game_logs",
             "player_game_log_refreshes",
+            "player_game_log_sync",
             "team_matchup_facts",
             "team_matchup_surface_observations",
             "player_diet_facts",
@@ -154,9 +156,14 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "field_goals_attempted",
         "three_pointers_made",
         "three_pointers_attempted",
+        "free_throws_made",
+        "free_throws_attempted",
+        "offensive_rebounds",
+        "defensive_rebounds",
         "turnovers",
         "steals",
         "blocks",
+        "personal_fouls",
     }
     assert inspect(engine).get_check_constraints("player_game_logs") == [
         {
@@ -174,6 +181,20 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "row_count",
         "source_row_count",
         "identity_source_row_count",
+        "publication_status",
+    }
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_game_log_sync")
+    } == {
+        "season",
+        "game_id",
+        "season_type",
+        "status",
+        "checksum",
+        "row_count",
+        "source_provider",
+        "retrieved_at",
     }
     assert inspect(engine).get_check_constraints("player_game_log_refreshes") == [
         {
@@ -260,6 +281,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (13, "013_create_player_diet_facts"),
             (14, "014_create_injury_snapshots"),
             (15, "015_share_injury_source_snapshots"),
+            (16, "016_pbp_game_log_primitives"),
         ]
 
 
@@ -289,6 +311,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "013_create_player_diet_facts",
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
+        "016_pbp_game_log_primitives",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -297,6 +320,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
     assert inspect(engine).has_table("player_game_log_refreshes")
+    assert inspect(engine).has_table("player_game_log_sync")
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
     assert inspect(engine).has_table("player_diet_surface_observations")
@@ -382,6 +406,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "player_pool_snapshots",
             "player_game_logs",
             "player_game_log_refreshes",
+            "player_game_log_sync",
             "team_matchup_facts",
             "team_matchup_surface_observations",
             "player_diet_facts",
@@ -504,6 +529,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "013_create_player_diet_facts",
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
+        "016_pbp_game_log_primitives",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -540,13 +566,15 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "013_create_player_diet_facts",
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
+        "016_pbp_game_log_primitives",
     )
-    assert upgraded.current_version == 15
+    assert upgraded.current_version == 16
     assert repeated.applied == ()
-    assert repeated.current_version == 15
+    assert repeated.current_version == 16
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
+    assert inspect(engine).has_table("player_game_log_sync")
     assert inspect(engine).has_table("team_matchup_facts")
     assert inspect(engine).has_table("player_diet_facts")
     assert inspect(engine).has_table("injury_snapshots")
@@ -586,7 +614,10 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         InjurySnapshotScope("2025-26", "legacy")
     )
 
-    assert upgraded.applied == ("015_share_injury_source_snapshots",)
+    assert upgraded.applied == (
+        "015_share_injury_source_snapshots",
+        "016_pbp_game_log_primitives",
+    )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
     evidence = InjurySnapshotRepository(engine).get_evidence(

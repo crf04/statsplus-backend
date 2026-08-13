@@ -41,9 +41,14 @@ class PlayerGameLog(Base):
     field_goals_attempted = Column(Integer, nullable=False)
     three_pointers_made = Column(Integer, nullable=False)
     three_pointers_attempted = Column(Integer, nullable=False)
+    free_throws_made = Column(Integer, nullable=False)
+    free_throws_attempted = Column(Integer, nullable=False)
+    offensive_rebounds = Column(Integer, nullable=False)
+    defensive_rebounds = Column(Integer, nullable=False)
     turnovers = Column(Integer, nullable=False)
     steals = Column(Integer, nullable=False)
     blocks = Column(Integer, nullable=False)
+    personal_fouls = Column(Integer, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -79,6 +84,13 @@ class PlayerGameLogRefresh(Base):
     row_count = Column(Integer, nullable=False)
     source_row_count = Column(Integer, nullable=False)
     identity_source_row_count = Column(Integer, nullable=False)
+    #: ``complete`` means every governed completed event through the observation
+    #: time is durably covered by PBP-derived facts; anything else — including
+    #: legacy NBA-derived publications — stays ``in_progress`` so a
+    #: database-first read never mistakes unverified data for a complete one.
+    publication_status = Column(
+        String(16), nullable=False, server_default="in_progress"
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -90,4 +102,38 @@ class PlayerGameLogRefresh(Base):
     )
 
 
-__all__ = ["PlayerGameLog", "PlayerGameLogRefresh"]
+class PlayerGameLogSync(Base):
+    """Bounded per-game synchronization evidence for one season.
+
+    Each row records the normalized row count, a checksum of the game's facts,
+    the source provider, and the retrieval time for one governed game.  The
+    checksum makes reconciliation idempotent: an unchanged game is not
+    rewritten, while a stat correction changes the checksum and replaces the
+    affected game's rows atomically.
+    """
+
+    __tablename__ = "player_game_log_sync"
+
+    season = Column(String(7), primary_key=True)
+    game_id = Column(String(32), primary_key=True)
+    season_type = Column(String(20), nullable=False)
+    status = Column(String(16), nullable=False)
+    checksum = Column(String(64), nullable=False)
+    row_count = Column(Integer, nullable=False)
+    source_provider = Column(String(32), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('complete', 'failed')",
+            name="ck_player_game_log_sync_status",
+        ),
+        Index("ix_player_game_log_sync_season", "season"),
+    )
+
+
+__all__ = [
+    "PlayerGameLog",
+    "PlayerGameLogRefresh",
+    "PlayerGameLogSync",
+]

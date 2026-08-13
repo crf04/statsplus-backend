@@ -47,6 +47,8 @@ class ApplicationDependencies:
     event_mapping_repository: Any | None = None
     event_resolver: Any | None = None
     player_diet_service: Any | None = None
+    pbp_game_logs_provider: Any | None = None
+    game_logs_source: Any | None = None
 
 
 def build_dependencies(
@@ -59,6 +61,7 @@ def build_dependencies(
 
     from app.providers.dabble import DabbleAdapter
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.prizepicks import PrizePicksAdapter
     from app.providers.underdog import UnderdogAdapter
@@ -118,6 +121,7 @@ def build_dependencies(
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
+    pbp_game_logs_provider = PBPGameLogAdapter(settings=settings)
     injury_provider = (
         RotoWireInjuryProvider(settings=settings)
         if settings.features.injury_report_enabled
@@ -159,12 +163,7 @@ def build_dependencies(
             coordinator=dfs_snapshot_cache,
         )
 
-    game_service = GameService(
-        engine,
-        redis_client=redis_client,
-        settings=settings,
-        nba_stats_adapter=nba_stats_provider,
-    )
+    game_service = None
     player_service = PlayerService(
         engine,
         settings=settings,
@@ -301,6 +300,31 @@ def build_dependencies(
             field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
         ),
     )
+    from app.services.game_logs_source import (
+        DatabaseFirstGameLogsSource,
+        LivePBPGameLogsSource,
+        StoredGameLogsSource,
+    )
+
+    live_game_logs_source = LivePBPGameLogsSource(
+        pbp_game_logs_provider,
+        event_catalog_service,
+    )
+    stored_game_logs_source = StoredGameLogsSource(
+        player_game_log_repository,
+    )
+    game_logs_source = DatabaseFirstGameLogsSource(
+        live_game_logs_source,
+        stored_game_logs_source,
+        player_game_log_repository,
+    )
+    game_service = GameService(
+        engine,
+        redis_client=redis_client,
+        settings=settings,
+        nba_stats_adapter=nba_stats_provider,
+        game_logs_source=game_logs_source,
+    )
     stored_player_pool_reader = (
         StoredPlayerPoolReader(player_pool_snapshot_repository)
         if player_pool_snapshot_repository is not None
@@ -355,6 +379,8 @@ def build_dependencies(
         comparison_board_service=comparison_board_service,
         dfs_board_response_service=dfs_board_response_service,
         player_diet_service=player_diet_service,
+        pbp_game_logs_provider=pbp_game_logs_provider,
+        game_logs_source=game_logs_source,
     )
 
 

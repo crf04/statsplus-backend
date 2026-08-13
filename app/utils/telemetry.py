@@ -76,6 +76,8 @@ PBP_STATS_OPERATIONS = frozenset(
         "get_totals_player_diet",
         "get_totals_opponent",
         "health_probe",
+        "player_game_logs",
+        "game_player_stats",
     }
 )
 DABBLE_OPERATIONS = frozenset(

@@ -76,7 +76,7 @@ not counted twice:
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -404,10 +404,60 @@ Game logs:
 GET /api/games/game_logs
   → Firebase auth (or explicit local-only bypass)
   → GameService.get_filtered_logs
-  → cached NBAStatsAdapter call (telemetry event per call)
+  → game-log source (cached PBP Stats per-player call, or stored facts for a
+    durably complete season)
   → local/database and request filters
   → serialized logs and averages
 ```
+
+The request-time player-game-log source is one injected seam
+(`app.services.game_logs_source`).  Production assembles a
+`DatabaseFirstGameLogsSource` that serves a season from the durable
+`player_game_logs` facts only when the season has a complete, valid
+publication; every other valid season falls through to the cached
+`LivePBPGameLogsSource`.  The live source replaces the request-time NBA Stats
+call: it requests one PBP per-player season game-log observation
+(`GET /get-game-logs/nba` with `EntityType=Player` and `EntityId`) through
+`PBPGameLogAdapter`, normalizes it through the shared canonical contract, and
+joins every row to the governed Event Catalog by game ID to recover team and
+opponent identity, home/away, and the existing Matchup notation.  The live
+per-player rows do not carry `EntityId`/`Name`/`TeamId`: player identity comes
+from the request plus the `single_row_table_data.Name` envelope, and team
+identity is derived exactly from each row's `Team`/`Opponent` tricodes against
+the Event Catalog.  An unavailable or empty Event Catalog fails closed as
+`provider_unavailable`.  The Redis cache policy
+is unchanged (current-season daily, historical 30-day); cache hits and misses
+are attributed to the PBP provider.  A database-served season bypasses Redis
+entirely so cached provider results never shadow fresher stored facts.
+
+`app.services.pbp_game_log_normalization.normalize_pbp_game_logs` is the one
+canonical PBP game-log mapping shared by the live path and durable ingestion.
+Provider omissions become zero only for a closed list of additive/counting
+box-score fields; identity, game, date, team, opponent, and `MM:SS` minutes
+evidence is malformed rather than zero-filled.  The join is fail-closed: any
+row that cannot join the governed Event Catalog, contradicts its team tricode,
+disagrees with the requested phase, or is missing identity/minutes evidence
+aborts the whole pass with `provider_unavailable`, so neither the live response
+nor a durable game publication ever tolerates a dropped row.  Canonical
+shooting facts derive
+`FGM = FG2M + FG3M` and `FGA = FG2A + FG3A`; PBP reports free-throw points
+rather than made free throws, and a made free throw is exactly one point, so
+the endpoint's canonical `FTM` reads `FtPoints` after that semantic
+equivalence; composite and fantasy values are
+computed centrally by `app.services.game_log_frame.derive_game_log_frame` so
+the live PBP and stored read paths can never disagree.  The stored source
+rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
+makes the Stage 3 parity seam a real equivalence check.
+
+Explicit contract amendment (#66): plus/minus is removed from the game-log
+contract.  `PLUS_MINUS` is not a supported `self_filters[STAT]`, the averages
+carry no `PLUS_MINUS` cell, response rows carry no `+/-` value, and the
+canonical PBP frame and durable `player_game_logs` schema store no plus/minus.
+PBP's per-game boxscore seam does not expose the field, and the amendment
+removes it from the public contract rather than inventing or relabeling
+evidence.  Because the durable path therefore covers every public primitive,
+an ingestion-complete, valid publication is database-first with no separate
+cutover gate.
 
 ### NBA Stats game-log adapter
 
@@ -437,12 +487,13 @@ telemetry, response normalization, and provider error translation. Tests inject
 the protocol into `GameService` or `PlayerService` rather than patching
 `nba_api`.
 
-`get_season_player_game_logs` is the refresh-only durable-log seam. Each call
-fetches one explicit phase for the whole season, retains canonical `PLAYER_ID`,
-and keeps the provider's exact minutes rather than the request-time game-log
-route's historical whole-minute presentation. Nightly calls it exactly twice,
-once for `Regular Season` and once for `Playoffs`; it is never called per player
-or from an HTTP request.
+`get_season_player_game_logs` is the legacy season-wide NBA durable-log seam.
+Each call fetches one explicit phase for the whole season, retains canonical
+`PLAYER_ID`, and keeps the provider's exact minutes rather than the
+request-time game-log route's historical whole-minute presentation. It remains
+available as a tested backfill utility; the PBP-based incremental
+`PlayerGameLogIngestService` is now the Nightly Refresh durable-log step, and
+request-time game-log reads use the PBP-backed source described above.
 
 `NBAStatsAdapter.fetch_whole_season_schedule(season=...)` is the provider seam
 for the canonical event catalog. It accepts only an explicit canonical
@@ -548,12 +599,14 @@ HTTP/authentication dependency.
 
 ### Durable player game logs
 
-`PlayerGameLogService.refresh(season)` consumes the season-wide NBA Stats seam
-once for `Regular Season` and once for `Playoffs` during Nightly Refresh, then
-stamps retrieval only after both provider calls return. It reads canonical
-identities through `AthleteCatalogService` and
-`EventCatalogService`; the player-log module does not query their tables
-directly. Every snapshot, including an empty preseason observation, requires a
+The legacy `PlayerGameLogService.refresh(season)` consumed the season-wide NBA
+Stats seam once for `Regular Season` and once for `Playoffs` during Nightly
+Refresh, stamping retrieval only after both provider calls return.  It remains
+available as a tested backfill seam; the PBP incremental
+`PlayerGameLogIngestService` (described below) is now the Nightly Refresh
+durable-log step.  Both paths share the same canonical safeguards: reads go
+through `AthleteCatalogService` and `EventCatalogService`; the player-log
+module does not query their tables directly. Every snapshot, including an empty preseason observation, requires a
 present, fresh, nonempty, internally complete Event Catalog for the same season
 observation; its freshness metadata must agree with the actual governed
 event-row count. A nonempty union snapshot also requires a present, fresh,
@@ -664,6 +717,73 @@ hides historical backfills, which remain season-sidecar based. Callers consume
 the same governed `StatsFreshnessRepository` fact rather than synthesizing
 freshness from rows. Neither migration 011
 nor its refresh service calls a provider from a public request.
+
+### PBP incremental durable ingestion
+
+The staged PBP migration (#66) expands the durable model to every primitive the
+legacy endpoint needs and makes the durable refresh PBP-based.  Migration 016
+adds `free_throws_made`, `free_throws_attempted`, `offensive_rebounds`,
+`defensive_rebounds`, and `personal_fouls` to
+`player_game_logs`, adds an explicit `publication_status`
+(`complete`/`in_progress`) to the season sidecar, and creates the
+`player_game_log_sync` per-game synchronization evidence table.  The #66
+contract amendment removes plus/minus from the public game-log contract, so the
+durable facts carry no `plus_minus` either.
+
+`PlayerGameLogIngestService` is the Stage 2 refresh seam used by Nightly
+Refresh.  It requires the same fresh, nonempty Event and Athlete Catalog
+prerequisites, discovers governed completed `Regular Season`/`Playoffs` games
+through the observation time, and requests one PBP per-game player observation
+(`GET /get-game-stats` with `Type=Player`, parsed by
+`PBPGameLogAdapter.parse_game_stats`) per missing game.  The parser flattens
+the nested `stats.Home/Away.FullGame` player arrays, excludes the provider's
+team-summary row (`EntityId == 0`), and attaches game identity from the
+envelope.  Each game's rows flow through the same canonical normalization
+contract, join the fresh Athlete Catalog for player identity (an unjoined
+athlete fails the game, never a dropped row), and must cover both exact event
+teams with at least the configured
+`PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` positive-minute players.
+Every target game is fetched, normalized, and validated before anything is
+written; only then does `PlayerGameLogRepository.publish_refresh` replace all
+staged games' rows, upsert their per-game sync evidence, recompute the season
+sidecar, and advance the configured current season's stats-surface observation
+in one transaction.  A game that fails at any earlier point preserves the exact
+prior fact rows and the last complete publication — a correction staged for one
+game never leaks into published facts when a later game fails.  The sidecar
+`publication_status` is `complete` only when every governed completed event
+carries complete PBP sync evidence; legacy NBA-derived publications stay
+`in_progress` until a real PBP backfill verifies them, so a database-first read
+never mistakes unverified data for a complete publication.
+
+A bounded recent-game reconciliation window
+(`PLAYER_GAME_LOG_RECONCILIATION_DAYS`, default three days) re-fetches recent
+completed games and atomically replaces their rows when a stat correction
+changes the game's normalized checksum; an unchanged game is idempotently
+skipped.  Per-game sync evidence records status, a checksum over the game's
+normalized facts, row count, source provider, and retrieval time; full raw PBP
+documents are never stored.  A malformed, incomplete, identity-removing, or
+provider-failed game preserves prior facts and fails the refresh, so Nightly's
+whole-unit retry never erases working game logs.  The legacy season-wide NBA
+refresh remains available as a tested backfill seam but is no longer wired
+into Nightly Refresh.
+
+### Database-first game-log reads
+
+Stage 3 makes Postgres the preferred read path.  `PlayerGameLogRepository`
+reports a complete publication only when the season sidecar is present with
+`publication_status == complete` and the read remains valid (a historical
+season's own sidecar, or a fresh stats-surface observation for the configured
+current season).  The request-time router serves that season from the durable
+facts through `StoredGameLogsSource`, which rebuilds the canonical frame from
+`PlayerGameLogRecord` primitives with the same central derivations as the live
+path.  A valid season that has not yet received a complete durable publication
+continues through the cached live PBP path; it is never mistaken for an empty
+stored season.  Because the #66 contract amendment removed plus/minus from the
+game-log contract, the durable path covers every public primitive and needs no
+separate cutover gate.  The parity seam is the authenticated game-log endpoint:
+tests compare the complete live-PBP and stored response documents — game
+identity, statistics, averages, and filter results — and cutover depends on
+strict equivalence.
 
 Authenticated matchup-selection reads compose only stored seams:
 
@@ -2006,7 +2126,7 @@ used to repair the fixture.
 - Route/service interaction: replace methods on the dependency graph supplied
   through the `DEPENDENCIES` app-factory override.
 - Provider failures: raise the relevant `requests` timeout/error from a patched service or endpoint constructor.
-- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`) with no network.
+- Provider response contracts: run the recorded fixtures in `tests/fixtures/nba_stats` and `tests/fixtures/pbp_stats` through the production parse seams (`parse_recorded_game_logs`, `parse_recorded_player_roster`, `parse_recorded_schedule`, `PBPTotalsAdapter.parse_totals`, `PBPGameLogAdapter.parse_game_logs`, `PBPGameLogAdapter.parse_game_stats`) with no network.
 - Player Diet provider contracts: run `tests/fixtures/player_diets/` through
   `parse_recorded_player_diet` and
   `PBPTotalsAdapter.parse_player_diet_totals`; these fixtures pin canonical

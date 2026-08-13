@@ -106,7 +106,6 @@ SUPPORTED_SELF_FILTER_STATS: tuple[str, ...] = (
     "OREB",
     "DREB",
     "PF",
-    "PLUS_MINUS",
     "PRA",
     "PA",
     "PR",

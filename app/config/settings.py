@@ -434,6 +434,10 @@ class CatalogSettings(BaseModel):
     player_game_log_min_active_players_per_team_game: int = Field(
         default=5, strict=True, ge=1
     )
+    #: How many past days of completed games are re-fetched during the routine
+    #: incremental player-log refresh so upstream stat corrections replace the
+    #: affected games' rows atomically.
+    player_game_log_reconciliation_days: int = Field(default=3, strict=True, ge=0)
     matchup_selection_h2h_min_games: int = Field(default=1, strict=True, ge=1)
     matchup_selection_archetype_min_games: int = Field(
         default=5, strict=True, ge=1
@@ -775,6 +779,9 @@ def _build_settings(
                 ),
                 player_game_log_min_active_players_per_team_game=reader.integer(
                     "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME", 5
+                ),
+                player_game_log_reconciliation_days=reader.integer(
+                    "PLAYER_GAME_LOG_RECONCILIATION_DAYS", 3
                 ),
                 matchup_selection_h2h_min_games=reader.integer(
                     "MATCHUP_SELECTION_H2H_MIN_GAMES", 1
