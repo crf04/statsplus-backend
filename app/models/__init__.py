@@ -7,8 +7,6 @@ the foundation for ORM models.
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from app.config.settings import get_runtime_settings
-from app.utils.db import get_engine, is_demo_database_url
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,7 +21,12 @@ def get_session(engine: Engine | None = None):
     Returns:
         Session: A new SQLAlchemy session bound to the application engine
     """
-    session_engine = engine or get_engine()
+    if engine is None:
+        from app.utils.db import get_engine
+
+        session_engine = get_engine()
+    else:
+        session_engine = engine
     Session = sessionmaker(bind=session_engine)
     return Session()
 
@@ -34,6 +37,9 @@ def create_all_tables():
     The function name is retained for the app-factory compatibility seam;
     callers that need a repeatable workflow should use ``scripts/migrate.py``.
     """
+    from app.config.settings import get_runtime_settings
+    from app.utils.db import get_engine, is_demo_database_url
+
     settings = get_runtime_settings()
     if is_demo_database_url(settings.database.url):
         logger.info("Skipping application migrations for the read-only demo database")
