@@ -105,10 +105,11 @@ class _ProviderDependencyUnavailable(ValueError):
 class PlayerDietRepository:
     """Persist available Bases while retaining prior facts for degraded Bases."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, write_fence: Any | None = None) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store player Diet facts")
         self.engine = engine
+        self._write_fence = write_fence
 
     def publish(
         self,
@@ -118,6 +119,19 @@ class PlayerDietRepository:
         *,
         retrieved_at: datetime,
     ) -> None:
+        if self._write_fence is not None:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                # One legacy refresh writes all player-Diet bases in one
+                # transaction.  Check every corresponding activated stream
+                # before touching any row, so a partial write cannot bypass
+                # the cutover by publishing a different base first.
+                for stream_key in (
+                    "synergy_play_types",
+                    "grouped_shot_types",
+                    "exact_shot_zones",
+                ):
+                    checker(stream_key)
         season = validate_canonical_season(season)
         observed_at = assume_utc(retrieved_at)
         fact_rows = tuple(facts)
@@ -321,8 +335,9 @@ class PlayerDietService:
         nba_stats_provider: Any,
         pbp_stats_provider: Any,
         clock: Callable[[], datetime] | None = None,
+        write_fence: Any | None = None,
     ) -> None:
-        self.repository = PlayerDietRepository(engine)
+        self.repository = PlayerDietRepository(engine, write_fence=write_fence)
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider

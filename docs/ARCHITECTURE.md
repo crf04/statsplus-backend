@@ -954,8 +954,10 @@ GET /api/games/matchup?game_id
 ```
 
 `MatchupService` has no NBA Stats, PBP Stats, DFS provider, or live Player Pool
-dependency; its injury dependency alone may invoke the separately gated
-RotoWire provider before tip. Missing stored
+dependency. The activated production assembly also selects the stored injury
+snapshot seam, so it cannot invoke RotoWire during a public read. The legacy
+pre-activation constructor retains its separately gated pre-tip injury mode
+for compatibility. Missing stored
 pool, player, Diet, or team-window facts degrade the response without starting
 collection. The team query's latest observation is the sole window-availability
 authority; when a Base/window is unavailable or missing, the response emits a
@@ -999,6 +1001,44 @@ an unavailable part is neutral zero rather than a reason to renormalize.
 Injury reconciliation can remove a canonical Out player or attach a badge
 reference; it does not change Matchup Scores, Diet Shares, scoring history, or
 projected roles.
+
+### Database-first Matchups activation (#87)
+
+`DatabaseFirstPublicationReader` is the read-side authority for the first
+activation. It follows one active `PublicationPointer` per stream, decodes
+only its immutable Publication payload, and returns bounded provenance
+(`publication_id`, version, Coverage Cutoff, age, and freshness). Freshness is
+computed independently for every stream; an active stale Publication remains
+the last-good value and is never replaced by a partial refresh or a provider
+fallback. Missing or corrupt payloads degrade only that contributor. The
+reader reports additive `mixed_cutoff` and `mixed_freshness` flags without
+collapsing the source clocks.
+
+`MatchupService(database_only=True)` is the production assembly used by the
+authenticated Matchup route. Its injury seam calls `get_stored_injuries`
+only; `DatabaseOnlyProviderGuard` is available to tests and raises on any
+provider attribute access. The route therefore composes only durable Regular
+Season facts and retains the existing success/degraded/missing shape. Event
+classification rejects Playoffs and Play-In during this first activation, and
+the registry keeps `synergy:l15` as `never_schedule`/
+`provider_window_unsupported`.
+
+`PublicationService.activate_stream` is additive and auditable through
+`PublicationActivation`; `rollback` and composition use the existing per-stream
+fence. `LegacyWriteFence` is injected into the legacy Event/Athlete Catalog,
+ player-log, Player Diet, and team-matchup writers, so activated streams reject
+ old writes while the tables remain readable for rollback and validation.
+ Migration 029 creates only the activation evidence table; no legacy table is
+ removed.
+
+`HistoricalRehearsalRunner` requires seven ordered dates, executes injected
+fixture/live validation callbacks, checks the completed-season Synergy result,
+and compares pointers before and after to prove the isolated rehearsal did
+not mutate production state. `FailureDrillRunner` and the benchmark seam are
+credential-free deterministic tooling. The benchmark retains bounded SQLite
+or PostgreSQL query-plan text alongside baseline/database-first p95 values; it
+records but does not claim a recovery-time or recovery-point SLA.
+
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event

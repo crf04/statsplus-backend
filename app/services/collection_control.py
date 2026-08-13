@@ -43,6 +43,7 @@ from app.models.collection_control import (
     CollectorTokenReplay,
     CollectorLease,
     PublicationPointer,
+    PublicationActivation,
     PublicationStream,
     PublicationVersion,
     PublicationObservation,
@@ -2221,6 +2222,7 @@ class PublicationService(_SessionService):
                         season: str | None = None, cutoff: datetime | None = None,
                         parity_artifact_id: str | None = None,
                         candidate_publication_id: str | None = None,
+                        actor: str = "operator",
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -2276,7 +2278,46 @@ class PublicationService(_SessionService):
                     )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
+            elif candidate_publication_id is not None:
+                # Non-ledger streams do not need a parity adjudication, but a
+                # cutover must still name an immutable candidate belonging to
+                # this stream.  Without this check an operator typo could
+                # leave activation evidence pointing at another stream (or a
+                # fabricated publication ID).
+                candidate = session.scalar(select(PublicationVersion).where(
+                    PublicationVersion.publication_id == candidate_publication_id,
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.status == "candidate",
+                ).order_by(PublicationVersion.version.desc()).limit(1))
+                if candidate is None:
+                    raise ControlPlaneError("publication_candidate_invalid")
+                if season is not None and candidate.season != season:
+                    raise ControlPlaneError("publication_candidate_invalid")
+                if cutoff is not None and (
+                    cutoff.tzinfo is None or candidate.cutoff != _aware(cutoff)
+                ):
+                    raise ControlPlaneError("publication_candidate_invalid")
             row.enabled = True
+            # Activation is additive and auditable.  If this call names a
+            # candidate, retain that exact identity; otherwise bind evidence
+            # to the current pointer when one exists.  Existing callers that
+            # only toggle a stream remain compatible and simply produce no
+            # activation row until a publication is available.
+            publication_id = candidate_publication_id
+            if publication_id is None:
+                pointer = session.get(PublicationPointer, stream_key)
+                publication_id = pointer.active_publication_id if pointer else None
+            if publication_id:
+                pointer = session.get(PublicationPointer, stream_key)
+                session.add(PublicationActivation(
+                    activation_id=_uuid(),
+                    stream_key=stream_key,
+                    publication_id=publication_id,
+                    actor=str(actor).strip()[:128] or "operator",
+                    reason=reason.strip()[:255],
+                    fence=int(pointer.fence) if pointer else 0,
+                    created_at=self.clock(),
+                ))
             return row
 
     def enqueue(self, stream_key: str, *, season: str, cutoff: datetime,
@@ -2796,6 +2837,7 @@ class CollectionOperationsService(_SessionService):
                 cutoff=cutoff,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
+                actor=actor,
                 session=session,
             ),
         )

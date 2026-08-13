@@ -86,10 +86,11 @@ class StoredTeamMatchupSnapshot:
 class TeamMatchupRepository:
     """Replace or read one season/as-of/window snapshot transactionally."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, write_fence=None) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
+        self._write_fence = write_fence
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -113,6 +114,22 @@ class TeamMatchupRepository:
         retrieved_at: datetime,
     ) -> None:
         """Replace related windows in one transaction after collection."""
+
+        if self._write_fence is not None:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                # The legacy replacement is a single transaction spanning
+                # season/L15 traditional and assist surfaces.  Fence the
+                # complete write unit before its first delete/insert.
+                for stream_key in (
+                    "traditional_opponent",
+                    "traditional_opponent_season",
+                    "traditional_opponent_l15",
+                    "assist_locations",
+                    "assist_locations_season",
+                    "assist_locations_l15",
+                ):
+                    checker(stream_key)
 
         received = tuple(
             (scope, tuple(facts), tuple(observations))

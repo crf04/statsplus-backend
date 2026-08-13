@@ -44,6 +44,7 @@ from app.services.team_matchup_query import (
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
+from app.services.database_first_activation import DatabaseFirstPublicationReader
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -252,6 +253,8 @@ class MatchupService:
         settings: RuntimeSettings,
         injuries: MatchupInjuryReader | None = None,
         clock: Callable[[], datetime] | None = None,
+        database_only: bool = False,
+        publication_reader: DatabaseFirstPublicationReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
@@ -261,6 +264,8 @@ class MatchupService:
         self.stats_freshness = stats_freshness
         self.settings = settings
         self.injuries = injuries
+        self.database_only = bool(database_only)
+        self.publication_reader = publication_reader
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
@@ -368,6 +373,44 @@ class MatchupService:
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
             },
+            **self._publication_metadata(season),
+        }
+
+    def _publication_metadata(self, season: str) -> dict[str, Any]:
+        """Add additive provenance without collapsing independent clocks."""
+
+        if self.publication_reader is not None:
+            metadata = self.publication_reader.metadata(
+                (
+                    "player_game_logs",
+                    "traditional_opponent_season",
+                    "traditional_opponent_l15",
+                    "assist_locations_season",
+                    "assist_locations_l15",
+                    "player_per36",
+                    "synergy_play_types",
+                    "grouped_shot_types",
+                    "exact_shot_zones",
+                ),
+                season=season,
+            )
+        else:
+            # Legacy deployments without the activation table still expose a
+            # truthful additive document based on their stored read seams.
+            metadata = {
+                "streams": {},
+                "mixed_cutoff": False,
+                "mixed_freshness": False,
+                "coverage_cutoffs": [],
+            }
+        return {
+            "provenance": metadata["streams"],
+            "coverage": {
+                "mixed_cutoff": bool(metadata["mixed_cutoff"]),
+                "mixed_freshness": bool(metadata["mixed_freshness"]),
+                "coverage_cutoffs": list(metadata["coverage_cutoffs"]),
+                "source": "database",
+            },
         }
 
     def _injuries(
@@ -377,6 +420,18 @@ class MatchupService:
         pool_players: Sequence[PoolPlayer],
     ) -> MatchupInjuryResult:
         if self.injuries is not None:
+            if self.database_only:
+                stored_reader = getattr(self.injuries, "get_stored_injuries", None)
+                if callable(stored_reader):
+                    return stored_reader(
+                        event=event,
+                        season=season,
+                        pool_players=pool_players,
+                    )
+                # A database-only assembly must not silently fall back to the
+                # pre-tip provider path when an injected injury service has no
+                # stored reader.
+                return unavailable_injury_result("stored_snapshot_unavailable")
             return self.injuries.get_injuries(
                 event=event,
                 season=season,
@@ -394,6 +449,14 @@ class MatchupService:
         events = self.event_catalog.get_events(season)
         for event in events:
             if str(event.get("nba_game_id")) == game_id:
+                classification = resolve_stored_event_classification(
+                    game_id,
+                    str(event.get("classification", event.get("season_type", ""))),
+                )
+                if classification.kind != "Regular Season":
+                    raise ResourceNotFoundError(
+                        "The requested matchup is outside the Regular Season window."
+                    )
                 return event, events
         raise ResourceNotFoundError("The requested matchup game was not found.")
 

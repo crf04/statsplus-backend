@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.domain.nba_events import resolve_stored_event_classification
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -168,6 +169,14 @@ class MatchupSelectionService:
             )
         for event in self.event_catalog.get_events(season):
             if str(event.get("nba_game_id")) == game_id:
+                classification = resolve_stored_event_classification(
+                    game_id,
+                    str(event.get("classification", event.get("season_type", ""))),
+                )
+                if classification.kind != "Regular Season":
+                    raise ResourceNotFoundError(
+                        "The requested matchup is outside the Regular Season window."
+                    )
                 return event
         raise ResourceNotFoundError("The requested matchup game was not found.")
 

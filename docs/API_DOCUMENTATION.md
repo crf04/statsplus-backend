@@ -1090,6 +1090,37 @@ bound publication ID and payload checksum must match that candidate. A
 rejected artifact always blocks, including when its
 raw comparison was exact; another season or cutoff is never reused. Unrelated
 ledger streams do not require parity adjudication.
+
+### Database-first Matchups activation (#87)
+
+The first activation is additive. `POST
+/api/admin/collection/streams/<stream_key>/activate` records an operator
+reason and enables only that stream; `POST
+/api/admin/collection/streams/<stream_key>/rollback` advances the same fenced
+pointer to its immediately prior Publication. A stale composition or legacy
+writer cannot overwrite a newer pointer. Activation evidence is retained in
+the `publication_activations` table and never contains raw observations.
+
+The authenticated Matchup and Matchup Selection routes read the durable
+Regular Season catalog, Player Pool, game-log, Diet, injury-snapshot, and team
+window seams. They make zero request-time NBA Stats, PBP, DFS, or injury
+provider calls in the database-first assembly. Existing fields remain
+backward compatible. Additive `provenance` stream entries identify the
+Publication ID, UTC Coverage Cutoff, age, and `fresh`/`stale` state; additive
+`coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
+when one contributor is older or unavailable. A stale active Publication is
+served as the last good fact with its real age; a failed partial attempt never
+replaces it. Synergy L15 is always `unavailable/provider_window_unsupported`
+and Playoff/Play-In requests are outside this first Regular Season activation.
+
+The isolated `scripts/database_first_rehearsal.py` command accepts exactly
+seven ordered Eastern dates and writes a validation report without changing
+production pointers. `scripts/database_first_drills.py` records deterministic
+outage, duplicate delivery, Outbox replay, expired credential, provider
+failure, alert recovery, and restore/replay checks. The
+`scripts/benchmark_matchups.py` command retains p95 latency and bounded query
+plans; the production gate is below one second and within ten percent of the
+recorded baseline. These artifacts claim no formal recovery SLA.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

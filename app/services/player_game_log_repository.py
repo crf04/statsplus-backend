@@ -149,6 +149,8 @@ class PlayerGameLogRepository:
         stats_surface_max_age: timedelta,
         stats_surface_season: str,
         clock: Callable[[], datetime] | None = None,
+        write_fence: Any | None = None,
+        serve_stale: bool = False,
     ) -> None:
         self.engine = engine
         self._stats_surface_season = validate_canonical_season(stats_surface_season)
@@ -156,6 +158,8 @@ class PlayerGameLogRepository:
             engine, surface=PLAYER_GAME_LOG_SURFACE
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._write_fence = write_fence
+        self._serve_stale = bool(serve_stale)
         self._stats_surface_max_age_seconds = exact_seconds(
             exact_timedelta(
                 exact_seconds(stats_surface_max_age),
@@ -191,6 +195,7 @@ class PlayerGameLogRepository:
         current_catalog_game_ids: frozenset[str] | None = None,
         recoverable_game_ids: frozenset[str] = frozenset(),
     ) -> PlayerGameLogPublication:
+        self._assert_legacy_write_allowed()
         canonical_season = validate_canonical_season(season)
         if publication_status not in {"complete", "in_progress"}:
             raise ValueError(
@@ -388,6 +393,7 @@ class PlayerGameLogRepository:
         boundary changes nothing, preserving the exact prior fact rows and the
         last complete publication.
         """
+        self._assert_legacy_write_allowed()
         canonical_season = validate_canonical_season(season)
         if not source_provider or source_provider != source_provider.strip():
             raise ValueError("source_provider must be a non-empty canonical value")
@@ -504,6 +510,14 @@ class PlayerGameLogRepository:
             recovered_removed_row_count=0,
         )
 
+    def _assert_legacy_write_allowed(self) -> None:
+        """Keep the pre-activation writer additive but fence it after cutover."""
+
+        if self._write_fence is not None:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                checker("player_game_logs")
+
     def _completed_coverage_status(
         self,
         connection: Any,
@@ -545,6 +559,11 @@ class PlayerGameLogRepository:
                 or freshness.publication_status != "complete"
             ):
                 return False
+            if self._serve_stale:
+                # Once database-first activation is enabled, a failed refresh
+                # never hides the last good complete publication.  The caller
+                # receives its real stale status separately.
+                return True
             return self.get_read_freshness(canonical_season).status == "fresh"
         except SQLAlchemyError:
             return False
@@ -779,6 +798,9 @@ class PlayerGameLogRepository:
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
     def _season_is_readable(self, season: str) -> bool:
+        if self._serve_stale:
+            publication = self.get_freshness(season)
+            return publication.retrieved_at is not None and publication.row_count > 0
         if season != self._stats_surface_season:
             return True
         completed_at = self._surface_freshness.get().last_successful_completion

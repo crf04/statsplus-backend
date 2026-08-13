@@ -51,12 +51,14 @@ class EventCatalogService:
                  settings: RuntimeSettings | None = None, *,
                  nba_stats_provider: NBAStatsProvider | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 max_age: timedelta | float | None = None, max_age_hours: float | None = None) -> None:
+                 max_age: timedelta | float | None = None, max_age_hours: float | None = None,
+                 write_fence: Any | None = None) -> None:
         self.provider = provider or nba_stats_provider
         if self.provider is None:
             raise ValueError("an NBA whole-season schedule provider is required")
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._write_fence = write_fence
         self.repository = EventCatalogRepository(engine)
         if is_demo_database_url(str(engine.url)):
             raise ValueError("The canonical event catalog requires a writable application database.")
@@ -101,6 +103,7 @@ class EventCatalogService:
         return EventCatalogBatchResult(tuple(results), failures)
 
     def _refresh_one(self, canonical: str, *, now: datetime | None) -> EventCatalogRefreshResult:
+        self._assert_legacy_write_allowed()
         refreshed_at = assume_utc(now or self._clock())
         try:
             raw = self.provider.fetch_whole_season_schedule(season=canonical)
@@ -117,6 +120,11 @@ class EventCatalogService:
         except Exception:
             self.repository.record_failure(canonical, refreshed_at)
             raise
+
+    def _assert_legacy_write_allowed(self) -> None:
+        checker = getattr(self._write_fence, "assert_writable", None)
+        if callable(checker):
+            checker("event_catalog")
 
     @staticmethod
     def _canonical_seasons(seasons: str | Iterable[str]) -> tuple[str, ...]:

@@ -58,6 +58,7 @@ class ApplicationDependencies:
     canonical_game_ledger_repository: Any | None = None
     ledger_materialization_service: Any | None = None
     ledger_backfill_service: Any | None = None
+    publication_reader: Any | None = None
 
 
 def build_dependencies(
@@ -133,6 +134,8 @@ def build_dependencies(
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
+    publication_reader = None
+    write_fence = None
     canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
@@ -145,6 +148,11 @@ def build_dependencies(
             engine, environment=settings.environment
         )
         publication_service = PublicationService(engine)
+        from app.services.database_first_activation import DatabaseFirstPublicationReader
+        from app.services.database_first_activation import LegacyWriteFence
+
+        publication_reader = DatabaseFirstPublicationReader(engine)
+        write_fence = LegacyWriteFence(engine)
         collection_operations = CollectionOperationsService(
             engine,
             publication_service=publication_service,
@@ -254,6 +262,7 @@ def build_dependencies(
             engine,
             settings=settings,
             nba_stats_provider=nba_stats_provider,
+            write_fence=write_fence,
         )
         from app.services.athlete_mapping_repository import AthleteMappingRepository
         from app.services.athlete_resolver import AthleteResolver
@@ -270,6 +279,7 @@ def build_dependencies(
             engine,
             settings=settings,
             nba_stats_provider=nba_stats_provider,
+            write_fence=write_fence,
         )
         # The repository rechecks a governed decision inside its own
         # transaction, so it is composed with the same configured match window
@@ -285,9 +295,10 @@ def build_dependencies(
             athlete_catalog=athlete_catalog_service,
             nba_stats_provider=nba_stats_provider,
             pbp_stats_provider=pbp_stats_provider,
+            write_fence=write_fence,
         )
         team_matchup_query_service = TeamMatchupQueryService(
-            TeamMatchupRepository(engine)
+            TeamMatchupRepository(engine, write_fence=write_fence)
         )
         from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
         from app.services.ledger_backfill import (
@@ -386,6 +397,8 @@ def build_dependencies(
             unit_seconds=3600,
             field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
         ),
+        write_fence=write_fence,
+        serve_stale=not demo_database,
     )
     from app.services.game_logs_source import (
         DatabaseFirstGameLogsSource,
@@ -434,6 +447,8 @@ def build_dependencies(
         stats_freshness=stats_freshness_repository,
         settings=settings,
         injuries=matchup_injury_service,
+        database_only=not demo_database,
+        publication_reader=publication_reader,
     )
 
     return ApplicationDependencies(
@@ -476,6 +491,7 @@ def build_dependencies(
         canonical_game_ledger_repository=canonical_game_ledger_repository,
         ledger_materialization_service=ledger_materialization_service,
         ledger_backfill_service=ledger_backfill_service,
+        publication_reader=publication_reader,
     )
 
 

@@ -637,6 +637,14 @@ def _create_collector_status_transitions(connection: Connection) -> None:
     CollectorStatusTransition.__table__.create(connection, checkfirst=True)
 
 
+def _create_publication_activations(connection: Connection) -> None:
+    """Persist explicit per-stream database-first activation evidence."""
+
+    from app.models.collection_control import PublicationActivation
+
+    PublicationActivation.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -677,6 +685,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     # evidence migration after the ledger migrations so both histories remain
     # replayable on one linear schema.
     Migration(28, "028_collector_status_transitions", _create_collector_status_transitions),
+    Migration(29, "029_publication_activations", _create_publication_activations),
 )
 
 
