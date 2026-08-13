@@ -198,6 +198,27 @@ Validate the bundled fixture without changing it:
 python scripts/validate_demo_db.py
 ```
 
+### Residential NBA Collector
+
+The pull-only Residential Collector is a separately installable command. It
+does not start Flask, import routes, accept a database URL, or retain a
+provider response. It exchanges a short-lived Railway token, executes only
+authorized unexpired work, writes normalized gzip envelopes to a bounded
+SQLite Outbox, and deletes each item only after a matching durable receipt.
+
+```powershell
+python -m pip install .
+python -m app.collector validate-config
+python -m app.collector status
+python -m app.collector run
+```
+
+Use [docs/RESIDENTIAL_COLLECTOR.md](docs/RESIDENTIAL_COLLECTOR.md) and the
+PowerShell scripts under `scripts/` for Windows Task Scheduler installation,
+conditional recovery, staged upgrade, rollback, Credential Manager setup, and
+Historical Rehearsal probes. The machine secret is never committed or stored
+in `.env`, the Outbox, release metadata, or diagnostics.
+
 The validator checks the required public tables and columns and fails if the
 `users` table contains records.
 

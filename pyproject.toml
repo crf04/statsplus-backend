@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statsplus-residential-collector"
+version = "0.1.0"
+description = "Pull-only StatsPlus residential NBA observation collector"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "nba_api>=1.11",
+    "pandas>=2.0",
+    "keyring>=24",
+    "requests>=2.31",
+]
+
+[project.scripts]
+statsplus-residential-collector = "app.collector.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

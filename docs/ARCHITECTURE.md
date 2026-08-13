@@ -2051,6 +2051,19 @@ a caller-provided `complete` flag alone cannot advance a pointer. Production
 requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
 may use a process-local key.
 
+The standalone residential writer lives in `app.collector`. Its import path is
+lazy with respect to Flask and route modules, and its CLI has no product
+database dependency. A one-shot invocation uses an injected NBA provider
+compatibility seam, a bounded WAL SQLite Outbox, and `RailwayClient`; the
+Outbox stores only compressed normalized envelopes and deletes them only after
+an exact durable receipt checksum. It orders newest cutoffs first, refuses a
+hard-limit write that would discard current work, and expires unsent work only
+through an explicit operator action. Cached Bootstrap Requests and Manifests
+are routing metadata only and are executable during a Railway outage only
+until their server-issued expiry/deadline. The Windows wrapper retries only
+transient/pending exit codes for the bounded recovery window; release
+directories are immutable and upgrades/rollback are explicit.
+
 Migration 017 creates these records without changing existing public readers.
 The collector routes are narrow HTTP adapters under `/api/collector`, while
 reasoned Firebase-admin mutations live under `/api/admin/collection`; raw
