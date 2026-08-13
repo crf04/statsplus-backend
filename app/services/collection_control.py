@@ -1386,6 +1386,72 @@ class CollectionControlService(_SessionService):
             ),
         }
 
+    def create_rehearsal_manifest(self, *, claims: CollectorClaims, season: str,
+                                  cutoff: datetime, now: datetime | None = None) -> CollectionManifest:
+        """Issue an isolated validation manifest that can never compose a publication."""
+
+        current = _aware(now or self.clock())
+        cutoff = _aware(cutoff)
+        if self.environment == "production" or claims.environment != self.environment:
+            raise ControlPlaneError("environment_mismatch")
+        if not {"poll", "ingest", "catalog_publish"} <= set(claims.scopes):
+            raise ControlPlaneError("scope_denied")
+        material = {"collector": claims.collector_id, "season": season, "cutoff": _iso(cutoff),
+                    "scope": "rehearsal_validation", "issued_at": _iso(current)}
+        row = CollectionManifest(
+            manifest_id=_uuid(), season=str(season), cutoff=cutoff,
+            collect_before=current + timedelta(minutes=10), accepted_versions="[2]",
+            scopes='["rehearsal_validation"]', checksum=_checksum(_json(material)),
+            status="active", created_at=current,
+        )
+        with self.session() as session, session.begin():
+            session.add(row)
+            _add_audit(session, actor=claims.collector_id, action="collector.rehearsal_manifest",
+                       resource=row.manifest_id, reason="rehearsal_validation",
+                       details={"season": str(season), "cutoff": _iso(cutoff)}, created_at=current)
+        return row
+
+    def verify_rehearsal_receipt(self, *, claims: CollectorClaims, manifest_id: str,
+                                 observation_id: str, client_observation_id: str,
+                                 checksum: str) -> CollectionObservation:
+        with self.session() as session:
+            row = session.get(CollectionObservation, observation_id)
+            manifest = session.get(CollectionManifest, manifest_id)
+            if (
+                row is None or manifest is None or row.collector_id != claims.collector_id
+                or row.manifest_id != manifest_id or row.observation_type != "rehearsal_validation"
+                or row.client_observation_id != client_observation_id or row.checksum != checksum
+                or json.loads(manifest.scopes) != ["rehearsal_validation"]
+            ):
+                raise ControlPlaneError("rehearsal_receipt_invalid")
+            return row
+
+    def rehearsal_operations(self, *, claims: CollectorClaims, manifest_id: str,
+                             observation_id: str) -> list[str]:
+        """Derive proof labels from durable machine, manifest, status, and receipt rows."""
+
+        with self.session() as session:
+            manifest_audit = session.scalar(select(AuditEvent).where(
+                AuditEvent.actor == claims.collector_id,
+                AuditEvent.action == "collector.rehearsal_manifest",
+                AuditEvent.resource == manifest_id,
+            ))
+            status = session.scalar(select(CollectorStatusTransition).where(
+                CollectorStatusTransition.collector_id == claims.collector_id,
+                CollectorStatusTransition.reason.in_({"rehearsal_started", "rehearsal_verified"}),
+            ))
+            observation = session.get(CollectionObservation, observation_id)
+        operations: list[str] = []
+        if claims.token_id:
+            operations.extend(("credential", "auth"))
+        if manifest_audit is not None:
+            operations.append("discovery")
+        if status is not None:
+            operations.append("status")
+        if observation is not None and observation.manifest_id == manifest_id:
+            operations.append("ingestion")
+        return operations
+
     @staticmethod
     def _latest_catalog_in_session(
         session: Session, season: str, catalog_type: str, *,
@@ -2002,7 +2068,8 @@ class ObservationIngestionService(_SessionService):
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
                     raise ControlPlaneError("scope_denied")
-            if self.publication_service is not None and catalog_request is None:
+                rehearsal_validation = observation_type == "rehearsal_validation" and allowed_scopes == {"rehearsal_validation"}
+            if self.publication_service is not None and catalog_request is None and not rehearsal_validation:
                 stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
@@ -2020,7 +2087,7 @@ class ObservationIngestionService(_SessionService):
                         raise ControlPlaneError("scope_unsupported")
                 if window is not None and str(window) not in supported_windows:
                     raise ControlPlaneError("scope_unsupported")
-            elif catalog_request is None:
+            elif catalog_request is None and not rehearsal_validation:
                 definition = _surface_definition(observation_type)
                 if definition is None or not _claims_allow_surface(
                     claims, definition=definition,
@@ -2077,7 +2144,7 @@ class ObservationIngestionService(_SessionService):
                     expires_at=catalog_expires_at,
                     session=session,
                 )
-            elif self.publication_service is not None:
+            elif self.publication_service is not None and not rehearsal_validation:
                 self.publication_service.enqueue_for_observation(
                     observation_type,
                     season=str(envelope["season"]),

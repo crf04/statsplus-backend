@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -154,9 +156,29 @@ def main(argv: list[str] | None = None) -> int:
         client.discover(token, limit=1)
         client.report_status(token, release_version=config.release_version,
                              release_checksum=metadata.checksum, state="running", reason="rehearsal_started")
+        manifest = client.rehearsal_manifest(token, season=args.season, cutoff=args.cutoff)
+        manifest_id = str(manifest["manifest_id"])
+        client_id = f"rehearsal-{metadata.checksum[:24]}-{hashlib.sha256((args.season + args.cutoff).encode()).hexdigest()[:16]}"
+        payload = {"observations": [{"contract_version": 1, "sanitized": True}]}
+        encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        checksum = hashlib.sha256(encoded_payload).hexdigest()
+        envelope = {
+            "manifest_id": manifest_id, "client_observation_id": client_id,
+            "environment": config.environment, "provider": "nba",
+            "observation_type": "rehearsal_validation", "scope": {"window": "rehearsal"},
+            "season": args.season, "cutoff": args.cutoff, "schema_version": 2,
+            "retrieved_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "checksum": checksum, "payload": payload,
+        }
+        wire = gzip.compress(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(), mtime=0)
+        receipt = client.upload_observation(token, wire)
+        replay = client.upload_observation(token, wire)
+        if receipt.get("observation_id") != replay.get("observation_id") or not replay.get("replay"):
+            raise CollectorConfigurationError("Railway ingestion replay was not idempotent")
         evidence = client.rehearsal_evidence(
             token, release_version=config.release_version, release_checksum=metadata.checksum,
-            season=args.season, cutoff=args.cutoff,
+            season=args.season, cutoff=args.cutoff, receipt=receipt, replay=replay,
+            manifest_id=manifest_id, client_observation_id=client_id, checksum=checksum,
         )
         expected = {
             "identity_id": config.identity_id, "environment": config.environment,
@@ -172,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
             raise CollectorConfigurationError("Railway rehearsal contract mismatch")
         if set(evidence.get("operations") or ()) != {"credential", "auth", "discovery", "status", "ingestion"}:
             raise CollectorConfigurationError("Railway rehearsal operations mismatch")
+        if not evidence.get("replay_verified") or evidence.get("observation_id") != receipt.get("observation_id"):
+            raise CollectorConfigurationError("Railway rehearsal receipt mismatch")
         issued = __import__("datetime").datetime.fromisoformat(str(evidence["issued_at"]).replace("Z", "+00:00"))
         expires = __import__("datetime").datetime.fromisoformat(str(evidence["expires_at"]).replace("Z", "+00:00"))
         if not issued < expires or expires <= __import__("datetime").datetime.now(__import__("datetime").timezone.utc):

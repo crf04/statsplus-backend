@@ -345,7 +345,8 @@ def collector_rehearsal_evidence():
     if not {"poll", "ingest", "catalog_publish"} <= set(claims.scopes):
         raise _control_error(ControlPlaneError("scope_denied"))
     body = _body()
-    if set(body) != {"release_version", "release_checksum", "season", "cutoff"}:
+    if set(body) != {"release_version", "release_checksum", "season", "cutoff", "manifest_id",
+                    "observation_id", "client_observation_id", "checksum", "replay_observation_id"}:
         raise InvalidInputError("Rehearsal evidence is malformed.", detail="invalid_release_status")
     try:
         row = _service("collector_tokens").report_status(
@@ -353,6 +354,17 @@ def collector_rehearsal_evidence():
             state="running", reason="rehearsal_verified",
         )
         cutoff = datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00"))
+        receipt = _service("collection_control").verify_rehearsal_receipt(
+            claims=claims, manifest_id=str(body["manifest_id"]), observation_id=str(body["observation_id"]),
+            client_observation_id=str(body["client_observation_id"]), checksum=str(body["checksum"]),
+        )
+        if str(body["replay_observation_id"]) != receipt.observation_id:
+            raise ControlPlaneError("rehearsal_receipt_invalid")
+        operations = _service("collection_control").rehearsal_operations(
+            claims=claims, manifest_id=receipt.manifest_id, observation_id=receipt.observation_id,
+        )
+        if set(operations) != {"credential", "auth", "discovery", "status", "ingestion"}:
+            raise ControlPlaneError("rehearsal_receipt_invalid")
     except (ControlPlaneError, ValueError, TypeError) as error:
         raise _control_error(error) from error
     now = row.last_seen_at
@@ -363,9 +375,31 @@ def collector_rehearsal_evidence():
         "endpoint": request.host_url.rstrip("/"),
         "release_version": row.release_version, "release_checksum": row.release_checksum,
         "season": str(body["season"]), "cutoff": cutoff.isoformat(),
-        "operations": ["credential", "auth", "discovery", "status", "ingestion"],
+        "operations": operations,
+        "manifest_id": receipt.manifest_id, "observation_id": receipt.observation_id,
+        "client_observation_id": receipt.client_observation_id, "receipt_checksum": receipt.checksum,
+        "replay_verified": True,
         "issued_at": now.isoformat(), "expires_at": (now + __import__("datetime").timedelta(minutes=10)).isoformat(),
     })
+
+
+@collection_bp.post("/collector/rehearsal-manifest")
+@route_error_boundary("Failed to issue collector rehearsal manifest.")
+def collector_rehearsal_manifest():
+    claims = _collector_claims_any(("poll", "ingest", "catalog_publish"))
+    body = _body()
+    if set(body) != {"season", "cutoff"}:
+        raise InvalidInputError("Rehearsal manifest is malformed.", detail="invalid_release_status")
+    try:
+        row = _service("collection_control").create_rehearsal_manifest(
+            claims=claims, season=str(body["season"]),
+            cutoff=datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00")),
+        )
+    except (ControlPlaneError, ValueError) as error:
+        raise _control_error(error) from error
+    return jsonify({"manifest_id": row.manifest_id, "season": row.season,
+                    "cutoff": row.cutoff.isoformat(), "collect_before": row.collect_before.isoformat(),
+                    "scope": "rehearsal_validation", "schema_version": 2})
 
 
 @collection_bp.get("/collector/manifest/<manifest_id>")

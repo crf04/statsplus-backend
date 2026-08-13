@@ -125,6 +125,10 @@ provider-authored taxonomy labels are retained; public Synergy L15 is not
 probed as a supported surface.
 Pass `--live` only for the separate explicit NBA endpoint compatibility check;
 promotion uses the deterministic offline gate plus the isolated Railway evidence.
+The Railway gate obtains a server-issued synthetic validation manifest, uploads
+one sanitized gzip envelope, replays the identical client observation ID, and
+requires the same durable receipt. Validation observations are persisted for
+audit but never enqueue or advance a product Publication.
 
 ## Release identity
 

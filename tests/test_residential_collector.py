@@ -233,6 +233,45 @@ def test_real_cli_rehearsal_defaults_to_offline_sanitized_fixtures(monkeypatch, 
     assert evidence["failed_scopes"] == []
 
 
+def test_fake_railway_rehearsal_requires_durable_idempotent_receipt():
+    class RehearsalTransport:
+        def __init__(self):
+            self.receipt = None
+
+        def request(self, method, url, *, headers=None, body=None, json_body=None, timeout=30):
+            if url.endswith("/api/collector/token"):
+                return HTTPResponse(201, {"token": "token", "expires_in": 300})
+            if url.endswith("/api/collector/rehearsal-manifest"):
+                return HTTPResponse(200, {"manifest_id": "validation-manifest"})
+            if url.endswith("/api/collector/observations"):
+                document = json.loads(gzip.decompress(body))
+                if self.receipt is None:
+                    self.receipt = {"observation_id": "durable-1", "client_observation_id": document["client_observation_id"],
+                                    "checksum": document["checksum"], "replay": False}
+                    return HTTPResponse(202, self.receipt)
+                return HTTPResponse(202, {**self.receipt, "replay": True})
+            if url.endswith("/api/collector/rehearsal-evidence"):
+                assert json_body["observation_id"] == json_body["replay_observation_id"] == "durable-1"
+                return HTTPResponse(200, {"operations": ["credential", "auth", "discovery", "status", "ingestion"],
+                                          "replay_verified": True, "observation_id": "durable-1"})
+            return HTTPResponse(200, {"environment": "testing", "bootstrap_requests": [], "manifests": []})
+
+    client = RailwayClient("http://127.0.0.1", identity_id="collector", environment="testing",
+                           transport=RehearsalTransport(), allow_insecure_localhost=True)
+    token = client.exchange_token("machine-secret")
+    manifest = client.rehearsal_manifest(token, season="2025-26", cutoff=NOW.isoformat())
+    wire = _wire("rehearsal", "sanitized")
+    receipt = client.upload_observation(token, wire)
+    replay = client.upload_observation(token, wire)
+    evidence = client.rehearsal_evidence(
+        token, release_version="0.1.0", release_checksum="a" * 64,
+        season="2025-26", cutoff=NOW.isoformat(), receipt=receipt, replay=replay,
+        manifest_id=manifest["manifest_id"], client_observation_id="rehearsal",
+        checksum=receipt["checksum"],
+    )
+    assert replay["replay"] and evidence["replay_verified"]
+
+
 def test_long_run_refreshes_short_lived_tokens_between_incremental_uploads(tmp_path: Path):
     clock = [NOW]
     descriptors = [{"scope": "synergy_play_types", "parameters": {

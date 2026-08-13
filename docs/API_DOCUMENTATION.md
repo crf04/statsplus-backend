@@ -1437,6 +1437,7 @@ idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 POST /api/collector/token
 POST /api/collector/status
 POST /api/collector/rehearsal-evidence
+POST /api/collector/rehearsal-manifest
 GET /api/collector/discovery
 GET /api/collector/bootstrap
 GET /api/collector/bootstrap/<request_id>
@@ -1555,6 +1556,13 @@ the complete poll/ingest/catalog capability set. Its short-lived response binds
 identity, environment, endpoint, audience, release version/checksum,
 season/cutoff, contract version, operations, and issuance/expiry. Promotion
 obtains this evidence directly; caller-authored evidence files are not trusted.
+Railway first issues a ten-minute `rehearsal_validation` manifest in a
+non-production environment. The collector submits one sanitized compressed
+Observation Envelope twice. Normal observation persistence and the unique
+collector/client ID constraint produce the durable receipt and replay receipt;
+the validation scope is explicitly excluded from publication composition.
+Evidence operations are derived from the persisted manifest audit, status
+transition, and observation receipt rather than asserted by the caller.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this

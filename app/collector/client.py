@@ -284,11 +284,23 @@ class RailwayClient:
         return dict(value)
 
     def rehearsal_evidence(self, token: CollectorToken | str, *, release_version: str,
-                           release_checksum: str, season: str, cutoff: str) -> dict[str, Any]:
+                           release_checksum: str, season: str, cutoff: str,
+                           receipt: Mapping[str, Any], replay: Mapping[str, Any],
+                           manifest_id: str, client_observation_id: str, checksum: str) -> dict[str, Any]:
         value = self._request("POST", "/api/collector/rehearsal-evidence", token=token, json_body={
             "release_version": release_version, "release_checksum": release_checksum,
-            "season": season, "cutoff": cutoff,
+            "season": season, "cutoff": cutoff, "manifest_id": manifest_id,
+            "observation_id": receipt.get("observation_id"),
+            "replay_observation_id": replay.get("observation_id"),
+            "client_observation_id": client_observation_id, "checksum": checksum,
         }).json()
+        if not isinstance(value, Mapping):
+            raise CollectorHTTPError("malformed_control_response")
+        return dict(value)
+
+    def rehearsal_manifest(self, token: CollectorToken | str, *, season: str, cutoff: str) -> dict[str, Any]:
+        value = self._request("POST", "/api/collector/rehearsal-manifest", token=token,
+                              json_body={"season": season, "cutoff": cutoff}).json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_control_response")
         return dict(value)

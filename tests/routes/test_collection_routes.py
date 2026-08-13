@@ -103,10 +103,20 @@ def test_rehearsal_evidence_is_machine_authenticated_and_release_bound(client, a
         identity_id="collector-1", last_seen_at=datetime(2026, 8, 12),
         release_version="collector-1.2.3", release_checksum="a" * 64,
     )
+    dependencies.collection_control.verify_rehearsal_receipt.return_value = SimpleNamespace(
+        manifest_id="rehearsal-manifest", observation_id="observation-1",
+        client_observation_id="rehearsal-client", checksum="b" * 64,
+    )
+    dependencies.collection_control.rehearsal_operations.return_value = [
+        "credential", "auth", "discovery", "status", "ingestion",
+    ]
     response = client.post(
         "/api/collector/rehearsal-evidence", headers={"Authorization": "Bearer token"},
         json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64,
-              "season": "2025-26", "cutoff": "2026-08-11T00:00:00Z"},
+              "season": "2025-26", "cutoff": "2026-08-11T00:00:00Z",
+              "manifest_id": "rehearsal-manifest", "observation_id": "observation-1",
+              "replay_observation_id": "observation-1", "client_observation_id": "rehearsal-client",
+              "checksum": "b" * 64},
     )
     assert response.status_code == 200
     assert response.json["identity_id"] == "collector-1"
@@ -116,6 +126,7 @@ def test_rehearsal_evidence_is_machine_authenticated_and_release_bound(client, a
     assert response.json["endpoint"]
     assert set(response.json["operations"]) == {"credential", "auth", "discovery", "status", "ingestion"}
     assert response.json["expires_at"] > response.json["issued_at"]
+    assert response.json["replay_verified"] is True
 
 
 def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
