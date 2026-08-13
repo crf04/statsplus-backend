@@ -81,7 +81,7 @@ class _Recorder:
             "client_observation_id": observation_id,
             "collector_id": "test",
             "manifest_id": manifest_id,
-            "environment": "testing",
+            "environment": "server",
             "provider": "pbp",
             "observation_type": "canonical_game_ledger",
             "scope": json.dumps({"game_id": game_id, "surface": manifest_scope}),
@@ -592,3 +592,61 @@ def test_unexpected_future_exception_discards_all_staging_after_prior_success(tm
 
     assert repository.get_game("success") is not None
     assert recorder.staged == set()
+
+
+def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'manifest-race.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(
+            require_governance=True,
+            clock=lambda: datetime(2024, 11, 20, tzinfo=timezone.utc),
+        ),
+    )
+    now = datetime(2024, 11, 20, tzinfo=timezone.utc)
+    _install_manifest(engine, now)
+    success = {**_event(), "nba_game_id": "race-success"}
+    superseded = {
+        **_event(),
+        "nba_game_id": "race-superseded",
+        "scheduled_at": "2024-11-14T00:00:00+00:00",
+    }
+
+    class SupersedingProvider(_Provider):
+        def fetch_game_player_logs(self, game_id, season, *, season_type="Regular Season"):
+            if game_id == "race-superseded":
+                with engine.begin() as connection:
+                    connection.execute(CollectionManifest.__table__.update().values(
+                        status="superseded", superseded_at=now,
+                    ))
+            return super().fetch_game_player_logs(
+                game_id, season, season_type=season_type,
+            )
+
+    recorder = _Recorder()
+    result = LedgerBackfillService(
+        provider=SupersedingProvider(
+            _payload(),
+            dates={
+                "race-success": "2024-11-15",
+                "race-superseded": "2024-11-14",
+            },
+        ),
+        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=recorder, repository=repository,
+        max_concurrency=1, clock=lambda: now,
+    ).refresh("2024-25", **_authorized((success, superseded), now))
+
+    assert not result.complete
+    assert repository.get_game("race-success") is not None
+    assert repository.get_game("race-superseded") is None
+    assert recorder.staged == set()
+    with engine.connect() as connection:
+        observations = connection.execute(select(CollectionObservation)).mappings().all()
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+    assert {row["observation_id"] for row in observations} == {
+        repository.get_game("race-success").source_observation_id,
+    }
+    assert len(jobs) == 6

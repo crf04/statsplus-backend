@@ -871,6 +871,12 @@ full provider documents never exceed the configured collection concurrency.
 The backfill service has no ungoverned/direct mode: a real manifest identity,
 exact canonical scope, accepted schema version, cutoff, deadline, and governed
 event snapshot are mandatory before provider I/O.
+Immediately before each accepted observation is inserted, the ledger
+transaction conditionally locks and revalidates that exact manifest row,
+including active status, server environment, season, cutoff, canonical scope,
+schema version, and deadline. Manifest supersession/expiry therefore
+serializes with acceptance: a provider response that returns after authority
+changes is discarded with no observation, ledger facts, or composition jobs.
 
 ### Database-first game-log reads
 

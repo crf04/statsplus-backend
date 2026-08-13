@@ -19,7 +19,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 import pandas as pd
-from sqlalchemy import delete, insert, inspect, select
+from sqlalchemy import delete, insert, inspect, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -31,7 +31,7 @@ from app.models.canonical_game_ledger import (
     LedgerBackfillState,
     LedgerPublication,
 )
-from app.models.collection_control import CollectionObservation
+from app.models.collection_control import CollectionManifest, CollectionObservation
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs
@@ -923,6 +923,11 @@ class CanonicalGameLedgerRepository:
                 expected_observations = {game.source_observation_id for game in candidates}
                 if set(accepted_observations) != expected_observations:
                     raise LedgerValidationError("accepted observations must exactly match candidate games")
+                self._lock_manifest_authorization(
+                    connection,
+                    candidates,
+                    accepted_observations,
+                )
                 connection.execute(
                     CollectionObservation.__table__.insert(),
                     [dict(accepted_observations[observation_id]) for observation_id in sorted(expected_observations)],
@@ -930,6 +935,79 @@ class CanonicalGameLedgerRepository:
             for candidate in candidates:
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
+
+    @staticmethod
+    def _lock_manifest_authorization(
+        connection: Connection,
+        candidates: Sequence[CanonicalGame],
+        observations: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Revalidate the exact manifest inside the acceptance transaction.
+
+        The no-op conditional UPDATE is deliberate: PostgreSQL and SQLite both
+        serialize it with manifest supersession, and the write lock is retained
+        through observation, ledger, and composition-job insertion.
+        """
+
+        rows = tuple(observations.values())
+        manifest_ids = {str(row.get("manifest_id") or "") for row in rows}
+        seasons = {str(row.get("season") or "") for row in rows}
+        cutoffs = {assume_utc(row["cutoff"]) for row in rows if row.get("cutoff") is not None}
+        accepted_at_values = tuple(
+            assume_utc(row["accepted_at"])
+            for row in rows
+            if row.get("accepted_at") is not None
+        )
+        if (
+            len(manifest_ids) != 1
+            or "" in manifest_ids
+            or len(seasons) != 1
+            or len(cutoffs) != 1
+            or len(accepted_at_values) != len(rows)
+            or {candidate.season for candidate in candidates} != seasons
+        ):
+            raise LedgerValidationError("accepted ledger manifest evidence is inconsistent")
+        manifest_id = next(iter(manifest_ids))
+        season = next(iter(seasons))
+        cutoff = next(iter(cutoffs))
+        accepted_at = max(accepted_at_values)
+        table = CollectionManifest.__table__
+        lock = connection.execute(update(table).where(
+            table.c.manifest_id == manifest_id,
+            table.c.season == season,
+            table.c.cutoff == cutoff,
+            table.c.status == "active",
+            table.c.collect_before > accepted_at,
+        ).values(status=table.c.status))
+        if lock.rowcount != 1:
+            raise LedgerValidationError("ledger manifest authorization expired before acceptance")
+        manifest = connection.execute(select(table).where(
+            table.c.manifest_id == manifest_id,
+        )).mappings().one()
+        manifest_scopes = set(json.loads(manifest["scopes"]))
+        accepted_versions = set(json.loads(manifest["accepted_versions"]))
+        by_observation = {
+            candidate.source_observation_id: candidate
+            for candidate in candidates
+        }
+        for observation_id, row in observations.items():
+            try:
+                scope = json.loads(str(row.get("scope") or ""))
+            except (TypeError, ValueError) as error:
+                raise LedgerValidationError("accepted ledger scope is malformed") from error
+            candidate = by_observation[observation_id]
+            if (
+                row.get("environment") != "server"
+                or row.get("provider") != "pbp"
+                or row.get("observation_type") != "canonical_game_ledger"
+                or not isinstance(scope, Mapping)
+                or scope.get("surface") != "canonical_game_ledger"
+                or str(scope.get("game_id") or "") != candidate.game_id
+                or "canonical_game_ledger" not in manifest_scopes
+                or row.get("schema_version") not in accepted_versions
+                or assume_utc(row["retrieved_at"]) >= assume_utc(manifest["collect_before"])
+            ):
+                raise LedgerValidationError("accepted ledger evidence is not manifest authorized")
 
     def _replace_candidate(
         self,
