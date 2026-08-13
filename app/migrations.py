@@ -629,6 +629,14 @@ def _bind_ledger_parity_to_publications(connection: Connection) -> None:
         ))
 
 
+def _create_collector_status_transitions(connection: Connection) -> None:
+    """Create append-only bounded machine lifecycle evidence."""
+
+    from app.models.collection_control import CollectorStatusTransition
+
+    CollectorStatusTransition.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -665,6 +673,10 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
     Migration(26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys),
     Migration(27, "027_bind_ledger_parity_to_publications", _bind_ledger_parity_to_publications),
+    # #85 was developed in parallel with #86.  Keep its additive lifecycle
+    # evidence migration after the ledger migrations so both histories remain
+    # replayable on one linear schema.
+    Migration(28, "028_collector_status_transitions", _create_collector_status_transitions),
 )
 
 
