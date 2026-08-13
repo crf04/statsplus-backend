@@ -81,7 +81,7 @@ class FailureDrillReport:
     production_evidence: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "status": self.status,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -89,6 +89,21 @@ class FailureDrillReport:
             "production_evidence": self.production_evidence,
             "drills": [asdict(drill) for drill in self.drills],
         }
+        payload["artifact_schema"] = {
+            "version": 1,
+            "engine": "postgresql" if self.production_evidence else "sqlite",
+            "required_fields": (
+                [
+                    "restore_command_evidence",
+                    "recovery_time_ms",
+                    "pbp_repair_observation_id",
+                    "pbp_repair_job_id",
+                ]
+                if self.production_evidence
+                else ["recovery_time_ms", "recovery_data_point"]
+            ),
+        }
+        return payload
 
 
 class FailureDrillRunner:
@@ -122,6 +137,8 @@ class FailureDrillRunner:
         restore_expectations: Mapping[str, Any] | None = None,
         pbp_repair: Callable[[Engine, str], Mapping[str, Any] | bool] | None = None,
         restore_ingestion: Callable[[Engine, CollectorClaims, Mapping[str, Any], bytes], Any] | None = None,
+        restore_started: float | None = None,
+        restore_command_evidence: Mapping[str, Any] | None = None,
     ) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.environment = str(environment).strip().lower() or "unit"
@@ -144,6 +161,8 @@ class FailureDrillRunner:
         self.restore_expectations = dict(restore_expectations or {})
         self.pbp_repair = pbp_repair
         self.restore_ingestion = restore_ingestion
+        self.restore_started = restore_started
+        self.restore_command_evidence = dict(restore_command_evidence or {})
         requested_url = database_url or (str(engine.url) if engine is not None else None)
         self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
         self.configuration_error = self._validate_configuration(
@@ -281,6 +300,37 @@ class FailureDrillRunner:
         except Exception:
             return f"{label}_database_disposable_marker_unreadable"
         return None
+
+    @classmethod
+    def preflight_disposable_database(
+        cls,
+        database_url: str,
+        *,
+        marker_nonce: str,
+        schema: str | None,
+        label: str,
+        require_empty: bool = True,
+    ) -> None:
+        """Check a marked target before an operator can restore into it."""
+
+        normalized = str(database_url).lower()
+        if any(marker in normalized for marker in ("prod", "production", "railway")):
+            raise ValueError(f"{label}_database_url_identifies_production")
+        engine = create_engine(database_url)
+        try:
+            if engine.dialect.name != "postgresql":
+                raise ValueError(f"{label}_restore_requires_postgres")
+            error = cls._preflight_target(
+                engine,
+                marker_nonce=marker_nonce,
+                schema=schema,
+                label=label,
+                require_empty=require_empty,
+            )
+            if error is not None:
+                raise ValueError(error)
+        finally:
+            engine.dispose()
 
     def run(
         self,
@@ -582,10 +632,17 @@ class FailureDrillRunner:
             }
 
         def isolated_restore_replay() -> Mapping[str, Any]:
-            restore_started = perf_counter()
+            restore_started = self.restore_started or perf_counter()
             if self.production_evidence:
                 return self._query_restored_database(started=restore_started)
             from sqlite3 import connect
+            from app.services.canonical_game_ledger import (
+                CanonicalGame,
+                CanonicalGameLedgerRepository,
+                PlayerGameFact,
+                TeamGameFact,
+                game_checksum,
+            )
             from app.models.canonical_game_ledger import (
                 CanonicalGameLedgerGame,
                 LedgerBackfillState,
@@ -738,7 +795,10 @@ class FailureDrillRunner:
                         away_team_tricode="BBB",
                         status="final",
                         source_observation_id=restore_observation,
-                        checksum="g" * 64,
+                        # Deliberately stale evidence.  The repair callback
+                        # below replaces this row through the governed
+                        # CanonicalGameLedgerRepository seam.
+                        checksum="x" * 64,
                         retrieved_at=now,
                         updated_at=now,
                     ))
@@ -797,21 +857,128 @@ class FailureDrillRunner:
                         updated_at=now,
                         last_error=None,
                     ))
+            repair_game = CanonicalGame(
+                game_id=restore_game,
+                season="2025-26",
+                game_date=now.date(),
+                home_team_id=1,
+                home_team_tricode="AAA",
+                away_team_id=2,
+                away_team_tricode="BBB",
+                team_facts=(
+                    TeamGameFact(
+                        team_id=1,
+                        team_tricode="AAA",
+                        opponent_team_id=2,
+                        opponent_team_tricode="BBB",
+                        is_home=True,
+                        points=25,
+                        field_goals_made=10,
+                        field_goals_attempted=20,
+                        two_pointers_made=8,
+                        two_pointers_attempted=16,
+                        three_pointers_made=2,
+                        three_pointers_attempted=4,
+                        free_throws_made=3,
+                        free_throws_attempted=3,
+                        offensive_rebounds=2,
+                        defensive_rebounds=3,
+                        rebounds=5,
+                        assists=4,
+                        turnovers=1,
+                        steals=1,
+                        blocks=1,
+                        personal_fouls=2,
+                        team_minutes=4.8,
+                    ),
+                    TeamGameFact(
+                        team_id=2,
+                        team_tricode="BBB",
+                        opponent_team_id=1,
+                        opponent_team_tricode="AAA",
+                        is_home=False,
+                        points=20,
+                        field_goals_made=8,
+                        field_goals_attempted=20,
+                        two_pointers_made=6,
+                        two_pointers_attempted=14,
+                        three_pointers_made=2,
+                        three_pointers_attempted=6,
+                        free_throws_made=2,
+                        free_throws_attempted=2,
+                        offensive_rebounds=1,
+                        defensive_rebounds=3,
+                        rebounds=4,
+                        assists=3,
+                        turnovers=1,
+                        steals=1,
+                        blocks=0,
+                        personal_fouls=2,
+                        team_minutes=4.8,
+                    ),
+                ),
+                player_facts=(
+                    PlayerGameFact(
+                        player_id=101,
+                        player_name="Repair Home",
+                        team_id=1,
+                        team_tricode="AAA",
+                        minutes=24.0,
+                        points=25,
+                        field_goals_made=10,
+                        field_goals_attempted=20,
+                        two_pointers_made=8,
+                        two_pointers_attempted=16,
+                        three_pointers_made=2,
+                        three_pointers_attempted=4,
+                        free_throws_made=3,
+                        free_throws_attempted=3,
+                        offensive_rebounds=2,
+                        defensive_rebounds=3,
+                        rebounds=5,
+                        assists=4,
+                        turnovers=1,
+                        steals=1,
+                        blocks=1,
+                        personal_fouls=2,
+                    ),
+                    PlayerGameFact(
+                        player_id=202,
+                        player_name="Repair Away",
+                        team_id=2,
+                        team_tricode="BBB",
+                        minutes=24.0,
+                        points=20,
+                        field_goals_made=8,
+                        field_goals_attempted=20,
+                        two_pointers_made=6,
+                        two_pointers_attempted=14,
+                        three_pointers_made=2,
+                        three_pointers_attempted=6,
+                        free_throws_made=2,
+                        free_throws_attempted=2,
+                        offensive_rebounds=1,
+                        defensive_rebounds=3,
+                        rebounds=4,
+                        assists=3,
+                        turnovers=1,
+                        steals=1,
+                        blocks=0,
+                        personal_fouls=2,
+                    ),
+                ),
+                source_observation_id=self._id("repair-observation"),
+                retrieved_at=now,
+                participant_ids_by_team=((1, (101,)), (2, (202,))),
+            ).with_checksum()
+            repair_checksum = game_checksum(repair_game)
+
             raw = self.engine.raw_connection()
             target_engine: Engine | None = None
             try:
                 source = raw.driver_connection
                 target = connect(":memory:")
                 source.backup(target)
-                # Restore drills intentionally corrupt one known PBP ledger
-                # field before invoking the repair seam.  The verification
-                # below reads the repaired row from the restored database,
-                # rather than trusting a callback's boolean.
-                target.execute(
-                    "UPDATE canonical_game_ledger_games SET checksum = ? WHERE game_id = ?",
-                    ("x" * 64, restore_game),
-                )
-                target.commit()
                 target_engine = create_engine(
                     "sqlite://",
                     creator=lambda: target,
@@ -820,13 +987,17 @@ class FailureDrillRunner:
                 repair = self.pbp_repair
                 if repair is None:
                     def repair(engine: Engine, game_id: str) -> Mapping[str, Any]:
-                        with engine.begin() as connection:
-                            changed = connection.execute(text(
-                                "UPDATE canonical_game_ledger_games "
-                                "SET checksum = :checksum, status = 'final' "
-                                "WHERE game_id = :game_id"
-                            ), {"checksum": "g" * 64, "game_id": game_id}).rowcount
-                        return {"game_id": game_id, "updated_rows": int(changed)}
+                        if game_id != repair_game.game_id:
+                            raise ValueError("repair_game_id_mismatch")
+                        result = CanonicalGameLedgerRepository(engine).replace_game(repair_game)
+                        return {
+                            "game_id": game_id,
+                            "observation_id": repair_game.source_observation_id,
+                            "checksum": result.checksum,
+                            "updated_rows": result.row_count,
+                            "composition_job_id": restore_job,
+                            "adapter": "canonical_game_ledger_repository",
+                        }
                 repair_result = repair(target_engine, restore_game)
 
                 # Exercise the real SQLite residential outbox and the real
@@ -900,7 +1071,7 @@ class FailureDrillRunner:
                 exact = {
                     "ledger_checksum": target.execute(
                         "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = ?", (restore_game,)
-                    ).fetchone()[0] == "g" * 64,
+                    ).fetchone()[0] == repair_checksum,
                     "active_checksum": target.execute(
                         "SELECT checksum FROM publication_versions WHERE publication_id = ?", (restore_publication,)
                     ).fetchone()[0] == "r" * 64,
@@ -943,6 +1114,9 @@ class FailureDrillRunner:
                     "observed_at": self.clock().astimezone(UTC).isoformat(),
                     "latest_governed_cutoff": self.clock().astimezone(UTC).isoformat(),
                     "latest_observation": restore_observation,
+                    "repair_observation": repair_game.source_observation_id,
+                    "repair_checksum": repair_checksum,
+                    "composition_job_id": restore_job,
                 },
                 "sla_claimed": False,
                 "adapter": "sqlite_unit",
@@ -1049,27 +1223,42 @@ class FailureDrillRunner:
             return {"verified": False, "reason": "pbp_repair_specification_required"}
         game_id = str(specification.get("game_id", ""))
         checksum = str(specification.get("checksum", ""))
-        if not game_id or len(checksum) != 64:
+        expected_observation_id = str(specification.get("observation_id", ""))
+        expected_job_id = str(specification.get("composition_job_id", ""))
+        if not game_id or len(checksum) != 64 or not expected_observation_id or not expected_job_id:
             return {"verified": False, "reason": "pbp_repair_identity_required"}
+        if self.pbp_repair is None:
+            return {
+                "verified": False,
+                "reason": "governed_pbp_repair_adapter_required",
+                "game_id": game_id,
+            }
         try:
-            if self.pbp_repair is not None:
-                result = self.pbp_repair(restored, game_id)
-                executed = bool(result) and not (
-                    isinstance(result, Mapping) and result.get("updated_rows") == 0
-                )
-            else:
-                with restored.begin() as connection:
-                    changed = connection.execute(text(
-                        "UPDATE canonical_game_ledger_games SET checksum = :checksum "
-                        "WHERE game_id = :game_id"
-                    ), {"checksum": checksum, "game_id": game_id}).rowcount
-                result = {"game_id": game_id, "updated_rows": int(changed)}
-                executed = int(changed) > 0
+            result = self.pbp_repair(restored, game_id)
+            if not isinstance(result, Mapping):
+                return {"verified": False, "reason": "governed_pbp_repair_evidence_required"}
+            executed = bool(result.get("verified", True)) and int(result.get("updated_rows", 1)) > 0
             with restored.connect() as connection:
                 verified = connection.execute(text(
                     "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = :game_id"
                 ), {"game_id": game_id}).scalar_one_or_none() == checksum
-            return {"verified": executed and verified, "repair_result": result}
+            evidence = {
+                "game_id": game_id,
+                "observation_id": str(result.get("observation_id", "")),
+                "composition_job_id": str(result.get("composition_job_id", "")),
+                "checksum": checksum,
+                "updated_rows": int(result.get("updated_rows", 0)),
+                "adapter": str(result.get("adapter", "governed_ledger_repair")),
+            }
+            identities_match = (
+                evidence["observation_id"] == expected_observation_id
+                and evidence["composition_job_id"] == expected_job_id
+            )
+            return {
+                "verified": executed and verified and identities_match,
+                "repair_result": dict(result),
+                **evidence,
+            }
         except Exception as error:
             return {"verified": False, "error": type(error).__name__}
 
@@ -1097,6 +1286,15 @@ class FailureDrillRunner:
             raise ValueError("restored_out_of_band_disposable_marker_nonce_required")
         if not self.restored_schema:
             raise ValueError("restored_postgres_schema_required")
+        command_evidence = self.restore_command_evidence
+        if (
+            not command_evidence
+            or command_evidence.get("status") != "succeeded"
+            or not command_evidence.get("backup_artifact")
+            or not command_evidence.get("command")
+            or command_evidence.get("returncode") != 0
+        ):
+            raise ValueError("restore_command_evidence_required")
         restored = create_engine(self.restored_database_url)
         try:
             if restored.dialect.name != "postgresql":
@@ -1222,6 +1420,8 @@ class FailureDrillRunner:
                 ),
                 "outbox_replayed_twice": bool(replay_result.get("outbox_replayed_twice")),
                 "pbp_repair_executed": bool(repair_result.get("verified")),
+                "pbp_repair_observation_id": bool(repair_result.get("observation_id")),
+                "pbp_repair_job_id": bool(repair_result.get("composition_job_id")),
             }
             recovery_time_ms = round((perf_counter() - restore_started) * 1000, 3)
             return {
@@ -1230,6 +1430,7 @@ class FailureDrillRunner:
                 "adapter": "postgres_disposable_restore",
                 "environment": "postgres_isolated",
                 "recovery_time_ms": recovery_time_ms,
+                "restore_duration_ms": recovery_time_ms,
                 "recovery_data_point": {
                     "observed_at": self.clock().astimezone(UTC).isoformat(),
                     "latest_governed_cutoff": (
@@ -1237,10 +1438,14 @@ class FailureDrillRunner:
                         if hasattr(measured["latest_governed_cutoff"], "isoformat")
                         else measured["latest_governed_cutoff"]
                     ),
+                    "latest_observation": repair_result.get("observation_id"),
                     "query_duration_ms": recovery_time_ms,
                 },
+                "restore_command_evidence": command_evidence,
                 "replay_evidence": replay_result,
                 "pbp_repair_evidence": repair_result,
+                "pbp_repair_observation_id": repair_result.get("observation_id"),
+                "pbp_repair_job_id": repair_result.get("composition_job_id"),
                 "production_evidence": True,
                 "verified": all(checks.values()),
             }
@@ -1265,6 +1470,8 @@ def run_failure_drills(
     restore_expectations: Mapping[str, Any] | None = None,
     pbp_repair: Callable[[Engine, str], Mapping[str, Any] | bool] | None = None,
     restore_ingestion: Callable[[Engine, CollectorClaims, Mapping[str, Any], bytes], Any] | None = None,
+    restore_started: float | None = None,
+    restore_command_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Convenience function used by scripts and smoke tests."""
 
@@ -1283,6 +1490,8 @@ def run_failure_drills(
         restore_expectations=restore_expectations,
         pbp_repair=pbp_repair,
         restore_ingestion=restore_ingestion,
+        restore_started=restore_started,
+        restore_command_evidence=restore_command_evidence,
     ).run(
         hooks=hooks,
         require_production_evidence=require_production_evidence,
@@ -1332,6 +1541,26 @@ __all__ = [
     "DrillResult",
     "FailureDrillReport",
     "FailureDrillRunner",
+    "preflight_disposable_database",
     "run_failure_drills",
     "run_restore_drill",
 ]
+
+
+def preflight_disposable_database(
+    database_url: str,
+    *,
+    marker_nonce: str,
+    schema: str | None,
+    label: str,
+    require_empty: bool = True,
+) -> None:
+    """Public operator seam for checking a marked target before restore."""
+
+    FailureDrillRunner.preflight_disposable_database(
+        database_url,
+        marker_nonce=marker_nonce,
+        schema=schema,
+        label=label,
+        require_empty=require_empty,
+    )

@@ -330,6 +330,27 @@ def test_unit_restore_drill_replays_outbox_and_repairs_ledger():
     assert details["recovery_data_point"]["latest_observation"]
 
 
+def test_operator_restore_rejects_missing_governed_repair_seam(tmp_path):
+    runner = FailureDrillRunner(
+        engine=_db(tmp_path),
+        environment="operator",
+        restore_expectations={
+            "pbp_repair": {
+                "game_id": "known-game",
+                "checksum": "c" * 64,
+                "observation_id": "accepted-observation",
+                "composition_job_id": "repair-job",
+            }
+        },
+    )
+    evidence = runner._restore_pbp_repair(runner.engine)
+    assert evidence == {
+        "verified": False,
+        "reason": "governed_pbp_repair_adapter_required",
+        "game_id": "known-game",
+    }
+
+
 def test_benchmark_emits_query_plan_and_passes_local_gate(tmp_path):
     engine = _db(tmp_path)
     report = benchmark_matchup_reads(
@@ -380,3 +401,19 @@ def test_service_benchmark_retains_emitted_sql_and_query_ceiling(tmp_path):
     assert report.query_count_within_ceiling
     assert report.measured_query_shapes
     assert report.query_plans
+
+
+def test_benchmark_rejects_unplanned_governed_full_scan():
+    from app.services.database_first_benchmark import _plans_are_indexed
+
+    statements = ((
+        "SELECT payload FROM publication_versions WHERE stream_key = ?",
+        ("logs",),
+    ),)
+    assert not _plans_are_indexed(
+        (
+            "SELECT payload FROM publication_versions WHERE stream_key = ?"
+            " => (0, 0, 'SCAN publication_versions')",
+        ),
+        measured_statements=statements,
+    )

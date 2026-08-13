@@ -14,7 +14,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import inspect, select
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings
@@ -22,6 +22,7 @@ from app.dependencies import build_dependencies
 from app.migrations import run_migrations
 from app.services.database_first_activation import DatabaseOnlyProviderGuard
 from app.services.database_first_benchmark import benchmark_matchup_services
+from app.utils.db import get_engine
 from app.models import Base
 from app.models.collection_control import (
     PublicationPointer,
@@ -432,8 +433,6 @@ def main() -> int:
         isolated=args.isolated,
         production_url=args.production_database_url,
     )
-    engine = create_engine(args.database_url)
-    run_migrations(engine)
     with open(args.fixture, encoding="utf-8") as handle:
         fixture = json.load(handle)
     if not isinstance(fixture, dict):
@@ -442,6 +441,16 @@ def main() -> int:
     game_id = str(fixture.get("game_id") or args.game_id)
     if not season or not game_id:
         raise SystemExit("benchmark fixture and --game-id require concrete season/game identity")
+    settings = RuntimeSettings(
+        environment="testing",
+        database={"url": args.database_url},
+        auth={"firebase_admin_disabled": True},
+        cache={"enabled": False},
+        features={"injury_report_enabled": False},
+        nba={"current_season": season},
+    )
+    engine = get_engine(settings)
+    run_migrations(engine)
     seeded = fixture.get("seeded_fixture")
     required_sections = {
         "event_catalog",
@@ -467,14 +476,6 @@ def main() -> int:
 
     fixture_profile = _load_fixture(engine, seeded, season=season, game_id=game_id)
 
-    settings = RuntimeSettings(
-        environment="testing",
-        database={"url": args.database_url},
-        auth={"firebase_admin_disabled": True},
-        cache={"enabled": False},
-        features={"injury_report_enabled": False},
-        nba={"current_season": season},
-    )
     dependencies = build_dependencies(settings)
     service = dependencies.matchup_service
     provider_counter = [0]
@@ -550,13 +551,32 @@ def main() -> int:
         fixture_validated=True,
         fixture_profile=fixture_profile,
     )
+    report_payload = report.to_dict()
+    fixture_metadata = {
+        **dict(report.fixture_profile or {}),
+        "fixture_label": "representative production-like fixture",
+        "captured_at": fixture.get("captured_at"),
+        "source_commit": fixture.get("source_commit"),
+        "production_claim": False,
+    }
+    report_payload["fixture_profile"] = fixture_metadata
     with open(args.report, "w", encoding="utf-8") as handle:
-        json.dump(report.to_dict(), handle, indent=2, sort_keys=True)
+        json.dump(report_payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    artifact_payload = {
+        **report_payload,
+        "artifact_type": "database_first_matchups_benchmark",
+        "evidence_status": "measured",
+        "engine": engine.dialect.name,
+        "captured_at": fixture.get("captured_at"),
+        "source_commit": fixture.get("source_commit"),
+        "production_claim": False,
+        "fixture_label": "representative production-like fixture",
+    }
     with open(args.artifact, "w", encoding="utf-8") as handle:
-        json.dump(report.to_dict(), handle, indent=2, sort_keys=True)
+        json.dump(artifact_payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    print(json.dumps(report.to_dict(), sort_keys=True))
+    print(json.dumps(artifact_payload, sort_keys=True))
     return 0 if report.passed else 1
 
 

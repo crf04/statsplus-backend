@@ -1,69 +1,222 @@
 #!/usr/bin/env python3
-"""Run deterministic failure and isolated restore/replay drills."""
+"""Run deterministic failure and isolated restore/replay drills.
+
+Operator mode deliberately owns the restore boundary.  It preflights an
+out-of-band marked, empty Postgres target, invokes a caller-provided argv
+restore command with ``shell=False``, and only then asks the application drill
+runner to query and repair that target.  A URL that merely points at an
+already-restored database cannot produce production evidence.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
+from typing import Any, Mapping
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.database_first_drills import run_failure_drills
+from app.services.database_first_drills import (
+    preflight_disposable_database,
+    run_failure_drills,
+)
+
+
+def _command(value: str, *, label: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} must be a JSON argv array") from error
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or any(not isinstance(item, str) or not item.strip() for item in parsed)
+    ):
+        raise ValueError(f"{label} must be a non-empty JSON argv array")
+    return parsed
+
+
+def _render(command: list[str], *, replacements: Mapping[str, str]) -> list[str]:
+    return [
+        value.format_map({key: str(replacements.get(key, "")) for key in replacements})
+        for value in command
+    ]
+
+
+def _redact(command: list[str]) -> list[str]:
+    redacted: list[str] = []
+    for value in command:
+        lowered = value.lower()
+        if any(marker in lowered for marker in ("password", "token", "secret", "credential")):
+            key, separator, _ = value.partition("=")
+            redacted.append(f"{key}=<redacted>" if separator else "<redacted>")
+        else:
+            redacted.append(value)
+    return redacted
+
+
+def _json_output(stdout: str) -> Mapping[str, Any]:
+    for line in reversed(stdout.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _failed_report(*, reason: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "environment": "postgres_isolated",
+        "production_evidence": False,
+        "artifact_schema": {
+            "version": 1,
+            "engine": "postgresql",
+            "required_fields": [
+                "restore_command_evidence",
+                "recovery_time_ms",
+                "pbp_repair_observation_id",
+                "pbp_repair_job_id",
+            ],
+        },
+        "error": reason,
+        "restore_command_evidence": dict(evidence),
+    }
+
+
+def _build_pbp_repair_callback(
+    command: list[str],
+    *,
+    database_url: str,
+    spec: Mapping[str, Any],
+):
+    """Invoke a real historical-repair seam and verify its durable IDs.
+
+    The command is normally ``scripts/ledger_refresh.py`` with provider
+    credentials supplied by the operator environment.  The callback performs
+    only read-side verification after the command; it never patches a ledger
+    row directly.
+    """
+
+    season = str(spec.get("season", ""))
+    expected_manifest = str(spec.get("manifest_id", ""))
+    expected_job = str(spec.get("composition_job_id", ""))
+    if not season or not expected_manifest or not expected_job:
+        raise ValueError("pbp_repair season, manifest_id, and composition_job_id are required")
+
+    def repair(engine, game_id: str) -> Mapping[str, Any]:
+        rendered = _render(
+            command,
+            replacements={
+                "database_url": database_url,
+                "game_id": game_id,
+                "season": season,
+            },
+        )
+        completed = subprocess.run(
+            rendered,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        command_result = _json_output(completed.stdout)
+        if completed.returncode != 0 or not (
+            bool(command_result.get("complete"))
+            or str(command_result.get("status", "")) == "complete"
+        ):
+            return {
+                "verified": False,
+                "adapter": "ledger_refresh_historical_repair",
+                "command": _redact(rendered),
+                "returncode": completed.returncode,
+                "command_result": dict(command_result),
+            }
+        from sqlalchemy import text
+
+        with engine.connect() as connection:
+            observation = connection.execute(
+                text(
+                    "SELECT observation_id, checksum, manifest_id "
+                    "FROM collection_observations "
+                    "WHERE observation_type = 'canonical_game_ledger' "
+                    "AND accepted_at IS NOT NULL AND scope LIKE :scope "
+                    "ORDER BY accepted_at DESC LIMIT 1"
+                ),
+                {"scope": f"%{game_id}%"},
+            ).mappings().first()
+            job = connection.execute(
+                text(
+                    "SELECT job_id FROM composition_jobs "
+                    "WHERE job_id = :job_id AND season = :season"
+                ),
+                {"job_id": expected_job, "season": season},
+            ).scalar_one_or_none()
+        if observation is None or str(observation["manifest_id"]) != expected_manifest or job is None:
+            return {
+                "verified": False,
+                "adapter": "ledger_refresh_historical_repair",
+                "command": _redact(rendered),
+                "returncode": completed.returncode,
+                "reason": "governed_repair_observation_or_job_missing",
+            }
+        return {
+            "verified": True,
+            "adapter": "ledger_refresh_historical_repair",
+            "command": _redact(rendered),
+            "returncode": completed.returncode,
+            "game_id": game_id,
+            "observation_id": str(observation["observation_id"]),
+            "composition_job_id": str(job),
+            "checksum": str(observation["checksum"]),
+            "updated_rows": 1,
+            "manifest_id": expected_manifest,
+            "command_result": dict(command_result),
+        }
+
+    return repair
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--database-url",
-        default=os.environ.get("DATABASE_URL"),
-        help="disposable isolated drill database URL",
-    )
+    parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     parser.add_argument(
         "--sqlite-unit",
         action="store_true",
         help="run the explicit local SQLite adapter drill (not production evidence)",
     )
+    parser.add_argument("--production-database-url")
+    parser.add_argument("--restored-database-url")
+    parser.add_argument("--marker-nonce", default=os.environ.get("STATPLUS_DISPOSABLE_MARKER_NONCE"))
+    parser.add_argument("--schema", default=os.environ.get("STATPLUS_DISPOSABLE_SCHEMA"))
+    parser.add_argument("--restored-marker-nonce", default=os.environ.get("STATPLUS_RESTORED_MARKER_NONCE"))
+    parser.add_argument("--restored-schema", default=os.environ.get("STATPLUS_RESTORED_SCHEMA"))
+    parser.add_argument("--restore-expectations", type=Path)
     parser.add_argument(
-        "--production-database-url",
-        help=(
-            "production/control URL used only to reject accidental same-database drills"
-        ),
-    )
-    parser.add_argument(
-        "--restored-database-url",
-        help="disposable isolated Postgres URL containing the completed restore",
-    )
-    parser.add_argument(
-        "--marker-nonce",
-        default=os.environ.get("STATPLUS_DISPOSABLE_MARKER_NONCE"),
-        help="nonce from the out-of-band statsplus_disposable_control marker",
-    )
-    parser.add_argument(
-        "--schema",
-        default=os.environ.get("STATPLUS_DISPOSABLE_SCHEMA"),
-        help="dedicated disposable Postgres schema name",
-    )
-    parser.add_argument(
-        "--restored-marker-nonce",
-        default=os.environ.get("STATPLUS_RESTORED_MARKER_NONCE"),
-        help="nonce from the restored database's out-of-band marker",
-    )
-    parser.add_argument(
-        "--restored-schema",
-        default=os.environ.get("STATPLUS_RESTORED_SCHEMA"),
-        help="dedicated schema containing the restored control plane",
-    )
-    parser.add_argument(
-        "--restore-expectations",
+        "--backup-artifact",
         type=Path,
-        help="JSON expected IDs/checksums for the restored database",
+        help="backup artifact consumed by the operator restore command",
+    )
+    parser.add_argument(
+        "--restore-command",
+        help="JSON argv array; use {backup_artifact}, {database_url}, and {schema} placeholders",
+    )
+    parser.add_argument(
+        "--pbp-repair-command",
+        help="JSON argv array for the governed historical repair seam; use {database_url}, {game_id}, and {season}",
     )
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
+
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")
     if args.sqlite_unit and not str(args.database_url).startswith("sqlite"):
@@ -72,15 +225,103 @@ def main() -> int:
         parser.error("SQLite drills require explicit --sqlite-unit")
     if not args.marker_nonce:
         parser.error("--marker-nonce or STATPLUS_DISPOSABLE_MARKER_NONCE is required")
-    if not args.sqlite_unit and not args.restored_database_url:
-        parser.error("operator drills require --restored-database-url")
-    if not args.sqlite_unit and not args.restored_marker_nonce:
-        parser.error("--restored-marker-nonce is required for operator restore evidence")
+    if not args.sqlite_unit:
+        if not args.restored_database_url:
+            parser.error("operator drills require --restored-database-url")
+        if not args.restored_marker_nonce:
+            parser.error("--restored-marker-nonce is required for operator restore evidence")
+        if not args.restored_schema:
+            parser.error("--restored-schema is required for operator restore evidence")
+        if not args.backup_artifact:
+            parser.error("operator drills require --backup-artifact")
+        if not args.restore_command:
+            parser.error("operator drills require --restore-command")
+        if not args.pbp_repair_command:
+            parser.error("operator drills require --pbp-repair-command")
+
     expectations = None
     if args.restore_expectations:
-        expectations = json.loads(args.restore_expectations.read_text(encoding="utf-8"))
+        try:
+            expectations = json.loads(args.restore_expectations.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            parser.error(f"cannot read --restore-expectations: {error}")
         if not isinstance(expectations, dict):
             parser.error("--restore-expectations must contain a JSON object")
+    if not args.sqlite_unit and (
+        not isinstance(expectations, dict)
+        or not isinstance(expectations.get("pbp_repair"), Mapping)
+    ):
+        parser.error("operator restore expectations require a pbp_repair object")
+
+    restore_evidence: dict[str, Any] = {}
+    restore_started: float | None = None
+    pbp_repair = None
+    if not args.sqlite_unit:
+        try:
+            backup = args.backup_artifact.resolve(strict=True)
+            if not backup.is_file():
+                raise ValueError("backup_artifact_must_be_a_file")
+            restore_command = _command(args.restore_command, label="--restore-command")
+            pbp_command = _command(args.pbp_repair_command, label="--pbp-repair-command")
+            if not any("{backup_artifact}" in token for token in restore_command):
+                raise ValueError("restore command must consume {backup_artifact}")
+            if not any("{database_url}" in token for token in restore_command):
+                raise ValueError("restore command must target {database_url}")
+            if str(args.restored_database_url) in {
+                str(args.database_url),
+                str(args.production_database_url),
+            }:
+                raise ValueError("restored target must be separate from drill and production URLs")
+            preflight_disposable_database(
+                str(args.restored_database_url),
+                marker_nonce=str(args.restored_marker_nonce),
+                schema=str(args.restored_schema),
+                label="restored",
+                require_empty=True,
+            )
+            rendered_restore = _render(
+                restore_command,
+                replacements={
+                    "backup_artifact": str(backup),
+                    "database_url": str(args.restored_database_url),
+                    "schema": str(args.restored_schema),
+                },
+            )
+            restore_started = perf_counter()
+            started_at = datetime.now(timezone.utc).isoformat()
+            completed = subprocess.run(
+                rendered_restore,
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            completed_at = datetime.now(timezone.utc).isoformat()
+            restore_evidence = {
+                "status": "succeeded" if completed.returncode == 0 else "failed",
+                "backup_artifact": str(backup),
+                "command": _redact(rendered_restore),
+                "returncode": completed.returncode,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "stdout_tail": completed.stdout[-2000:],
+                "stderr_tail": completed.stderr[-2000:],
+            }
+            if completed.returncode != 0:
+                report = _failed_report(reason="restore_command_failed", evidence=restore_evidence)
+                Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                print(json.dumps(report, sort_keys=True))
+                return 1
+            pbp_repair = _build_pbp_repair_callback(
+                pbp_command,
+                database_url=str(args.restored_database_url),
+                spec=expectations["pbp_repair"],
+            )
+        except (OSError, ValueError) as error:
+            report = _failed_report(reason=str(error), evidence=restore_evidence)
+            Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(report, sort_keys=True))
+            return 1
 
     report = run_failure_drills(
         database_url=args.database_url,
@@ -93,11 +334,12 @@ def main() -> int:
         restored_marker_nonce=args.restored_marker_nonce,
         restored_schema=args.restored_schema,
         restore_expectations=expectations,
+        pbp_repair=pbp_repair,
+        restore_started=restore_started,
+        restore_command_evidence=restore_evidence,
         require_production_evidence=not args.sqlite_unit,
     )
-    with open(args.report, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, sort_keys=True))
     return 0 if report["status"] == "passed" else 1
 

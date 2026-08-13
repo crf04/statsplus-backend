@@ -33,6 +33,8 @@ class BenchmarkReport:
     query_count_ceiling: int = 0
     query_count_within_ceiling: bool = True
     measured_query_shapes: tuple[str, ...] = ()
+    unplanned_query_shapes: tuple[str, ...] = ()
+    governed_query_tables: tuple[str, ...] = ()
     fixture_profile: Mapping[str, Any] | None = None
 
     @property
@@ -45,6 +47,7 @@ class BenchmarkReport:
             and self.fixture_validated
             and self.provider_calls == 0
             and self.query_count_within_ceiling
+            and not self.unplanned_query_shapes
             and bool(self.measured_query_shapes or self.baseline_source == "injected")
         )
 
@@ -124,7 +127,13 @@ def benchmark_matchup_reads(
     plans_available = bool(plans) and all(
         "=> unavailable" not in plan for plan in plans
     )
-    plans_indexed = _plans_are_indexed(plans) if require_indexed_plans else True
+    plans_indexed = (
+        _plans_are_indexed(plans, measured_statements=unique_measured)
+        if require_indexed_plans
+        else True
+    )
+    unplanned = _unplanned_query_shapes(plans, unique_measured) if require_indexed_plans else ()
+    governed_tables = _governed_tables(unique_measured)
     return BenchmarkReport(
         iterations=count,
         baseline_p95_ms=round(baseline_p95, 3),
@@ -149,6 +158,8 @@ def benchmark_matchup_reads(
             f"{statement} | params={parameters!r}"
             for statement, parameters in unique_measured
         ),
+        unplanned_query_shapes=unplanned,
+        governed_query_tables=governed_tables,
     )
 
 
@@ -314,27 +325,78 @@ def _unique_statements(statements: list[tuple[str, Any]]) -> tuple[tuple[str, An
     return tuple(result)
 
 
-def _plans_are_indexed(plans: tuple[str, ...]) -> bool:
-    """Reject full scans for bounded publication/ledger read queries."""
+_GOVERNED_TABLE_PATTERNS = (
+    "publication_",
+    "player_game_logs",
+    "player_pool_snapshots",
+    "player_diet",
+    "team_matchup",
+    "event_catalog",
+    "canonical_game_ledger",
+)
 
-    required_tables = (
-        "publication_pointers",
-        "publication_versions",
-        "player_game_logs",
-        "canonical_game_ledger_games",
+
+def _governed_tables(statements: tuple[tuple[str, Any], ...]) -> tuple[str, ...]:
+    names: set[str] = set()
+    for statement, _parameters in statements:
+        lowered = statement.lower()
+        for match in re.finditer(r"\b(?:from|join)\s+([a-z][a-z0-9_]*)", lowered):
+            table = match.group(1)
+            if any(table.startswith(pattern) for pattern in _GOVERNED_TABLE_PATTERNS):
+                names.add(table)
+    return tuple(sorted(names))
+
+
+def _unplanned_query_shapes(
+    plans: tuple[str, ...],
+    statements: tuple[tuple[str, Any], ...],
+) -> tuple[str, ...]:
+    planned = {
+        plan.split(" => ", 1)[0].split(" [params=", 1)[0]
+        for plan in plans
+        if " => " in plan
+    }
+    return tuple(
+        statement
+        for statement, _parameters in statements
+        if statement not in planned
     )
+
+
+def _plans_are_indexed(
+    plans: tuple[str, ...],
+    *,
+    measured_statements: tuple[tuple[str, Any], ...] = (),
+) -> bool:
+    """Reject unavailable, unplanned, or full-scan governed read evidence."""
+
+    if not plans:
+        return False
+    if _unplanned_query_shapes(plans, measured_statements):
+        return False
     for plan in plans:
         if "=> unavailable" in plan:
             return False
-        upper = plan.upper()
-        for table in required_tables:
-            if table.upper() in upper and f"SCAN {table.upper()}" in upper:
-                return False
-        # SQLite reports aliased publication tables as ``SCAN p``/``SCAN v``;
-        # the SQL text retained in the artifact identifies those aliases.
-        if "publication_pointers" in plan.lower() and "SCAN P" in upper:
+        sql, _, raw_plan = plan.partition(" => ")
+        governed = any(pattern in sql.lower() for pattern in _GOVERNED_TABLE_PATTERNS)
+        if not governed:
+            continue
+        upper = raw_plan.upper()
+        # SQLite emits SCAN alias/table; PostgreSQL emits Seq Scan.  Both are
+        # disallowed for a bounded publication/ledger Matchups read.
+        if "SEQ SCAN" in upper or re.search(r"\bSCAN\s+(?:[A-Z_][A-Z0-9_]*|P|V)\b", upper):
             return False
-        if "publication_versions" in plan.lower() and "SCAN V" in upper:
+        if not any(
+            marker in upper
+            for marker in (
+                "SEARCH ",
+                "USING INDEX",
+                "USING COVERING INDEX",
+                "PRIMARY KEY",
+                "INDEX SCAN",
+                "INDEX ONLY SCAN",
+            )
+        ):
             return False
     return True
 
