@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -35,6 +36,13 @@ from app.models.collection_control import (
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
+    CompositionJob,
+    CollectionCycle,
+    AuditEvent,
+    ReconciliationItem,
+    CollectionAlert,
+    CollectorUsage,
+    ValidationSummary,
 )
 
 
@@ -44,6 +52,16 @@ MAX_ENVELOPE_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
 MAX_SCOPE_COUNT = 512
 MAX_SCOPE_BYTES = 32 * 1024
+OBSERVATION_RETENTION_DAYS = 30
+ATHLETE_REUSE_DAYS = 7
+MAX_PAYLOAD_VALUES = 100_000
+
+SURFACE_REGISTRY: tuple[dict[str, Any], ...] = (
+    {"stream_key": "event_catalog", "provider": "nba", "owner": "residential_collector", "scope": "season", "enabled": True},
+    {"stream_key": "athlete_catalog", "provider": "nba", "owner": "residential_collector", "scope": "season", "enabled": True},
+    {"stream_key": "canonical_game_ledger", "provider": "pbp", "owner": "railway", "scope": "game", "enabled": True},
+    {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "enabled": False, "reason": "provider_window_unsupported"},
+)
 
 
 def utcnow() -> datetime:
@@ -333,17 +351,29 @@ class CollectionControlService(_SessionService):
             return None
 
     def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
-                        collect_before: datetime, accepted_versions: Iterable[int] = (1, 2)) -> CollectionManifest:
+                        collect_before: datetime, accepted_versions: Iterable[int] = (1, 2),
+                        required_athlete_ids: Iterable[str] = ()) -> CollectionManifest:
         now = _aware(self.clock())
         cutoff, collect_before = _aware(cutoff), _aware(collect_before)
         if cutoff > collect_before or collect_before <= now:
             raise ControlPlaneError("invalid_manifest_window")
         event = self.latest_catalog(season, "event", cutoff=cutoff, now=now)
         athlete = self.latest_catalog(season, "athlete", cutoff=cutoff, now=now)
-        if event is None:
+        # A newer cutoff can never inherit an old Event Catalog.  Athlete
+        # identity may reuse the last-good publication for at most seven days,
+        # but only when the optional required identity set is fully present.
+        if event is None or _aware(event.cutoff) != cutoff:
             raise ControlPlaneError("event_catalog_required")
-        if athlete is None:
+        if athlete is None or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400:
             raise ControlPlaneError("athlete_catalog_required")
+        required_ids = {str(item) for item in required_athlete_ids}
+        if required_ids:
+            try:
+                catalog_ids = {str(item) for item in json.loads(athlete.payload).get("identities", [])}
+            except (AttributeError, json.JSONDecodeError, TypeError):
+                catalog_ids = set()
+            if not required_ids <= catalog_ids:
+                raise ControlPlaneError("identity_unresolved")
         scope_list = sorted({str(scope).strip() for scope in scopes if str(scope).strip()})
         versions = sorted({int(version) for version in accepted_versions})
         if not scope_list or not versions or len(_json(scope_list).encode()) > MAX_SCOPE_BYTES:
@@ -352,11 +382,14 @@ class CollectionControlService(_SessionService):
                     "accepted_versions": versions, "scopes": scope_list}
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
+            prior = session.scalars(select(CollectionManifest).where(CollectionManifest.season == season, CollectionManifest.status == "active")).all()
             session.query(CollectionManifest).filter(CollectionManifest.season == season, CollectionManifest.status == "active").update(
                 {"status": "superseded", "superseded_at": now})
             row = CollectionManifest(manifest_id=_uuid(), season=season, cutoff=cutoff, collect_before=collect_before,
                 accepted_versions=_json(versions), scopes=_json(scope_list), checksum=digest, status="active", created_at=now)
             session.add(row)
+            for old in prior:
+                old.superseded_by = row.manifest_id
         return row
 
     def get_manifest(self, manifest_id: str, *, now: datetime | None = None) -> CollectionManifest:
@@ -367,6 +400,44 @@ class CollectionControlService(_SessionService):
             if row.status != "active" or _aware(row.collect_before) <= _aware(now or self.clock()):
                 raise ControlPlaneError("manifest_expired")
             return row
+
+    def open_cycle(self, manifest_id: str, *, completed_game_count: int) -> CollectionCycle:
+        """Open a cycle; no completed game is a truthful no-game outcome."""
+        if completed_game_count < 0:
+            raise ControlPlaneError("invalid_game_count")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            manifest = session.get(CollectionManifest, manifest_id)
+            if manifest is None or manifest.status != "active":
+                raise ControlPlaneError("manifest_expired")
+            cycle = CollectionCycle(cycle_id=_uuid(), season=manifest.season, manifest_id=manifest_id,
+                cutoff=manifest.cutoff, status="no_game" if completed_game_count == 0 else "collecting",
+                completed_game_count=completed_game_count, created_at=now)
+            session.add(cycle)
+        return cycle
+
+    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None) -> CollectionCycle:
+        if status not in {"complete", "attention", "failed"}:
+            raise ControlPlaneError("invalid_cycle_status")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            cycle = session.get(CollectionCycle, cycle_id)
+            if cycle is None:
+                raise ControlPlaneError("cycle_not_found")
+            if cycle.status in {"complete", "no_game", "superseded"}:
+                raise ControlPlaneError("cycle_immutable")
+            cycle.status, cycle.completed_at, cycle.attention_reason = status, now, reason
+        return cycle
+
+    def supersede_cycle(self, cycle_id: str, *, reason: str) -> CollectionCycle:
+        if len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        with self.session() as session, session.begin():
+            cycle = session.get(CollectionCycle, cycle_id)
+            if cycle is None:
+                raise ControlPlaneError("cycle_not_found")
+            cycle.status, cycle.superseded_at, cycle.attention_reason = "superseded", self.clock(), reason.strip()[:64]
+        return cycle
 
 
 class ObservationIngestionService(_SessionService):
@@ -387,8 +458,9 @@ class ObservationIngestionService(_SessionService):
         if len(decoded) > max_payload_bytes:
             raise ControlPlaneError("payload_too_large")
         try:
-            value = json.loads(decoded)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
+            _validate_payload_shape(value)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
         if not isinstance(value, (dict, list)):
             raise ControlPlaneError("malformed_payload")
@@ -459,6 +531,53 @@ class PublicationService(_SessionService):
                 row.enabled = enabled
         return row
 
+    def register_default_streams(self) -> tuple[PublicationStream, ...]:
+        rows = []
+        for definition in SURFACE_REGISTRY:
+            rows.append(self.register_stream(
+                definition["stream_key"], provider=definition["provider"], owner=definition["owner"],
+                required_observations=[definition["stream_key"]], publication_strategy="replace",
+                supported_windows=[definition["scope"]], enabled=bool(definition["enabled"]),
+            ))
+        return tuple(rows)
+
+    def activate_stream(self, stream_key: str, *, reason: str) -> PublicationStream:
+        if len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        with self.session() as session, session.begin():
+            row = session.get(PublicationStream, stream_key)
+            if row is None:
+                raise ControlPlaneError("stream_not_found")
+            row.enabled = True
+            return row
+
+    def enqueue(self, stream_key: str, *, season: str, cutoff: datetime) -> CompositionJob:
+        """Create one idempotent composition job for a stream/cutoff."""
+        now = self.clock()
+        with self.session() as session, session.begin():
+            existing = session.scalar(select(CompositionJob).where(
+                CompositionJob.stream_key == stream_key, CompositionJob.season == season,
+                CompositionJob.cutoff == _aware(cutoff)))
+            if existing is not None:
+                return existing
+            row = CompositionJob(job_id=_uuid(), stream_key=stream_key, season=season, cutoff=_aware(cutoff),
+                                 status="queued", attempts=0, created_at=now, updated_at=now)
+            session.add(row)
+        return row
+
+    def retry(self, job_id: str, *, reason: str) -> CompositionJob:
+        if len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            row = session.get(CompositionJob, job_id)
+            if row is None:
+                raise ControlPlaneError("composition_not_found")
+            if row.status not in {"failed", "queued"}:
+                raise ControlPlaneError("composition_not_retryable")
+            row.status, row.attempts, row.updated_at, row.last_error = "queued", row.attempts + 1, now, None
+        return row
+
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None) -> PublicationVersion:
         encoded = _json(payload)
@@ -489,6 +608,13 @@ class PublicationService(_SessionService):
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
         return publication
 
+    def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
+                         completeness: Mapping[str, Any], expected_fence: int | None = None) -> PublicationVersion:
+        if not bool(completeness.get("complete")):
+            raise ControlPlaneError("incomplete_publication")
+        return self.compose(stream_key, season=season, cutoff=cutoff, payload=payload,
+                            expected_fence=expected_fence)
+
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:
             pointer = session.get(PublicationPointer, stream_key)
@@ -517,6 +643,156 @@ class PublicationService(_SessionService):
         return version
 
 
+class CollectionOperationsService(_SessionService):
+    """Bounded operational evidence, retention, and completeness gates."""
+
+    def audit(self, *, actor: str, action: str, resource: str, reason: str,
+              details: Mapping[str, Any] = ()) -> AuditEvent:
+        if not actor.strip() or not action.strip() or not resource.strip() or len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        row = AuditEvent(event_id=_uuid(), actor=actor.strip()[:128], action=action.strip()[:64],
+                         resource=resource.strip()[:128], reason=reason.strip()[:255],
+                         details=_json(dict(details)), created_at=self.clock())
+        with self.session() as session, session.begin():
+            session.add(row)
+        return row
+
+    def reconciliation(self, *, season: str, kind: str, reason: str,
+                       details: Mapping[str, Any] = ()) -> ReconciliationItem:
+        if not _valid_season(season) or not kind or not reason:
+            raise ControlPlaneError("invalid_reconciliation")
+        row = ReconciliationItem(item_id=_uuid(), season=season, kind=kind[:64], reason=reason[:64],
+                                 details=_json(dict(details)), created_at=self.clock())
+        with self.session() as session, session.begin():
+            session.add(row)
+        return row
+
+    def resolve_reconciliation(self, item_id: str, *, actor: str, reason: str) -> ReconciliationItem:
+        row = self.audit(actor=actor, action="reconciliation.resolve", resource=item_id, reason=reason)
+        del row
+        with self.session() as session, session.begin():
+            item = session.get(ReconciliationItem, item_id)
+            if item is None:
+                raise ControlPlaneError("reconciliation_not_found")
+            item.status, item.resolved_at = "resolved", self.clock()
+        return item
+
+    def alert(self, *, cycle_id: str | None, severity: str, code: str) -> CollectionAlert:
+        if severity not in {"warning", "critical"} or not code:
+            raise ControlPlaneError("invalid_alert")
+        row = CollectionAlert(alert_id=_uuid(), cycle_id=cycle_id, severity=severity, code=code[:64], created_at=self.clock())
+        with self.session() as session, session.begin():
+            session.add(row)
+        return row
+
+    def record_usage(self, collector_id: str, *, envelopes: int = 0, bytes_received: int = 0,
+                     polls: int = 0, max_envelopes: int = 1000, max_bytes: int = 50 * 1024 * 1024) -> CollectorUsage:
+        if min(envelopes, bytes_received, polls) < 0 or envelopes > max_envelopes or bytes_received > max_bytes:
+            raise ControlPlaneError("usage_limit")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            row = session.get(CollectorUsage, collector_id)
+            if row is None or (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
+                row = CollectorUsage(collector_id=collector_id, window_started_at=now)
+                session.merge(row)
+            if row.envelope_count + envelopes > max_envelopes or row.byte_count + bytes_received > max_bytes:
+                raise ControlPlaneError("usage_limit")
+            row.envelope_count += envelopes
+            row.byte_count += bytes_received
+            row.poll_count += polls
+        return row
+
+    def validate_completeness(self, *, required_team_ids: Iterable[str] = (), observed_team_ids: Iterable[str] = (),
+                              required_base_slices: Iterable[str] = (), complete_base_slices: Iterable[str] = (),
+                              league_complete: bool = False) -> dict[str, Any]:
+        required_teams, observed_teams = set(map(str, required_team_ids)), set(map(str, observed_team_ids))
+        required_bases, complete_bases = set(map(str, required_base_slices)), set(map(str, complete_base_slices))
+        missing_teams = sorted(required_teams - observed_teams)
+        missing_bases = sorted(required_bases - complete_bases)
+        if league_complete and observed_teams != required_teams:
+            missing_teams = sorted(required_teams - observed_teams) or ["league_not_complete"]
+        return {"complete": not missing_teams and not missing_bases,
+                "missing_team_ids": missing_teams, "missing_base_slices": missing_bases,
+                "team_count": len(observed_teams), "base_count": len(complete_bases)}
+
+    def store_validation(self, cycle_id: str, *, status: str, counts: Mapping[str, Any]) -> ValidationSummary:
+        if status not in {"passed", "failed", "attention"}:
+            raise ControlPlaneError("invalid_validation_status")
+        row = ValidationSummary(summary_id=_uuid(), cycle_id=cycle_id, status=status, counts=_json(dict(counts)), created_at=self.clock())
+        with self.session() as session, session.begin():
+            session.add(row)
+        return row
+
+    def gc_observations(self, *, now: datetime | None = None, retention_days: int = OBSERVATION_RETENTION_DAYS) -> int:
+        if retention_days < 1:
+            raise ControlPlaneError("invalid_retention")
+        cutoff = _aware(now or self.clock()) - timedelta(days=retention_days)
+        with self.session() as session, session.begin():
+            # Keep observations named by an active or rollback publication;
+            # provenance survives ordinary 30-day garbage collection.
+            protected: set[str] = set()
+            publications = session.scalars(select(PublicationVersion).where(PublicationVersion.status.in_(("active", "rollback")))).all()
+            for publication in publications:
+                try:
+                    document = json.loads(publication.payload)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                protected.update(_find_observation_ids(document))
+            rows = session.scalars(select(CollectionObservation).where(CollectionObservation.accepted_at < cutoff)).all()
+            rows = [row for row in rows if row.observation_id not in protected]
+            count = len(rows)
+            for row in rows:
+                session.delete(row)
+        return count
+
+
+class EmailAlertAdapter:
+    """Pluggable bounded alert sink; production supplies the email transport."""
+
+    def __init__(self, sender: Callable[[str, str], None] | None = None) -> None:
+        self.sender = sender
+
+    def send(self, *, code: str, severity: str, cycle_id: str | None = None) -> None:
+        if severity not in {"warning", "critical"} or not code:
+            raise ControlPlaneError("invalid_alert")
+        if self.sender is not None:
+            self.sender(f"StatsPlus collection {severity}", f"code={code[:64]} cycle={cycle_id or 'none'}")
+
+
+def _find_observation_ids(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"observation_id", "observation_ids"}:
+                if isinstance(item, str):
+                    found.add(item)
+                elif isinstance(item, list):
+                    found.update(str(candidate) for candidate in item)
+            found.update(_find_observation_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_find_observation_ids(item))
+    return found
+
+
+def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _depth: int = 0) -> None:
+    """Reject NaN/infinite values and pathological nested payload volumes."""
+    counter = _count or [0]
+    counter[0] += 1
+    if counter[0] > MAX_PAYLOAD_VALUES or _depth > 64:
+        raise ValueError("payload volume exceeds limit")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite value")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key) > 512:
+                raise ValueError("invalid payload key")
+            _validate_payload_shape(child, _count=counter, _depth=_depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_payload_shape(child, _count=counter, _depth=_depth + 1)
+
+
 def _parse_datetime(value: Any) -> datetime:
     if not isinstance(value, str):
         raise ControlPlaneError("invalid_timestamp")
@@ -539,6 +815,6 @@ def _valid_season(season: str) -> bool:
 
 
 __all__ = [
-    "CURRENT_ENVELOPE_VERSION", "ControlPlaneError", "CollectorClaims", "CollectorTokenService",
-    "CollectionControlService", "ObservationIngestionService", "ObservationReceipt", "PublicationService",
+    "CURRENT_ENVELOPE_VERSION", "SURFACE_REGISTRY", "ControlPlaneError", "CollectorClaims", "CollectorTokenService",
+    "CollectionControlService", "ObservationIngestionService", "ObservationReceipt", "PublicationService", "CollectionOperationsService", "EmailAlertAdapter",
 ]

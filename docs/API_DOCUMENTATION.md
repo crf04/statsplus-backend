@@ -1428,6 +1428,13 @@ GET /api/collector/manifest/<manifest_id>
 POST /api/collector/observations
 POST /api/admin/collection/seasons/<season>
 POST /api/admin/collection/streams/<stream_key>/rollback
+POST /api/admin/collection/streams/<stream_key>/activate
+POST /api/admin/collection/compositions/<job_id>/retry
+POST /api/admin/collection/bootstrap
+POST /api/admin/collection/collectors/<identity_id>/revoke
+POST /api/admin/collection/collectors/<identity_id>/rotate
+GET /api/admin/collection/reconciliation
+POST /api/admin/collection/reconciliation/<item_id>/resolve
 ```
 
 `POST /api/collector/observations` accepts one complete normalized envelope

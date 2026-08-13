@@ -203,8 +203,92 @@ class CollectorTokenReplay(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class CollectionCycle(Base):
+    """One immutable cutoff collection attempt."""
+
+    __tablename__ = "collection_cycles"
+
+    cycle_id = Column(String(36), primary_key=True)
+    season = Column(String(7), nullable=False)
+    manifest_id = Column(String(36), nullable=False, unique=True)
+    cutoff = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(16), nullable=False, default="collecting")
+    completed_game_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    superseded_at = Column(DateTime(timezone=True), nullable=True)
+    attention_reason = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('collecting', 'complete', 'no_game', 'attention', 'failed', 'superseded')", name="ck_collection_cycle_status"),
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "collection_audit_events"
+
+    event_id = Column(String(36), primary_key=True)
+    actor = Column(String(128), nullable=False)
+    action = Column(String(64), nullable=False)
+    resource = Column(String(128), nullable=False)
+    reason = Column(String(255), nullable=False)
+    details = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ReconciliationItem(Base):
+    __tablename__ = "collection_reconciliation_items"
+
+    item_id = Column(String(36), primary_key=True)
+    season = Column(String(7), nullable=False)
+    kind = Column(String(64), nullable=False)
+    reason = Column(String(64), nullable=False)
+    details = Column(Text, nullable=False, default="{}")
+    status = Column(String(16), nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (CheckConstraint("status IN ('open', 'resolved')", name="ck_reconciliation_status"),)
+
+
+class CollectionAlert(Base):
+    __tablename__ = "collection_alerts"
+
+    alert_id = Column(String(36), primary_key=True)
+    cycle_id = Column(String(36), nullable=True)
+    severity = Column(String(16), nullable=False)
+    code = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (CheckConstraint("severity IN ('warning', 'critical')", name="ck_collection_alert_severity"),)
+
+
+class CollectorUsage(Base):
+    __tablename__ = "collector_usage"
+
+    collector_id = Column(String(64), primary_key=True)
+    window_started_at = Column(DateTime(timezone=True), nullable=False)
+    poll_count = Column(Integer, nullable=False, default=0)
+    envelope_count = Column(Integer, nullable=False, default=0)
+    byte_count = Column(Integer, nullable=False, default=0)
+
+
+class ValidationSummary(Base):
+    __tablename__ = "collection_validation_summaries"
+
+    summary_id = Column(String(36), primary_key=True)
+    cycle_id = Column(String(36), nullable=False)
+    status = Column(String(16), nullable=False)
+    counts = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectionObservation", "PublicationStream",
     "PublicationVersion", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
+    "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
+    "CollectorUsage", "ValidationSummary",
 ]

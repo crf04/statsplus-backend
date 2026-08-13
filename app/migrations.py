@@ -341,6 +341,12 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
     )
 
     # Creation order is intentionally explicit for PostgreSQL deployments and
@@ -357,6 +363,33 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def _upgrade_collection_operations(connection: Connection) -> None:
+    """Add cycle, audit, alert, usage, and reconciliation evidence (#84)."""
+    from app.models.collection_control import (
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    )
+    for model in (
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
     ):
         model.__table__.create(connection, checkfirst=True)
 
@@ -387,6 +420,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _upgrade_player_game_log_primitives,
     ),
     Migration(17, "017_collection_control_plane", _create_collection_control_plane_tables),
+    Migration(18, "018_collection_operations", _upgrade_collection_operations),
 )
 
 

@@ -12,6 +12,7 @@ from app.services.collection_control import (
     ControlPlaneError,
     ObservationIngestionService,
     PublicationService,
+    CollectionOperationsService,
 )
 
 
@@ -89,12 +90,18 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     envelope["checksum"] = "0" * 64
     with pytest.raises(ControlPlaneError, match="checksum_mismatch"):
         ingestion.ingest(claims, envelope, payload)
+    bad_payload = b'{"value":NaN}'
+    envelope["checksum"] = __import__("hashlib").sha256(bad_payload).hexdigest()
+    with pytest.raises(ControlPlaneError, match="malformed_payload"):
+        ingestion.ingest(claims, envelope, bad_payload)
 
 
 def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_stream("synergy:season", provider="nba", owner="collector", required_observations=["synergy"], publication_strategy="replace", enabled=True)
+    queued = publications.enqueue("synergy:season", season="2025-26", cutoff=now)
+    assert publications.enqueue("synergy:season", season="2025-26", cutoff=now).job_id == queued.job_id
     first = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 1})
     with pytest.raises(ControlPlaneError, match="stale_composition"):
         publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=0)
@@ -102,3 +109,25 @@ def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     assert publications.current("synergy:season").publication_id == second.publication_id
     rollback = publications.rollback("synergy:season", reason="operator repair")
     assert rollback.payload == first.payload
+    assert any(row.enabled is False for row in publications.register_default_streams() if row.stream_key == "synergy:l15")
+
+
+def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(request.request_id, {"kind": kind}, version="v1")
+    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
+    cycle = control.open_cycle(manifest.manifest_id, completed_game_count=0)
+    assert cycle.status == "no_game"
+    operations = CollectionOperationsService(control_db, clock=lambda: now)
+    assert operations.validate_completeness(required_team_ids=[str(i) for i in range(30)], observed_team_ids=[str(i) for i in range(30)], league_complete=True)["complete"]
+    assert not operations.validate_completeness(required_base_slices=["play_types"], complete_base_slices=[])["complete"]
+    audit = operations.audit(actor="operator", action="cycle.open", resource=cycle.cycle_id, reason="scheduled collection")
+    assert audit.reason == "scheduled collection"
+    item = operations.reconciliation(season="2025-26", kind="identity", reason="identity_unresolved")
+    assert operations.resolve_reconciliation(item.item_id, actor="operator", reason="catalog repaired").status == "resolved"
+    assert operations.alert(cycle_id=cycle.cycle_id, severity="warning", code="stale_catalog").code == "stale_catalog"

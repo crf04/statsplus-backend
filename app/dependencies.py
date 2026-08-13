@@ -53,6 +53,7 @@ class ApplicationDependencies:
     collection_control: Any | None = None
     observation_ingestion: Any | None = None
     publication_service: Any | None = None
+    collection_operations: Any | None = None
 
 
 def build_dependencies(
@@ -107,6 +108,7 @@ def build_dependencies(
         CollectionControlService,
         ObservationIngestionService,
         PublicationService,
+        CollectionOperationsService,
     )
 
     # Load the reviewed statistic definitions before constructing providers.
@@ -125,7 +127,7 @@ def build_dependencies(
 
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
-    collector_tokens = collection_control = observation_ingestion = publication_service = None
+    collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -136,6 +138,7 @@ def build_dependencies(
         collection_control = CollectionControlService(engine)
         observation_ingestion = ObservationIngestionService(engine)
         publication_service = PublicationService(engine)
+        collection_operations = CollectionOperationsService(engine)
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
     )
@@ -406,6 +409,7 @@ def build_dependencies(
         collection_control=collection_control,
         observation_ingestion=observation_ingestion,
         publication_service=publication_service,
+        collection_operations=collection_operations,
     )
 
 

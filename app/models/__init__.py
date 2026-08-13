@@ -94,6 +94,12 @@ from .collection_control import (  # noqa: E402
     PublicationPointer,
     CompositionJob,
     CollectorTokenReplay,
+    CollectionCycle,
+    AuditEvent,
+    ReconciliationItem,
+    CollectionAlert,
+    CollectorUsage,
+    ValidationSummary,
 )
 
 __all__ = [
@@ -138,4 +144,10 @@ __all__ = [
     'PublicationPointer',
     'CompositionJob',
     'CollectorTokenReplay',
+    'CollectionCycle',
+    'AuditEvent',
+    'ReconciliationItem',
+    'CollectionAlert',
+    'CollectorUsage',
+    'ValidationSummary',
 ]
