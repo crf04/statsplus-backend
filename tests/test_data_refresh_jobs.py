@@ -590,6 +590,7 @@ def job_app(tmp_path, monkeypatch):
             "SKIP_TABLE_CREATE": False,
         }
     )
+    assert app.extensions["dependencies"].data_refresh_jobs_service._poller is None
 
     engine = get_engine(app.extensions["runtime_settings"])
     sync_job_service = DataRefreshJobService(
@@ -677,11 +678,12 @@ def test_start_returns_202_and_status_is_visible(job_app, monkeypatch):
 
     client = job_app.test_client()
     headers = _admin_headers(monkeypatch)
-    monkeypatch.setattr(
-        data_update_routes.data_service,
-        "update_all_data",
-        lambda **kwargs: True,
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            data_update_routes.data_service,
+            "update_all_data",
+            lambda **kwargs: True,
+        )
 
     response = client.post("/api/data/update_database", headers=headers)
 
@@ -707,9 +709,10 @@ def test_duplicate_active_operation_returns_409(job_app, monkeypatch):
 
     client = job_app.test_client()
     headers = _admin_headers(monkeypatch)
-    monkeypatch.setattr(
-        data_update_routes.data_service, "update_all_data", lambda: True
-    )
+    with client.application.app_context():
+        monkeypatch.setattr(
+            data_update_routes.data_service, "update_all_data", lambda: True
+        )
 
     engine = get_engine(get_runtime_settings())
     with Session(engine) as session:
