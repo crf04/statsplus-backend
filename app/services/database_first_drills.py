@@ -180,6 +180,7 @@ class FailureDrillRunner:
         self.restore_ingestion = restore_ingestion
         self.restore_started = restore_started
         self.restore_command_evidence = dict(restore_command_evidence or {})
+        self._drill_cutoff: datetime | None = None
         requested_url = database_url or (str(engine.url) if engine is not None else None)
         self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
         self.configuration_error = self._validate_configuration(
@@ -470,6 +471,7 @@ class FailureDrillRunner:
 
         def duplicate_delivery_idempotency() -> Mapping[str, Any]:
             now = self.clock().astimezone(UTC)
+            self._drill_cutoff = now
             payload = json.dumps(
                 {
                     "base": "drill_observation",
@@ -1030,7 +1032,7 @@ class FailureDrillRunner:
                     observation_type="drill_observation",
                     scope={"window": "season"},
                     season="2025-26",
-                    cutoff=self.clock().astimezone(UTC).isoformat(),
+                    cutoff=(self._drill_cutoff or self.clock().astimezone(UTC)).isoformat(),
                     retrieved_at=self.clock().astimezone(UTC).isoformat(),
                     schema_version=1,
                     payload={"base": "drill_observation", "rows": [{"slice_key": "restore", "value": 1}]},
@@ -1055,19 +1057,21 @@ class FailureDrillRunner:
                     restored_outbox = ResidentialOutbox(
                         outbox_path, clock=lambda: self.clock().astimezone(UTC)
                     )
-                    item = restored_outbox.enqueue_observation(replay_envelope)
-                    duplicate_item = restored_outbox.enqueue_observation(replay_envelope)
-                    wire = json.loads(gzip.decompress(item.payload))
-                    restored_payload = json.dumps(
-                        wire["payload"], sort_keys=True, separators=(",", ":")
-                    ).encode()
-                    restored_envelope = {key: value for key, value in wire.items() if key != "payload"}
-                    first_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
-                    second_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
-                    acknowledged = restored_outbox.acknowledge(
-                        item.item_id, checksum=replay_envelope.checksum
-                    )
-                    restored_outbox.close()
+                    try:
+                        item = restored_outbox.enqueue_observation(replay_envelope)
+                        duplicate_item = restored_outbox.enqueue_observation(replay_envelope)
+                        wire = json.loads(gzip.decompress(item.payload))
+                        restored_payload = json.dumps(
+                            wire["payload"], sort_keys=True, separators=(",", ":")
+                        ).encode()
+                        restored_envelope = {key: value for key, value in wire.items() if key != "payload"}
+                        first_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
+                        second_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
+                        acknowledged = restored_outbox.acknowledge(
+                            item.item_id, checksum=replay_envelope.checksum
+                        )
+                    finally:
+                        restored_outbox.close()
                 checks = {
                     "ledger": f"SELECT game_id FROM canonical_game_ledger_games WHERE game_id = '{restore_game}'",
                     "pointers": f"SELECT stream_key FROM publication_pointers WHERE stream_key = '{restore_stream}' AND active_publication_id = '{restore_publication}' AND previous_publication_id = '{restore_prior_publication}'",
@@ -1207,20 +1211,22 @@ class FailureDrillRunner:
             )
             with TemporaryDirectory(prefix="statsplus-operator-outbox-") as directory:
                 outbox = ResidentialOutbox(str(Path(directory) / "outbox.sqlite3"), clock=self.clock)
-                item = outbox.enqueue_observation(envelope)
-                duplicate = outbox.enqueue_observation(envelope)
-                wire = json.loads(gzip.decompress(item.payload))
-                body = json.dumps(wire["payload"], sort_keys=True, separators=(",", ":")).encode()
-                wire_envelope = {key: value for key, value in wire.items() if key != "payload"}
-                invoke = self.restore_ingestion
-                if invoke is None:
-                    first = target_ingestion.ingest(claims, wire_envelope, body)
-                    second = target_ingestion.ingest(claims, wire_envelope, body)
-                else:
-                    first = invoke(restored, claims, wire_envelope, body)
-                    second = invoke(restored, claims, wire_envelope, body)
-                acknowledged = outbox.acknowledge(item.item_id, checksum=envelope.checksum)
-                outbox.close()
+                try:
+                    item = outbox.enqueue_observation(envelope)
+                    duplicate = outbox.enqueue_observation(envelope)
+                    wire = json.loads(gzip.decompress(item.payload))
+                    body = json.dumps(wire["payload"], sort_keys=True, separators=(",", ":")).encode()
+                    wire_envelope = {key: value for key, value in wire.items() if key != "payload"}
+                    invoke = self.restore_ingestion
+                    if invoke is None:
+                        first = target_ingestion.ingest(claims, wire_envelope, body)
+                        second = target_ingestion.ingest(claims, wire_envelope, body)
+                    else:
+                        first = invoke(restored, claims, wire_envelope, body)
+                        second = invoke(restored, claims, wire_envelope, body)
+                    acknowledged = outbox.acknowledge(item.item_id, checksum=envelope.checksum)
+                finally:
+                    outbox.close()
             first_id = getattr(first, "observation_id", None)
             second_id = getattr(second, "observation_id", None)
             replay = bool(getattr(second, "replay", False))
