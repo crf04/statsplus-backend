@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,21 +72,26 @@ class _Provider:
 class _Recorder:
     def __init__(self):
         self.count = 0
+        self.staged = set()
 
-    def stage(self, observation, *, season, game_id, retrieved_at):
+    def stage(
+        self, observation, *, season, game_id, retrieved_at,
+        manifest_id, manifest_scope, manifest_cutoff,
+    ):
         self.count += 1
         observation_id = f"accepted:{game_id}:{self.count}"
+        self.staged.add(observation_id)
         return observation_id, {
             "observation_id": observation_id,
             "client_observation_id": observation_id,
             "collector_id": "test",
-            "manifest_id": None,
+            "manifest_id": manifest_id,
             "environment": "testing",
             "provider": "pbp",
             "observation_type": "canonical_game_ledger",
-            "scope": "{}",
+            "scope": json.dumps({"game_id": game_id, "surface": manifest_scope}),
             "season": season,
-            "cutoff": retrieved_at,
+            "cutoff": manifest_cutoff,
             "schema_version": 1,
             "checksum": observation_id,
             "payload": "{}",
@@ -96,6 +102,12 @@ class _Recorder:
 
     def get_staged(self, observation_id):
         return []
+
+    def consume(self, observation_id):
+        self.staged.discard(observation_id)
+
+    def discard(self, observation_id):
+        self.staged.discard(observation_id)
 
 
 def _event():
@@ -172,23 +184,36 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=_Recorder(),
+        observation_recorder=(recorder := _Recorder()),
         repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
 
-    result = service.refresh("2024-25")
+    result = service.refresh(
+        "2024-25",
+        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        governed_events=(_event(),),
+        manifest_id="ledger-manifest",
+        collect_before=datetime(2024, 11, 17, tzinfo=timezone.utc),
+    )
 
     assert result.complete
     assert result.status == "complete"
     assert provider.calls == [("0022400001", "2024-25", "Regular Season")]
+    assert recorder.staged == set()
     progress = repository.get_progress("2024-25")
     assert progress is not None
     assert progress.status == "complete"
     assert progress.completed_game_ids == frozenset({"0022400001"})
     with engine.connect() as connection:
-        assert len(connection.execute(select(CompositionJob)).all()) == 6
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+        assert len(jobs) == 6
+        assert {job["manifest_id"] for job in jobs} == {"ledger-manifest"}
+        accepted = connection.execute(select(CollectionObservation)).mappings().one()
+    assert accepted["manifest_id"] == "ledger-manifest"
+    assert accepted["cutoff"] == datetime(2024, 11, 16)
+    assert json.loads(accepted["scope"])["surface"] == "canonical_game_ledger"
 
 
 def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(tmp_path):
@@ -272,6 +297,9 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
         season="2024-25",
         game_id="0022400001",
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        manifest_id="manifest-1",
+        manifest_scope="canonical_game_ledger",
+        manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
     participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
         observation_id
@@ -287,6 +315,9 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
         season="2024-25",
         game_id="0022400001",
         retrieved_at=datetime(2024, 11, 16, 0, 1, tzinfo=timezone.utc),
+        manifest_id="manifest-1",
+        manifest_scope="canonical_game_ledger",
+        manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
     second_participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
         second_id
@@ -294,6 +325,40 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
 
     assert participants[1610612747][0] == 2544
     assert second_participants[1610612747][0] == 999999
+    recorder.consume(observation_id)
+    try:
+        recorder.get_staged(observation_id)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("consumed staged observation remained readable")
+    assert recorder.get_staged(second_id) is not None
+    recorder.discard(second_id)
+
+
+def test_staged_observation_ids_are_concurrent_and_exactly_discarded(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'staging.sqlite3'}")
+    run_migrations(engine)
+    recorder = CollectionObservationLedgerRecorder(engine)
+    now = datetime(2024, 11, 16, tzinfo=timezone.utc)
+
+    def stage(index):
+        return recorder.stage(
+            [{"GAME_ID": str(index), "EntityId": index + 1}],
+            season="2024-25", game_id=str(index), retrieved_at=now,
+            manifest_id="manifest", manifest_scope="canonical_game_ledger",
+            manifest_cutoff=now,
+        )[0]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        observation_ids = tuple(executor.map(stage, range(40)))
+
+    assert len(set(observation_ids)) == 40
+    recorder.discard(observation_ids[0])
+    assert recorder.get_staged(observation_ids[1]) is not None
+    for observation_id in observation_ids[1:]:
+        recorder.discard(observation_id)
+    assert recorder.pending_count() == 0
 
 
 def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_path):
@@ -305,13 +370,14 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
         def get_participants(self, observation_id):
             return {1610612747: (2544,), 1610612759: (201935,)}
 
+    recorder = _Recorder()
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
         event_catalog=_Events(_event()),
         athlete_catalog=_Athletes(),
         participant_catalog=MissingParticipant(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=_Recorder(),
+        observation_recorder=recorder,
         repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
@@ -322,6 +388,57 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
         assert connection.execute(select(CollectionObservation)).all() == []
         assert connection.execute(select(CompositionJob)).all() == []
     assert repository.get_game("0022400001") is None
+    assert recorder.staged == set()
+
+
+def test_transaction_exception_discards_staged_observation(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'write-failure.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    monkeypatch.setattr(
+        repository,
+        "replace_games_atomic",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
+    )
+    recorder = _Recorder()
+
+    result = LedgerBackfillService(
+        provider=_Provider(_payload()), event_catalog=_Events(_event()),
+        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=recorder, repository=repository,
+        max_concurrency=1,
+        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+    ).refresh("2024-25")
+
+    assert not result.complete
+    assert recorder.staged == set()
+
+
+def test_deadline_crossed_during_provider_call_cannot_accept_observation(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'deadline.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    recorder = _Recorder()
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    deadline = cutoff + timedelta(minutes=1)
+    clock_values = iter((cutoff, deadline))
+
+    result = LedgerBackfillService(
+        provider=_Provider(_payload()), event_catalog=_Events(_event()),
+        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=recorder, repository=repository,
+        max_concurrency=1, clock=lambda: next(clock_values),
+    ).refresh(
+        "2024-25", cutoff=cutoff, governed_events=(_event(),),
+        manifest_id="ledger-manifest", collect_before=deadline,
+    )
+
+    assert not result.complete
+    assert recorder.staged == set()
+    with engine.connect() as connection:
+        assert connection.execute(select(CollectionObservation)).all() == []
 
 
 def test_valid_game_commits_when_later_target_fails(tmp_path):

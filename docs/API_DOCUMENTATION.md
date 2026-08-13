@@ -1070,7 +1070,10 @@ adjudication evidence, and zero or unequal comparison sets cannot claim exact
 parity.
 PBP retrievals are accepted into immutable collection observations before a
 ledger replacement; inactive publication provenance must resolve exactly to
-those accepted rows. Player game logs Season, traditional opponent Season and
+those accepted rows and to one authorizing canonical-ledger manifest/cutoff.
+Collection stops at that manifest's `collect_before`; later composition of
+evidence accepted before the deadline remains allowed for repair and
+rehearsal. Player game logs Season, traditional opponent Season and
 L15, assist locations Season and L15, and player per-36 each have independent
 candidate payloads. A missing assist primitive cannot suppress the other
 streams. Durable traditional/per-36 parity artifacts remain

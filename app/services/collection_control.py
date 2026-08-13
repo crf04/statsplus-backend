@@ -2297,14 +2297,43 @@ class PublicationService(_SessionService):
                 raise ControlPlaneError("inactive_ledger_stream_required")
             if not provenance:
                 raise ControlPlaneError("ledger_provenance_required")
-            accepted = set(session.scalars(select(CollectionObservation.observation_id).where(
+            accepted_rows = session.scalars(select(CollectionObservation).where(
                 CollectionObservation.observation_id.in_(tuple(provenance)),
                 CollectionObservation.season == season,
                 CollectionObservation.provider == "pbp",
                 CollectionObservation.observation_type == "canonical_game_ledger",
-            )))
+            )).all()
+            accepted = {row.observation_id for row in accepted_rows}
             if accepted != set(provenance):
                 raise ControlPlaneError("ledger_provenance_not_accepted")
+            manifest_ids = {row.manifest_id for row in accepted_rows}
+            if len(manifest_ids) != 1 or None in manifest_ids:
+                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            manifest_id = str(next(iter(manifest_ids)))
+            manifest = session.get(CollectionManifest, manifest_id)
+            governed_cutoff = _aware(cutoff)
+            if (
+                manifest is None
+                or manifest.season != season
+                or _aware(manifest.cutoff) != governed_cutoff
+                or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
+                or 1 not in set(json.loads(manifest.accepted_versions))
+            ):
+                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            for observation in accepted_rows:
+                try:
+                    scope = json.loads(observation.scope)
+                except (TypeError, ValueError) as error:
+                    raise ControlPlaneError("ledger_provenance_scope_mismatch") from error
+                if (
+                    not isinstance(scope, Mapping)
+                    or scope.get("surface") != "canonical_game_ledger"
+                    or _aware(observation.cutoff) != governed_cutoff
+                    or _aware(observation.retrieved_at) > _aware(manifest.collect_before)
+                    or _aware(observation.accepted_at) > _aware(manifest.collect_before)
+                    or observation.schema_version not in set(json.loads(manifest.accepted_versions))
+                ):
+                    raise ControlPlaneError("ledger_provenance_scope_mismatch")
             next_version = session.scalar(
                 select(PublicationVersion.version).where(
                     PublicationVersion.stream_key == stream_key,

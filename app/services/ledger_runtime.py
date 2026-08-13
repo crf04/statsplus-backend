@@ -25,12 +25,20 @@ class LedgerGovernance:
     team_ids: frozenset[int]
     expected_l15_game_ids: dict[int, frozenset[str]]
     events: tuple[Mapping[str, object], ...] = ()
+    manifest_id: str | None = None
+    manifest_scope: str = "canonical_game_ledger"
+    collect_before: datetime | None = None
 
 
 class LedgerGovernanceReader(Protocol):
-    def read(self, season: str, cutoff: datetime) -> LedgerGovernance: ...
+    def read_for_collection(self, season: str) -> LedgerGovernance: ...
 
-    def read_active(self, season: str) -> LedgerGovernance: ...
+    def read_for_composition(
+        self,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None = None,
+    ) -> LedgerGovernance: ...
 
 
 class ActiveManifestLedgerGovernanceReader:
@@ -41,7 +49,21 @@ class ActiveManifestLedgerGovernanceReader:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
-        return self._read(season, cutoff, require_l15=True)
+        return self.read_for_composition(season, cutoff)
+
+    def read_for_composition(
+        self,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None = None,
+    ) -> LedgerGovernance:
+        return self._read(
+            season,
+            cutoff,
+            require_l15=True,
+            require_collection_authorization=False,
+            manifest_id=manifest_id,
+        )
 
     def _read(
         self,
@@ -49,19 +71,31 @@ class ActiveManifestLedgerGovernanceReader:
         cutoff: datetime,
         *,
         require_l15: bool,
+        require_collection_authorization: bool,
+        manifest_id: str | None = None,
     ) -> LedgerGovernance:
         with self.engine.connect() as connection:
             active = connection.execute(select(ActiveSeason).where(
                 ActiveSeason.season == season,
                 ActiveSeason.status == "active",
                 ActiveSeason.phase == "Regular Season",
-            )).first()
-            manifest = connection.execute(select(CollectionManifest).where(
+            )).first() if require_collection_authorization else True
+            manifest_query = select(CollectionManifest).where(
                 CollectionManifest.season == season,
                 CollectionManifest.cutoff == cutoff,
-                CollectionManifest.status == "active",
-                CollectionManifest.collect_before > self.clock(),
-            )).mappings().one_or_none()
+            )
+            if manifest_id is not None:
+                manifest_query = manifest_query.where(
+                    CollectionManifest.manifest_id == manifest_id,
+                )
+            if require_collection_authorization:
+                manifest_query = manifest_query.where(
+                    CollectionManifest.status == "active",
+                    CollectionManifest.collect_before > self.clock(),
+                )
+            manifest = connection.execute(
+                manifest_query.order_by(CollectionManifest.created_at.desc()).limit(1)
+            ).mappings().one_or_none()
             events = connection.execute(select(EventCatalogEntry).where(
                 EventCatalogEntry.season == season,
                 EventCatalogEntry.classification == "Regular Season",
@@ -109,9 +143,15 @@ class ActiveManifestLedgerGovernanceReader:
                 if len(game_ids) >= 15
             },
             events=events,
+            manifest_id=str(manifest["manifest_id"]),
+            collect_before=(
+                manifest["collect_before"].replace(tzinfo=timezone.utc)
+                if manifest["collect_before"].tzinfo is None
+                else manifest["collect_before"]
+            ),
         )
 
-    def read_active(self, season: str) -> LedgerGovernance:
+    def read_for_collection(self, season: str) -> LedgerGovernance:
         """Resolve the newest executable manifest before any provider I/O."""
 
         now = self.clock()
@@ -123,7 +163,17 @@ class ActiveManifestLedgerGovernanceReader:
             ).order_by(CollectionManifest.cutoff.desc()).limit(1))
         if cutoff is None:
             raise ValueError("active manifest and completed Event Catalog governance are required")
-        return self._read(season, cutoff, require_l15=False)
+        return self._read(
+            season,
+            cutoff,
+            require_l15=False,
+            require_collection_authorization=True,
+            manifest_id=None,
+        )
+
+    # Compatibility alias for internal callers written before collection and
+    # composition authorization became distinct operations.
+    read_active = read_for_collection
 
 
 class LedgerRuntime:
@@ -151,13 +201,16 @@ class LedgerRuntime:
         max_games: int | None = None,
         historical_repair: bool = False,
     ) -> BackfillResult:
-        governance = self.governance.read_active(season)
+        governance = self.governance.read_for_collection(season)
         return self.backfill.refresh(
             season,
             cutoff=governance.cutoff,
             max_games=max_games,
             historical_repair=historical_repair,
             governed_events=governance.events,
+            manifest_id=governance.manifest_id,
+            manifest_scope=governance.manifest_scope,
+            collect_before=governance.collect_before,
         )
 
     def compose_queued(self, season: str) -> int:
@@ -167,10 +220,17 @@ class LedgerRuntime:
                 table.c.season == season,
                 table.c.status == "queued",
             ).order_by(table.c.cutoff, table.c.created_at)).mappings().all()
-        cutoffs = sorted({row["cutoff"] for row in jobs})
+        slices = sorted({
+            (row["cutoff"], row["manifest_id"])
+            for row in jobs
+        }, key=lambda item: (item[0], item[1] or ""))
         completed = 0
-        for cutoff in cutoffs:
-            governance = self.governance.read(season, cutoff)
+        for cutoff, manifest_id in slices:
+            governance = self.governance.read_for_composition(
+                season,
+                cutoff,
+                manifest_id,
+            )
             games = tuple(
                 game
                 for summary in self.repository.list_games(season, through=cutoff.date())
@@ -196,7 +256,10 @@ class LedgerRuntime:
             ):
                 succeeded |= {"assist_locations_season", "assist_locations_l15"}
             with self.repository.engine.begin() as connection:
-                for job in (row for row in jobs if row["cutoff"] == cutoff):
+                for job in (
+                    row for row in jobs
+                    if row["cutoff"] == cutoff and row["manifest_id"] == manifest_id
+                ):
                     success = job["stream_key"] in succeeded
                     connection.execute(update(table).where(
                         table.c.job_id == job["job_id"],

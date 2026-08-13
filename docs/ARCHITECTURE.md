@@ -855,6 +855,17 @@ the season-level `general_opponent_stats` 30-team Per48 semantics keyed by
 empty comparison. Runtime refresh resolves the active unexpired manifest and
 its exact authorized Event Catalog snapshot before entering the
 provider-capable backfill boundary.
+Collection authorization and composition governance are intentionally
+separate. Provider I/O and new acceptance require an active Season plus an
+active manifest before `collect_before`; already accepted observations may be
+composed later from their immutable manifest/cutoff even after that manifest
+is expired or superseded (`scripts/ledger_refresh.py --compose-only` performs
+that operation without entering collection). Every ledger observation stores that manifest ID,
+the canonical ledger surface scope, schema version, and manifest cutoff, and a
+candidate refuses mixed-manifest or mismatched-cutoff provenance. Provider
+documents live only in an exact-ID staging cache during validation: successful
+entries are consumed after the atomic ledger commit, while every rejected or
+failed entry is discarded without affecting concurrent IDs.
 
 ### Database-first game-log reads
 

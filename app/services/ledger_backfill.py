@@ -57,9 +57,23 @@ class LedgerParticipantCatalogReader(Protocol):
 
 
 class LedgerObservationRecorder(Protocol):
-    def stage(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> tuple[str, Mapping[str, object]]: ...
+    def stage(
+        self,
+        observation: object,
+        *,
+        season: str,
+        game_id: str,
+        retrieved_at: datetime,
+        manifest_id: str,
+        manifest_scope: str,
+        manifest_cutoff: datetime,
+    ) -> tuple[str, Mapping[str, object]]: ...
 
     def get_staged(self, observation_id: str) -> object: ...
+
+    def consume(self, observation_id: str) -> None: ...
+
+    def discard(self, observation_id: str) -> None: ...
 
 
 class CollectionObservationLedgerRecorder:
@@ -70,7 +84,19 @@ class CollectionObservationLedgerRecorder:
         self._staged: dict[str, object] = {}
         self._lock = threading.Lock()
 
-    def stage(self, observation: object, *, season: str, game_id: str, retrieved_at: datetime) -> tuple[str, Mapping[str, object]]:
+    def stage(
+        self,
+        observation: object,
+        *,
+        season: str,
+        game_id: str,
+        retrieved_at: datetime,
+        manifest_id: str,
+        manifest_scope: str,
+        manifest_cutoff: datetime,
+    ) -> tuple[str, Mapping[str, object]]:
+        if not manifest_id or manifest_scope != "canonical_game_ledger":
+            raise LedgerValidationError("authorizing ledger manifest is required")
         document = (
             observation.to_dict(orient="records")
             if isinstance(observation, pd.DataFrame)
@@ -82,13 +108,16 @@ class CollectionObservationLedgerRecorder:
             "observation_id": observation_id,
             "client_observation_id": f"ledger:{game_id}:{observation_id}",
             "collector_id": "railway-ledger",
-            "manifest_id": None,
+            "manifest_id": manifest_id,
             "environment": "server",
             "provider": "pbp",
             "observation_type": "canonical_game_ledger",
-            "scope": json.dumps({"game_id": game_id}, sort_keys=True),
+            "scope": json.dumps(
+                {"game_id": game_id, "surface": manifest_scope},
+                sort_keys=True,
+            ),
             "season": season,
-            "cutoff": retrieved_at,
+            "cutoff": manifest_cutoff,
             "schema_version": 1,
             "checksum": hashlib.sha256(payload.encode()).hexdigest(),
             "payload": payload,
@@ -105,6 +134,24 @@ class CollectionObservationLedgerRecorder:
             if observation_id not in self._staged:
                 raise LedgerValidationError("staged participant observation is required")
             return self._staged[observation_id]
+
+    def consume(self, observation_id: str) -> None:
+        """Release one staged document only after its DB transaction commits."""
+
+        with self._lock:
+            self._staged.pop(observation_id, None)
+
+    def discard(self, observation_id: str) -> None:
+        """Release one rejected or failed staged document without affecting peers."""
+
+        with self._lock:
+            self._staged.pop(observation_id, None)
+
+    def pending_count(self) -> int:
+        """Return bounded lifecycle diagnostics without exposing documents."""
+
+        with self._lock:
+            return len(self._staged)
 
 
 class AcceptedObservationParticipantCatalog:
@@ -197,7 +244,11 @@ class LedgerBackfillService:
             (event_catalog, ("get_events", "get_freshness"), "event_catalog"),
             (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
             (participant_catalog, ("get_participants",), "participant_catalog"),
-            (observation_recorder, ("stage", "get_staged"), "observation_recorder"),
+            (
+                observation_recorder,
+                ("stage", "get_staged", "consume", "discard"),
+                "observation_recorder",
+            ),
         ):
             if any(not callable(getattr(collaborator, method, None)) for method in methods):
                 raise TypeError(f"{label} does not satisfy the governed ledger contract")
@@ -216,6 +267,9 @@ class LedgerBackfillService:
         max_games: int | None = None,
         historical_repair: bool = False,
         governed_events: Iterable[Mapping[str, object]] | None = None,
+        manifest_id: str | None = None,
+        manifest_scope: str = "canonical_game_ledger",
+        collect_before: datetime | None = None,
     ) -> BackfillResult:
         """Run one bounded pass and persist resumable progress.
 
@@ -224,16 +278,30 @@ class LedgerBackfillService:
         untouched without rolling back other valid progress from the pass.
         """
 
-        now = _aware(cutoff or self.clock())
+        retrieved_at = _aware(self.clock())
+        through = _aware(cutoff or retrieved_at)
+        if governed_events is not None and not manifest_id:
+            raise LedgerValidationError("authorized ledger manifest identity is required")
+        if governed_events is not None and collect_before is None:
+            raise LedgerValidationError("authorized ledger collection deadline is required")
         events = (
-            self._authorized_events(governed_events, season=season, through=now)
+            self._authorized_events(governed_events, season=season, through=through)
             if governed_events is not None
-            else self._governed_events(season, through=now)
+            else self._governed_events(season, through=through)
         )
         expected_ids = frozenset(str(event["nba_game_id"]) for event in events)
         checksums = self.repository.game_checksums(season)
-        summaries = {summary.game_id: summary for summary in self.repository.list_games(season, through=now.date())}
-        targets = self._targets(events, checksums=checksums, summaries=summaries, now=now, repair=historical_repair)
+        summaries = {
+            summary.game_id: summary
+            for summary in self.repository.list_games(season, through=through.date())
+        }
+        targets = self._targets(
+            events,
+            checksums=checksums,
+            summaries=summaries,
+            now=retrieved_at,
+            repair=historical_repair,
+        )
         if max_games is not None:
             if isinstance(max_games, bool) or max_games < 1:
                 raise ValueError("max_games must be a positive integer")
@@ -243,7 +311,7 @@ class LedgerBackfillService:
             selected = targets
             lower_priority_remaining = 0
 
-        athlete_ids = self._athlete_ids(season, now=now)
+        athlete_ids = self._athlete_ids(season, now=retrieved_at)
         staged: list[tuple[CanonicalGame, Mapping[str, object]]] = []
         failures: list[str] = []
         lock = threading.Lock()
@@ -251,13 +319,18 @@ class LedgerBackfillService:
         def fetch(target: _Target) -> tuple[str, CanonicalGame | None, Mapping[str, object] | None, str | None]:
             event = target.event
             game_id = str(event["nba_game_id"])
+            observation_id: str | None = None
+            retained_for_commit = False
             try:
                 observation = self.provider.fetch_game_player_logs(game_id, season, season_type="Regular Season")
                 observation_id, observation_values = self.observation_recorder.stage(
                     observation,
                     season=season,
                     game_id=game_id,
-                    retrieved_at=now,
+                    retrieved_at=retrieved_at,
+                    manifest_id=manifest_id or "legacy-direct-backfill",
+                    manifest_scope=manifest_scope,
+                    manifest_cutoff=through,
                 )
                 participants = self.participant_catalog.get_participants(observation_id)
                 game = canonical_game_from_pbp(
@@ -265,7 +338,7 @@ class LedgerBackfillService:
                     event=event,
                     season=season,
                     source_observation_id=observation_id,
-                    retrieved_at=now,
+                    retrieved_at=retrieved_at,
                     participant_ids_by_team=participants,
                 )
                 if athlete_ids is not None:
@@ -281,6 +354,7 @@ class LedgerBackfillService:
                             },
                         )
                         raise LedgerValidationError("PBP game contains an unresolved Athlete Catalog identity")
+                retained_for_commit = True
                 return game_id, game, observation_values, None
             except (
                 KeyError,
@@ -292,6 +366,9 @@ class LedgerBackfillService:
                 ProviderUnavailableError,
             ) as error:
                 return game_id, None, None, _safe_reason(error)
+            finally:
+                if observation_id is not None and not retained_for_commit:
+                    self.observation_recorder.discard(observation_id)
 
         if selected:
             with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
@@ -308,23 +385,35 @@ class LedgerBackfillService:
 
         writes = []
         for game, observation in sorted(staged, key=lambda item: item[0].game_id):
+            committed = False
             try:
+                accepted_at = _aware(self.clock())
+                if collect_before is not None and accepted_at >= _aware(collect_before):
+                    raise LedgerValidationError("ledger manifest collection deadline elapsed")
+                accepted_observation = dict(observation)
+                accepted_observation["accepted_at"] = accepted_at
                 writes.extend(self.repository.replace_games_atomic(
                     (game,),
-                    accepted_observations={game.source_observation_id: observation},
+                    accepted_observations={game.source_observation_id: accepted_observation},
                 ))
+                committed = True
             except Exception:
                 failures.append(game.game_id)
+            finally:
+                if committed:
+                    self.observation_recorder.consume(game.source_observation_id)
+                else:
+                    self.observation_recorder.discard(game.source_observation_id)
         resulting_ids = {
             summary.game_id
-            for summary in self.repository.list_games(season, through=now.date())
+            for summary in self.repository.list_games(season, through=through.date())
         }
         complete = expected_ids == resulting_ids
         pending = tuple(sorted(expected_ids - resulting_ids))
         status = "complete" if complete else "unavailable"
         self._save_progress(
             season,
-            cutoff=now,
+            cutoff=through,
             completed=resulting_ids,
             failed=failures,
             status=status,
@@ -333,7 +422,7 @@ class LedgerBackfillService:
         )
         return BackfillResult(
             season=season,
-            cutoff=now,
+            cutoff=through,
             status=status,
             complete=complete,
             games_processed=len(staged),

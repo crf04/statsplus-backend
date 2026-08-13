@@ -324,6 +324,7 @@ class LedgerCorrectionQueue:
                     update(table).where(table.c.job_id == existing).values(
                         status="queued",
                         attempts=0,
+                        manifest_id=manifest["manifest_id"] if manifest is not None else None,
                         updated_at=now,
                         last_error=None,
                     )
@@ -332,7 +333,7 @@ class LedgerCorrectionQueue:
                 connection.execute(insert(table).values(
                     job_id=str(uuid4()),
                     stream_key=stream_key,
-                    manifest_id=None,
+                    manifest_id=manifest["manifest_id"] if manifest is not None else None,
                     season=game.season,
                     cutoff=cutoff,
                     status="queued",

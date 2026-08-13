@@ -85,7 +85,20 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     assert all(len(game_ids) == 15 for game_ids in governance.expected_l15_game_ids.values())
     assert ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
-    ).read_active("2025-26").expected_game_ids == governance.expected_game_ids
+    ).read_for_collection("2025-26").expected_game_ids == governance.expected_game_ids
+
+    with engine.begin() as connection:
+        connection.execute(update(CollectionManifest).values(
+            status="expired", collect_before=cutoff,
+        ))
+    after_deadline = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: cutoff + timedelta(days=1)
+    )
+    assert after_deadline.read_for_composition(
+        "2025-26", cutoff,
+    ).expected_game_ids == governance.expected_game_ids
+    with pytest.raises(ValueError, match="active manifest"):
+        after_deadline.read_for_collection("2025-26")
 
     with engine.begin() as connection:
         connection.execute(update(EventCatalogEntry).where(
@@ -137,7 +150,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
         } for stream in streams])
 
     class Governance:
-        def read(self, season, governed_cutoff):
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
             return LedgerGovernance(season, governed_cutoff, expected, team_ids, expected_l15)
 
     class Parity:
@@ -169,7 +182,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
 
 def test_refresh_fails_governance_before_any_backfill_or_provider_work():
     class Governance:
-        def read_active(self, season):
+        def read_for_collection(self, season):
             raise ValueError("active manifest required")
 
     class Backfill:
@@ -213,9 +226,11 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
 
     class Backfill:
         calls = 0
+        kwargs = None
 
         def refresh(self, *args, **kwargs):
             self.calls += 1
+            self.kwargs = kwargs
             return object()
 
     backfill = Backfill()
@@ -242,3 +257,6 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
         ))
     runtime.refresh("2025-26")
     assert backfill.calls == 1
+    assert backfill.kwargs["manifest_id"] == "manifest"
+    assert backfill.kwargs["manifest_scope"] == "canonical_game_ledger"
+    assert backfill.kwargs["collect_before"] == now + timedelta(hours=1)

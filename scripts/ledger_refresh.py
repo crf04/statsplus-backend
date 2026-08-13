@@ -28,6 +28,11 @@ def main() -> int:
     parser.add_argument("--max-games", type=int)
     parser.add_argument("--historical-repair", action="store_true")
     parser.add_argument("--compose", action="store_true")
+    parser.add_argument(
+        "--compose-only",
+        action="store_true",
+        help="compose already accepted jobs without authorizing provider collection",
+    )
     args = parser.parse_args()
     settings = RuntimeSettings(
         environment="development",
@@ -42,6 +47,10 @@ def main() -> int:
         materialization=dependencies.ledger_materialization_service,
         governance=ActiveManifestLedgerGovernanceReader(dependencies.engine),
     )
+    if args.compose_only:
+        composed = runtime.compose_queued(args.season)
+        print(json.dumps({"season": args.season, "composed_jobs": composed}, sort_keys=True))
+        return 0
     result = runtime.refresh(
         args.season,
         max_games=args.max_games,

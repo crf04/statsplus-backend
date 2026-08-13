@@ -73,16 +73,25 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            status="active", created_at=now,
+        ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
                 "observation_id": observation_id,
                 "client_observation_id": observation_id,
                 "collector_id": "test",
-                "manifest_id": None,
+                "manifest_id": "ledger-manifest",
                 "environment": "testing",
                 "provider": "pbp",
                 "observation_type": "canonical_game_ledger",
-                "scope": "{}",
+                "scope": json.dumps({
+                    "game_id": observation_id.removeprefix("pbp:"),
+                    "surface": "canonical_game_ledger",
+                }),
                 "season": "2025-26",
                 "cutoff": now,
                 "schema_version": 1,
@@ -115,6 +124,59 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         ("pbp:game-1", "game-1"),
         ("pbp:game-2", "game-2"),
     }
+
+
+def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now + timedelta(days=2))
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert(), [{
+            "manifest_id": manifest_id, "season": "2025-26", "cutoff": now,
+            "collect_before": now + timedelta(hours=1), "accepted_versions": "[1]",
+            "scopes": '["canonical_game_ledger"]', "checksum": manifest_id,
+            "status": status, "created_at": now,
+        } for manifest_id, status in (
+            ("ledger-manifest-a", "expired"),
+            ("ledger-manifest-b", "superseded"),
+        )])
+        connection.execute(CollectionObservation.__table__.insert(), [{
+            "observation_id": f"obs-{index}", "client_observation_id": f"obs-{index}",
+            "collector_id": "test", "manifest_id": manifest_id,
+            "environment": "testing", "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps({
+                "game_id": f"game-{index}", "surface": "canonical_game_ledger",
+            }),
+            "season": "2025-26",
+            "cutoff": now if index != 3 else now + timedelta(days=1),
+            "schema_version": 1, "checksum": str(index) * 64,
+            "payload": "{}", "payload_bytes": 2,
+            "retrieved_at": now, "accepted_at": now,
+        } for index, manifest_id in (
+            (1, "ledger-manifest-a"),
+            (2, "ledger-manifest-b"),
+            (3, "ledger-manifest-a"),
+        )])
+
+    with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-1": "game-1", "obs-2": "game-2"},
+        )
+    with pytest.raises(ControlPlaneError, match="scope_mismatch"):
+        publications.compose_inactive_ledger(
+            "player_per36", season="2025-26", cutoff=now, payload=[],
+            provenance={"obs-3": "game-3"},
+        )
+
+    # Composition remains legal after collect_before for evidence accepted
+    # before the immutable deadline.
+    version = publications.compose_inactive_ledger(
+        "player_per36", season="2025-26", cutoff=now, payload=[],
+        provenance={"obs-1": "game-1"},
+    )
+    assert version.status == "candidate"
 
 
 def test_pending_parity_blocks_ledger_stream_activation(control_db):

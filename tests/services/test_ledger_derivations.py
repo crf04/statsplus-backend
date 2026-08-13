@@ -26,7 +26,11 @@ from app.services.canonical_game_ledger import (
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
-from app.models.collection_control import CollectionObservation, PublicationVersion
+from app.models.collection_control import (
+    CollectionManifest,
+    CollectionObservation,
+    PublicationVersion,
+)
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
 
@@ -217,19 +221,31 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     publications.register_default_streams()
     games = _league_games()
     repository.replace_games_atomic(games)
+    candidate_cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
     with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2025-26",
+            cutoff=candidate_cutoff,
+            collect_before=datetime(2025, 11, 2, tzinfo=timezone.utc),
+            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
+            checksum="ledger-manifest", status="expired",
+            created_at=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
                 "observation_id": game.source_observation_id,
                 "client_observation_id": game.source_observation_id,
                 "collector_id": "test",
-                "manifest_id": None,
+                "manifest_id": "ledger-manifest",
                 "environment": "testing",
                 "provider": "pbp",
                 "observation_type": "canonical_game_ledger",
-                "scope": "{}",
+                "scope": json.dumps({
+                    "game_id": game.game_id,
+                    "surface": "canonical_game_ledger",
+                }),
                 "season": game.season,
-                "cutoff": game.retrieved_at,
+                "cutoff": candidate_cutoff,
                 "schema_version": 1,
                 "checksum": game.checksum,
                 "payload": "{}",
