@@ -36,6 +36,14 @@ from app.models.team_matchup import TeamMatchupFactRow, TeamMatchupSurfaceObserv
 
 UTC = timezone.utc
 
+# The benchmark is intentionally representative rather than a toy smoke test.
+# These lower bounds keep a tiny fixture from producing a misleadingly cheap
+# p95 or a query plan that does not exercise the governed indexes.
+MIN_FIXTURE_TEAMS = 30
+MIN_FIXTURE_GAMES = 10
+MIN_FIXTURE_PLAYERS = 100
+MIN_FIXTURE_LOG_ROWS = 500
+
 
 def _rows(value, *, label: str) -> list[dict]:
     if isinstance(value, Mapping):
@@ -90,9 +98,16 @@ def _require_disposable_database(engine: Engine) -> None:
     inspectable = inspect(engine)
     for table_name in (
         "event_catalog",
+        "event_catalog_refreshes",
         "player_game_logs",
+        "player_game_log_refreshes",
         "player_pool_snapshots",
+        "publication_streams",
+        "publication_versions",
         "publication_pointers",
+        "publication_observations",
+        "publication_activations",
+        "canonical_game_ledger_games",
     ):
         if table_name in inspectable.get_table_names():
             with engine.connect() as connection:
@@ -104,7 +119,71 @@ def _require_disposable_database(engine: Engine) -> None:
                     )
 
 
-def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str) -> None:
+def _validate_fixture_scale(
+    *,
+    event_rows: list[dict],
+    player_rows: list[dict],
+    pool_rows: list[dict],
+    team_rows: list[dict],
+    game_id: str,
+) -> dict[str, object]:
+    """Require enough teams/games/players to represent a production read."""
+
+    game_ids = {
+        str(row.get("nba_game_id") or row.get("game_id") or game_id)
+        for row in event_rows
+    }
+    team_ids = {
+        int(value)
+        for row in event_rows
+        for value in (row.get("home_team_id"), row.get("away_team_id"))
+        if value is not None
+    }
+    team_ids.update(
+        int(row["team_id"])
+        for row in team_rows
+        if row.get("team_id") is not None
+    )
+    player_ids = {int(row["player_id"]) for row in player_rows if row.get("player_id") is not None}
+    pool_player_ids = {
+        int(player.get("canonical_player_id") or player.get("player_id"))
+        for row in pool_rows
+        for player in (row.get("players") if isinstance(row.get("players"), list) else [row])
+        if isinstance(player, Mapping)
+        and (player.get("canonical_player_id") or player.get("player_id")) is not None
+    }
+    player_ids.update(pool_player_ids)
+    profile = {
+        "fixture_kind": "representative_fixture",
+        "production_claim": False,
+        "teams": len(team_ids),
+        "games": len(game_ids),
+        "players": len(player_ids),
+        "player_game_log_rows": len(player_rows),
+        "minimums": {
+            "teams": MIN_FIXTURE_TEAMS,
+            "games": MIN_FIXTURE_GAMES,
+            "players": MIN_FIXTURE_PLAYERS,
+            "player_game_log_rows": MIN_FIXTURE_LOG_ROWS,
+        },
+    }
+    failures = [
+        key for key, minimum in (
+            ("teams", MIN_FIXTURE_TEAMS),
+            ("games", MIN_FIXTURE_GAMES),
+            ("players", MIN_FIXTURE_PLAYERS),
+            ("player_game_log_rows", MIN_FIXTURE_LOG_ROWS),
+        ) if int(profile[key]) < minimum
+    ]
+    if failures:
+        raise SystemExit(
+            "benchmark fixture is below representative minimums: "
+            + ", ".join(failures)
+        )
+    return profile
+
+
+def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str) -> dict[str, object]:
     """Load the JSON fixture into the temporary application schema.
 
     The benchmark deliberately owns fixture loading so timing never measures
@@ -142,6 +221,13 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
         raise SystemExit("benchmark publications require streams, versions, and pointers")
     stream_rows = _rows(publication_streams, label="publications.streams")
     pointer_rows = _rows(publication_pointers, label="publications.pointers")
+    fixture_profile = _validate_fixture_scale(
+        event_rows=event_rows,
+        player_rows=player_rows,
+        pool_rows=pool_rows,
+        team_rows=team_facts,
+        game_id=game_id,
+    )
 
     with engine.begin() as connection:
         event_table = EventCatalogEntry.__table__
@@ -312,6 +398,7 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
             values.setdefault("fence", 1)
             values["updated_at"] = _datetime(values.get("updated_at"), default=now)
             connection.execute(pointer_table.insert().values(values))
+    return fixture_profile
 
 
 def main() -> int:
@@ -334,6 +421,11 @@ def main() -> int:
     parser.add_argument("--game-id", required=True)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--report", required=True)
+    parser.add_argument(
+        "--artifact",
+        default=str(Path("analysis") / "database_first_benchmark_artifact.json"),
+        help="sanitized deterministic evidence artifact regenerated with the report",
+    )
     args = parser.parse_args()
     _validate_database_scope(
         args.database_url,
@@ -373,7 +465,7 @@ def main() -> int:
             "player_game_logs, player_diets, team_matchups, and publications sections"
         )
 
-    _load_fixture(engine, seeded, season=season, game_id=game_id)
+    fixture_profile = _load_fixture(engine, seeded, season=season, game_id=game_id)
 
     settings = RuntimeSettings(
         environment="testing",
@@ -456,8 +548,12 @@ def main() -> int:
         iterations=args.iterations,
         provider_call_count=lambda: provider_counter[0],
         fixture_validated=True,
+        fixture_profile=fixture_profile,
     )
     with open(args.report, "w", encoding="utf-8") as handle:
+        json.dump(report.to_dict(), handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    with open(args.artifact, "w", encoding="utf-8") as handle:
         json.dump(report.to_dict(), handle, indent=2, sort_keys=True)
         handle.write("\n")
     print(json.dumps(report.to_dict(), sort_keys=True))

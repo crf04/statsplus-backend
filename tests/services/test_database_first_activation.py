@@ -312,6 +312,24 @@ def test_failure_drills_are_deterministic_and_named():
     assert report.drills[0].attempts == 2
 
 
+def test_url_drill_requires_out_of_band_marker_not_isolated_assertion(tmp_path):
+    runner = FailureDrillRunner(
+        database_url=f"sqlite:///{tmp_path / 'unsafe.sqlite3'}",
+        isolated=True,
+    )
+    assert runner.configuration_error == "out_of_band_disposable_marker_nonce_required"
+
+
+def test_unit_restore_drill_replays_outbox_and_repairs_ledger():
+    report = FailureDrillRunner(clock=lambda: NOW).run()
+    details = next(item.details for item in report.drills if item.name == "isolated_restore_replay")
+    assert details["outbox_replayed_twice"]
+    assert details["outbox_duplicate_item_idempotent"]
+    assert details["pbp_repair_validated"]
+    assert details["exact_checksums_validated"]
+    assert details["recovery_data_point"]["latest_observation"]
+
+
 def test_benchmark_emits_query_plan_and_passes_local_gate(tmp_path):
     engine = _db(tmp_path)
     report = benchmark_matchup_reads(
@@ -334,3 +352,31 @@ def test_benchmark_rejects_one_callable_for_both_paths(tmp_path):
         benchmark_matchup_reads(
             engine, baseline=read, database_first=read, iterations=1
         )
+
+
+def test_service_benchmark_retains_emitted_sql_and_query_ceiling(tmp_path):
+    from sqlalchemy import text
+    from app.services.database_first_benchmark import benchmark_matchup_services
+
+    engine = _db(tmp_path)
+
+    def route():
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1")).all()
+        return {"status": "ok"}
+
+    report = benchmark_matchup_services(
+        engine,
+        baseline_route=lambda: route(),
+        database_first_route=lambda: route(),
+        season="2025-26",
+        game_id="benchmark-game",
+        iterations=2,
+        provider_call_count=lambda: 0,
+        fixture_validated=True,
+        fixture_profile={"fixture_kind": "representative_fixture", "production_claim": False},
+    )
+    assert report.query_count == 1
+    assert report.query_count_within_ceiling
+    assert report.measured_query_shapes
+    assert report.query_plans

@@ -955,10 +955,9 @@ GET /api/games/matchup?game_id
 ```
 
 `MatchupService` has no NBA Stats, PBP Stats, DFS provider, or live Player Pool
-dependency. The activated production assembly also selects the stored injury
-snapshot seam, so it cannot invoke RotoWire during a public read. The legacy
-pre-activation constructor retains its separately gated pre-tip injury mode
-for compatibility. Missing stored
+dependency for statistical reads. Injury Reports retain the existing
+`MatchupInjuryService` live/snapshot contract in both assemblies; activating
+database-first statistical streams does not change that contract. Missing stored
 pool, player, Diet, or team-window facts degrade the response without starting
 collection. The team query's latest observation is the sole window-availability
 authority; when a Base/window is unavailable or missing, the response emits a

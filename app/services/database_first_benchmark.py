@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 
@@ -28,6 +29,11 @@ class BenchmarkReport:
     provider_calls: int = 0
     baseline_source: str = "injected"
     database_first_source: str = "injected"
+    query_count: int = 0
+    query_count_ceiling: int = 0
+    query_count_within_ceiling: bool = True
+    measured_query_shapes: tuple[str, ...] = ()
+    fixture_profile: Mapping[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -38,6 +44,8 @@ class BenchmarkReport:
             and self.query_plans_indexed
             and self.fixture_validated
             and self.provider_calls == 0
+            and self.query_count_within_ceiling
+            and bool(self.measured_query_shapes or self.baseline_source == "injected")
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +73,8 @@ def benchmark_matchup_reads(
     game_id: str = "benchmark-game",
     require_indexed_plans: bool = False,
     fixture_validated: bool = True,
+    capture_sql: bool = False,
+    query_count_ceiling: int = 128,
 ) -> BenchmarkReport:
     """Measure distinct full-read seams and retain bounded SQL query plans."""
 
@@ -76,15 +86,23 @@ def benchmark_matchup_reads(
         raise ValueError("provider_calls must be a non-negative integer")
 
     count = max(1, min(int(iterations), 1000))
+    ceiling = max(1, min(int(query_count_ceiling), 10_000))
     baseline_times: list[float] = []
     db_times: list[float] = []
+    measured: list[tuple[str, Any]] = []
+    observed_query_count = 0
     for _ in range(count):
         started = time.perf_counter()
-        baseline()
+        with _capture_sql(engine):
+            baseline()
         baseline_times.append((time.perf_counter() - started) * 1000)
         started = time.perf_counter()
-        database_first()
+        with _capture_sql(engine) as database_capture:
+            database_first()
         db_times.append((time.perf_counter() - started) * 1000)
+        if capture_sql:
+            observed_query_count = max(observed_query_count, len(database_capture.statements))
+            measured.extend(database_capture.statements)
     baseline_p95 = _p95(baseline_times)
     db_p95 = _p95(db_times)
     # A no-op seam can be below the timer's meaningful resolution on a local
@@ -96,7 +114,13 @@ def benchmark_matchup_reads(
         ratio = 1.0
     else:
         ratio = db_p95 / max(baseline_p95, measurement_floor_ms)
-    plans = _query_plans(engine, season=season, game_id=game_id)
+    unique_measured = _unique_statements(measured)
+    plans = _query_plans(
+        engine,
+        season=season,
+        game_id=game_id,
+        measured_statements=unique_measured if capture_sql else None,
+    )
     plans_available = bool(plans) and all(
         "=> unavailable" not in plan for plan in plans
     )
@@ -115,6 +139,16 @@ def benchmark_matchup_reads(
         provider_calls=provider_calls,
         baseline_source=baseline_source,
         database_first_source=database_first_source,
+        query_count=observed_query_count,
+        query_count_ceiling=ceiling if capture_sql else 0,
+        query_count_within_ceiling=(
+            observed_query_count > 0 and observed_query_count <= ceiling
+            if capture_sql else True
+        ),
+        measured_query_shapes=tuple(
+            f"{statement} | params={parameters!r}"
+            for statement, parameters in unique_measured
+        ),
     )
 
 
@@ -128,6 +162,7 @@ def benchmark_matchup_services(
     iterations: int = 20,
     provider_call_count: Callable[[], int] | None = None,
     fixture_validated: bool = False,
+    fixture_profile: Mapping[str, Any] | None = None,
 ) -> BenchmarkReport:
     """Benchmark the complete route/service callables over one fixture.
 
@@ -145,6 +180,12 @@ def benchmark_matchup_services(
         raise ValueError("benchmark requires an instrumented statistical provider counter")
     if not fixture_validated:
         raise ValueError("benchmark requires a validated disposable fixture")
+    if (
+        not isinstance(fixture_profile, Mapping)
+        or fixture_profile.get("fixture_kind") != "representative_fixture"
+        or bool(fixture_profile.get("production_claim"))
+    ):
+        raise ValueError("benchmark requires a representative fixture profile")
 
     def invoke(route: Callable[[], Any]) -> Any:
         value = route()
@@ -174,16 +215,18 @@ def benchmark_matchup_services(
         game_id=game_id,
         require_indexed_plans=True,
         fixture_validated=True,
+        capture_sql=True,
     )
-    return replace(report, provider_calls=observed_calls)
+    return replace(report, provider_calls=observed_calls, fixture_profile=fixture_profile)
 
 
 def _query_plans(
-    engine: Engine, *, season: str = "2025-26", game_id: str = "benchmark-game"
+    engine: Engine, *, season: str = "2025-26", game_id: str = "benchmark-game",
+    measured_statements: tuple[tuple[str, Any], ...] | None = None,
 ) -> tuple[str, ...]:
     safe_season = str(season).replace("'", "''")
     safe_game_id = str(game_id).replace("'", "''")
-    statements = (
+    fallback_statements = (
         "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key",
         "SELECT p.stream_key, p.fence, v.publication_id, v.version "
         "FROM publication_pointers p JOIN publication_versions v "
@@ -198,16 +241,77 @@ def _query_plans(
         "SELECT game_id, season, game_date FROM canonical_game_ledger_games "
         f"WHERE season = '{safe_season}' ORDER BY game_date DESC, game_id DESC LIMIT 50",
     )
+    statements = tuple(measured_statements or ((statement, None) for statement in fallback_statements))
     plans: list[str] = []
     with engine.connect() as connection:
-        for statement in statements:
+        for statement, parameters in statements:
             try:
                 prefix = "EXPLAIN QUERY PLAN " if engine.dialect.name == "sqlite" else "EXPLAIN "
-                rows = connection.execute(text(prefix + statement)).all()
-                plans.append(statement + " => " + " | ".join(str(row) for row in rows)[:1024])
+                if parameters is None:
+                    rows = connection.execute(text(prefix + statement)).all()
+                else:
+                    rows = connection.exec_driver_sql(prefix + statement, parameters).all()
+                parameter_note = "" if parameters is None else f" [params={parameters!r}]"
+                plans.append(statement + parameter_note + " => " + " | ".join(str(row) for row in rows)[:1024])
             except Exception:
                 plans.append(statement + " => unavailable")
     return tuple(plans)
+
+
+@dataclass(slots=True)
+class _SQLCapture:
+    statements: list[tuple[str, Any]]
+
+
+class _capture_sql:
+    """Capture the SQL emitted by a real service invocation.
+
+    Only SELECT statements are retained as sanitized shape/parameter pairs;
+    setup, transaction, and PRAGMA chatter cannot be mistaken for read-path
+    evidence.  The listener is installed for the duration of one call and is
+    always removed, so benchmark instrumentation cannot leak into the app.
+    """
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        self.capture = _SQLCapture([])
+        self._listener = self._record
+
+    def __enter__(self) -> _SQLCapture:
+        event.listen(self.engine, "before_cursor_execute", self._listener)
+        return self.capture
+
+    def __exit__(self, *_exc: Any) -> None:
+        event.remove(self.engine, "before_cursor_execute", self._listener)
+
+    def _record(self, _conn: Any, _cursor: Any, statement: str, parameters: Any, *_args: Any) -> None:
+        normalized = re.sub(r"\s+", " ", str(statement)).strip()
+        upper = normalized.upper()
+        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+            return
+        self.capture.statements.append((normalized, _safe_parameters(parameters)))
+
+
+def _safe_parameters(parameters: Any) -> Any:
+    if isinstance(parameters, Mapping):
+        return {str(key): _safe_parameters(value) for key, value in sorted(parameters.items(), key=lambda item: str(item[0]))}
+    if isinstance(parameters, (list, tuple)):
+        return tuple(_safe_parameters(value) for value in parameters)
+    if parameters is None or isinstance(parameters, (str, int, float, bool)):
+        return parameters
+    return type(parameters).__name__
+
+
+def _unique_statements(statements: list[tuple[str, Any]]) -> tuple[tuple[str, Any], ...]:
+    seen: set[str] = set()
+    result: list[tuple[str, Any]] = []
+    for statement, parameters in statements:
+        key = f"{statement}\x00{parameters!r}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((statement, parameters))
+    return tuple(result)
 
 
 def _plans_are_indexed(plans: tuple[str, ...]) -> bool:

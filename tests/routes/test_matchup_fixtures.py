@@ -1,6 +1,8 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,12 +19,17 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.migrations import run_migrations
+from app.models.collection_control import (
+    CollectionObservation,
+    PublicationObservation,
+    PublicationVersion,
+)
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.event_catalog_service import EventCatalogService
 from app.services.database_first_activation import (
-    PublicationRead,
-    PublicationReadSnapshot,
+    DatabaseFirstPublicationReader,
 )
+from app.services.collection_control import CollectionOperationsService, PublicationService
 from app.services.matchup import MatchupService
 from app.services.matchup_selection import MatchupSelectionService
 from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -954,106 +961,107 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     team_matchups = _team_matchups(engine)
     log_facts = player_logs.list_player_rows(SEASON, 2544)
     diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
-    stream_keys = (
-        "player_game_logs",
-        "traditional_opponent_season",
-        "traditional_opponent_l15",
-        "assist_locations_season",
-        "assist_locations_l15",
-        "player_per36",
-        "synergy_play_types",
-        "grouped_shot_types",
-        "exact_shot_zones",
-        "player_assist_locations",
-        "synergy:l15",
-        "synergy_play_types_opponent_season",
-        "synergy_play_types_opponent_l15",
-        "grouped_shot_types_opponent_season",
-        "grouped_shot_types_opponent_l15",
-        "exact_shot_zones_opponent_season",
-        "exact_shot_zones_opponent_l15",
+    publication_service = PublicationService(engine, clock=lambda: NOW)
+    publication_service.register_default_streams()
+    operations = CollectionOperationsService(
+        engine, publication_service=publication_service, clock=lambda: NOW
     )
 
-    def legacy_read(stream_key):
-        return PublicationRead(
-            stream_key=stream_key,
-            publication_id=None,
-            season=SEASON,
-            cutoff=None,
-            version=None,
-            status="inactive",
-            freshness="legacy_fallback",
-            age_seconds=None,
-            payload=None,
-            source="legacy_database",
-            legacy_fallback_allowed=True,
-        )
+    def candidate(stream_key, payload, *, publication_id, observation_id, provider="nba"):
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        checksum = hashlib.sha256(encoded.encode()).hexdigest()
+        with engine.begin() as connection:
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season=SEASON,
+                cutoff=NOW - timedelta(days=1),
+                version=1,
+                status="candidate",
+                checksum=checksum,
+                payload=encoded,
+                created_at=NOW,
+                reason="authenticated journey candidate",
+                fence=0,
+            ))
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=observation_id,
+                collector_id="journey-collector",
+                manifest_id=None,
+                environment="testing",
+                provider=provider,
+                observation_type=stream_key,
+                scope=json.dumps({"stream": stream_key}),
+                season=SEASON,
+                cutoff=NOW - timedelta(days=1),
+                schema_version=1,
+                checksum=checksum,
+                payload=encoded,
+                payload_bytes=len(encoded.encode()),
+                retrieved_at=NOW,
+                accepted_at=NOW,
+            ))
+            connection.execute(PublicationObservation.__table__.insert().values(
+                publication_id=publication_id,
+                observation_id=observation_id,
+                role="accepted_candidate",
+                slice_key=None,
+                created_at=NOW,
+            ))
+        return checksum
 
-    reads = {stream_key: legacy_read(stream_key) for stream_key in stream_keys}
-    reads["player_game_logs"] = PublicationRead(
-        stream_key="player_game_logs",
-        publication_id="rollback-player-logs",
-        season=SEASON,
-        cutoff=(NOW - timedelta(days=1)).isoformat(),
-        version=2,
-        status="rollback",
-        freshness="stale",
-        age_seconds=86400,
-        payload={"rows": []},
-        retrieved_at=NOW - timedelta(days=1),
-        checksum="a" * 64,
-        fence=2,
-        decoded=tuple(log_facts),
+    def log_payload(points):
+        row = asdict(log_facts[0])
+        row["game_date"] = row["game_date"].isoformat()
+        row["points"] = points
+        return {"rows": [row]}
+
+    first_log = "journey-log-first"
+    second_log = "journey-log-second"
+    first_log_payload = log_payload(25)
+    second_log_payload = log_payload(26)
+    candidate(
+        "player_game_logs", first_log_payload, publication_id=first_log,
+        observation_id="journey-observation-first",
     )
-    diet_streams = {
-        "synergy_play_types": "play_types",
-        "grouped_shot_types": "shot_types",
-        "exact_shot_zones": "shot_zones",
-        "player_assist_locations": "assist_locations",
-    }
-    for stream_key, base in diet_streams.items():
-        reads[stream_key] = PublicationRead(
-            stream_key=stream_key,
-            publication_id=f"active-{base}",
-            season=SEASON,
-            cutoff=NOW.isoformat(),
-            version=3,
-            status="active",
-            freshness="fresh",
-            age_seconds=0,
-            payload={"rows": []},
-            retrieved_at=NOW,
-            checksum="b" * 64,
-            fence=3,
-            decoded=tuple(fact for fact in diet_facts if fact.base == base),
-        )
-    reads["synergy:l15"] = PublicationRead(
-        stream_key="synergy:l15",
-        publication_id=None,
-        season=SEASON,
-        cutoff=None,
-        version=None,
-        status="unavailable",
-        freshness="unavailable",
-        age_seconds=None,
-        payload=None,
-        unavailable_reason="provider_window_unsupported",
+    candidate(
+        "player_game_logs", second_log_payload, publication_id=second_log,
+        observation_id="journey-observation-second",
     )
-    reads["synergy_play_types_opponent_l15"] = reads["synergy:l15"]
-
-    class JourneyReader:
-        def snapshot(self, requested, *, season):
-            selected = {key: reads[key] for key in requested}
-            return PublicationReadSnapshot(
-                season=season,
-                reads=selected,
-                generation=tuple(
-                    (key, value.publication_id, value.fence, value.version)
-                    for key, value in sorted(selected.items())
-                ),
-            )
-
-    reader = JourneyReader()
+    diet_rows = [
+        {
+            key: value
+            for key, value in asdict(fact).items()
+            if key not in {"base", "retrieved_at"}
+        }
+        for fact in diet_facts
+        if fact.base == "play_types"
+    ]
+    diet_candidate = "journey-diet"
+    candidate(
+        "synergy_play_types", {"base": "play_types", "rows": diet_rows},
+        publication_id=diet_candidate, observation_id="journey-observation-diet",
+    )
+    operations.activate_stream(
+        "player_game_logs", actor="journey-operator", reason="activate first logs",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=first_log,
+    )
+    operations.activate_stream(
+        "player_game_logs", actor="journey-operator", reason="advance logs",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=second_log,
+    )
+    operations.activate_stream(
+        "synergy_play_types", actor="journey-operator", reason="activate diet",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=diet_candidate,
+    )
+    rollback = operations.rollback_publication(
+        "player_game_logs", actor="journey-operator", reason="restore first log payload"
+    )
+    assert rollback.resource.payload == json.dumps(
+        first_log_payload, sort_keys=True, separators=(",", ":")
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     player_logs._publication_reader = reader
     player_diets.repository._publication_reader = reader
     team_matchups._publication_reader = reader
@@ -1121,13 +1129,20 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
 
+    restored_snapshot = reader.snapshot(
+        ("player_game_logs", "synergy_play_types"), season=SEASON
+    )
+    assert restored_snapshot.read("player_game_logs").decoded[0].points == 25
+    assert restored_snapshot.read("player_game_logs").publication_id == rollback.resource.publication_id
+    assert restored_snapshot.generation
+
     assert slate_response.status_code == 200
     assert matchup_response.status_code == 200
     assert selection_response.status_code == 200
     matchup = matchup_response.get_json()
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
-    assert matchup["provenance"]["player_game_logs"]["publication_id"] == "rollback-player-logs"
-    assert matchup["provenance"]["synergy_play_types"]["publication_id"] == "active-play_types"
+    assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
+    assert matchup["provenance"]["synergy_play_types"]["publication_id"] == diet_candidate
     assert matchup["provenance"]["synergy:l15"]["unavailable_reason"] == "provider_window_unsupported"
     assert matchup["coverage"]["mixed_cutoff"]
     assert matchup["coverage"]["mixed_freshness"]

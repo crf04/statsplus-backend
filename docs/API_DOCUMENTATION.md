@@ -1130,7 +1130,15 @@ explicit separate production snapshot database. `scripts/database_first_drills.p
 records deterministic outage, duplicate delivery, Outbox replay, expired
 credential, provider failure, alert recovery, and restore/replay checks using
 temporary control-plane state; SQLite restore is explicitly a local unit
-adapter, while a production gate requires configured Postgres evidence. The
+adapter. Every URL-backed drill first opens a read-only target preflight and
+requires an out-of-band `statsplus_disposable_control` marker nonce; the
+`isolated` flag is not isolation evidence. A production gate additionally
+requires a dedicated Postgres schema, expected IDs/checksums, direct restored
+database verification, and explicit replay/repair evidence. The
+marker is provisioned out-of-band (for example, a row in
+`statsplus_disposable_control(marker_nonce, purpose, schema_name)` with
+`purpose = 'database_first_drill'`) and the preflight rejects any existing
+domain rows before migration. The
 `scripts/benchmark_matchups.py` command requires a production-like fixture,
 game identity, and an explicitly disposable database. It loads and validates
 the fixture, invokes the complete legacy and activated MatchupService paths,

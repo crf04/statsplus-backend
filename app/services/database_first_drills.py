@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import gzip
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +18,7 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
@@ -23,6 +27,7 @@ from app.models.collection_control import (
     PublicationPointer,
 )
 from app.services.collection_control import (
+    CollectorClaims,
     CollectorTokenService,
     ObservationIngestionService,
     PublicationService,
@@ -32,6 +37,30 @@ from app.collector.outbox import ResidentialOutbox
 
 
 UTC = timezone.utc
+DISPOSABLE_MARKER_TABLE = "statsplus_disposable_control"
+DISPOSABLE_MARKER_PURPOSE = "database_first_drill"
+
+# These are the application tables that may contain production/control-plane
+# rows.  The marker itself is deliberately not managed by migrations: an
+# operator creates it out-of-band before a drill is allowed to migrate a
+# target.  A migrated-but-empty disposable database is safe to reuse.
+DOMAIN_TABLES = frozenset({
+    "alembic_version",
+    "canonical_game_ledger_games",
+    "canonical_game_ledger_backfill",
+    "canonical_game_ledger_publications",
+    "collection_audit_events",
+    "collection_observations",
+    "composition_jobs",
+    "publication_activations",
+    "publication_observations",
+    "publication_pointers",
+    "publication_streams",
+    "publication_versions",
+    "player_game_logs",
+    "player_diets",
+    "team_matchups",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +115,13 @@ class FailureDrillRunner:
         production_database_url: str | None = None,
         restored_database_url: str | None = None,
         restore_adapter: Callable[[], Mapping[str, Any]] | None = None,
+        disposable_marker_nonce: str | None = None,
+        disposable_schema: str | None = None,
+        restored_marker_nonce: str | None = None,
+        restored_schema: str | None = None,
+        restore_expectations: Mapping[str, Any] | None = None,
+        pbp_repair: Callable[[Engine, str], Mapping[str, Any] | bool] | None = None,
+        restore_ingestion: Callable[[Engine, CollectorClaims, Mapping[str, Any], bytes], Any] | None = None,
     ) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.environment = str(environment).strip().lower() or "unit"
@@ -93,20 +129,43 @@ class FailureDrillRunner:
         self.production_database_url = production_database_url
         self.restored_database_url = restored_database_url
         self.restore_adapter = restore_adapter
+        self.disposable_marker_nonce = disposable_marker_nonce or os.environ.get(
+            "STATPLUS_DISPOSABLE_MARKER_NONCE"
+        )
+        self.disposable_schema = disposable_schema or os.environ.get(
+            "STATPLUS_DISPOSABLE_SCHEMA"
+        )
+        self.restored_marker_nonce = restored_marker_nonce or os.environ.get(
+            "STATPLUS_RESTORED_MARKER_NONCE"
+        )
+        self.restored_schema = restored_schema or os.environ.get(
+            "STATPLUS_RESTORED_SCHEMA"
+        )
+        self.restore_expectations = dict(restore_expectations or {})
+        self.pbp_repair = pbp_repair
+        self.restore_ingestion = restore_ingestion
         requested_url = database_url or (str(engine.url) if engine is not None else None)
+        self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
         self.configuration_error = self._validate_configuration(
             requested_url,
             isolated=isolated,
             production_database_url=production_database_url,
             restored_database_url=restored_database_url,
+            disposable_marker_nonce=self.disposable_marker_nonce,
+            disposable_schema=self.disposable_schema,
         )
+        if self.configuration_error is None and requested_url is not None:
+            self.configuration_error = self._preflight_target(
+                self.engine,
+                marker_nonce=self.disposable_marker_nonce,
+                schema=self.disposable_schema,
+                label="drill",
+            )
         if self.configuration_error is not None:
-            self.engine = engine or create_engine("sqlite:///:memory:")
             self.production_evidence = False
             self.publications = None
             self.ingestion = None
             return
-        self.engine = engine or create_engine(database_url or "sqlite:///:memory:")
         self.production_evidence = (
             self.environment not in {"unit", "test_unit"}
             and self.engine.dialect.name == "postgresql"
@@ -141,20 +200,86 @@ class FailureDrillRunner:
         isolated: bool,
         production_database_url: str | None,
         restored_database_url: str | None,
+        disposable_marker_nonce: str | None = None,
+        disposable_schema: str | None = None,
     ) -> str | None:
         if database_url is None:
             return None
         normalized = str(database_url).lower()
-        if not isolated and any(
-            marker in normalized for marker in ("prod", "production", "railway")
-        ):
-            return "drill database must be explicitly marked isolated"
+        # ``isolated=True`` is retained only for source compatibility.  It is
+        # an assertion supplied by the caller, not isolation evidence.  A
+        # marker row is checked against the opened database before migrations.
+        if any(marker in normalized for marker in ("prod", "production", "railway")):
+            return "drill database URL identifies a production/control plane"
+        if not disposable_marker_nonce or not str(disposable_marker_nonce).strip():
+            return "out_of_band_disposable_marker_nonce_required"
+        if str(database_url).startswith("postgres") and not str(disposable_schema or "").strip():
+            return "postgres_disposable_schema_required"
         if production_database_url and str(database_url) == str(production_database_url):
             return "drill database cannot equal production/control database"
         if restored_database_url and str(restored_database_url) in {
             str(database_url), str(production_database_url)
         }:
             return "restored drill database must be a separate disposable database"
+        return None
+
+    @staticmethod
+    def _preflight_target(
+        engine: Engine,
+        *,
+        marker_nonce: str | None,
+        schema: str | None,
+        label: str,
+        require_empty: bool = True,
+    ) -> str | None:
+        """Perform a read-only disposable-target check before migrations.
+
+        The marker is provisioned by an operator or test harness outside this
+        runner.  Consequently a caller cannot make an arbitrary URL safe by
+        passing an ``isolated`` boolean or by having this process create its
+        own marker immediately before migration.
+        """
+
+        try:
+            inspector = inspect(engine)
+            table_names = set(inspector.get_table_names(schema=schema))
+        except Exception:
+            return f"{label}_database_preflight_unreadable"
+        if DISPOSABLE_MARKER_TABLE not in table_names:
+            return f"{label}_database_disposable_marker_missing"
+        if schema and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(schema)):
+            return f"{label}_database_disposable_schema_invalid"
+        qualified_marker = (
+            f'"{schema}"."{DISPOSABLE_MARKER_TABLE}"' if schema else DISPOSABLE_MARKER_TABLE
+        )
+        try:
+            with engine.connect() as connection:
+                marker = connection.execute(
+                    text(
+                        f"SELECT marker_nonce, purpose, schema_name "
+                        f"FROM {qualified_marker} WHERE marker_nonce = :nonce"
+                    ),
+                    {"nonce": str(marker_nonce)},
+                ).mappings().first()
+                if marker is None or str(marker.get("purpose")) != DISPOSABLE_MARKER_PURPOSE:
+                    return f"{label}_database_disposable_marker_mismatch"
+                if schema and marker.get("schema_name") not in {None, str(schema)}:
+                    return f"{label}_database_disposable_schema_mismatch"
+                # A target may already have the migration ledger, but no
+                # domain rows.  This query is deliberately read-only.
+                for table in sorted(table_names & DOMAIN_TABLES):
+                    if table == "alembic_version":
+                        continue
+                    if not require_empty:
+                        continue
+                    qualified_table = f'"{schema}"."{table}"' if schema else table
+                    count = connection.execute(
+                        text(f"SELECT COUNT(*) FROM {qualified_table}")
+                    ).scalar_one()
+                    if int(count) > 0:
+                        return f"{label}_database_not_empty"
+        except Exception:
+            return f"{label}_database_disposable_marker_unreadable"
         return None
 
     def run(
@@ -457,8 +582,9 @@ class FailureDrillRunner:
             }
 
         def isolated_restore_replay() -> Mapping[str, Any]:
+            restore_started = perf_counter()
             if self.production_evidence:
-                return self._query_restored_database()
+                return self._query_restored_database(started=restore_started)
             from sqlite3 import connect
             from app.models.canonical_game_ledger import (
                 CanonicalGameLedgerGame,
@@ -469,17 +595,20 @@ class FailureDrillRunner:
                 AuditEvent,
                 CollectionObservation,
                 CompositionJob,
+                PublicationActivation,
                 PublicationObservation,
                 PublicationVersion,
             )
 
             restore_publication = self._id("restore-publication")
+            restore_prior_publication = self._id("restore-prior-publication")
             restore_stream = self._id("restore-stream")
             restore_observation = self._id("restore-observation")
             restore_collector = self._id("restore-collector")
             restore_game = self._id("restore-game")
             restore_audit = self._id("restore-audit")
             restore_job = self._id("restore-job")
+            restore_activation = self._id("restore-activation")
 
             with self.engine.begin() as connection:
                 now = self.clock().astimezone(UTC)
@@ -496,12 +625,41 @@ class FailureDrillRunner:
                     "reason": "restore drill",
                     "fence": 1,
                 }
+                prior_publication = {
+                    **publication,
+                    "publication_id": restore_prior_publication,
+                    "status": "rollback",
+                    "checksum": "p" * 64,
+                    "payload": json.dumps({"rows": [{"game_id": restore_game, "version": "prior"}]}),
+                    "reason": "restore rollback evidence",
+                    "fence": 0,
+                }
+                if connection.execute(
+                    PublicationVersion.__table__.select().where(
+                        PublicationVersion.publication_id == prior_publication["publication_id"]
+                    )
+                ).first() is None:
+                    connection.execute(PublicationVersion.__table__.insert().values(**prior_publication))
                 if connection.execute(
                     PublicationVersion.__table__.select().where(
                         PublicationVersion.publication_id == publication["publication_id"]
                     )
                 ).first() is None:
                     connection.execute(PublicationVersion.__table__.insert().values(**publication))
+                if connection.execute(
+                    PublicationActivation.__table__.select().where(
+                        PublicationActivation.activation_id == restore_activation
+                    )
+                ).first() is None:
+                    connection.execute(PublicationActivation.__table__.insert().values(
+                        activation_id=restore_activation,
+                        stream_key=restore_stream,
+                        publication_id=restore_publication,
+                        actor="drill",
+                        reason="restore drill activation",
+                        fence=1,
+                        created_at=now,
+                    ))
                 if connection.execute(
                     PublicationPointer.__table__.select().where(
                         PublicationPointer.stream_key == restore_stream
@@ -510,7 +668,7 @@ class FailureDrillRunner:
                     connection.execute(PublicationPointer.__table__.insert().values(
                         stream_key=restore_stream,
                         active_publication_id=publication["publication_id"],
-                        previous_publication_id=None,
+                        previous_publication_id=restore_prior_publication,
                         fence=1,
                         updated_at=now,
                     ))
@@ -640,13 +798,91 @@ class FailureDrillRunner:
                         last_error=None,
                     ))
             raw = self.engine.raw_connection()
+            target_engine: Engine | None = None
             try:
                 source = raw.driver_connection
                 target = connect(":memory:")
                 source.backup(target)
+                # Restore drills intentionally corrupt one known PBP ledger
+                # field before invoking the repair seam.  The verification
+                # below reads the repaired row from the restored database,
+                # rather than trusting a callback's boolean.
+                target.execute(
+                    "UPDATE canonical_game_ledger_games SET checksum = ? WHERE game_id = ?",
+                    ("x" * 64, restore_game),
+                )
+                target.commit()
+                target_engine = create_engine(
+                    "sqlite://",
+                    creator=lambda: target,
+                    poolclass=StaticPool,
+                )
+                repair = self.pbp_repair
+                if repair is None:
+                    def repair(engine: Engine, game_id: str) -> Mapping[str, Any]:
+                        with engine.begin() as connection:
+                            changed = connection.execute(text(
+                                "UPDATE canonical_game_ledger_games "
+                                "SET checksum = :checksum, status = 'final' "
+                                "WHERE game_id = :game_id"
+                            ), {"checksum": "g" * 64, "game_id": game_id}).rowcount
+                        return {"game_id": game_id, "updated_rows": int(changed)}
+                repair_result = repair(target_engine, restore_game)
+
+                # Exercise the real SQLite residential outbox and the real
+                # control-plane ingestion service on the restored copy.  The
+                # second receipt is the server-side duplicate path, and the
+                # item is acknowledged only after both deliveries succeed.
+                replay_envelope = ObservationEnvelope(
+                    manifest_id=self._id("ingestion-manifest"),
+                    client_observation_id=self._id("restore-receipt"),
+                    environment="testing",
+                    collector_id=self._id("ingestion-collector"),
+                    provider="drill",
+                    observation_type="drill_observation",
+                    scope={"window": "season"},
+                    season="2025-26",
+                    cutoff=self.clock().astimezone(UTC).isoformat(),
+                    retrieved_at=self.clock().astimezone(UTC).isoformat(),
+                    schema_version=1,
+                    payload={"base": "drill_observation", "rows": [{"slice_key": "restore", "value": 1}]},
+                )
+                target_publications = PublicationService(target_engine, clock=self.clock)
+                target_ingestion = ObservationIngestionService(
+                    target_engine, publication_service=target_publications, clock=self.clock
+                )
+                claims = CollectorClaims(
+                    collector_id=self._id("ingestion-collector"),
+                    audience="statsplus",
+                    environment="testing",
+                    scopes=frozenset({"ingest"}),
+                    token_id=self._id("restore-token"),
+                    expires_at=self.clock().astimezone(UTC) + timedelta(hours=1),
+                    owner="local",
+                    providers=frozenset({"drill"}),
+                    surfaces=frozenset({"drill_observation"}),
+                )
+                with TemporaryDirectory(prefix="statsplus-restore-outbox-") as outbox_directory:
+                    outbox_path = str(Path(outbox_directory) / "outbox.sqlite3")
+                    restored_outbox = ResidentialOutbox(
+                        outbox_path, clock=lambda: self.clock().astimezone(UTC)
+                    )
+                    item = restored_outbox.enqueue_observation(replay_envelope)
+                    duplicate_item = restored_outbox.enqueue_observation(replay_envelope)
+                    wire = json.loads(gzip.decompress(item.payload))
+                    restored_payload = json.dumps(
+                        wire["payload"], sort_keys=True, separators=(",", ":")
+                    ).encode()
+                    restored_envelope = {key: value for key, value in wire.items() if key != "payload"}
+                    first_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
+                    second_receipt = target_ingestion.ingest(claims, restored_envelope, restored_payload)
+                    acknowledged = restored_outbox.acknowledge(
+                        item.item_id, checksum=replay_envelope.checksum
+                    )
+                    restored_outbox.close()
                 checks = {
                     "ledger": f"SELECT game_id FROM canonical_game_ledger_games WHERE game_id = '{restore_game}'",
-                    "pointers": f"SELECT stream_key FROM publication_pointers WHERE stream_key = '{restore_stream}' AND active_publication_id = '{restore_publication}'",
+                    "pointers": f"SELECT stream_key FROM publication_pointers WHERE stream_key = '{restore_stream}' AND active_publication_id = '{restore_publication}' AND previous_publication_id = '{restore_prior_publication}'",
                     "audit": f"SELECT event_id FROM collection_audit_events WHERE event_id = '{restore_audit}'",
                     "provenance": f"SELECT publication_id FROM publication_observations WHERE publication_id = '{restore_publication}'",
                     "pbp_repair": "SELECT season FROM canonical_game_ledger_backfill WHERE season = '2025-26' AND status = 'complete'",
@@ -661,8 +897,30 @@ class FailureDrillRunner:
                         "SELECT stream_key FROM publication_pointers"
                     ).fetchall()
                 }
+                exact = {
+                    "ledger_checksum": target.execute(
+                        "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = ?", (restore_game,)
+                    ).fetchone()[0] == "g" * 64,
+                    "active_checksum": target.execute(
+                        "SELECT checksum FROM publication_versions WHERE publication_id = ?", (restore_publication,)
+                    ).fetchone()[0] == "r" * 64,
+                    "previous_checksum": target.execute(
+                        "SELECT checksum FROM publication_versions WHERE publication_id = ?", (restore_prior_publication,)
+                    ).fetchone()[0] == "p" * 64,
+                    "activation_fk": target.execute(
+                        "SELECT 1 FROM publication_activations a JOIN publication_versions v "
+                        "ON v.publication_id = a.publication_id WHERE a.activation_id = ?", (restore_activation,)
+                    ).fetchone() is not None,
+                    "provenance_fk": target.execute(
+                        "SELECT 1 FROM publication_observations p JOIN publication_versions v "
+                        "ON v.publication_id = p.publication_id JOIN collection_observations o "
+                        "ON o.observation_id = p.observation_id WHERE p.publication_id = ?", (restore_publication,)
+                    ).fetchone() is not None,
+                }
                 target.close()
             finally:
+                if target_engine is not None:
+                    target_engine.dispose()
                 raw.close()
             replayed_rows = set(restored_rows)
             return {
@@ -675,11 +933,30 @@ class FailureDrillRunner:
                 "provenance_validated": restored_checks["provenance"],
                 "pbp_repair_validated": restored_checks["pbp_repair"],
                 "replay_validated": restored_checks["replay"],
+                "exact_checksums_validated": all(exact.values()),
+                "repair_result": repair_result,
+                "outbox_replayed_twice": first_receipt.observation_id == second_receipt.observation_id and second_receipt.replay,
+                "outbox_duplicate_item_idempotent": duplicate_item.item_id == item.item_id,
+                "outbox_acknowledged": acknowledged,
+                "recovery_time_ms": round((perf_counter() - restore_started) * 1000, 3),
+                "recovery_data_point": {
+                    "observed_at": self.clock().astimezone(UTC).isoformat(),
+                    "latest_governed_cutoff": self.clock().astimezone(UTC).isoformat(),
+                    "latest_observation": restore_observation,
+                },
                 "sla_claimed": False,
                 "adapter": "sqlite_unit",
                 "environment": "unit",
                 "production_evidence": False,
-                "verified": replayed_rows == restored_rows and all(restored_checks.values()),
+                "verified": (
+                    replayed_rows == restored_rows
+                    and all(restored_checks.values())
+                    and all(exact.values())
+                    and first_receipt.observation_id == second_receipt.observation_id
+                    and second_receipt.replay
+                    and duplicate_item.item_id == item.item_id
+                    and acknowledged
+                ),
             }
 
         hooks: dict[str, Callable[[], Mapping[str, Any]]] = {
@@ -693,7 +970,110 @@ class FailureDrillRunner:
         }
         return hooks[name]
 
-    def _query_restored_database(self) -> Mapping[str, Any]:
+    def _restore_outbox_replay(self, restored: Engine) -> Mapping[str, Any]:
+        """Replay one configured receipt twice against the restored control plane."""
+
+        specification = self.restore_expectations.get("replay")
+        if not isinstance(specification, Mapping):
+            return {"verified": False, "reason": "restore_replay_specification_required"}
+        try:
+            payload = specification["payload"]
+            envelope = ObservationEnvelope(
+                manifest_id=str(specification["manifest_id"]),
+                client_observation_id=str(specification["client_observation_id"]),
+                environment=str(specification.get("environment", "production")),
+                collector_id=str(specification["collector_id"]),
+                provider=str(specification["provider"]),
+                observation_type=str(specification["observation_type"]),
+                scope=specification["scope"],
+                season=str(specification["season"]),
+                cutoff=str(specification["cutoff"]),
+                retrieved_at=str(specification.get("retrieved_at", specification["cutoff"])),
+                schema_version=int(specification.get("schema_version", 1)),
+                payload=payload,
+            )
+            claims_data = specification["claims"]
+            if not isinstance(claims_data, Mapping):
+                raise ValueError("restore_replay_claims_required")
+            expires_at = datetime.fromisoformat(
+                str(claims_data["expires_at"]).replace("Z", "+00:00")
+            )
+            claims = CollectorClaims(
+                collector_id=str(claims_data.get("collector_id", envelope.collector_id)),
+                audience=str(claims_data.get("audience", "statsplus")),
+                environment=str(claims_data.get("environment", envelope.environment)),
+                scopes=frozenset(str(value) for value in claims_data.get("scopes", ["ingest"])),
+                token_id=str(claims_data["token_id"]),
+                expires_at=expires_at,
+                owner=str(claims_data.get("owner", "")),
+                providers=frozenset(str(value) for value in claims_data.get("providers", [envelope.provider])),
+                surfaces=frozenset(str(value) for value in claims_data.get("surfaces", [envelope.observation_type])),
+            )
+            target_ingestion = ObservationIngestionService(
+                restored,
+                publication_service=PublicationService(restored, clock=self.clock),
+                clock=self.clock,
+            )
+            with TemporaryDirectory(prefix="statsplus-operator-outbox-") as directory:
+                outbox = ResidentialOutbox(str(Path(directory) / "outbox.sqlite3"), clock=self.clock)
+                item = outbox.enqueue_observation(envelope)
+                duplicate = outbox.enqueue_observation(envelope)
+                wire = json.loads(gzip.decompress(item.payload))
+                body = json.dumps(wire["payload"], sort_keys=True, separators=(",", ":")).encode()
+                wire_envelope = {key: value for key, value in wire.items() if key != "payload"}
+                invoke = self.restore_ingestion
+                if invoke is None:
+                    first = target_ingestion.ingest(claims, wire_envelope, body)
+                    second = target_ingestion.ingest(claims, wire_envelope, body)
+                else:
+                    first = invoke(restored, claims, wire_envelope, body)
+                    second = invoke(restored, claims, wire_envelope, body)
+                acknowledged = outbox.acknowledge(item.item_id, checksum=envelope.checksum)
+                outbox.close()
+            first_id = getattr(first, "observation_id", None)
+            second_id = getattr(second, "observation_id", None)
+            replay = bool(getattr(second, "replay", False))
+            return {
+                "verified": duplicate.item_id == item.item_id
+                and first_id == second_id and replay and acknowledged,
+                "outbox_replayed_twice": first_id == second_id and replay,
+                "outbox_duplicate_item_idempotent": duplicate.item_id == item.item_id,
+                "outbox_acknowledged": acknowledged,
+            }
+        except Exception as error:
+            return {"verified": False, "error": type(error).__name__}
+
+    def _restore_pbp_repair(self, restored: Engine) -> Mapping[str, Any]:
+        specification = self.restore_expectations.get("pbp_repair")
+        if not isinstance(specification, Mapping):
+            return {"verified": False, "reason": "pbp_repair_specification_required"}
+        game_id = str(specification.get("game_id", ""))
+        checksum = str(specification.get("checksum", ""))
+        if not game_id or len(checksum) != 64:
+            return {"verified": False, "reason": "pbp_repair_identity_required"}
+        try:
+            if self.pbp_repair is not None:
+                result = self.pbp_repair(restored, game_id)
+                executed = bool(result) and not (
+                    isinstance(result, Mapping) and result.get("updated_rows") == 0
+                )
+            else:
+                with restored.begin() as connection:
+                    changed = connection.execute(text(
+                        "UPDATE canonical_game_ledger_games SET checksum = :checksum "
+                        "WHERE game_id = :game_id"
+                    ), {"checksum": checksum, "game_id": game_id}).rowcount
+                result = {"game_id": game_id, "updated_rows": int(changed)}
+                executed = int(changed) > 0
+            with restored.connect() as connection:
+                verified = connection.execute(text(
+                    "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = :game_id"
+                ), {"game_id": game_id}).scalar_one_or_none() == checksum
+            return {"verified": executed and verified, "repair_result": result}
+        except Exception as error:
+            return {"verified": False, "error": type(error).__name__}
+
+    def _query_restored_database(self, *, started: float | None = None) -> Mapping[str, Any]:
         """Validate a disposable restored Postgres database by querying it.
 
         The operator supplies the URL of the restored isolated database, not a
@@ -704,16 +1084,34 @@ class FailureDrillRunner:
 
         if not self.restored_database_url:
             raise ValueError("restored_isolated_database_url_required")
-        started = perf_counter()
+        restore_started = started if started is not None else perf_counter()
         if str(self.restored_database_url) in {
             str(self.production_database_url),
             str(self.engine.url),
         }:
             raise ValueError("restored_database_must_be_disposable_and_separate")
+        normalized = str(self.restored_database_url).lower()
+        if any(marker in normalized for marker in ("prod", "production", "railway")):
+            raise ValueError("restored_database_url_identifies_production")
+        if not self.restored_marker_nonce:
+            raise ValueError("restored_out_of_band_disposable_marker_nonce_required")
+        if not self.restored_schema:
+            raise ValueError("restored_postgres_schema_required")
         restored = create_engine(self.restored_database_url)
         try:
             if restored.dialect.name != "postgresql":
                 raise ValueError("production_restore_requires_postgres")
+            if not self.restore_expectations:
+                raise ValueError("restore_expectations_required")
+            preflight = self._preflight_target(
+                restored,
+                marker_nonce=self.restored_marker_nonce,
+                schema=self.restored_schema,
+                label="restored",
+                require_empty=False,
+            )
+            if preflight is not None:
+                raise ValueError(preflight)
             table_names = set(inspect(restored).get_table_names())
             required_tables = {
                 "canonical_game_ledger_games",
@@ -721,11 +1119,15 @@ class FailureDrillRunner:
                 "publication_pointers",
                 "publication_versions",
                 "publication_observations",
+                "publication_activations",
+                "collection_observations",
                 "collection_audit_events",
                 "composition_jobs",
             }
             if not required_tables <= table_names:
                 raise ValueError("restored_database_schema_incomplete")
+            replay_result = self._restore_outbox_replay(restored)
+            repair_result = self._restore_pbp_repair(restored)
             with restored.connect() as connection:
                 measured = {
                     "ledger_rows": int(connection.execute(text(
@@ -751,7 +1153,61 @@ class FailureDrillRunner:
                         "SELECT COUNT(*) FROM composition_jobs "
                         "WHERE status IN ('queued', 'succeeded')"
                     )).scalar_one()),
+                    "orphan_provenance_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM publication_observations p "
+                        "LEFT JOIN publication_versions v ON v.publication_id = p.publication_id "
+                        "LEFT JOIN collection_observations o ON o.observation_id = p.observation_id "
+                        "WHERE v.publication_id IS NULL OR o.observation_id IS NULL"
+                    )).scalar_one()),
+                    "orphan_activation_rows": int(connection.execute(text(
+                        "SELECT COUNT(*) FROM publication_activations a "
+                        "LEFT JOIN publication_versions v ON v.publication_id = a.publication_id "
+                        "WHERE v.publication_id IS NULL"
+                    )).scalar_one()),
+                    "latest_governed_cutoff": connection.execute(text(
+                        "SELECT MAX(cutoff) FROM collection_observations"
+                    )).scalar_one(),
                 }
+                expected_ledger = self.restore_expectations.get("ledger", ())
+                expected_publications = self.restore_expectations.get("publications", ())
+                expected_pointers = self.restore_expectations.get("pointers", ())
+                def expected_rows(value: Any) -> tuple[Mapping[str, Any], ...]:
+                    if isinstance(value, Mapping):
+                        return (value,)
+                    if isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
+                        return tuple(value)
+                    return ()
+                ledger_rows = expected_rows(expected_ledger)
+                publication_rows = expected_rows(expected_publications)
+                pointer_rows = expected_rows(expected_pointers)
+                exact_ledger = all(
+                    connection.execute(text(
+                        "SELECT 1 FROM canonical_game_ledger_games "
+                        "WHERE game_id = :game_id AND checksum = :checksum"
+                    ), {"game_id": str(row["game_id"]), "checksum": str(row["checksum"])}).first()
+                    is not None
+                    for row in ledger_rows
+                )
+                exact_publications = all(
+                    connection.execute(text(
+                        "SELECT 1 FROM publication_versions "
+                        "WHERE publication_id = :publication_id AND checksum = :checksum"
+                    ), {"publication_id": str(row["publication_id"]), "checksum": str(row["checksum"])}).first()
+                    is not None
+                    for row in publication_rows
+                )
+                exact_pointers = all(
+                    connection.execute(text(
+                        "SELECT 1 FROM publication_pointers WHERE stream_key = :stream_key "
+                        "AND active_publication_id = :active_publication_id "
+                        "AND previous_publication_id = :previous_publication_id"
+                    ), {
+                        "stream_key": str(row["stream_key"]),
+                        "active_publication_id": str(row["active_publication_id"]),
+                        "previous_publication_id": str(row["previous_publication_id"]),
+                    }).first() is not None
+                    for row in pointer_rows
+                )
             checks = {
                 "ledger_validated": measured["ledger_rows"] > 0,
                 "pointers_validated": measured["pointer_rows"] > 0,
@@ -759,8 +1215,15 @@ class FailureDrillRunner:
                 "audit_validated": measured["audit_rows"] > 0,
                 "pbp_repair_validated": measured["pbp_repair_rows"] > 0,
                 "replay_validated": measured["replay_rows"] > 0,
+                "foreign_keys_validated": measured["orphan_provenance_rows"] == 0 and measured["orphan_activation_rows"] == 0,
+                "exact_expected_rows_validated": (
+                    bool(ledger_rows) and bool(publication_rows) and bool(pointer_rows)
+                    and exact_ledger and exact_publications and exact_pointers
+                ),
+                "outbox_replayed_twice": bool(replay_result.get("outbox_replayed_twice")),
+                "pbp_repair_executed": bool(repair_result.get("verified")),
             }
-            recovery_time_ms = round((perf_counter() - started) * 1000, 3)
+            recovery_time_ms = round((perf_counter() - restore_started) * 1000, 3)
             return {
                 **measured,
                 **checks,
@@ -769,8 +1232,15 @@ class FailureDrillRunner:
                 "recovery_time_ms": recovery_time_ms,
                 "recovery_data_point": {
                     "observed_at": self.clock().astimezone(UTC).isoformat(),
+                    "latest_governed_cutoff": (
+                        measured["latest_governed_cutoff"].isoformat()
+                        if hasattr(measured["latest_governed_cutoff"], "isoformat")
+                        else measured["latest_governed_cutoff"]
+                    ),
                     "query_duration_ms": recovery_time_ms,
                 },
+                "replay_evidence": replay_result,
+                "pbp_repair_evidence": repair_result,
                 "production_evidence": True,
                 "verified": all(checks.values()),
             }
@@ -788,6 +1258,13 @@ def run_failure_drills(
     restored_database_url: str | None = None,
     require_production_evidence: bool = False,
     restore_adapter: Callable[[], Mapping[str, Any]] | None = None,
+    disposable_marker_nonce: str | None = None,
+    disposable_schema: str | None = None,
+    restored_marker_nonce: str | None = None,
+    restored_schema: str | None = None,
+    restore_expectations: Mapping[str, Any] | None = None,
+    pbp_repair: Callable[[Engine, str], Mapping[str, Any] | bool] | None = None,
+    restore_ingestion: Callable[[Engine, CollectorClaims, Mapping[str, Any], bytes], Any] | None = None,
 ) -> dict[str, Any]:
     """Convenience function used by scripts and smoke tests."""
 
@@ -799,6 +1276,13 @@ def run_failure_drills(
         restored_database_url=restored_database_url,
         clock=clock,
         restore_adapter=restore_adapter,
+        disposable_marker_nonce=disposable_marker_nonce,
+        disposable_schema=disposable_schema,
+        restored_marker_nonce=restored_marker_nonce,
+        restored_schema=restored_schema,
+        restore_expectations=restore_expectations,
+        pbp_repair=pbp_repair,
+        restore_ingestion=restore_ingestion,
     ).run(
         hooks=hooks,
         require_production_evidence=require_production_evidence,

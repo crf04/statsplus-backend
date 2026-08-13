@@ -1,0 +1,26 @@
+{
+  "artifact_type": "database_first_matchup_benchmark",
+  "evidence_status": "awaiting_disposable_run",
+  "generated_by": "scripts/benchmark_matchups.py",
+  "production_claim": false,
+  "fixture_profile": {
+    "fixture_kind": "representative_fixture",
+    "production_claim": false,
+    "minimums": {
+      "games": 10,
+      "player_game_log_rows": 500,
+      "players": 100,
+      "teams": 30
+    }
+  },
+  "note": "Run the benchmark command against a disposable production-like fixture to populate measured p95, provider counter, query count, and EXPLAIN evidence. This checked-in file is a truthful schema until that run is performed.",
+  "baseline_p95_ms": null,
+  "database_first_p95_ms": null,
+  "ratio": null,
+  "provider_calls": null,
+  "query_count": null,
+  "query_count_ceiling": 128,
+  "query_count_within_ceiling": null,
+  "measured_query_shapes": [],
+  "query_plans": []
+}
