@@ -484,7 +484,10 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
 
     result = run_migrations(engine)
 
-    assert result.applied == ("027_bind_ledger_parity_to_publications",)
+    assert result.applied == (
+        "027_bind_ledger_parity_to_publications",
+        "028_collector_status_transitions",
+    )
     with engine.connect() as connection:
         assert connection.scalar(text(
             "SELECT count(*) FROM canonical_game_ledger_parity_artifacts"
