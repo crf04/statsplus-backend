@@ -91,6 +91,13 @@ _NON_PLAYER_KINDS = {
     "entry_placement",
 }
 
+# ``threading.Lock.acquire(timeout=...)`` accepts a platform-sized timeout.
+# Windows rejects the multi-year timeout used by ordinary fixture contexts,
+# even though the absolute deadline itself is valid.  Poll in small bounded
+# slices so lock acquisition remains deadline-bounded on every platform.
+_SERIALIZED_LOCK_WAIT_SECONDS = 1.0
+_DETAIL_WAIT_SLICE_SECONDS = 1.0
+
 
 def canonical_stat_components(stats: Sequence[str]) -> list[str]:
     """Normalize components into a stable provider-independent order."""
@@ -151,9 +158,14 @@ class _SerializedSession:
         they reserve a transport slot or begin upstream work.
         """
 
-        remaining = deadline - self._monotonic()
-        if remaining <= 0 or not self._get_lock.acquire(timeout=remaining):
-            raise DeadlineExceededError("provider retrieval deadline exceeded")
+        while True:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise DeadlineExceededError("provider retrieval deadline exceeded")
+            if self._get_lock.acquire(
+                timeout=min(remaining, _SERIALIZED_LOCK_WAIT_SECONDS)
+            ):
+                break
         if self._monotonic() >= deadline:
             self._get_lock.release()
             raise DeadlineExceededError("provider retrieval deadline exceeded")
@@ -1088,16 +1100,21 @@ class DabbleAdapter:
                 if not submit_next():
                     break
             while pending:
-                remaining = context.remaining_seconds(now=self._now_utc())
-                if remaining <= 0:
-                    cancel_pending()
-                    break
-                done, _ = concurrent.futures.wait(
-                    pending,
-                    timeout=remaining,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                if not done or context.is_expired(now=self._now_utc()):
+                done: set[concurrent.futures.Future[Any]] = set()
+                while pending and not done:
+                    remaining = context.remaining_seconds(now=self._now_utc())
+                    if remaining <= 0:
+                        cancel_pending()
+                        break
+                    done, _ = concurrent.futures.wait(
+                        pending,
+                        timeout=min(remaining, _DETAIL_WAIT_SLICE_SECONDS),
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    if context.is_expired(now=self._now_utc()):
+                        cancel_pending()
+                        break
+                if not done:
                     cancel_pending()
                     break
                 for future in done:
