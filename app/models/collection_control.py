@@ -288,10 +288,48 @@ class ValidationSummary(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class GovernedNotApplicable(Base):
+    __tablename__ = "governed_not_applicable"
+
+    cycle_id = Column(String(36), primary_key=True)
+    stream_key = Column(String(96), primary_key=True)
+    actor = Column(String(128), nullable=False)
+    reason = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class OperatorJob(Base):
+    __tablename__ = "collection_operator_jobs"
+
+    job_id = Column(String(36), primary_key=True)
+    actor = Column(String(128), nullable=False)
+    action = Column(String(64), nullable=False)
+    resource = Column(String(128), nullable=False)
+    reason = Column(String(255), nullable=False)
+    status = Column(String(16), nullable=False, default="queued")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    error_code = Column(String(64), nullable=True)
+
+    __table_args__ = (CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_operator_job_status"),)
+
+
+class CredentialDelivery(Base):
+    __tablename__ = "collector_credential_deliveries"
+
+    delivery_id = Column(String(36), primary_key=True)
+    identity_id = Column(String(64), nullable=False)
+    encrypted_secret = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectionObservation", "PublicationStream",
     "PublicationVersion", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",
+    "GovernedNotApplicable", "OperatorJob", "CredentialDelivery",
 ]

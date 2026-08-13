@@ -4,6 +4,8 @@ import json
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy import select
+from app.models.collection_control import CollectionAlert, CompositionJob, OperatorJob, PublicationStream
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -13,6 +15,7 @@ from app.services.collection_control import (
     ObservationIngestionService,
     PublicationService,
     CollectionOperationsService,
+    EmailAlertAdapter,
 )
 
 
@@ -41,6 +44,10 @@ def test_collector_tokens_are_scoped_expiring_and_one_time_when_consumed(control
         tokens.validate(token, required_scope="poll")
     rotated = tokens.rotate(identity["identity_id"], overlap_seconds=60)
     assert rotated["secret"] != identity["secret"]
+    delivered = tokens.retrieve_delivery(rotated["delivery_id"])
+    assert delivered["secret"] == rotated["secret"]
+    with pytest.raises(ControlPlaneError, match="credential_delivery_unavailable"):
+        tokens.retrieve_delivery(rotated["delivery_id"])
     assert tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["poll"])
     with pytest.raises(ControlPlaneError, match="invalid_identity_secret"):
         tokens.issue_for_secret(identity["identity_id"], "wrong", scopes=["poll"])
@@ -91,7 +98,8 @@ def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(cont
     envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-late", "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types", "scope": {}, "season": "2025-26", "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(), "retrieved_at": now[0].isoformat()}
     receipt = ingestion.ingest(claims, envelope, payload)
     assert receipt.replay is False
-    assert publication.enqueue("synergy_play_types", season="2025-26", cutoff=cutoff).job_id
+    with publication.session() as session:
+        assert session.scalar(select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")) is not None
     now[0] += timedelta(minutes=2)
     with pytest.raises(ControlPlaneError, match="manifest_expired"):
         ingestion.ingest(claims, envelope, payload)
@@ -131,19 +139,21 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
 def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
-    publications.register_stream("synergy:season", provider="nba", owner="collector", required_observations=["synergy"], publication_strategy="replace", enabled=True)
+    publications.register_stream("synergy:season", provider="nba", owner="collector", required_observations=[], publication_strategy="replace", enabled=True)
     queued = publications.enqueue("synergy:season", season="2025-26", cutoff=now)
     assert publications.enqueue("synergy:season", season="2025-26", cutoff=now).job_id == queued.job_id
-    gate = {"complete": True, "not_applicable": ["synergy"]}
-    with pytest.raises(ControlPlaneError, match="completeness_required"):
-        publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 0})
-    first = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 1}, completeness=gate)
+    first = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 1})
     with pytest.raises(ControlPlaneError, match="stale_composition"):
-        publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=0, completeness=gate)
-    second = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=first.fence, completeness=gate)
+        publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=0)
+    second = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=first.fence)
     assert publications.current("synergy:season").publication_id == second.publication_id
     rollback = publications.rollback("synergy:season", reason="operator repair")
     assert rollback.payload == first.payload
+    publications.register_stream("event_catalog", provider="nba", owner="operator", required_observations=["event_catalog"], publication_strategy="replace", enabled=True)
+    publications.register_default_streams()
+    assert publications.current("event_catalog") is None
+    with publications.session() as session:
+        assert session.get(PublicationStream, "event_catalog").enabled is True
     assert any(row.enabled is False for row in publications.register_default_streams() if row.stream_key == "synergy:l15")
 
 
@@ -159,10 +169,28 @@ def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=0)
     assert cycle.status == "no_game"
     operations = CollectionOperationsService(control_db, clock=lambda: now)
-    assert operations.validate_completeness(required_team_ids=[str(i) for i in range(30)], observed_team_ids=[str(i) for i in range(30)], league_complete=True)["complete"]
-    assert not operations.validate_completeness(required_base_slices=["play_types"], complete_base_slices=[])["complete"]
+    assert operations.validate_completeness(cycle_id=cycle.cycle_id)["complete"]
     audit = operations.audit(actor="operator", action="cycle.open", resource=cycle.cycle_id, reason="scheduled collection")
     assert audit.reason == "scheduled collection"
     item = operations.reconciliation(season="2025-26", kind="identity", reason="identity_unresolved")
     assert operations.resolve_reconciliation(item.item_id, actor="operator", reason="catalog repaired").status == "resolved"
     assert operations.alert(cycle_id=cycle.cycle_id, severity="warning", code="stale_catalog").code == "stale_catalog"
+
+
+def test_alert_delivery_failure_rolls_back_durable_mutation(control_db):
+    def fail(_subject, _body):
+        raise RuntimeError("mailbox unavailable")
+
+    operations = CollectionOperationsService(control_db, alert_adapter=EmailAlertAdapter(fail))
+    with pytest.raises(RuntimeError, match="mailbox unavailable"):
+        operations.alert(cycle_id=None, severity="critical", code="first_failure")
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionAlert)).all() == []
+
+
+def test_audit_creates_durable_operator_job(control_db):
+    operations = CollectionOperationsService(control_db)
+    event = operations.audit(actor="admin", action="cycle.start", resource="cycle", reason="operator requested")
+    with control_db.connect() as connection:
+        jobs = connection.execute(select(OperatorJob)).all()
+    assert jobs and event.details.find(jobs[0][0]) >= 0

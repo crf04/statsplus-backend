@@ -100,6 +100,9 @@ from .collection_control import (  # noqa: E402
     CollectionAlert,
     CollectorUsage,
     ValidationSummary,
+    GovernedNotApplicable,
+    OperatorJob,
+    CredentialDelivery,
 )
 
 __all__ = [
@@ -150,4 +153,7 @@ __all__ = [
     'CollectionAlert',
     'CollectorUsage',
     'ValidationSummary',
+    'GovernedNotApplicable',
+    'OperatorJob',
+    'CredentialDelivery',
 ]

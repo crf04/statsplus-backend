@@ -410,6 +410,12 @@ def _upgrade_surface_registry(connection: Connection) -> None:
             connection.execute(text(f"ALTER TABLE {quoted} ADD COLUMN {preparer.quote(name)} {type_sql}"))
 
 
+def _upgrade_operator_control(connection: Connection) -> None:
+    from app.models.collection_control import GovernedNotApplicable, OperatorJob, CredentialDelivery
+    for model in (GovernedNotApplicable, OperatorJob, CredentialDelivery):
+        model.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -438,6 +444,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(17, "017_collection_control_plane", _create_collection_control_plane_tables),
     Migration(18, "018_collection_operations", _upgrade_collection_operations),
     Migration(19, "019_surface_registry_metadata", _upgrade_surface_registry),
+    Migration(20, "020_operator_control", _upgrade_operator_control),
 )
 
 

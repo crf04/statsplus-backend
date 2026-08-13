@@ -1435,23 +1435,29 @@ POST /api/admin/collection/repair
 POST /api/admin/collection/bootstrap
 POST /api/admin/collection/collectors/<identity_id>/revoke
 POST /api/admin/collection/collectors/<identity_id>/rotate
+GET /api/admin/collection/credential-deliveries/<delivery_id>
 GET /api/admin/collection/reconciliation
+GET /api/admin/collection/diagnostics
 POST /api/admin/collection/reconciliation/<item_id>/resolve
 ```
 
 `POST /api/collector/observations` accepts one complete normalized envelope
-and payload. The server validates the manifest, schema version, environment,
-scope, checksum, size, and `collect_before` deadline before one atomic insert.
+and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The
+server validates exact envelope fields, registered provider ownership, accepted
+schema/window, manifest, environment, scope, checksum, finite/non-negative
+payload values, size, and `collect_before` deadline before one atomic insert.
 Repeating the same
 collector/client observation ID and checksum returns the original receipt;
 reusing the ID with a different checksum is rejected. Operator actions return
 bounded durable identifiers and require a human-readable reason where they
-mutate publication state. Raw observations, credentials, and player-level
+mutate publication state. Raw observations and player-level
 payloads are never returned by these routes. Collector limits return `429
 rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
 The rotation endpoint returns only a durable job/identity status; the new
 long-lived machine secret is delivered through the deployment credential
-channel, never over this API.
+channel, never over the normal mutation API. The Firebase-admin-only,
+one-time credential-delivery endpoint returns the replacement once, then
+invalidates the delivery.
 
 ## User Endpoints
 

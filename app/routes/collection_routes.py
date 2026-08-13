@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import json
 from datetime import datetime
 from flask import Blueprint, jsonify, request
 
@@ -15,10 +17,15 @@ from app.errors import (
     route_error_boundary,
 )
 from app.services.collection_control import ControlPlaneError
-from app.utils.auth import require_admin
+from app.utils.auth import get_current_user, require_admin
 
 
 collection_bp = Blueprint("collection", __name__)
+
+
+def _actor() -> str:
+    user = get_current_user() or {}
+    return str(user.get("uid") or user.get("email") or "admin")[:128]
 
 
 def _service(name: str):
@@ -94,13 +101,31 @@ def get_manifest(manifest_id: str):
 @route_error_boundary("Failed to ingest the observation.")
 def ingest_observation():
     claims = _collector_claims("ingest")
-    envelope = _body()
+    if request.headers.get("Content-Encoding", "").lower() != "gzip":
+        raise InvalidInputError("Observation envelopes must use gzip compression.", detail="compression_required")
+    raw = request.get_data(cache=False)
+    try:
+        envelope = json.loads(gzip.decompress(raw))
+    except (OSError, EOFError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise InvalidInputError("The compressed observation envelope is malformed.", detail="malformed_envelope") from error
+    if not isinstance(envelope, dict):
+        raise InvalidInputError("The compressed observation envelope is malformed.", detail="malformed_envelope")
     payload = envelope.pop("payload", None)
     if payload is None:
-        raise InvalidInputError("The observation payload is required.")
+        raise InvalidInputError("The observation payload is required.", detail="malformed_envelope")
+    envelope["checksum"] = str(envelope.get("checksum") or __import__("hashlib").sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest())
+    accepted = {"manifest_id", "client_observation_id", "environment", "provider", "observation_type",
+                "scope", "season", "cutoff", "schema_version", "retrieved_at", "checksum"}
+    if set(envelope) != accepted:
+        raise InvalidInputError("The observation envelope fields are invalid.", detail="malformed_envelope")
+    encoded_payload = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
     try:
-        _service("collection_operations").record_usage(claims.collector_id, envelopes=1, bytes_received=len(str(payload).encode()))
-        receipt = _service("observation_ingestion").ingest(claims, envelope, __import__("json").dumps(payload, separators=(",", ":")))
+        _service("collection_operations").record_usage(claims.collector_id, envelopes=1, bytes_received=len(raw))
+        receipt = _service("observation_ingestion").ingest(
+            claims, envelope, gzip.compress(encoded_payload), compressed=True
+        )
     except (ControlPlaneError, TypeError, ValueError) as error:
         if isinstance(error, ControlPlaneError) and error.reason == "usage_limit":
             raise RateLimitedError(60, detail=error.reason) from error
@@ -113,10 +138,10 @@ def ingest_observation():
 @route_error_boundary("Failed to activate the collection season.")
 def activate_season(season: str):
     body = _body()
-    actor = str(body.get("actor", "")).strip()
+    actor = _actor()
     reason = str(body.get("reason", "")).strip()
-    if not actor or len(reason) < 3:
-        raise InvalidInputError("An operator identity and human-readable reason are required.")
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
     try:
         row = _service("collection_control").activate_season(season, actor=actor)
         _service("collection_operations").audit(actor=actor, action="season.activate", resource=season, reason=reason)
@@ -133,7 +158,7 @@ def rollback_publication(stream_key: str):
     reason = str(body.get("reason", "")).strip()
     try:
         row = _service("publication_service").rollback(stream_key, reason=reason)
-        _service("collection_operations").audit(actor=str(body.get("actor", "admin")), action="publication.rollback", resource=stream_key, reason=reason)
+        _service("collection_operations").audit(actor=_actor(), action="publication.rollback", resource=stream_key, reason=reason)
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": row.publication_id, "stream_key": row.stream_key, "status": row.status}), 202
@@ -146,7 +171,7 @@ def activate_stream(stream_key: str):
     body = _body()
     try:
         row = _service("publication_service").activate_stream(stream_key, reason=str(body.get("reason", "")))
-        _service("collection_operations").audit(actor=str(body.get("actor", "admin")), action="stream.activate", resource=stream_key, reason=str(body.get("reason", "")))
+        _service("collection_operations").audit(actor=_actor(), action="stream.activate", resource=stream_key, reason=str(body.get("reason", "")))
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": stream_key, "stream_key": row.stream_key, "enabled": row.enabled}), 202
@@ -159,7 +184,7 @@ def retry_composition(job_id: str):
     body = _body()
     try:
         row = _service("publication_service").retry(job_id, reason=str(body.get("reason", "")))
-        _service("collection_operations").audit(actor=str(body.get("actor", "admin")), action="composition.retry", resource=job_id, reason=str(body.get("reason", "")))
+        _service("collection_operations").audit(actor=_actor(), action="composition.retry", resource=job_id, reason=str(body.get("reason", "")))
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": row.job_id, "status": row.status, "attempts": row.attempts}), 202
@@ -170,9 +195,9 @@ def retry_composition(job_id: str):
 @route_error_boundary("Failed to start collection cycle.")
 def start_cycle():
     body = _body()
-    actor, reason = str(body.get("actor", "")).strip(), str(body.get("reason", "")).strip()
-    if not actor or len(reason) < 3:
-        raise InvalidInputError("An operator identity and human-readable reason are required.")
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
     try:
         cycle = _service("collection_control").open_cycle(str(body["manifest_id"]), completed_game_count=int(body.get("completed_game_count", 0)))
         _service("collection_operations").audit(actor=actor, action="cycle.start", resource=cycle.cycle_id, reason=reason)
@@ -188,9 +213,9 @@ def start_cycle():
 @route_error_boundary("Failed to schedule scoped repair.")
 def scoped_repair():
     body = _body()
-    actor, reason = str(body.get("actor", "")).strip(), str(body.get("reason", "")).strip()
-    if not actor or len(reason) < 3:
-        raise InvalidInputError("An operator identity and human-readable reason are required.")
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
     try:
         cutoff = datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00"))
         job = _service("publication_service").enqueue(str(body["stream_key"]), season=str(body["season"]), cutoff=cutoff)
@@ -207,9 +232,9 @@ def scoped_repair():
 @route_error_boundary("Failed to create the bootstrap request.")
 def create_bootstrap():
     body = _body()
-    actor, reason = str(body.get("actor", "")).strip(), str(body.get("reason", "")).strip()
-    if not actor or len(reason) < 3:
-        raise InvalidInputError("An operator identity and human-readable reason are required.")
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
     try:
         cutoff = datetime.fromisoformat(str(body["cutoff"]).replace("Z", "+00:00"))
         row = _service("collection_control").create_bootstrap_request(
@@ -231,7 +256,7 @@ def revoke_collector(identity_id: str):
         raise InvalidInputError("A human-readable reason is required.")
     try:
         _service("collector_tokens").revoke(identity_id)
-        _service("collection_operations").audit(actor=str(body.get("actor", "admin")), action="collector.revoke", resource=identity_id, reason=reason)
+        _service("collection_operations").audit(actor=_actor(), action="collector.revoke", resource=identity_id, reason=reason)
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": identity_id, "status": "revoked"}), 202
@@ -247,11 +272,22 @@ def rotate_collector(identity_id: str):
         raise InvalidInputError("A human-readable reason is required.")
     try:
         credentials = _service("collector_tokens").rotate(identity_id)
-        _service("collection_operations").audit(actor=str(body.get("actor", "admin")), action="collector.rotate", resource=identity_id, reason=reason)
+        _service("collection_operations").audit(actor=_actor(), action="collector.rotate", resource=identity_id, reason=reason)
     except ControlPlaneError as error:
         raise _control_error(error) from error
     del credentials
     return jsonify({"job_id": identity_id, "identity_id": identity_id, "status": "rotated"}), 202
+
+
+@collection_bp.get("/admin/collection/credential-deliveries/<delivery_id>")
+@require_admin
+@route_error_boundary("Failed to retrieve collector credentials.")
+def retrieve_credential_delivery(delivery_id: str):
+    try:
+        delivery = _service("collector_tokens").retrieve_delivery(delivery_id)
+    except ControlPlaneError as error:
+        raise ResourceNotFoundError("The one-time credential delivery is unavailable.", detail=error.reason) from error
+    return jsonify(delivery)
 
 
 @collection_bp.get("/admin/collection/reconciliation")
@@ -262,13 +298,20 @@ def list_reconciliation():
     return jsonify({"items": [{"item_id": row.item_id, "season": row.season, "kind": row.kind, "reason": row.reason, "status": row.status} for row in rows]})
 
 
+@collection_bp.get("/admin/collection/diagnostics")
+@require_admin
+@route_error_boundary("Failed to retrieve collection diagnostics.")
+def collection_diagnostics():
+    return jsonify(_service("collection_operations").diagnostics(limit=50))
+
+
 @collection_bp.post("/admin/collection/reconciliation/<item_id>/resolve")
 @require_admin
 @route_error_boundary("Failed to resolve reconciliation item.")
 def resolve_reconciliation(item_id: str):
     body = _body()
     try:
-        row = _service("collection_operations").resolve_reconciliation(item_id, actor=str(body.get("actor", "admin")), reason=str(body.get("reason", "")))
+        row = _service("collection_operations").resolve_reconciliation(item_id, actor=_actor(), reason=str(body.get("reason", "")))
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": row.item_id, "status": row.status}), 202

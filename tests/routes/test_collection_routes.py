@@ -1,5 +1,7 @@
 """HTTP boundary tests for the collection control plane."""
 
+import gzip
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -57,6 +59,25 @@ def test_machine_secret_exchange_is_reachable_and_never_returns_secret(client, a
     assert response.json == {"token": "short-lived-token"}
 
 
+def test_observation_route_requires_atomic_compressed_envelope(client, app):
+    dependencies = _install_collection_services(app)
+    body = {
+        "manifest_id": "manifest-1", "client_observation_id": "obs-1", "environment": "testing",
+        "provider": "nba", "observation_type": "synergy_play_types", "scope": {},
+        "season": "2025-26", "cutoff": "2026-08-11T00:00:00+00:00", "schema_version": 2,
+        "retrieved_at": "2026-08-12T00:00:00+00:00", "payload": {"rows": []},
+    }
+    response = client.post(
+        "/api/collector/observations", data=gzip.compress(json.dumps(body).encode()),
+        headers={"Authorization": "Bearer token", "Content-Encoding": "gzip", "Content-Type": "application/json"},
+    )
+    assert response.status_code == 202
+    assert dependencies.observation_ingestion.ingest.call_args.kwargs["compressed"] is True
+
+    uncompressed = client.post("/api/collector/observations", json=body, headers={"Authorization": "Bearer token"})
+    assert uncompressed.status_code == 400
+
+
 def test_malformed_json_body_is_stable_400(client, app):
     _install_collection_services(app)
     response = client.post("/api/collector/token", json=["not", "an", "object"])
@@ -71,6 +92,8 @@ def test_operator_route_matrix_is_registered_and_reasoned(client, app):
         ("/api/admin/collection/streams/stream/rollback", "POST"),
         ("/api/admin/collection/streams/stream/activate", "POST"),
         ("/api/admin/collection/compositions/job/retry", "POST"),
+        ("/api/admin/collection/cycles/start", "POST"),
+        ("/api/admin/collection/repair", "POST"),
         ("/api/admin/collection/bootstrap", "POST"),
         ("/api/admin/collection/collectors/id/revoke", "POST"),
         ("/api/admin/collection/collectors/id/rotate", "POST"),

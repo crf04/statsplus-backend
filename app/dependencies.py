@@ -110,6 +110,7 @@ def build_dependencies(
         ObservationIngestionService,
         PublicationService,
         CollectionOperationsService,
+        EmailAlertAdapter,
     )
 
     # Load the reviewed statistic definitions before constructing providers.
@@ -138,11 +139,13 @@ def build_dependencies(
         )
         collection_control = CollectionControlService(engine)
         publication_service = PublicationService(engine)
-        collection_operations = CollectionOperationsService(engine)
+        collection_operations = CollectionOperationsService(
+            engine, publication_service=publication_service, alert_adapter=EmailAlertAdapter()
+        )
         if inspect(engine).has_table("publication_streams"):
             publication_service.register_default_streams()
         observation_ingestion = ObservationIngestionService(
-            engine, publication_service=publication_service, operations_service=collection_operations
+            engine, publication_service=publication_service
         )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
