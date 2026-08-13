@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame
@@ -17,7 +17,11 @@ from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
 )
-from app.services.database_first_drills import FailureDrillRunner
+from app.services.database_first_drills import (
+    FailureDrillRunner,
+    PBPRepairIdentitySnapshot,
+    verify_new_pbp_repair_identities,
+)
 from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
 from app.services.database_first_drills import DatabaseIdentity
@@ -278,6 +282,128 @@ def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(
     assert replay_evidence["verified"] is False
     assert replay_evidence["observation_id"] == ""
     assert replay_evidence["composition_job_ids"] == ()
+
+
+@pytest.mark.parametrize(
+    ("observation_changes", "manifest_changes", "expected_verified"),
+    (
+        pytest.param({}, {}, True, id="accepted-control"),
+        pytest.param({"accepted_at": None}, {}, False, id="unaccepted"),
+        pytest.param(
+            {"retrieved_at": "2026-04-14 00:00:00.000000"},
+            {},
+            False,
+            id="retrieved-at-deadline",
+        ),
+        pytest.param(
+            {"accepted_at": "2026-04-14 00:00:00.000000"},
+            {},
+            False,
+            id="accepted-at-deadline",
+        ),
+        pytest.param({"schema_version": 2}, {}, False, id="unauthorized-schema"),
+        pytest.param(
+            {"scope": '{"surface":"canonical_game_ledger","game_id":"other"}'},
+            {},
+            False,
+            id="wrong-game-scope",
+        ),
+        pytest.param({"environment": "operator"}, {}, False, id="wrong-environment"),
+        pytest.param({}, {"scopes": '["other"]'}, False, id="manifest-scope-missing"),
+    ),
+)
+def test_pbp_repair_rejects_observation_without_manifest_acceptance(
+    tmp_path, observation_changes, manifest_changes, expected_verified
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'acceptance.sqlite3'}")
+    cutoff = "2026-04-12 23:59:00.000000"
+    collect_before = "2026-04-14 00:00:00.000000"
+    observation = {
+        "observation_id": "new-observation",
+        "manifest_id": "repair-manifest",
+        "environment": "server",
+        "provider": "pbp",
+        "observation_type": "canonical_game_ledger",
+        "scope": '{"surface":"canonical_game_ledger","game_id":"0022501234"}',
+        "season": "2025-26",
+        "cutoff": cutoff,
+        "schema_version": 1,
+        "retrieved_at": "2026-04-13 12:00:00.000000",
+        "accepted_at": "2026-04-13 12:00:00.000000",
+    }
+    observation.update(observation_changes)
+    manifest = {
+        "manifest_id": "repair-manifest",
+        "season": "2025-26",
+        "cutoff": cutoff,
+        "collect_before": collect_before,
+        "accepted_versions": "[1]",
+        "scopes": '["canonical_game_ledger"]',
+        "status": "active",
+    }
+    manifest.update(manifest_changes)
+    streams = (
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
+    )
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE collection_manifests ("
+            "manifest_id TEXT, season TEXT, cutoff DATETIME, collect_before DATETIME, "
+            "accepted_versions TEXT, scopes TEXT, status TEXT)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE collection_observations ("
+            "observation_id TEXT, manifest_id TEXT, environment TEXT, provider TEXT, "
+            "observation_type TEXT, scope TEXT, season TEXT, cutoff DATETIME, "
+            "schema_version INTEGER, retrieved_at DATETIME, accepted_at DATETIME)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE canonical_game_ledger_games ("
+            "game_id TEXT, season TEXT, source_observation_id TEXT, checksum TEXT)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE composition_jobs ("
+            "job_id TEXT, stream_key TEXT, manifest_id TEXT, season TEXT, "
+            "cutoff DATETIME, status TEXT)"
+        ))
+        connection.execute(text(
+            "INSERT INTO collection_manifests VALUES ("
+            ":manifest_id, :season, :cutoff, :collect_before, :accepted_versions, "
+            ":scopes, :status)"
+        ), manifest)
+        connection.execute(text(
+            "INSERT INTO collection_observations VALUES ("
+            ":observation_id, :manifest_id, :environment, :provider, "
+            ":observation_type, :scope, :season, :cutoff, :schema_version, "
+            ":retrieved_at, :accepted_at)"
+        ), observation)
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_games VALUES ("
+            "'0022501234', '2025-26', 'new-observation', :checksum)"
+        ), {"checksum": "e" * 64})
+        connection.execute(text(
+            "INSERT INTO composition_jobs VALUES ("
+            ":job_id, :stream_key, 'repair-manifest', '2025-26', :cutoff, 'queued')"
+        ), [
+            {"job_id": f"new-{index}", "stream_key": stream, "cutoff": cutoff}
+            for index, stream in enumerate(streams)
+        ])
+
+    evidence = verify_new_pbp_repair_identities(
+        engine,
+        season="2025-26",
+        manifest_id="repair-manifest",
+        game_id="0022501234",
+        checksum="e" * 64,
+        before=PBPRepairIdentitySnapshot(frozenset(), frozenset()),
+    )
+
+    assert evidence["verified"] is expected_verified, evidence
 
 
 def test_restore_report_omits_raw_subprocess_output(monkeypatch, tmp_path):

@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
+from app.domain.utc import assume_utc
 from app.migrations import run_migrations
 from app.models.collection_control import (
     CollectionManifest,
@@ -110,6 +111,9 @@ def verify_new_pbp_repair_identities(
             CollectionManifest.manifest_id,
             CollectionManifest.season,
             CollectionManifest.cutoff,
+            CollectionManifest.collect_before,
+            CollectionManifest.accepted_versions,
+            CollectionManifest.scopes,
         ).where(
             CollectionManifest.manifest_id == manifest_id,
             CollectionManifest.season == season,
@@ -133,6 +137,10 @@ def verify_new_pbp_repair_identities(
             CollectionObservation.scope,
             CollectionObservation.season,
             CollectionObservation.cutoff,
+            CollectionObservation.environment,
+            CollectionObservation.schema_version,
+            CollectionObservation.retrieved_at,
+            CollectionObservation.accepted_at,
         ).where(
             CollectionObservation.observation_id == observation_id,
         )).mappings().one_or_none()
@@ -150,8 +158,15 @@ def verify_new_pbp_repair_identities(
         )).mappings().all()
     try:
         scope = json.loads(str(observation["scope"])) if observation is not None else None
+        manifest_scopes = set(json.loads(str(manifest["scopes"])))
+        accepted_versions = {
+            int(value)
+            for value in json.loads(str(manifest["accepted_versions"]))
+        }
     except (TypeError, ValueError):
         scope = None
+        manifest_scopes = set()
+        accepted_versions = set()
     observation_valid = (
         observation is not None
         and observation_id not in before.observation_ids
@@ -160,9 +175,16 @@ def verify_new_pbp_repair_identities(
         and observation["cutoff"] == manifest["cutoff"]
         and str(observation["provider"]) == "pbp"
         and str(observation["observation_type"]) == "canonical_game_ledger"
+        and str(observation["environment"]) == "server"
+        and observation["accepted_at"] is not None
+        and observation["retrieved_at"] is not None
+        and assume_utc(observation["accepted_at"]) < assume_utc(manifest["collect_before"])
+        and assume_utc(observation["retrieved_at"]) < assume_utc(manifest["collect_before"])
+        and observation["schema_version"] in accepted_versions
         and isinstance(scope, Mapping)
         and str(scope.get("game_id", "")) == game_id
         and str(scope.get("surface", "")) == "canonical_game_ledger"
+        and "canonical_game_ledger" in manifest_scopes
     )
     expected_streams = frozenset(LedgerCorrectionQueue.STREAMS)
     new_jobs = tuple(

@@ -1140,7 +1140,10 @@ PBP repair expectation names only its known preconditions (`season`,
 captures restored observation and composition-job identities before invoking
 the repair, then reports only newly created IDs after binding the accepted PBP
 ledger observation and every invalidated derived stream to that manifest's
-cutoff; a pre-existing matching row cannot satisfy the drill. The
+cutoff. The observation must independently satisfy the runtime acceptance
+contract for environment, canonical scope, authorized schema version, and
+collection deadline; a pre-existing or merely inserted row cannot satisfy the
+drill. The
 marker is provisioned out-of-band (for example, a row in
 `statsplus_disposable_control(marker_nonce, purpose, schema_name)` with
 `purpose = 'database_first_drill'`) and the preflight rejects any existing
