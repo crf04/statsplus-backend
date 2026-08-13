@@ -9,7 +9,6 @@ durable insert; publication pointers are changed under a per-stream fence.
 from __future__ import annotations
 
 import base64
-import gzip
 import hashlib
 import hmac
 import json
@@ -17,6 +16,8 @@ import math
 import threading
 import secrets
 import uuid
+import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
@@ -26,6 +27,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
+
+from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 
 from app.models.collection_control import (
     ActiveSeason,
@@ -60,6 +63,16 @@ MAX_SCOPE_BYTES = 32 * 1024
 OBSERVATION_RETENTION_DAYS = 30
 ATHLETE_REUSE_DAYS = 7
 MAX_PAYLOAD_VALUES = 100_000
+MAX_PAYLOAD_DEPTH = 64
+MAX_RECORDS_PER_OBSERVATION = 100_000
+NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
+REGISTERED_BASES = frozenset({"play_types", "shot_zones", "shot_types", "assist_locations"})
+STREAM_BASES: dict[str, frozenset[str]] = {
+    "synergy_play_types": frozenset({"play_types"}),
+    "grouped_shot_types": frozenset({"shot_types"}),
+    "exact_shot_zones": frozenset({"shot_zones"}),
+    "assist_locations": frozenset({"assist_locations"}),
+}
 
 @dataclass(frozen=True, slots=True)
 class SurfaceDefinition:
@@ -123,6 +136,35 @@ def _checksum(value: bytes | str) -> str:
     return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
 
 
+def decompress_gzip_limited(raw: bytes, *, max_output_bytes: int,
+                            max_input_bytes: int = MAX_COMPRESSED_BYTES) -> bytes:
+    """Decompress gzip without allocating beyond either wire ceiling."""
+
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > max_input_bytes:
+        raise ControlPlaneError("payload_too_large")
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    output = bytearray()
+    try:
+        for offset in range(0, len(raw), 64 * 1024):
+            remaining = max_output_bytes - len(output)
+            if remaining < 0:
+                raise ControlPlaneError("payload_too_large")
+            chunk = decoder.decompress(raw[offset:offset + 64 * 1024], remaining + 1)
+            output.extend(chunk)
+            if len(output) > max_output_bytes or decoder.unconsumed_tail:
+                raise ControlPlaneError("payload_too_large")
+        remaining = max_output_bytes - len(output)
+        tail = decoder.flush(remaining + 1)
+        output.extend(tail)
+    except ControlPlaneError:
+        raise
+    except (zlib.error, ValueError, OverflowError) as error:
+        raise ControlPlaneError("invalid_compression") from error
+    if len(output) > max_output_bytes or not decoder.eof or decoder.unused_data:
+        raise ControlPlaneError("invalid_compression")
+    return bytes(output)
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -161,6 +203,24 @@ class ObservationReceipt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorActionResult:
+    """The durable result of one atomic operator mutation."""
+
+    resource: Any
+    job: Any
+    audit: Any
+
+    @property
+    def job_id(self) -> str:
+        return str(self.job.job_id)
+
+    def __getattr__(self, name: str) -> Any:
+        # Keep the service's historical row-like return ergonomics while the
+        # HTTP layer can access the durable job alongside the resource.
+        return getattr(self.resource, name)
+
+
 class _SessionService:
     def __init__(self, engine: Engine, *, clock: Callable[[], datetime] = utcnow) -> None:
         self.engine = engine
@@ -169,6 +229,16 @@ class _SessionService:
 
     def session(self) -> Session:
         return self.session_factory()
+
+    @contextmanager
+    def _session_scope(self, session: Session | None = None):
+        """Use a caller transaction when supplied, otherwise own one."""
+
+        if session is not None:
+            yield session
+            return
+        with self.session() as owned, owned.begin():
+            yield owned
 
 
 class CollectorTokenService(_SessionService):
@@ -307,19 +377,21 @@ class CollectorTokenService(_SessionService):
             identity.last_seen_at = now
         return CollectorClaims(identity_id, str(payload["aud"]), self.environment, scopes, token_id, expires)
 
-    def revoke(self, identity_id: str) -> None:
-        with self.session() as session, session.begin():
+    def revoke(self, identity_id: str, *, session: Session | None = None) -> CollectorIdentity:
+        with self._session_scope(session) as session:
             identity = session.get(CollectorIdentity, identity_id)
             if identity is None:
                 raise ControlPlaneError("identity_not_found")
             identity.revoked_at = self.clock()
+            return identity
 
-    def rotate(self, identity_id: str, *, overlap_seconds: int = 3600) -> dict[str, str]:
+    def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,
+               session: Session | None = None) -> dict[str, str]:
         if overlap_seconds < 0:
             raise ControlPlaneError("invalid_rotation_window")
         secret = secrets.token_urlsafe(32)
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             identity = session.get(CollectorIdentity, identity_id)
             if identity is None or identity.revoked_at is not None:
                 raise ControlPlaneError("identity_revoked")
@@ -335,6 +407,13 @@ class CollectorTokenService(_SessionService):
         return {"identity_id": identity_id, "secret": secret, "delivery_id": delivery_id}
 
     def retrieve_delivery(self, delivery_id: str) -> dict[str, str]:
+        """Legacy in-process retrieval used by the deployment channel.
+
+        The HTTP admin endpoint deliberately calls :meth:`delivery_metadata`;
+        plaintext replacement secrets are only returned by the
+        machine-authenticated claim endpoint.
+        """
+
         now = _aware(self.clock())
         with self.session() as session, session.begin():
             delivery = session.get(CredentialDelivery, delivery_id)
@@ -347,15 +426,65 @@ class CollectorTokenService(_SessionService):
             delivery.retrieved_at = now
             return {"delivery_id": delivery_id, "identity_id": delivery.identity_id, "secret": secret}
 
+    def delivery_metadata(self, delivery_id: str) -> dict[str, Any]:
+        """Return safe delivery state without decrypting a replacement secret."""
+
+        with self.session() as session:
+            delivery = session.get(CredentialDelivery, delivery_id)
+            if delivery is None:
+                raise ControlPlaneError("credential_delivery_unavailable")
+            return {
+                "delivery_id": delivery.delivery_id,
+                "identity_id": delivery.identity_id,
+                "expires_at": _iso(delivery.expires_at),
+                "retrieved": delivery.retrieved_at is not None,
+            }
+
+    def claim_delivery(self, delivery_id: str, *, collector_id: str,
+                       presented_secret: str) -> dict[str, str]:
+        """Deliver one replacement only to the rotated machine.
+
+        The old secret remains valid only for the explicit overlap window and
+        is the proof that the caller controls the machine identity.  Admin
+        reads never decrypt this record.
+        """
+
+        now = _aware(self.clock())
+        with self.session() as session, session.begin():
+            delivery = session.get(CredentialDelivery, delivery_id)
+            if delivery is None or delivery.retrieved_at is not None or _aware(delivery.expires_at) <= now:
+                raise ControlPlaneError("credential_delivery_unavailable")
+            if delivery.identity_id != collector_id:
+                raise ControlPlaneError("credential_delivery_unavailable")
+            identity = session.get(CollectorIdentity, collector_id)
+            if identity is None or identity.revoked_at is not None:
+                raise ControlPlaneError("identity_revoked")
+            current = self._verify_secret(presented_secret, identity.secret_hash)
+            previous = (
+                identity.previous_secret_hash is not None
+                and identity.previous_secret_expires_at is not None
+                and _aware(identity.previous_secret_expires_at) > now
+                and self._verify_secret(presented_secret, identity.previous_secret_hash)
+            )
+            if not current and not previous:
+                raise ControlPlaneError("invalid_identity_secret")
+            try:
+                secret = self._credential_cipher.decrypt(delivery.encrypted_secret.encode()).decode()
+            except (FernetInvalidToken, UnicodeDecodeError) as error:
+                raise ControlPlaneError("credential_delivery_unavailable") from error
+            delivery.retrieved_at = now
+            return {"delivery_id": delivery_id, "identity_id": collector_id, "secret": secret}
+
 
 class CollectionControlService(_SessionService):
     """Manage active seasons, bootstrap requests, catalogs, and manifests."""
 
-    def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None) -> ActiveSeason:
+    def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
+                        session: Session | None = None) -> ActiveSeason:
         if not _valid_season(season):
             raise ControlPlaneError("invalid_season")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             session.query(ActiveSeason).filter(ActiveSeason.status == "active").update({"status": "inactive"})
             row = session.get(ActiveSeason, season)
             if row is None:
@@ -367,13 +496,14 @@ class CollectionControlService(_SessionService):
         return row
 
     def create_bootstrap_request(self, season: str, catalog_type: str, *, cutoff: datetime,
-                                 ttl_hours: int = 24) -> BootstrapRequest:
+                                 ttl_hours: int = 24,
+                                 session: Session | None = None) -> BootstrapRequest:
         if catalog_type not in {"event", "athlete"} or not _valid_season(season):
             raise ControlPlaneError("invalid_bootstrap")
         if ttl_hours <= 0 or ttl_hours > 168:
             raise ControlPlaneError("invalid_bootstrap_expiry")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             active = session.get(ActiveSeason, season)
             if active is None or active.status != "active":
                 raise ControlPlaneError("season_not_active")
@@ -383,11 +513,17 @@ class CollectionControlService(_SessionService):
         return row
 
     def publish_catalog(self, request_id: str, payload: Any, *, version: str,
-                        checksum: str | None = None, expires_at: datetime | None = None) -> CatalogPublication:
+                        checksum: str | None = None, expires_at: datetime | None = None,
+                        session: Session | None = None) -> CatalogPublication:
         encoded = _json(payload)
-        checksum = checksum or _checksum(encoded)
+        computed_checksum = _checksum(encoded)
+        if checksum is not None and not hmac.compare_digest(str(checksum), computed_checksum):
+            raise ControlPlaneError("checksum_mismatch")
+        checksum = computed_checksum
+        if not str(version).strip() or len(str(version)) > 128:
+            raise ControlPlaneError("invalid_catalog_version")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             request = session.get(BootstrapRequest, request_id)
             if request is None:
                 raise ControlPlaneError("bootstrap_not_found")
@@ -400,6 +536,18 @@ class CollectionControlService(_SessionService):
             session.add(publication)
             request.status, request.completed_at, request.catalog_version = "succeeded", now, version
         return publication
+
+    def bootstrap_status(self, request_id: str, *, now: datetime | None = None) -> BootstrapRequest:
+        """Read bounded bootstrap state and expire pending work truthfully."""
+
+        current = _aware(now or self.clock())
+        with self.session() as session, session.begin():
+            request = session.get(BootstrapRequest, request_id)
+            if request is None:
+                raise ControlPlaneError("bootstrap_not_found")
+            if request.status == "pending" and _aware(request.expires_at) <= current:
+                request.status = "expired"
+            return request
 
     def latest_catalog(self, season: str, catalog_type: str, *, cutoff: datetime | None = None,
                        now: datetime | None = None) -> CatalogPublication | None:
@@ -422,6 +570,10 @@ class CollectionControlService(_SessionService):
         cutoff, collect_before = _aware(cutoff), _aware(collect_before)
         if cutoff > collect_before or collect_before <= now:
             raise ControlPlaneError("invalid_manifest_window")
+        with self.session() as session:
+            active = session.get(ActiveSeason, season)
+            if active is None or active.status != "active":
+                raise ControlPlaneError("season_not_active")
         event = self.latest_catalog(season, "event", cutoff=cutoff, now=now)
         athlete = self.latest_catalog(season, "athlete", cutoff=cutoff, now=now)
         # A newer cutoff can never inherit an old Event Catalog.  Athlete
@@ -440,13 +592,29 @@ class CollectionControlService(_SessionService):
             if not required_ids <= catalog_ids:
                 raise ControlPlaneError("identity_unresolved")
         scope_list = sorted({str(scope).strip() for scope in scopes if str(scope).strip()})
-        versions = sorted({int(version) for version in accepted_versions})
-        if not scope_list or not versions or len(_json(scope_list).encode()) > MAX_SCOPE_BYTES:
+        try:
+            versions = sorted({int(version) for version in accepted_versions})
+        except (TypeError, ValueError) as error:
+            raise ControlPlaneError("invalid_manifest") from error
+        registered_scopes = {
+            scope
+            for definition in SURFACE_REGISTRY
+            for scope in (definition.stream_key, definition.scope, *definition.required)
+        }
+        if (
+            not scope_list
+            or not versions
+            or not set(scope_list) <= registered_scopes
+            or len(_json(scope_list).encode()) > MAX_SCOPE_BYTES
+        ):
             raise ControlPlaneError("invalid_manifest")
         material = {"season": season, "cutoff": cutoff.isoformat(), "collect_before": collect_before.isoformat(),
                     "accepted_versions": versions, "scopes": scope_list}
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
+            active = session.get(ActiveSeason, season)
+            if active is None or active.status != "active":
+                raise ControlPlaneError("season_not_active")
             prior = session.scalars(select(CollectionManifest).where(CollectionManifest.season == season, CollectionManifest.status == "active")).all()
             session.query(CollectionManifest).filter(CollectionManifest.season == season, CollectionManifest.status == "active").update(
                 {"status": "superseded", "superseded_at": now})
@@ -466,26 +634,50 @@ class CollectionControlService(_SessionService):
                 raise ControlPlaneError("manifest_expired")
             return row
 
-    def open_cycle(self, manifest_id: str, *, completed_game_count: int) -> CollectionCycle:
-        """Open a cycle; no completed game is a truthful no-game outcome."""
-        if completed_game_count < 0:
-            raise ControlPlaneError("invalid_game_count")
+    def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
+                   session: Session | None = None) -> CollectionCycle:
+        """Open a cycle from the governed Event Catalog.
+
+        ``completed_game_count`` remains a compatibility keyword for older
+        callers, but is intentionally ignored.  A caller cannot manufacture a
+        no-game or complete-game outcome by submitting an administrator-owned
+        count.
+        """
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None or manifest.status != "active":
                 raise ControlPlaneError("manifest_expired")
+            active = session.get(ActiveSeason, manifest.season)
+            if active is None or active.status != "active":
+                raise ControlPlaneError("season_not_active")
+            event = session.scalar(select(CatalogPublication).where(
+                CatalogPublication.season == manifest.season,
+                CatalogPublication.catalog_type == "event",
+                CatalogPublication.cutoff == manifest.cutoff,
+                CatalogPublication.complete.is_(True),
+                (CatalogPublication.expires_at.is_(None)
+                 | (CatalogPublication.expires_at > _aware(now))),
+            ).order_by(CatalogPublication.published_at.desc()))
+            if event is None:
+                raise ControlPlaneError("event_catalog_required")
+            game_count = _completed_game_count(event.payload, cutoff=_aware(manifest.cutoff))
             cycle = CollectionCycle(cycle_id=_uuid(), season=manifest.season, manifest_id=manifest_id,
-                cutoff=manifest.cutoff, status="no_game" if completed_game_count == 0 else "collecting",
-                completed_game_count=completed_game_count, created_at=now)
+                cutoff=manifest.cutoff, status="no_game" if game_count == 0 else "collecting",
+                completed_game_count=game_count, created_at=now)
             session.add(cycle)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                raise ControlPlaneError("cycle_exists") from error
         return cycle
 
-    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None) -> CollectionCycle:
+    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None,
+                     session: Session | None = None) -> CollectionCycle:
         if status not in {"complete", "attention", "failed"}:
             raise ControlPlaneError("invalid_cycle_status")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             cycle = session.get(CollectionCycle, cycle_id)
             if cycle is None:
                 raise ControlPlaneError("cycle_not_found")
@@ -495,10 +687,13 @@ class CollectionControlService(_SessionService):
                 exempt = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
                     GovernedNotApplicable.cycle_id == cycle_id
                 )))
-                enabled = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+                manifest = session.get(CollectionManifest, cycle.manifest_id)
+                if manifest is None:
+                    raise ControlPlaneError("manifest_expired")
+                enabled = _manifest_streams(session, manifest)
                 missing = []
                 for stream in enabled:
-                    if stream.publication_strategy == "request_time":
+                    if stream.publication_strategy in {"request_time", "never_schedule"}:
                         continue
                     if stream.stream_key in exempt:
                         continue
@@ -511,22 +706,26 @@ class CollectionControlService(_SessionService):
             cycle.status, cycle.completed_at, cycle.attention_reason = status, now, reason
         return cycle
 
-    def govern_not_applicable(self, cycle_id: str, stream_key: str, *, actor: str, reason: str) -> GovernedNotApplicable:
+    def govern_not_applicable(self, cycle_id: str, stream_key: str, *, actor: str, reason: str,
+                              session: Session | None = None) -> GovernedNotApplicable:
         if not actor.strip() or len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             cycle = session.get(CollectionCycle, cycle_id)
             stream = session.get(PublicationStream, stream_key)
-            if cycle is None or stream is None or not stream.enabled:
+            if cycle is None or stream is None:
+                raise ControlPlaneError("not_applicable_invalid")
+            manifest = session.get(CollectionManifest, cycle.manifest_id)
+            if manifest is None or stream not in _manifest_streams(session, manifest):
                 raise ControlPlaneError("not_applicable_invalid")
             row = GovernedNotApplicable(cycle_id=cycle_id, stream_key=stream_key, actor=actor[:128], reason=reason[:255], created_at=self.clock())
             session.merge(row)
         return row
 
-    def supersede_cycle(self, cycle_id: str, *, reason: str) -> CollectionCycle:
+    def supersede_cycle(self, cycle_id: str, *, reason: str, session: Session | None = None) -> CollectionCycle:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             cycle = session.get(CollectionCycle, cycle_id)
             if cycle is None:
                 raise ControlPlaneError("cycle_not_found")
@@ -561,40 +760,59 @@ class ObservationIngestionService(_SessionService):
     def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
                *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
                max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
+        if not isinstance(envelope, Mapping):
+            raise ControlPlaneError("malformed_envelope")
         if compressed and isinstance(payload, str):
             payload = payload.encode()
-        raw = payload if isinstance(payload, bytes) else payload.encode()
+        if not isinstance(payload, (bytes, bytearray)):
+            raise ControlPlaneError("malformed_payload")
+        raw = bytes(payload)
         if len(raw) > max_compressed_bytes if compressed else len(raw) > max_payload_bytes:
             raise ControlPlaneError("payload_too_large")
-        try:
-            decoded = gzip.decompress(raw) if compressed else raw
-        except (OSError, EOFError) as error:
-            raise ControlPlaneError("invalid_compression") from error
-        if len(decoded) > max_payload_bytes:
-            raise ControlPlaneError("payload_too_large")
+        decoded = (
+            decompress_gzip_limited(
+                raw,
+                max_output_bytes=max_payload_bytes,
+                max_input_bytes=max_compressed_bytes,
+            )
+            if compressed else raw
+        )
         try:
             value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
-            _validate_payload_shape(value)
+            _validate_observation_payload(value, observation_type=str(envelope.get("observation_type", "")))
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
         if not isinstance(value, (dict, list)):
             raise ControlPlaneError("malformed_payload")
-        required = {"manifest_id", "client_observation_id", "environment", "provider", "observation_type", "scope", "season", "cutoff", "schema_version", "retrieved_at"}
-        if not required <= envelope.keys():
+        required = {"manifest_id", "client_observation_id", "environment", "provider", "observation_type", "scope", "season", "cutoff", "schema_version", "retrieved_at", "checksum"}
+        if set(envelope) != required:
             raise ControlPlaneError("malformed_envelope")
+        if "ingest" not in claims.scopes:
+            raise ControlPlaneError("scope_denied")
         if envelope["environment"] != claims.environment or envelope["season"] is None:
             raise ControlPlaneError("environment_mismatch")
-        schema_version = int(envelope["schema_version"])
-        observation_type = str(envelope["observation_type"]).strip()
+        raw_schema_version = envelope["schema_version"]
+        if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
+            raise ControlPlaneError("schema_unsupported")
+        schema_version = raw_schema_version
+        if not isinstance(envelope["provider"], str) or not envelope["provider"].strip():
+            raise ControlPlaneError("provider_not_registered")
+        if not isinstance(envelope["observation_type"], str):
+            raise ControlPlaneError("invalid_observation_type")
+        observation_type = envelope["observation_type"].strip()
         if not observation_type:
             raise ControlPlaneError("invalid_observation_type")
-        client_id = str(envelope["client_observation_id"]).strip()
+        if not isinstance(envelope["client_observation_id"], str):
+            raise ControlPlaneError("invalid_observation_id")
+        client_id = envelope["client_observation_id"].strip()
         if not client_id or len(client_id) > 128:
             raise ControlPlaneError("invalid_observation_id")
         scope_text = _json(envelope["scope"])
         if len(scope_text.encode()) > MAX_SCOPE_BYTES:
             raise ControlPlaneError("scope_limit")
-        manifest_id = str(envelope["manifest_id"])
+        if not isinstance(envelope["manifest_id"], str) or not envelope["manifest_id"].strip():
+            raise ControlPlaneError("manifest_not_found")
+        manifest_id = envelope["manifest_id"].strip()
         checksum = str(envelope.get("checksum") or _checksum(decoded))
         if checksum != _checksum(decoded):
             raise ControlPlaneError("checksum_mismatch")
@@ -614,14 +832,17 @@ class ObservationIngestionService(_SessionService):
                 raise ControlPlaneError("scope_denied")
             scope_value = envelope["scope"]
             if self.publication_service is not None:
-                stream = self._registered_stream(session, observation_type, str(envelope["provider"]))
+                stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
                 if schema_version not in set(json.loads(stream.schema_versions)):
                     raise ControlPlaneError("schema_unsupported")
                 supported_windows = set(json.loads(stream.supported_windows))
-                if isinstance(scope_value, Mapping) and scope_value.get("window") is not None:
-                    if str(scope_value["window"]) not in supported_windows:
+                if isinstance(scope_value, Mapping):
+                    window = scope_value.get("window", scope_value.get("scope"))
+                    if supported_windows and window is None:
+                        raise ControlPlaneError("scope_unsupported")
+                    if window is not None and str(window) not in supported_windows:
                         raise ControlPlaneError("scope_unsupported")
             if not isinstance(scope_value, (str, Mapping, list, tuple)):
                 raise ControlPlaneError("invalid_scope")
@@ -632,8 +853,8 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("observation_id_conflict")
                 return ObservationReceipt(existing.observation_id, client_id, checksum, replay=True)
             row = CollectionObservation(observation_id=_uuid(), client_observation_id=client_id, collector_id=claims.collector_id,
-                environment=claims.environment, provider=str(envelope["provider"]), observation_type=observation_type,
-                scope=scope_text, season=str(envelope["season"]), cutoff=_parse_datetime(envelope["cutoff"]), schema_version=schema_version,
+                environment=claims.environment, provider=envelope["provider"].strip(), observation_type=observation_type,
+                manifest_id=manifest_id, scope=scope_text, season=str(envelope["season"]), cutoff=_parse_datetime(envelope["cutoff"]), schema_version=schema_version,
                 checksum=checksum, payload=decoded.decode(), payload_bytes=len(decoded), retrieved_at=_parse_datetime(envelope["retrieved_at"]), accepted_at=now)
             session.add(row)
             try:
@@ -641,11 +862,14 @@ class ObservationIngestionService(_SessionService):
             except IntegrityError as error:
                 session.rollback()
                 raise ControlPlaneError("observation_race") from error
-        if self.publication_service is not None:
-            self.publication_service.enqueue_for_observation(
-                observation_type, season=str(envelope["season"]),
-                cutoff=_parse_datetime(envelope["cutoff"])
-            )
+            if self.publication_service is not None:
+                self.publication_service.enqueue_for_observation(
+                    observation_type,
+                    season=str(envelope["season"]),
+                    cutoff=_parse_datetime(envelope["cutoff"]),
+                    manifest_id=manifest_id,
+                    session=session,
+                )
         return ObservationReceipt(row.observation_id, client_id, checksum)
 
     @staticmethod
@@ -668,6 +892,9 @@ class PublicationService(_SessionService):
                         freshness_rule: str = "cutoff_current") -> PublicationStream:
         if not stream_key or not provider or not owner:
             raise ControlPlaneError("invalid_stream")
+        definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
+        if definition is not None and definition.strategy == "never_schedule" and enabled:
+            raise ControlPlaneError("stream_unavailable")
         now = self.clock()
         with self.session() as session, session.begin():
             row = session.get(PublicationStream, stream_key)
@@ -699,43 +926,54 @@ class PublicationService(_SessionService):
             ))
         return tuple(rows)
 
-    def activate_stream(self, stream_key: str, *, reason: str) -> PublicationStream:
+    def activate_stream(self, stream_key: str, *, reason: str,
+                        session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             row = session.get(PublicationStream, stream_key)
             if row is None:
                 raise ControlPlaneError("stream_not_found")
+            definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
+            if definition is not None and definition.strategy == "never_schedule":
+                raise ControlPlaneError("stream_unavailable")
             row.enabled = True
             return row
 
-    def enqueue(self, stream_key: str, *, season: str, cutoff: datetime) -> CompositionJob:
+    def enqueue(self, stream_key: str, *, season: str, cutoff: datetime,
+                manifest_id: str | None = None,
+                session: Session | None = None) -> CompositionJob:
         """Create one idempotent composition job for a stream/cutoff."""
         now = self.clock()
-        with self.session() as session, session.begin():
-            existing = session.scalar(select(CompositionJob).where(
+        with self._session_scope(session) as session:
+            existing_query = select(CompositionJob).where(
                 CompositionJob.stream_key == stream_key, CompositionJob.season == season,
-                CompositionJob.cutoff == _aware(cutoff)))
+                CompositionJob.cutoff == _aware(cutoff))
+            existing = session.scalar(existing_query)
             if existing is not None:
                 return existing
-            row = CompositionJob(job_id=_uuid(), stream_key=stream_key, season=season, cutoff=_aware(cutoff),
+            row = CompositionJob(job_id=_uuid(), stream_key=stream_key, manifest_id=manifest_id,
+                                 season=season, cutoff=_aware(cutoff),
                                  status="queued", attempts=0, created_at=now, updated_at=now)
             session.add(row)
         return row
 
-    def enqueue_for_observation(self, observation_type: str, *, season: str, cutoff: datetime) -> int:
-        with self.session() as session:
+    def enqueue_for_observation(self, observation_type: str, *, season: str, cutoff: datetime,
+                                manifest_id: str | None = None,
+                                session: Session | None = None) -> int:
+        with self._session_scope(session) as session:
             streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
             matching = [stream.stream_key for stream in streams if observation_type in set(json.loads(stream.required_observations))]
-        for stream_key in matching:
-            self.enqueue(stream_key, season=season, cutoff=cutoff)
+            for stream_key in matching:
+                self.enqueue(stream_key, season=season, cutoff=cutoff,
+                             manifest_id=manifest_id, session=session)
         return len(matching)
 
-    def retry(self, job_id: str, *, reason: str) -> CompositionJob:
+    def retry(self, job_id: str, *, reason: str, session: Session | None = None) -> CompositionJob:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             row = session.get(CompositionJob, job_id)
             if row is None:
                 raise ControlPlaneError("composition_not_found")
@@ -749,38 +987,53 @@ class PublicationService(_SessionService):
         cutoff = _aware(cutoff)
         with self.session() as session:
             streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
-            candidates: set[tuple[str, str]] = set()
+            candidates: set[tuple[str, str, str]] = set()
             for stream in streams:
                 required = set(json.loads(stream.required_observations))
                 if not required:
                     continue
-                observed = set(session.scalars(select(CollectionObservation.observation_type).where(
-                    CollectionObservation.season == season, CollectionObservation.cutoff == cutoff
-                )))
-                if required & observed:
-                    candidates.add((stream.stream_key, season))
+                observations = session.scalars(select(CollectionObservation).where(
+                    CollectionObservation.season == season,
+                    CollectionObservation.cutoff == cutoff,
+                    CollectionObservation.provider == stream.provider,
+                    CollectionObservation.manifest_id.is_not(None),
+                )).all()
+                for manifest_id in {row.manifest_id for row in observations
+                                    if row.observation_type in required and row.manifest_id}:
+                    candidates.add((stream.stream_key, season, manifest_id))
         count = 0
-        for stream_key, selected_season in sorted(candidates):
+        for stream_key, selected_season, manifest_id in sorted(candidates):
             if count >= min(max(limit, 1), 1000):
                 break
-            self.enqueue(stream_key, season=selected_season, cutoff=cutoff)
+            self.enqueue(stream_key, season=selected_season, cutoff=cutoff, manifest_id=manifest_id)
             count += 1
         return count
 
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
-                expected_fence: int | None = None, reason: str | None = None) -> PublicationVersion:
+                expected_fence: int | None = None, reason: str | None = None,
+                manifest_id: str | None = None) -> PublicationVersion:
         encoded = _json(payload)
         now = self.clock()
         with self.session() as session, session.begin():
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
-            self._assert_completeness(session, stream, season=season, cutoff=_aware(cutoff))
-            pointer = session.get(PublicationPointer, stream_key)
+            self._assert_completeness(session, stream, season=season, cutoff=_aware(cutoff),
+                                      manifest_id=manifest_id)
+            pointer = session.scalar(select(PublicationPointer).where(
+                PublicationPointer.stream_key == stream_key
+            ).with_for_update())
             if pointer is None:
+                if expected_fence not in (None, 0):
+                    raise ControlPlaneError("stale_composition")
                 pointer = PublicationPointer(stream_key=stream_key, fence=0, updated_at=now)
                 session.add(pointer)
-                session.flush()
+                try:
+                    session.flush()
+                except IntegrityError as error:
+                    raise ControlPlaneError("stale_composition") from error
+            elif expected_fence is None:
+                raise ControlPlaneError("expected_fence_required")
             if expected_fence is not None and pointer.fence != expected_fence:
                 raise ControlPlaneError("stale_composition")
             old = pointer.active_publication_id
@@ -796,54 +1049,116 @@ class PublicationService(_SessionService):
                 if previous is not None:
                     previous.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
+            session.flush()
         return publication
 
     @staticmethod
     def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
-                             cutoff: datetime) -> None:
+                             cutoff: datetime, manifest_id: str | None = None) -> None:
         required = set(json.loads(stream.required_observations))
-        observed = set(session.scalars(select(CollectionObservation.observation_type).where(
-            CollectionObservation.season == season, CollectionObservation.cutoff == cutoff
+        observations = list(session.scalars(select(CollectionObservation).where(
+            CollectionObservation.season == season,
+            CollectionObservation.cutoff == cutoff,
+            CollectionObservation.manifest_id.is_not(None),
         )))
+        manifest_ids = {row.manifest_id for row in observations}
+        if manifest_id is not None:
+            observations = [row for row in observations if row.manifest_id == manifest_id]
+            manifest_ids = {row.manifest_id for row in observations}
+        elif len(manifest_ids) > 1:
+            raise ControlPlaneError("mixed_manifest")
+        observed = {row.observation_type for row in observations
+                    if row.provider == stream.provider and _observation_matches_scope(row, stream)}
         missing = sorted(required - observed)
         if missing:
             raise ControlPlaneError("incomplete_publication")
         if stream.completeness_rule == "league_complete":
             team_ids: set[str] = set()
-            for observation in session.scalars(select(CollectionObservation).where(
-                CollectionObservation.season == season, CollectionObservation.cutoff == cutoff
-            )):
+            team_codes: set[str] = set()
+            invalid_team_evidence = False
+            for observation in observations:
+                if observation.provider != stream.provider or not _observation_matches_scope(observation, stream):
+                    continue
                 try:
                     evidence = json.loads(observation.payload)
-                    team_ids.update(map(str, evidence.get("team_ids", ()))) if isinstance(evidence, dict) else None
                 except (TypeError, json.JSONDecodeError):
                     continue
-            if len(team_ids) != 30:
+                if not isinstance(evidence, Mapping):
+                    continue
+                for team_evidence in _evidence_team_fields(evidence):
+                    ids, ids_valid = _strict_team_ids(team_evidence.get("team_ids"))
+                    codes, codes_valid = _strict_team_codes(
+                        team_evidence.get("team_tricodes", team_evidence.get("teams"))
+                    )
+                    invalid_team_evidence |= not ids_valid or not codes_valid
+                    team_ids.update(ids)
+                    team_codes.update(codes)
+                    if "team_id" in team_evidence:
+                        team_id = str(team_evidence.get("team_id") or "")
+                        if team_id not in NBA_TEAM_IDS:
+                            invalid_team_evidence = True
+                        else:
+                            team_ids.add(team_id)
+                    if "tricode" in team_evidence or "abbreviation" in team_evidence:
+                        code = canonical_nba_team_abbreviation(
+                            team_evidence.get("tricode", team_evidence.get("abbreviation"))
+                        )
+                        if code not in NBA_TEAM_TRICODES:
+                            invalid_team_evidence = True
+                        else:
+                            team_codes.add(code)
+            if invalid_team_evidence:
+                raise ControlPlaneError("league_incomplete")
+            if team_ids and team_ids != NBA_TEAM_IDS:
+                raise ControlPlaneError("league_incomplete")
+            if not team_ids and team_codes != set(NBA_TEAM_TRICODES):
                 raise ControlPlaneError("league_incomplete")
         if stream.completeness_rule == "base_complete" and required:
-            # Every accepted snapshot must identify a governed base; partial
-            # snapshots cannot silently advance a registered stream.
-            if not observed:
+            accepted = False
+            for observation in observations:
+                if (
+                    observation.provider != stream.provider
+                    or not _observation_matches_scope(observation, stream)
+                    or observation.observation_type not in required
+                ):
+                    continue
+                try:
+                    evidence = json.loads(observation.payload)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(evidence, Mapping) and any(
+                    _registered_base_for_stream(stream.stream_key, base)
+                    for base in _evidence_bases(evidence)
+                ):
+                    accepted = True
+                    break
+            if not accepted:
                 raise ControlPlaneError("base_incomplete")
 
     def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
-                         expected_fence: int | None = None) -> PublicationVersion:
+                         expected_fence: int | None = None,
+                         manifest_id: str | None = None) -> PublicationVersion:
         return self.compose(stream_key, season=season, cutoff=cutoff, payload=payload,
-                            expected_fence=expected_fence)
+                            expected_fence=expected_fence, manifest_id=manifest_id)
 
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:
             pointer = session.get(PublicationPointer, stream_key)
             return session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
 
-    def rollback(self, stream_key: str, *, reason: str) -> PublicationVersion:
+    def rollback(self, stream_key: str, *, reason: str, expected_fence: int | None = None,
+                 session: Session | None = None) -> PublicationVersion:
         if not reason or len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         now = self.clock()
-        with self.session() as session, session.begin():
-            pointer = session.get(PublicationPointer, stream_key)
+        with self._session_scope(session) as session:
+            pointer = session.scalar(select(PublicationPointer).where(
+                PublicationPointer.stream_key == stream_key
+            ).with_for_update())
             if pointer is None or not pointer.previous_publication_id:
                 raise ControlPlaneError("rollback_unavailable")
+            if expected_fence is not None and pointer.fence != expected_fence:
+                raise ControlPlaneError("stale_composition")
             prior = session.get(PublicationVersion, pointer.previous_publication_id)
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if prior is None or current is None:
@@ -863,26 +1178,172 @@ class CollectionOperationsService(_SessionService):
     """Bounded operational evidence, retention, and completeness gates."""
 
     def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
+                 collection_control: "CollectionControlService | None" = None,
+                 collector_tokens: "CollectorTokenService | None" = None,
                  alert_adapter: "EmailAlertAdapter | None" = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
+        self.collection_control = collection_control
+        self.collector_tokens = collector_tokens
         self.alert_adapter = alert_adapter or EmailAlertAdapter()
+
+    @staticmethod
+    def _validate_reason(actor: str, action: str, resource: str, reason: str) -> tuple[str, str, str, str]:
+        values = (str(actor).strip(), str(action).strip(), str(resource).strip(), str(reason).strip())
+        if not values[0] or not values[1] or not values[2] or len(values[3]) < 3:
+            raise ControlPlaneError("reason_required")
+        return values[0][:128], values[1][:64], values[2][:128], values[3][:255]
+
+    def _run_operator(self, *, actor: str, action: str, resource: str, reason: str,
+                      mutation: Callable[[Session], Any],
+                      details: Mapping[str, Any] = ()) -> OperatorActionResult:
+        """Run state change, audit, and durable job in one DB transaction."""
+
+        actor, action, resource, reason = self._validate_reason(actor, action, resource, reason)
+        now = self.clock()
+        with self.session() as session, session.begin():
+            job = OperatorJob(
+                job_id=_uuid(), actor=actor, action=action, resource=resource,
+                reason=reason, status="running", created_at=now,
+            )
+            session.add(job)
+            session.flush()
+            changed = mutation(session)
+            job.status = "succeeded"
+            job.completed_at = self.clock()
+            audit = AuditEvent(
+                event_id=_uuid(), actor=actor, action=action, resource=resource,
+                reason=reason,
+                details=_json({**dict(details), "operator_job_id": job.job_id}),
+                created_at=now,
+            )
+            session.add(audit)
+        return OperatorActionResult(changed, job, audit)
+
+    def activate_season(self, season: str, *, actor: str, reason: str,
+                        cutoff: datetime | None = None) -> OperatorActionResult:
+        if self.collection_control is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="season.activate", resource=season, reason=reason,
+            mutation=lambda session: self.collection_control.activate_season(
+                season, actor=actor, cutoff=cutoff, session=session
+            ),
+        )
+
+    def rollback_publication(self, stream_key: str, *, actor: str, reason: str,
+                             expected_fence: int | None = None) -> OperatorActionResult:
+        if self.publication_service is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="publication.rollback", resource=stream_key, reason=reason,
+            mutation=lambda session: self.publication_service.rollback(
+                stream_key, reason=reason, expected_fence=expected_fence, session=session
+            ),
+        )
+
+    def activate_stream(self, stream_key: str, *, actor: str, reason: str) -> OperatorActionResult:
+        if self.publication_service is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="stream.activate", resource=stream_key, reason=reason,
+            mutation=lambda session: self.publication_service.activate_stream(
+                stream_key, reason=reason, session=session
+            ),
+        )
+
+    def retry_composition(self, job_id: str, *, actor: str, reason: str) -> OperatorActionResult:
+        if self.publication_service is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="composition.retry", resource=job_id, reason=reason,
+            mutation=lambda session: self.publication_service.retry(
+                job_id, reason=reason, session=session
+            ),
+        )
+
+    def start_cycle(self, manifest_id: str, *, actor: str, reason: str) -> OperatorActionResult:
+        if self.collection_control is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="cycle.start", resource=manifest_id, reason=reason,
+            mutation=lambda session: self.collection_control.open_cycle(
+                manifest_id, session=session
+            ),
+        )
+
+    def scoped_repair(self, stream_key: str, *, season: str, cutoff: datetime,
+                      actor: str, reason: str) -> OperatorActionResult:
+        if self.publication_service is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="scoped_repair.start", resource=stream_key, reason=reason,
+            details={"stream_key": stream_key},
+            mutation=lambda session: self.publication_service.enqueue(
+                stream_key, season=season, cutoff=cutoff, session=session
+            ),
+        )
+
+    def finish_cycle(self, cycle_id: str, *, status: str, actor: str,
+                     reason: str) -> OperatorActionResult:
+        if self.collection_control is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="cycle.finish", resource=cycle_id, reason=reason,
+            mutation=lambda session: self.collection_control.finish_cycle(
+                cycle_id, status=status, reason=reason, session=session
+            ),
+        )
+
+    def govern_not_applicable(self, cycle_id: str, stream_key: str, *, actor: str,
+                              reason: str) -> OperatorActionResult:
+        if self.collection_control is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="cycle.not_applicable", resource=cycle_id, reason=reason,
+            details={"stream_key": stream_key},
+            mutation=lambda session: self.collection_control.govern_not_applicable(
+                cycle_id, stream_key, actor=actor, reason=reason, session=session
+            ),
+        )
+
+    def bootstrap(self, season: str, catalog_type: str, *, cutoff: datetime,
+                  actor: str, reason: str) -> OperatorActionResult:
+        if self.collection_control is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="bootstrap.start", resource=f"{season}:{catalog_type}", reason=reason,
+            mutation=lambda session: self.collection_control.create_bootstrap_request(
+                season, catalog_type, cutoff=cutoff, session=session
+            ),
+        )
+
+    def revoke_collector(self, identity_id: str, *, actor: str, reason: str) -> OperatorActionResult:
+        if self.collector_tokens is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="collector.revoke", resource=identity_id, reason=reason,
+            mutation=lambda session: self.collector_tokens.revoke(identity_id, session=session),
+        )
+
+    def rotate_collector(self, identity_id: str, *, actor: str, reason: str,
+                         overlap_seconds: int = 3600) -> OperatorActionResult:
+        if self.collector_tokens is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="collector.rotate", resource=identity_id, reason=reason,
+            mutation=lambda session: self.collector_tokens.rotate(
+                identity_id, overlap_seconds=overlap_seconds, session=session
+            ),
+        )
 
     def audit(self, *, actor: str, action: str, resource: str, reason: str,
               details: Mapping[str, Any] = ()) -> AuditEvent:
-        if not actor.strip() or not action.strip() or not resource.strip() or len(reason.strip()) < 3:
-            raise ControlPlaneError("reason_required")
-        row = AuditEvent(event_id=_uuid(), actor=actor.strip()[:128], action=action.strip()[:64],
-                         resource=resource.strip()[:128], reason=reason.strip()[:255],
-                         details=_json(dict(details)), created_at=self.clock())
-        with self.session() as session, session.begin():
-            job = OperatorJob(job_id=_uuid(), actor=row.actor, action=row.action, resource=row.resource,
-                              reason=row.reason, status="succeeded", created_at=row.created_at, completed_at=row.created_at)
-            session.add(job)
-            row.details = _json({**dict(details), "operator_job_id": job.job_id})
-            session.add(row)
-        return row
+        return self._run_operator(
+            actor=actor, action=action, resource=resource, reason=reason,
+            mutation=lambda _session: None, details=details,
+        ).audit
 
     def reconciliation(self, *, season: str, kind: str, reason: str,
                        details: Mapping[str, Any] = ()) -> ReconciliationItem:
@@ -894,15 +1355,20 @@ class CollectionOperationsService(_SessionService):
             session.add(row)
         return row
 
-    def resolve_reconciliation(self, item_id: str, *, actor: str, reason: str) -> ReconciliationItem:
-        row = self.audit(actor=actor, action="reconciliation.resolve", resource=item_id, reason=reason)
-        del row
-        with self.session() as session, session.begin():
+    def resolve_reconciliation(self, item_id: str, *, actor: str, reason: str) -> OperatorActionResult:
+        def resolve(session: Session) -> ReconciliationItem:
             item = session.get(ReconciliationItem, item_id)
             if item is None:
                 raise ControlPlaneError("reconciliation_not_found")
+            if item.status != "open":
+                raise ControlPlaneError("reconciliation_already_resolved")
             item.status, item.resolved_at = "resolved", self.clock()
-        return item
+            return item
+
+        return self._run_operator(
+            actor=actor, action="reconciliation.resolve", resource=item_id,
+            reason=reason, mutation=resolve,
+        )
 
     def alert(self, *, cycle_id: str | None, severity: str, code: str) -> CollectionAlert:
         if severity not in {"warning", "critical"} or not code:
@@ -929,9 +1395,10 @@ class CollectionOperationsService(_SessionService):
                     GovernedNotApplicable.cycle_id == cycle.cycle_id
                 )))
                 missing = []
-                streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+                manifest = session.get(CollectionManifest, cycle.manifest_id)
+                streams = _manifest_streams(session, manifest) if manifest is not None else []
                 for stream in streams:
-                    if stream.publication_strategy == "request_time" or stream.stream_key in governed:
+                    if stream.publication_strategy in {"request_time", "never_schedule"} or stream.stream_key in governed:
                         continue
                     pointer = session.get(PublicationPointer, stream.stream_key)
                     publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
@@ -996,7 +1463,11 @@ class CollectionOperationsService(_SessionService):
             "reconciliation": [{"item_id": row.item_id, "season": row.season, "kind": row.kind, "reason": row.reason, "status": row.status} for row in items],
             "validation": [{"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status} for row in validations],
             "usage": [{"collector_id": row.collector_id, "poll_count": row.poll_count, "envelope_count": row.envelope_count, "byte_count": row.byte_count} for row in usage],
-            "jobs": [{"job_id": row.job_id, "action": row.action, "resource": row.resource, "status": row.status, "created_at": row.created_at.isoformat()} for row in jobs],
+            "jobs": [{
+                "job_id": row.job_id, "action": row.action, "resource": row.resource,
+                "status": row.status, "created_at": row.created_at.isoformat(),
+                "completed_at": _iso(row.completed_at), "error_code": row.error_code,
+            } for row in jobs],
         }
 
     def validate_completeness(self, *, cycle_id: str) -> dict[str, Any]:
@@ -1013,10 +1484,11 @@ class CollectionOperationsService(_SessionService):
             governed = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
                 GovernedNotApplicable.cycle_id == cycle_id
             )))
-            streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+            manifest = session.get(CollectionManifest, cycle.manifest_id)
+            streams = _manifest_streams(session, manifest) if manifest is not None else []
             missing: list[str] = []
             for stream in streams:
-                if stream.publication_strategy == "request_time":
+                if stream.publication_strategy in {"request_time", "never_schedule"}:
                     continue
                 if stream.stream_key in governed:
                     continue
@@ -1070,6 +1542,171 @@ class EmailAlertAdapter:
             self.sender(f"StatsPlus collection {severity}", f"code={code[:64]} cycle={cycle_id or 'none'}")
 
 
+def _canonical_team_ids(value: Any) -> set[str]:
+    """Extract only IDs from the immutable NBA team registry."""
+
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    return {str(item) for item in value if str(item) in NBA_TEAM_IDS}
+
+
+def _canonical_team_codes(value: Any) -> set[str]:
+    """Extract only reviewed NBA tricodes from team evidence."""
+
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    codes: set[str] = set()
+    for item in value:
+        if isinstance(item, Mapping):
+            item = item.get("tricode", item.get("abbreviation", item.get("team")))
+        code = canonical_nba_team_abbreviation(item)
+        if code in NBA_TEAM_TRICODES:
+            codes.add(code)
+    return codes
+
+
+def _strict_team_ids(value: Any) -> tuple[set[str], bool]:
+    """Return canonical team IDs and reject extra or duplicate identities."""
+
+    if value is None:
+        return set(), True
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set(), False
+    raw = [str(item) for item in value]
+    valid = len(raw) == len(set(raw)) and all(item in NBA_TEAM_IDS for item in raw)
+    return ({item for item in raw if item in NBA_TEAM_IDS}, valid)
+
+
+def _strict_team_codes(value: Any) -> tuple[set[str], bool]:
+    """Return reviewed NBA tricodes and reject unknown or duplicate codes."""
+
+    if value is None:
+        return set(), True
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set(), False
+    raw: list[str] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            item = item.get("tricode", item.get("abbreviation", item.get("team")))
+        raw.append(canonical_nba_team_abbreviation(item))
+    valid = len(raw) == len(set(raw)) and all(item in NBA_TEAM_TRICODES for item in raw)
+    return ({item for item in raw if item in NBA_TEAM_TRICODES}, valid)
+
+
+def _evidence_team_fields(evidence: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    fields = [evidence]
+    for key in ("rows", "records", "data", "observations"):
+        items = evidence.get(key)
+        if isinstance(items, list):
+            fields.extend(item for item in items if isinstance(item, Mapping))
+    return fields
+
+
+def _registered_base_for_stream(stream_key: str, value: Any) -> bool:
+    base = str(value or "").strip()
+    allowed = STREAM_BASES.get(stream_key, REGISTERED_BASES)
+    return base in allowed
+
+
+def _evidence_bases(evidence: Mapping[str, Any]) -> set[Any]:
+    bases: set[Any] = {evidence.get("base")}
+    for key in ("rows", "records", "data", "observations"):
+        items = evidence.get(key)
+        if isinstance(items, list):
+            bases.update(
+                item.get("base") for item in items
+                if isinstance(item, Mapping) and "base" in item
+            )
+    return bases
+
+
+def _observation_matches_scope(observation: CollectionObservation,
+                               stream: PublicationStream) -> bool:
+    """Ensure completeness counts only the stream's registered scope."""
+
+    try:
+        scope = json.loads(observation.scope)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    windows = set(json.loads(stream.supported_windows))
+    if not windows:
+        return True
+    if isinstance(scope, Mapping):
+        window = scope.get("window")
+        if window is None:
+            window = scope.get("scope")
+        if window is None:
+            return False
+        return str(window) in windows
+    return str(scope) in windows
+
+
+def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
+    """Count completed canonical events from an Event Catalog publication."""
+
+    try:
+        document = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    if isinstance(document, list):
+        events = document
+    elif isinstance(document, Mapping):
+        events = document.get("events", document.get("games"))
+    else:
+        return 0
+    if isinstance(events, list):
+        count = 0
+        identities: set[str] = set()
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            game_id = event.get("nba_game_id", event.get("game_id", event.get("id")))
+            status = str(event.get("status", event.get("status_text", ""))).lower()
+            status_code = event.get("status_code")
+            completed = bool(event.get("completed")) or status in {
+                "final", "finished", "completed", "closed", "game over", "3",
+            } or status.startswith("final") or status_code in {3, "3"}
+            if not completed or not game_id:
+                continue
+            scheduled = event.get("scheduled_at", event.get("date"))
+            if scheduled:
+                try:
+                    if _parse_datetime(str(scheduled)) > cutoff:
+                        continue
+                except ControlPlaneError:
+                    continue
+            identity = str(game_id)
+            if identity not in identities:
+                identities.add(identity)
+                count += 1
+        return count
+    raw_count = document.get("completed_game_count")
+    if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0:
+        return raw_count
+    return 0
+
+
+def _manifest_streams(session: Session, manifest: CollectionManifest) -> list[PublicationStream]:
+    """Resolve only streams explicitly frozen into this manifest."""
+
+    scopes = set(json.loads(manifest.scopes))
+    # The manifest freezes its required scopes.  Do not re-read the current
+    # activation flags here: a later operator toggle must not widen or shrink
+    # an already-open cycle.
+    streams = session.scalars(select(PublicationStream)).all()
+    selected: list[PublicationStream] = []
+    for stream in streams:
+        definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream.stream_key), None)
+        if definition is not None and definition.strategy == "never_schedule":
+            continue
+        registry_scopes = {stream.stream_key, *json.loads(stream.required_observations)}
+        if definition is not None:
+            registry_scopes.update({definition.scope, *definition.required})
+        if scopes.intersection(registry_scopes):
+            selected.append(stream)
+    return selected
+
+
 def _find_observation_ids(value: Any) -> set[str]:
     found: set[str] = set()
     if isinstance(value, dict):
@@ -1086,6 +1723,64 @@ def _find_observation_ids(value: Any) -> set[str]:
     return found
 
 
+def _validate_observation_payload(value: Any, *, observation_type: str) -> None:
+    """Run the closed registry validator before durable observation insert."""
+
+    del observation_type  # registry ownership is checked against the envelope below
+    if value is None or value == {} or value == []:
+        raise ValueError("empty payload")
+    if isinstance(value, list):
+        if not value or not all(isinstance(item, Mapping) for item in value):
+            raise ValueError("generic payload")
+        for item in value:
+            _validate_record_invariants(item)
+    elif isinstance(value, Mapping):
+        collection_keys = {
+            "rows", "records", "data", "events", "games", "identities", "players",
+            "teams", "observations", "team_ids", "team_tricodes", "base",
+        }
+        if not collection_keys.intersection(value):
+            raise ValueError("generic payload")
+        for key in ("rows", "records", "data", "events", "games", "identities", "players", "teams", "observations"):
+            if key in value and isinstance(value[key], (list, tuple)) and not value[key]:
+                raise ValueError("empty collection")
+        for key in ("participants", "participant_ids"):
+            if key in value:
+                participants = value[key]
+                if not isinstance(participants, (list, tuple, set)) or not participants:
+                    raise ValueError("participants required")
+        _validate_record_invariants(value)
+    _validate_payload_shape(value)
+
+
+def _validate_record_invariants(value: Mapping[str, Any]) -> None:
+    """Validate explicit identity/category/percentage/count evidence."""
+
+    for key, child in value.items():
+        lower = str(key).lower()
+        if lower in {"percentage", "percent", "pct"}:
+            if not isinstance(child, (int, float)) or isinstance(child, bool) or not math.isfinite(float(child)) or not 0 <= float(child) <= 100:
+                raise ValueError("invalid percentage")
+        if lower in {"share", "rate", "ratio"}:
+            if not isinstance(child, (int, float)) or isinstance(child, bool) or not math.isfinite(float(child)) or not 0 <= float(child) <= 1:
+                raise ValueError("invalid percentage")
+        if "category" in lower and child in (None, ""):
+            raise ValueError("category required")
+        if lower in {"player_id", "team_id", "game_id", "nba_game_id", "identity_id"} and child in (None, ""):
+            raise ValueError("identity required")
+        if lower in {"games_played", "game_count", "volume", "possessions", "field_goal_attempts"}:
+            if isinstance(child, bool) or not isinstance(child, (int, float)) or child < 0 or child > MAX_RECORDS_PER_OBSERVATION:
+                raise ValueError("invalid historical volume")
+    for key in ("rows", "records", "events", "games", "identities", "players", "teams", "observations"):
+        records = value.get(key)
+        if isinstance(records, list):
+            if len(records) > MAX_RECORDS_PER_OBSERVATION:
+                raise ValueError("payload volume exceeds limit")
+            for record in records:
+                if isinstance(record, Mapping):
+                    _validate_record_invariants(record)
+
+
 def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _depth: int = 0) -> None:
     """Apply generic envelope safety plus schema-neutral count invariants.
 
@@ -1095,7 +1790,7 @@ def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _dep
     """
     counter = _count or [0]
     counter[0] += 1
-    if counter[0] > MAX_PAYLOAD_VALUES or _depth > 64:
+    if counter[0] > MAX_PAYLOAD_VALUES or _depth > MAX_PAYLOAD_DEPTH:
         raise ValueError("payload volume exceeds limit")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("non-finite value")
@@ -1144,4 +1839,5 @@ def _valid_season(season: str) -> bool:
 __all__ = [
     "CURRENT_ENVELOPE_VERSION", "SURFACE_REGISTRY", "SurfaceDefinition", "ControlPlaneError", "CollectorClaims", "CollectorTokenService",
     "CollectionControlService", "ObservationIngestionService", "ObservationReceipt", "PublicationService", "CollectionOperationsService", "EmailAlertAdapter",
+    "OperatorActionResult", "decompress_gzip_limited",
 ]

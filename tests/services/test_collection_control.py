@@ -5,7 +5,15 @@ import json
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
-from app.models.collection_control import CollectionAlert, CompositionJob, OperatorJob, PublicationStream
+from app.models.collection_control import (
+    ActiveSeason,
+    AuditEvent,
+    CollectionAlert,
+    CompositionJob,
+    CollectionObservation,
+    OperatorJob,
+    PublicationStream,
+)
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -16,6 +24,7 @@ from app.services.collection_control import (
     PublicationService,
     CollectionOperationsService,
     EmailAlertAdapter,
+    NBA_TEAM_IDS,
 )
 
 
@@ -194,3 +203,131 @@ def test_audit_creates_durable_operator_job(control_db):
     with control_db.connect() as connection:
         jobs = connection.execute(select(OperatorJob)).all()
     assert jobs and event.details.find(jobs[0][0]) >= 0
+
+
+def test_operator_mutation_audit_and_job_are_one_transaction(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    operations = CollectionOperationsService(control_db, collection_control=control, clock=lambda: now)
+
+    result = operations.activate_season(
+        "2025-26", actor="operator", reason="activate regular season"
+    )
+    assert result.job.status == "succeeded"
+    with control_db.connect() as connection:
+        assert connection.execute(select(ActiveSeason)).first().status == "active"
+        assert connection.execute(select(OperatorJob)).first().job_id == result.job_id
+        assert connection.execute(select(AuditEvent)).first().details.find(result.job_id) >= 0
+
+    with pytest.raises(ControlPlaneError, match="reconciliation_not_found"):
+        operations.resolve_reconciliation("missing", actor="operator", reason="repair record")
+    with control_db.connect() as connection:
+        assert len(connection.execute(select(OperatorJob)).all()) == 1
+        assert len(connection.execute(select(AuditEvent)).all()) == 1
+
+
+def test_cycle_game_count_comes_from_event_catalog_not_request_body(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    control.publish_catalog(event_request.request_id, {
+        "events": [{"nba_game_id": "001", "status": "Final", "scheduled_at": cutoff.isoformat()}]
+    }, version="event-v1")
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    control.publish_catalog(athlete_request.request_id, {"identities": ["1"]}, version="athlete-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        collect_before=now + timedelta(hours=1), required_athlete_ids=["1"],
+    )
+    cycle = control.open_cycle(manifest.manifest_id, completed_game_count=999)
+    assert cycle.completed_game_count == 1
+    assert cycle.status == "collecting"
+
+
+def test_publication_requires_expected_fence_after_initial_pointer(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "fenced", provider="nba", owner="collector", required_observations=[],
+        publication_strategy="replace", enabled=True,
+    )
+    first = publication.compose("fenced", season="2025-26", cutoff=now, payload={"v": 1})
+    with pytest.raises(ControlPlaneError, match="expected_fence_required"):
+        publication.compose("fenced", season="2025-26", cutoff=now, payload={"v": 2})
+    assert publication.current("fenced").publication_id == first.publication_id
+
+
+def test_completeness_uses_same_manifest_provider_scope_and_registered_evidence(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "league", provider="nba", owner="collector", required_observations=["league_obs"],
+        publication_strategy="replace", supported_windows=["season"],
+        completeness_rule="league_complete", enabled=True,
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs-league", client_observation_id="client-league",
+            collector_id="collector", manifest_id="manifest-1", environment="testing",
+            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2,
+            checksum="a" * 64, payload=json.dumps({"team_ids": sorted(NBA_TEAM_IDS)}),
+            payload_bytes=2, retrieved_at=now, accepted_at=now,
+        ))
+    publication.compose(
+        "league", season="2025-26", cutoff=now, payload={"published": True},
+        manifest_id="manifest-1",
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs-foreign", client_observation_id="client-foreign",
+            collector_id="collector", manifest_id="manifest-2", environment="testing",
+            provider="other", observation_type="league_obs", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2,
+            checksum="b" * 64, payload=json.dumps({"team_ids": ["not-a-team"]}),
+            payload_bytes=2, retrieved_at=now, accepted_at=now,
+        ))
+    assert publication.current("league").payload == '{"published":true}'
+
+
+def test_base_completeness_requires_registered_base(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "synergy_play_types", provider="nba", owner="collector", required_observations=["synergy_play_types"],
+        publication_strategy="replace", supported_windows=["season"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    with control_db.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs-base", client_observation_id="client-base",
+            collector_id="collector", manifest_id="manifest-base", environment="testing",
+            provider="nba", observation_type="synergy_play_types", scope=json.dumps({"window": "season"}),
+            season="2025-26", cutoff=now, schema_version=2,
+            checksum="c" * 64, payload=json.dumps({"base": "shot_types", "rows": [{"category": "x"}]}),
+            payload_bytes=2, retrieved_at=now, accepted_at=now,
+        ))
+    with pytest.raises(ControlPlaneError, match="base_incomplete"):
+        publication.compose(
+            "synergy_play_types", season="2025-26", cutoff=now, payload={"published": True},
+            manifest_id="manifest-base",
+        )
+
+
+def test_compressed_observation_is_rejected_before_oversize_allocation(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    claims = __import__("app.services.collection_control", fromlist=["CollectorClaims"]).CollectorClaims(
+        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", now
+    )
+    ingestion = ObservationIngestionService(control_db, clock=lambda: now)
+    payload = gzip.compress(json.dumps({"rows": ["x"] * 100}).encode())
+    envelope = {
+        "manifest_id": "missing", "client_observation_id": "obs", "environment": "testing",
+        "provider": "nba", "observation_type": "synergy", "scope": {},
+        "season": "2025-26", "cutoff": now.isoformat(), "schema_version": 2,
+        "retrieved_at": now.isoformat(), "checksum": "0" * 64,
+    }
+    with pytest.raises(ControlPlaneError, match="payload_too_large"):
+        ingestion.ingest(claims, envelope, payload, compressed=True, max_payload_bytes=16)

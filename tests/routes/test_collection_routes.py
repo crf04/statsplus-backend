@@ -2,6 +2,7 @@
 
 import gzip
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -51,12 +52,56 @@ def test_invalid_collector_token_is_401(client, app):
     assert response.json["error"]["code"] == "invalid_token"
 
 
+def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
+    dependencies = _install_collection_services(app)
+    row = SimpleNamespace(
+        request_id="request-1", season="2025-26", catalog_type="event",
+        cutoff=datetime(2026, 8, 11),
+        status="pending", expires_at=datetime(2026, 8, 13),
+        catalog_version=None, completed_at=None, failure_reason=None,
+    )
+    dependencies.collection_control.bootstrap_status.return_value = row
+    poll = client.get(
+        "/api/collector/bootstrap/request-1",
+        headers={"Authorization": "Bearer token"},
+    )
+    assert poll.status_code == 200
+    assert poll.json["status"] == "pending"
+
+    publication = SimpleNamespace(
+        publication_id="publication-1", season="2025-26", catalog_type="event",
+        cutoff=row.cutoff, version="v1", checksum="a" * 64,
+        published_at=row.expires_at,
+    )
+    dependencies.collection_control.publish_catalog.return_value = publication
+    published = client.post(
+        "/api/collector/catalog/request-1",
+        json={"version": "v1", "payload": {"events": [{"id": "1"}]}},
+        headers={"Authorization": "Bearer token"},
+    )
+    assert published.status_code == 201
+    assert published.json["publication_id"] == "publication-1"
+
+
 def test_machine_secret_exchange_is_reachable_and_never_returns_secret(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.issue_for_secret.return_value = "short-lived-token"
     response = client.post("/api/collector/token", json={"identity_id": "collector-1", "secret": "machine-secret", "scopes": ["ingest"]})
     assert response.status_code == 201
     assert response.json == {"token": "short-lived-token"}
+
+
+def test_invalid_machine_secret_is_401_not_400(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collector_tokens.issue_for_secret.side_effect = ControlPlaneError(
+        "invalid_identity_secret"
+    )
+    response = client.post(
+        "/api/collector/token",
+        json={"identity_id": "collector-1", "secret": "wrong"},
+    )
+    assert response.status_code == 401
+    assert response.json["error"]["code"] == "invalid_token"
 
 
 def test_observation_route_requires_atomic_compressed_envelope(client, app):
@@ -112,6 +157,18 @@ def test_rotation_response_does_not_expose_long_lived_secret(client, app):
     response = client.post("/api/admin/collection/collectors/id/rotate", json={"reason": "planned rotation"})
     assert response.status_code == 202
     assert "secret" not in response.json
+
+
+def test_admin_credential_get_returns_metadata_only(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collector_tokens.delivery_metadata.return_value = {
+        "delivery_id": "delivery-1", "identity_id": "collector-1",
+        "expires_at": "2026-08-13T00:00:00+00:00", "retrieved": False,
+    }
+    response = client.get("/api/admin/collection/credential-deliveries/delivery-1")
+    assert response.status_code == 200
+    assert "secret" not in response.json
+    dependencies.collector_tokens.retrieve_delivery.assert_not_called()
 
 
 def test_rate_limit_has_stable_retry_timing(client, app):

@@ -113,6 +113,10 @@ class CollectionObservation(Base):
     observation_id = Column(String(36), primary_key=True)
     client_observation_id = Column(String(128), nullable=False)
     collector_id = Column(String(64), nullable=False)
+    # The manifest is part of observation provenance.  It is nullable only for
+    # pre-control-plane rows upgraded in place; new ingestion always supplies
+    # it and publication completeness never mixes manifests.
+    manifest_id = Column(String(36), nullable=True)
     environment = Column(String(32), nullable=False)
     provider = Column(String(64), nullable=False)
     observation_type = Column(String(64), nullable=False)
@@ -184,6 +188,7 @@ class CompositionJob(Base):
 
     job_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
+    manifest_id = Column(String(36), nullable=True)
     season = Column(String(7), nullable=False)
     cutoff = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(16), nullable=False, default="queued")

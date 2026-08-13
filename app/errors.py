@@ -278,6 +278,14 @@ class DuplicateOperationError(AppError):
     default_message = "An identical operation is already running or queued."
 
 
+class ConflictError(AppError):
+    """The request is valid but conflicts with durable current state."""
+
+    status_code = 409
+    code = "operation_conflict"
+    default_message = "The operation conflicts with the current collection state."
+
+
 def route_error_boundary(
     safe_message: str,
     *,

@@ -1424,8 +1424,12 @@ Operator mutations require Firebase administrator authentication.
 
 ```http
 POST /api/collector/token
+GET /api/collector/bootstrap/<request_id>
+GET /api/collector/bootstrap/<request_id>/status
+POST /api/collector/catalog/<request_id>
 GET /api/collector/manifest/<manifest_id>
 POST /api/collector/observations
+POST /api/collector/credential-deliveries/<delivery_id>/claim
 POST /api/admin/collection/seasons/<season>
 POST /api/admin/collection/streams/<stream_key>/rollback
 POST /api/admin/collection/streams/<stream_key>/activate
@@ -1455,11 +1459,22 @@ bounded durable identifiers and require a human-readable reason where they
 mutate publication state. Raw observations and player-level
 payloads are never returned by these routes. Collector limits return `429
 rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
+Bootstrap status is a bounded response containing request state, season,
+catalog type, cutoff, expiry, and version; it never returns catalog payload
+facts. A collector with the bootstrap/catalog scope publishes one catalog at
+`POST /api/collector/catalog/<request_id>` and the request becomes succeeded;
+expired or already-completed requests are rejected. Railway then creates the
+immutable cutoff manifest only after both Event and Athlete Catalog
+publications pass their governed freshness checks.
+
 The rotation endpoint returns only a durable job/identity status; the new
-long-lived machine secret is delivered through the deployment credential
-channel, never over the normal mutation API. The Firebase-admin-only,
-one-time credential-delivery endpoint returns the replacement once, then
-invalidates the delivery.
+long-lived machine secret is never returned by an admin GET. During the
+explicit overlap window, the rotated machine presents its old secret over the
+machine-authenticated `POST /api/collector/credential-deliveries/<delivery_id>/claim`
+route (with a short-lived token carrying `credential` or `ingest`) and receives
+the replacement once. The delivery is encrypted at rest, expires, and is
+invalidated atomically on retrieval. `GET
+/api/admin/collection/credential-deliveries/<delivery_id>` returns metadata only.
 
 ## User Endpoints
 

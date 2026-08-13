@@ -414,6 +414,17 @@ def _upgrade_operator_control(connection: Connection) -> None:
     from app.models.collection_control import GovernedNotApplicable, OperatorJob, CredentialDelivery
     for model in (GovernedNotApplicable, OperatorJob, CredentialDelivery):
         model.__table__.create(connection, checkfirst=True)
+    # Preserve provenance for databases that applied the original control
+    # plane before manifest-bound completeness was introduced.  Fresh
+    # databases receive these columns from the model-driven create above.
+    preparer = connection.dialect.identifier_preparer
+    for table, column in (("collection_observations", "manifest_id"), ("composition_jobs", "manifest_id")):
+        existing = {item["name"] for item in inspect(connection).get_columns(table)}
+        if column not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(column)} VARCHAR(36)"
+            ))
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (

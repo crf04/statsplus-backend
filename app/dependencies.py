@@ -140,7 +140,11 @@ def build_dependencies(
         collection_control = CollectionControlService(engine)
         publication_service = PublicationService(engine)
         collection_operations = CollectionOperationsService(
-            engine, publication_service=publication_service, alert_adapter=EmailAlertAdapter()
+            engine,
+            publication_service=publication_service,
+            collection_control=collection_control,
+            collector_tokens=collector_tokens,
+            alert_adapter=EmailAlertAdapter(),
         )
         if inspect(engine).has_table("publication_streams"):
             publication_service.register_default_streams()
