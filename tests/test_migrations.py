@@ -183,6 +183,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "source_row_count",
         "identity_source_row_count",
         "publication_status",
+        "route_complete",
     }
     assert {
         column["name"]

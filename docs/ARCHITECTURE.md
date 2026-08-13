@@ -451,9 +451,17 @@ makes the Stage 3 parity seam a real equivalence check.
 
 Per-game `PlusMinus` is one field PBP's per-game boxscore seam does not expose
 (the per-player seam does).  The durable model therefore stores a nullable
-`plus_minus`: a stored season truthfully reports `+/-` as null and omits the
-`PLUS_MINUS` average rather than inventing a zero, and the parity contract
-scopes that single honest divergence out of the strict comparison.
+`plus_minus` and never invents a zero.  The public game-log contract includes
+the `PLUS_MINUS` primitive, its average, and its self-filter behavior, so the
+DB-first route cutover is gated on typed publication evidence: the season
+sidecar's `route_complete` flag is true only when the stored publication proves
+every public primitive including plus-minus is complete.  A PBP per-game
+publication carries null plus/minus and therefore keeps `route_complete`
+false — it may be durably stored and ingestion-complete, but the request-time
+route keeps serving the cached live PBP path with unchanged documents and
+filters.  Any season eligible for cutover must satisfy strict parity, including
+plus-minus, before the gate opens; production rollout evidence for plus-minus
+completeness is external and reported, never fabricated.
 
 ### NBA Stats game-log adapter
 
@@ -764,17 +772,23 @@ into Nightly Refresh.
 ### Database-first game-log reads
 
 Stage 3 makes Postgres the preferred read path.  `PlayerGameLogRepository`
-reports a complete publication only when the season sidecar is present with
+reports ingestion-complete only when the season sidecar is present with
 `publication_status == complete` and the read remains valid (a historical
 season's own sidecar, or a fresh stats-surface observation for the configured
-current season).  The request-time router serves that season from the durable
-facts through `StoredGameLogsSource`, which rebuilds the canonical frame from
+current season).  The request-time router additionally requires
+`has_complete_route_publication` — ingestion-complete plus the typed
+`route_complete` evidence that every public primitive including `plus_minus` is
+stored — before serving that season from the durable facts through
+`StoredGameLogsSource`, which rebuilds the canonical frame from
 `PlayerGameLogRecord` primitives with the same central derivations as the live
-path.  A valid season that has not yet received a complete durable publication
-continues through the cached live PBP path; it is never mistaken for an empty
-stored season.  The parity seam is the authenticated game-log endpoint: tests
-compare the complete live-PBP and stored response documents — game identity,
-statistics, averages, and filter results — and cutover depends on equivalence.
+path.  A valid season that is ingestion-complete but route-incomplete (PBP's
+per-game publication with null plus/minus) continues through the cached live
+PBP path, so the route document and its filters are never degraded; it is never
+mistaken for an empty stored season.  The parity seam is the authenticated
+game-log endpoint: for any season eligible for cutover, tests compare the
+complete live-PBP and stored response documents — game identity, statistics,
+averages, and filter results, including plus-minus — and cutover depends on
+strict equivalence.
 
 Authenticated matchup-selection reads compose only stored seams:
 

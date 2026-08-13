@@ -640,8 +640,12 @@ class FakeRepository:
         self.reads.append(season)
         return self.complete
 
+    def has_complete_route_publication(self, season):
+        self.reads.append(season)
+        return self.complete
 
-def test_database_first_router_serves_complete_seasons_from_storage():
+
+def test_database_first_router_serves_route_complete_seasons_from_storage():
     class StoredSource:
         def get_player_logs(self, player_id, season, *, cache_status):
             return "stored-frame"
@@ -656,7 +660,7 @@ def test_database_first_router_serves_complete_seasons_from_storage():
     assert router.cached("2025-26") is False
 
 
-def test_database_first_router_falls_back_to_live_for_uncovered_seasons():
+def test_database_first_router_falls_back_to_live_when_route_not_complete():
     class LiveSource:
         def get_player_logs(self, player_id, season, *, cache_status):
             return "live-frame"

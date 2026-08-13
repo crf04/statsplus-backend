@@ -36,6 +36,8 @@ class PlayerGameLogReader(Protocol):
 
     def has_complete_publication(self, season: str) -> bool: ...
 
+    def has_complete_route_publication(self, season: str) -> bool: ...
+
     def get_read_freshness(self, season: str) -> Any: ...
 
 
@@ -144,7 +146,14 @@ class StoredGameLogsSource:
 
 
 class DatabaseFirstGameLogsSource:
-    """Serve a durably complete season from Postgres, else the live PBP path."""
+    """Serve a durably complete season from Postgres, else the live PBP path.
+
+    The cutover gate is the typed route-complete publication evidence: a season
+    serves from Postgres only when its stored publication proves every public
+    primitive including ``plus_minus`` is complete.  A PBP per-game publication
+    carries null plus/minus and therefore always falls through to the cached
+    live PBP path, so route documents and filters remain unchanged.
+    """
 
     def __init__(
         self,
@@ -171,13 +180,13 @@ class DatabaseFirstGameLogsSource:
         )
 
     def cached(self, season: str) -> bool:
-        return not self.repository.has_complete_publication(season)
+        return not self.repository.has_complete_route_publication(season)
 
     def record_cache_hit(self, operation: str) -> None:
         self.live_source.record_cache_hit(operation)
 
     def _source_for(self, season: str) -> GameLogsSource:
-        if self.repository.has_complete_publication(season):
+        if self.repository.has_complete_route_publication(season):
             return self.stored_source
         return self.live_source
 

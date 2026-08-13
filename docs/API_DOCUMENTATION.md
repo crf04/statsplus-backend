@@ -804,14 +804,15 @@ Matchup notation; any unjoinable or contradictory row fails the request rather
 than being guessed or dropped. The HTTP
 parameters, success payload, filter vocabulary, authentication, error schema,
 and Redis caching behavior are unchanged, and cache telemetry is attributed to
-PBP Stats. A season with a complete, valid durable publication is served
-database-first from the stored `player_game_logs` facts with identical values;
-any other valid season continues through the cached live PBP path. Both paths
+PBP Stats. A season with a complete, valid durable publication that also proves
+every public primitive including `PLUS_MINUS` is stored is served
+database-first from the stored `player_game_logs` facts with strictly identical
+values; every other valid season — including PBP per-game publications, which
+carry no plus/minus evidence — continues through the cached live PBP path, so
+route documents and filters remain unchanged. Both paths
 return the same whole-minute presentation and the same composite/fantasy
-averages. Because PBP's per-game boxscore seam exposes no `PlusMinus` (the
-per-player seam does), a database-served season reports `+/-` as null and omits
-the `PLUS_MINUS` average rather than inventing a zero; this single honest
-divergence is scoped out of the cutover parity comparison.
+averages, and any season cut over to the database must satisfy strict parity
+including plus-minus.
 
 ### Contract and migration note (#9)
 

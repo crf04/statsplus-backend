@@ -95,6 +95,14 @@ class PlayerGameLogRefresh(Base):
     publication_status = Column(
         String(16), nullable=False, server_default="in_progress"
     )
+    #: Typed cutover evidence: whether the stored publication proves every
+    #: public game-log primitive including ``plus_minus`` is complete.  PBP's
+    #: per-game boxscore seam exposes no plus/minus, so its publications carry
+    #: null values and this stays false, keeping the request-time route on the
+    #: live PBP path with unchanged documents and filters.
+    route_complete = Column(
+        Boolean, nullable=False, server_default="0"
+    )
 
     __table_args__ = (
         CheckConstraint(

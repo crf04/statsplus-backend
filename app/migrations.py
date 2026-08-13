@@ -328,6 +328,13 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
                 "publication_status VARCHAR(16) NOT NULL DEFAULT 'in_progress'"
             )
         )
+    if "route_complete" not in existing_refreshes:
+        connection.execute(
+            text(
+                f"ALTER TABLE {refreshes_table} ADD COLUMN "
+                "route_complete BOOLEAN NOT NULL DEFAULT 0"
+            )
+        )
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (

@@ -164,12 +164,35 @@ def test_ingest_publishes_each_missing_completed_game_atomically(tmp_path):
     freshness = repository.get_freshness(SEASON)
     assert freshness.publication_status == "complete"
     assert repository.has_complete_publication(SEASON) is True
+    # The per-game boxscore seam exposes no plus/minus, so the DB-first route
+    # cutover gate stays closed and the request-time path keeps using live PBP.
+    assert repository.has_complete_route_publication(SEASON) is False
 
     sync = repository.get_sync_status(SEASON, "0022500001")
     assert sync.status == "complete"
     assert sync.row_count == 10
     assert sync.source_provider == "pbp_stats"
     assert len(sync.checksum) == 64
+
+
+def test_ingest_marks_route_complete_only_with_truthful_plus_minus_evidence(
+    tmp_path,
+):
+    repository = _repository(tmp_path)
+    _seed_identities(repository)
+    games = {
+        "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2, plus_minus=True),
+        "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2, plus_minus=True),
+    }
+    provider = FakeGameLogProvider(games)
+
+    _service(repository, provider).refresh(SEASON)
+
+    assert repository.get_freshness(SEASON).publication_status == "complete"
+    # A provider that truthfully carries plus/minus proves the public
+    # primitives complete, so the cutover gate may open.
+    assert repository.get_freshness(SEASON).route_complete is True
+    assert repository.has_complete_route_publication(SEASON) is True
 
 
 def test_failed_run_preserves_the_last_complete_publication(tmp_path):

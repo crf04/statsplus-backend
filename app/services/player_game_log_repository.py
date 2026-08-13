@@ -85,6 +85,9 @@ class PlayerGameLogFreshness:
     #: parity-checked evidence; the safe default for any legacy/NBA-derived or
     #: unknown state is ``in_progress``.
     publication_status: str = "in_progress"
+    #: Whether the stored publication proves every public primitive including
+    #: ``plus_minus`` is complete (the DB-first route cutover gate).
+    route_complete: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +294,13 @@ class PlayerGameLogRepository:
                 "source_row_count": source_row_count,
                 "identity_source_row_count": identity_source_row_count,
                 "publication_status": publication_status,
+                "route_complete": (
+                    publication_status == "complete"
+                    and all(
+                        record.plus_minus is not None
+                        for record in unique.values()
+                    )
+                ),
             }
             result = connection.execute(
                 update(refresh_table)
@@ -347,6 +357,7 @@ class PlayerGameLogRepository:
             source_row_count=int(row["source_row_count"]),
             identity_source_row_count=int(row["identity_source_row_count"]),
             publication_status=str(row["publication_status"]),
+            route_complete=bool(row["route_complete"]),
         )
 
     def get_read_freshness(self, season: str) -> PlayerGameLogReadFreshness:
@@ -479,6 +490,14 @@ class PlayerGameLogRepository:
                 canonical_season,
                 expected_complete_game_ids,
             )
+            missing_plus_minus = connection.execute(
+                select(func.count())
+                .select_from(log_table)
+                .where(
+                    log_table.c.season == canonical_season,
+                    log_table.c.plus_minus.is_(None),
+                )
+            ).scalar_one()
             values = {
                 "source_provider": source_provider,
                 "retrieved_at": retrieved,
@@ -486,6 +505,10 @@ class PlayerGameLogRepository:
                 "source_row_count": int(row_count),
                 "identity_source_row_count": int(row_count),
                 "publication_status": publication_status,
+                "route_complete": (
+                    publication_status == "complete"
+                    and missing_plus_minus == 0
+                ),
             }
             result = connection.execute(
                 update(refresh_table)
@@ -529,14 +552,14 @@ class PlayerGameLogRepository:
         )
 
     def has_complete_publication(self, season: str) -> bool:
-        """Whether this season may serve database-first reads.
+        """Whether this season has a complete durable ingestion publication.
 
-        A season is durably complete only when its sidecar carries a complete
-        publication and that publication is still valid: a historical season
-        with any sidecar is complete, while the configured current season must
-        also carry a fresh stats-surface observation.  A database that does not
-        own the player-log surface (such as the read-only demo fixture) simply
-        reports no complete publication.
+        A season is durably ingestion-complete only when its sidecar carries a
+        complete publication and that publication is still valid: a historical
+        season with any sidecar is complete, while the configured current
+        season must also carry a fresh stats-surface observation.  This is the
+        ingestion gate, not the request-time route cutover gate; see
+        :meth:`has_complete_route_publication`.
         """
         canonical_season = validate_canonical_season(season)
         try:
@@ -547,6 +570,24 @@ class PlayerGameLogRepository:
             ):
                 return False
             return self.get_read_freshness(canonical_season).status == "fresh"
+        except SQLAlchemyError:
+            return False
+
+    def has_complete_route_publication(self, season: str) -> bool:
+        """Whether this season may serve database-first request-time reads.
+
+        The DB-first route cutover requires typed publication evidence that
+        every public game-log primitive including ``plus_minus`` is complete.
+        PBP's per-game boxscore seam exposes no plus/minus, so its otherwise
+        complete publications report ``route_complete`` false and the route
+        keeps serving the cached live PBP path with unchanged documents and
+        filters.
+        """
+        canonical_season = validate_canonical_season(season)
+        try:
+            if not self.has_complete_publication(canonical_season):
+                return False
+            return self.get_freshness(canonical_season).route_complete
         except SQLAlchemyError:
             return False
 
