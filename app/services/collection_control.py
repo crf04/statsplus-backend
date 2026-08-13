@@ -13,7 +13,6 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import threading
 import secrets
 import uuid
@@ -21,7 +20,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -44,6 +43,7 @@ from app.models.collection_control import (
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
+    PublicationObservation,
     CompositionJob,
     CollectionCycle,
     AuditEvent,
@@ -55,6 +55,8 @@ from app.models.collection_control import (
     OperatorJob,
     GovernedNotApplicable,
 )
+from app.models.event_catalog import EventCatalogEntry
+from app.models.athlete_catalog import AthleteCatalog
 
 
 UTC = timezone.utc
@@ -325,6 +327,10 @@ class ControlPlaneError(ValueError):
         super().__init__(message or reason)
 
 
+class UnresolvedIdentityError(ValueError):
+    """Payload evidence names an identity not yet reconciled by governance."""
+
+
 @dataclass(frozen=True, slots=True)
 class CollectorClaims:
     collector_id: str
@@ -336,6 +342,13 @@ class CollectorClaims:
     owner: str = ""
     providers: frozenset[str] = frozenset()
     surfaces: frozenset[str] = frozenset()
+
+
+class CollectorLeaseGrant(NamedTuple):
+    """Owner/fence pair acquired from the cross-worker lease row."""
+
+    owner: str
+    fence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,19 +727,13 @@ class CollectionControlService(_SessionService):
                  min_athlete_catalog_identities: int | None = None) -> None:
         super().__init__(engine, clock=clock)
         self.environment = environment.strip() or "testing"
-        # Test deployments can use deterministic small fixtures while a
-        # production control plane keeps a meaningful whole-season volume
-        # floor.  Deployments may override all three values explicitly.
-        production = self.environment == "production"
-        self.min_event_catalog_games = max(1, self._catalog_bound(
-            min_event_catalog_games, "COLLECTOR_MIN_EVENT_CATALOG_GAMES", 100 if production else 1,
-        ))
-        self.min_event_catalog_teams = max(2, min(30, self._catalog_bound(
-            min_event_catalog_teams, "COLLECTOR_MIN_EVENT_CATALOG_TEAMS", 30 if production else 2,
-        )))
-        self.min_athlete_catalog_identities = max(1, self._catalog_bound(
-            min_athlete_catalog_identities, "COLLECTOR_MIN_ATHLETE_CATALOG_IDENTITIES", 1,
-        ))
+        # Floors are structural guards only.  Completeness is proven below by
+        # exact equality with governed Event/Athlete Catalog identities; no
+        # environment variable or guessed provider volume can assert a whole
+        # season.
+        self.min_event_catalog_games = max(1, int(min_event_catalog_games or 1))
+        self.min_event_catalog_teams = max(2, min(30, int(min_event_catalog_teams or 30)))
+        self.min_athlete_catalog_identities = max(1, int(min_athlete_catalog_identities or 1))
         if (
             self.min_event_catalog_games > MAX_EVENT_CATALOG_GAMES
             or self.min_athlete_catalog_identities > MAX_ATHLETE_CATALOG_IDENTITIES
@@ -734,16 +741,58 @@ class CollectionControlService(_SessionService):
             raise ControlPlaneError("invalid_catalog_bounds")
 
     @staticmethod
-    def _catalog_bound(explicit: int | None, environment_name: str, default: int) -> int:
-        if explicit is not None:
-            return int(explicit)
-        raw = os.getenv(environment_name)
-        if raw is None:
-            return default
-        try:
-            return int(raw)
-        except ValueError as error:
-            raise ControlPlaneError("invalid_catalog_bounds") from error
+    def _governed_event_ids(session: Session, season: str) -> set[str]:
+        """Return the canonical regular-season schedule identities."""
+
+        rows = session.scalars(select(EventCatalogEntry).where(
+            EventCatalogEntry.season == season,
+            EventCatalogEntry.classification == "Regular Season",
+        )).all()
+        return {str(row.nba_game_id) for row in rows}
+
+    @staticmethod
+    def _governed_athlete_ids(session: Session, season: str) -> set[str]:
+        """Return identities registered for the governed season roster."""
+
+        rows = session.scalars(select(AthleteCatalog.player_id).where(
+            AthleteCatalog.season == season,
+            AthleteCatalog.is_active_for_season.is_(True),
+        )).all()
+        return {str(row) for row in rows}
+
+    @staticmethod
+    def _catalog_payload_ids(payload: Any, catalog_type: str) -> set[str]:
+        rows = _catalog_rows(payload, catalog_type=catalog_type) or []
+        result: set[str] = set()
+        for row in rows:
+            if isinstance(row, Mapping):
+                value = row.get(
+                    "nba_game_id" if catalog_type == "event" else "player_id",
+                    row.get("game_id" if catalog_type == "event" else "id"),
+                )
+            else:
+                value = row
+            if value not in (None, ""):
+                result.add(str(value).strip())
+        return result
+
+    def _catalog_complete_against_governed_evidence(
+        self, session: Session, payload: Any, catalog_type: str, season: str,
+    ) -> bool:
+        active = session.get(ActiveSeason, season)
+        if active is None or active.status != "active" or active.phase != "Regular Season":
+            return False
+        governed = (
+            self._governed_event_ids(session, season)
+            if catalog_type == "event"
+            else self._governed_athlete_ids(session, season)
+        )
+        if not governed:
+            return False
+        supplied = self._catalog_payload_ids(payload, catalog_type)
+        if supplied != governed:
+            return False
+        return True
 
     def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
                         session: Session | None = None) -> ActiveSeason:
@@ -778,6 +827,31 @@ class CollectionControlService(_SessionService):
             session.add(row)
         return row
 
+    def record_identity_unresolved(self, *, season: str, kind: str,
+                                   reason: str = "identity_unresolved",
+                                   details: Mapping[str, Any] = ()) -> ReconciliationItem:
+        """Append/dedupe bounded reconciliation evidence before rejecting work."""
+
+        safe = {
+            str(key)[:64]: str(value)[:256]
+            for key, value in dict(details).items()
+            if str(key)[:64] not in {"secret", "token", "payload"}
+        }
+        dedupe_key = _checksum(_json({
+            "season": season, "kind": kind[:64], "reason": reason[:64], "details": safe,
+        }))[:128]
+        with self.session() as session, session.begin():
+            row = session.scalar(select(ReconciliationItem).where(
+                ReconciliationItem.dedupe_key == dedupe_key
+            ))
+            if row is None:
+                row = ReconciliationItem(
+                    item_id=_uuid(), season=season, kind=kind[:64], reason=reason[:64],
+                    details=_json(safe), dedupe_key=dedupe_key, created_at=self.clock(),
+                )
+                session.add(row)
+            return row
+
     def publish_catalog(self, request_id: str, payload: Any, *, version: str,
                         checksum: str | None = None, expires_at: datetime | None = None,
                         session: Session | None = None) -> CatalogPublication:
@@ -799,23 +873,50 @@ class CollectionControlService(_SessionService):
             try:
                 _validate_catalog_payload(
                     payload, request.catalog_type,
-                    min_event_games=self.min_event_catalog_games,
-                    min_event_teams=self.min_event_catalog_teams,
-                    min_athlete_identities=self.min_athlete_catalog_identities,
+                    # Shape validation is deliberately permissive enough to
+                    # retain an incomplete publication.  Exact whole-season
+                    # completeness is decided only against governed rows
+                    # immediately below.
+                    min_event_games=1,
+                    min_event_teams=2,
+                    min_athlete_identities=1,
                 )
                 if request.catalog_type == "athlete":
                     event = session.scalar(select(CatalogPublication).where(
                         CatalogPublication.season == request.season,
                         CatalogPublication.catalog_type == "event",
                         CatalogPublication.cutoff == request.cutoff,
-                        CatalogPublication.complete.is_(True),
                     ).order_by(CatalogPublication.published_at.desc()))
-                    if event is None:
+                    if event is None or not event.complete:
                         raise ValueError("event evidence required")
                     required_ids = _required_athlete_ids(event.payload)
                     catalog_ids = _catalog_identity_ids(payload)
                     if not required_ids or not required_ids <= catalog_ids:
-                        raise ValueError("athlete catalog incomplete")
+                        self.record_identity_unresolved(
+                            season=request.season, kind="athlete_catalog",
+                            details={"catalog_type": request.catalog_type,
+                                     "request_id": request.request_id,
+                                     "missing_count": len(required_ids - catalog_ids)},
+                        )
+                        raise ControlPlaneError("identity_unresolved")
+                if not self._catalog_complete_against_governed_evidence(
+                    session, payload, request.catalog_type, request.season,
+                ):
+                    # The shape is valid, but the provider did not reconcile
+                    # every governed schedule/identity row.  Persist it as an
+                    # explicitly incomplete publication; manifests and cycles
+                    # only consider complete=True publications.
+                    publication = CatalogPublication(
+                        publication_id=_uuid(), season=request.season,
+                        catalog_type=request.catalog_type, cutoff=request.cutoff,
+                        version=version, checksum=checksum, payload=encoded,
+                        complete=False, published_at=now, expires_at=expires_at,
+                    )
+                    session.add(publication)
+                    request.status, request.completed_at, request.catalog_version = "succeeded", now, version
+                    return publication
+            except ControlPlaneError:
+                raise
             except ValueError as error:
                 raise ControlPlaneError("catalog_payload_invalid") from error
             publication = CatalogPublication(publication_id=_uuid(), season=request.season, catalog_type=request.catalog_type,
@@ -967,8 +1068,10 @@ class CollectionControlService(_SessionService):
                        now: datetime | None = None) -> CatalogPublication | None:
         now = _aware(now or self.clock())
         with self.session() as session:
-            stmt = select(CatalogPublication).where(CatalogPublication.season == season, CatalogPublication.catalog_type == catalog_type,
-                CatalogPublication.complete.is_(True))
+            stmt = select(CatalogPublication).where(
+                CatalogPublication.season == season,
+                CatalogPublication.catalog_type == catalog_type,
+            )
             if cutoff is not None:
                 stmt = stmt.where(CatalogPublication.cutoff <= _aware(cutoff))
             rows = list(session.scalars(stmt.order_by(CatalogPublication.cutoff.desc(), CatalogPublication.published_at.desc())))
@@ -995,9 +1098,9 @@ class CollectionControlService(_SessionService):
         # but only after its required identities are derived from the governed
         # Event Catalog.  ``required_athlete_ids`` is retained as a compatibility
         # keyword and deliberately cannot expand or assert completeness.
-        if event is None or _aware(event.cutoff) != cutoff:
+        if event is None or not event.complete or _aware(event.cutoff) != cutoff:
             raise ControlPlaneError("event_catalog_required")
-        if athlete is None or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400:
+        if athlete is None or not athlete.complete or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400:
             raise ControlPlaneError("athlete_catalog_required")
         try:
             event_document = json.loads(event.payload)
@@ -1019,6 +1122,12 @@ class CollectionControlService(_SessionService):
         required_ids = _required_athlete_ids(event.payload)
         catalog_ids = _catalog_identity_ids(athlete_document)
         if not required_ids or not required_ids <= catalog_ids:
+            self.record_identity_unresolved(
+                season=season, kind="manifest", details={
+                    "manifest_cutoff": cutoff.isoformat(),
+                    "missing_count": len(required_ids - catalog_ids),
+                },
+            )
             raise ControlPlaneError("identity_unresolved")
         scope_list = sorted({str(scope).strip() for scope in scopes if str(scope).strip()})
         try:
@@ -1044,6 +1153,12 @@ class CollectionControlService(_SessionService):
             active = session.get(ActiveSeason, season)
             if active is None or active.status != "active":
                 raise ControlPlaneError("season_not_active")
+            if not self._catalog_complete_against_governed_evidence(
+                session, event_document, "event", season,
+            ) or not self._catalog_complete_against_governed_evidence(
+                session, athlete_document, "athlete", season,
+            ):
+                raise ControlPlaneError("catalog_incomplete")
             prior = session.scalars(select(CollectionManifest).where(CollectionManifest.season == season, CollectionManifest.status == "active")).all()
             session.query(CollectionManifest).filter(CollectionManifest.season == season, CollectionManifest.status == "active").update(
                 {"status": "superseded", "superseded_at": now})
@@ -1092,11 +1207,10 @@ class CollectionControlService(_SessionService):
                 CatalogPublication.season == manifest.season,
                 CatalogPublication.catalog_type == "event",
                 CatalogPublication.cutoff == manifest.cutoff,
-                CatalogPublication.complete.is_(True),
                 (CatalogPublication.expires_at.is_(None)
                  | (CatalogPublication.expires_at > _aware(now))),
             ).order_by(CatalogPublication.published_at.desc()))
-            if event is None:
+            if event is None or not event.complete:
                 raise ControlPlaneError("event_catalog_required")
             try:
                 event_document = json.loads(event.payload)
@@ -1108,6 +1222,10 @@ class CollectionControlService(_SessionService):
                 )
             except (TypeError, json.JSONDecodeError, ValueError) as error:
                 raise ControlPlaneError("event_catalog_invalid") from error
+            if not self._catalog_complete_against_governed_evidence(
+                session, event_document, "event", manifest.season,
+            ):
+                raise ControlPlaneError("event_catalog_incomplete")
             game_count = _completed_game_count(event.payload, cutoff=_aware(manifest.cutoff))
             cycle = CollectionCycle(cycle_id=_uuid(), season=manifest.season, manifest_id=manifest_id,
                 cutoff=manifest.cutoff, status="no_game" if game_count == 0 else "collecting",
@@ -1198,8 +1316,8 @@ class ObservationIngestionService(_SessionService):
         self._identity_locks: dict[str, threading.BoundedSemaphore] = {}
         self._identity_locks_guard = threading.Lock()
 
-    def _acquire_identity_lease(self, claims: CollectorClaims) -> str:
-        """Acquire the cross-worker database lease for one collector identity."""
+    def _acquire_identity_lease(self, claims: CollectorClaims) -> CollectorLeaseGrant:
+        """Acquire the cross-worker database lease and return its fence."""
 
         now = _aware(self.clock())
         owner = secrets.token_urlsafe(18)
@@ -1239,18 +1357,50 @@ class ObservationIngestionService(_SessionService):
             lease.fence = int(lease.fence or 0) + 1
             lease.updated_at = now
             session.flush()
-        return owner
+        return CollectorLeaseGrant(owner=owner, fence=int(lease.fence))
 
-    def _release_identity_lease(self, claims: CollectorClaims, owner: str) -> None:
+    def _release_identity_lease(self, claims: CollectorClaims,
+                                grant: CollectorLeaseGrant | str) -> None:
+        owner = grant.owner if isinstance(grant, CollectorLeaseGrant) else grant
+        fence = grant.fence if isinstance(grant, CollectorLeaseGrant) else None
         now = _aware(self.clock())
         with self.session() as session, session.begin():
             lease = session.scalar(select(CollectorLease).where(
                 CollectorLease.collector_id == claims.collector_id
             ).with_for_update())
-            if lease is not None and lease.lease_owner == owner:
+            if lease is not None and lease.lease_owner == owner and (
+                fence is None or int(lease.fence or 0) == fence
+            ):
                 lease.lease_owner = None
                 lease.lease_expires_at = now
                 lease.updated_at = now
+
+    def _assert_identity_lease(self, session: Session, claims: CollectorClaims,
+                               grant: CollectorLeaseGrant) -> None:
+        """Fence accepted work immediately before its enclosing commit.
+
+        The row lock is held until the observation/job transaction commits. A
+        worker whose lease expired and was taken over therefore cannot commit
+        an observation or enqueue a composition job under its stale fence.
+        Extending the still-valid lease while holding the row lock also gives
+        a waiting worker a truthful retry decision after this transaction.
+        """
+
+        now = _aware(self.clock())
+        lease = session.scalar(select(CollectorLease).where(
+            CollectorLease.collector_id == claims.collector_id
+        ).with_for_update())
+        if (
+            lease is None
+            or lease.lease_owner != grant.owner
+            or int(lease.fence or 0) != int(grant.fence)
+            or lease.lease_expires_at is None
+            or _aware(lease.lease_expires_at) <= now
+        ):
+            raise ControlPlaneError("stale_lease")
+        lease.lease_expires_at = now + timedelta(seconds=COLLECTOR_LEASE_SECONDS)
+        lease.updated_at = now
+        session.flush()
 
     def _preflight_payload(self, envelope: Mapping[str, Any], payload: bytes | str,
                            *, compressed: bool, max_payload_bytes: int,
@@ -1278,6 +1428,14 @@ class ObservationIngestionService(_SessionService):
                 min_event_catalog_teams=self.min_event_catalog_teams,
                 min_athlete_catalog_identities=self.min_athlete_catalog_identities,
             )
+        except UnresolvedIdentityError as error:
+            if self.collection_control is not None and envelope.get("season"):
+                self.collection_control.record_identity_unresolved(
+                    season=str(envelope["season"]), kind=str(envelope.get("observation_type", "observation")),
+                    details={"provider": str(envelope.get("provider", "")),
+                             "client_observation_id": str(envelope.get("client_observation_id", ""))},
+                )
+            raise ControlPlaneError("identity_unresolved") from error
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
 
@@ -1293,19 +1451,20 @@ class ObservationIngestionService(_SessionService):
             lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
         if not lock.acquire(blocking=False):
             raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
-        lease_owner = None
+        lease_grant = None
         try:
             self._preflight_payload(
                 envelope, payload, compressed=compressed,
                 max_payload_bytes=max_payload_bytes,
                 max_compressed_bytes=max_compressed_bytes,
             )
-            lease_owner = self._acquire_identity_lease(claims)
+            lease_grant = self._acquire_identity_lease(claims)
             return self._ingest(claims, envelope, payload, compressed=compressed,
-                                max_payload_bytes=max_payload_bytes, max_compressed_bytes=max_compressed_bytes)
+                                max_payload_bytes=max_payload_bytes, max_compressed_bytes=max_compressed_bytes,
+                                lease_grant=lease_grant)
         finally:
-            if lease_owner is not None:
-                self._release_identity_lease(claims, lease_owner)
+            if lease_grant is not None:
+                self._release_identity_lease(claims, lease_grant)
             lock.release()
 
     def ingest_catalog(self, claims: CollectorClaims, envelope: Mapping[str, Any],
@@ -1319,14 +1478,14 @@ class ObservationIngestionService(_SessionService):
             lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
         if not lock.acquire(blocking=False):
             raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
-        lease_owner = None
+        lease_grant = None
         try:
             self._preflight_payload(
                 envelope, payload, compressed=False,
                 max_payload_bytes=max_payload_bytes,
                 max_compressed_bytes=max_compressed_bytes,
             )
-            lease_owner = self._acquire_identity_lease(claims)
+            lease_grant = self._acquire_identity_lease(claims)
             return self._ingest(
                 claims,
                 envelope,
@@ -1337,10 +1496,11 @@ class ObservationIngestionService(_SessionService):
                 catalog_request_id=request_id,
                 catalog_version=catalog_version,
                 catalog_expires_at=expires_at,
+                lease_grant=lease_grant,
             )
         finally:
-            if lease_owner is not None:
-                self._release_identity_lease(claims, lease_owner)
+            if lease_grant is not None:
+                self._release_identity_lease(claims, lease_grant)
             lock.release()
 
     def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
@@ -1348,7 +1508,8 @@ class ObservationIngestionService(_SessionService):
                 max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
                 catalog_request_id: str | None = None,
                 catalog_version: str | None = None,
-                catalog_expires_at: datetime | None = None) -> ObservationReceipt | CatalogPublication:
+                catalog_expires_at: datetime | None = None,
+                lease_grant: CollectorLeaseGrant | None = None) -> ObservationReceipt | CatalogPublication:
         if not isinstance(envelope, Mapping):
             raise ControlPlaneError("malformed_envelope")
         if compressed and isinstance(payload, str):
@@ -1374,6 +1535,14 @@ class ObservationIngestionService(_SessionService):
                 min_event_catalog_teams=self.min_event_catalog_teams,
                 min_athlete_catalog_identities=self.min_athlete_catalog_identities,
             )
+        except UnresolvedIdentityError as error:
+            if self.collection_control is not None and envelope.get("season"):
+                self.collection_control.record_identity_unresolved(
+                    season=str(envelope["season"]), kind=str(envelope.get("observation_type", "observation")),
+                    details={"provider": str(envelope.get("provider", "")),
+                             "client_observation_id": str(envelope.get("client_observation_id", ""))},
+                )
+            raise ControlPlaneError("identity_unresolved") from error
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
         if not isinstance(value, (dict, list)):
@@ -1551,7 +1720,7 @@ class ObservationIngestionService(_SessionService):
                 session.rollback()
                 raise ControlPlaneError("observation_race") from error
             if catalog_request is not None:
-                return self.collection_control.publish_catalog(
+                publication = self.collection_control.publish_catalog(
                     catalog_request_id,
                     value,
                     version=catalog_version or "",
@@ -1559,7 +1728,7 @@ class ObservationIngestionService(_SessionService):
                     expires_at=catalog_expires_at,
                     session=session,
                 )
-            if self.publication_service is not None:
+            elif self.publication_service is not None:
                 self.publication_service.enqueue_for_observation(
                     observation_type,
                     season=str(envelope["season"]),
@@ -1567,6 +1736,10 @@ class ObservationIngestionService(_SessionService):
                     manifest_id=manifest_id,
                     session=session,
                 )
+            if lease_grant is not None:
+                self._assert_identity_lease(session, claims, lease_grant)
+            if catalog_request is not None:
+                return publication
         return ObservationReceipt(row.observation_id, client_id, checksum)
 
     @staticmethod
@@ -1715,8 +1888,10 @@ class PublicationService(_SessionService):
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
-            self._assert_completeness(session, stream, season=season, cutoff=_aware(cutoff),
-                                      manifest_id=manifest_id)
+            provenance_ids = self._assert_completeness(
+                session, stream, season=season, cutoff=_aware(cutoff),
+                manifest_id=manifest_id,
+            )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
             ).with_for_update())
@@ -1741,6 +1916,13 @@ class PublicationService(_SessionService):
                 cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=_checksum(encoded), payload=encoded,
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
+            for observation_id in sorted(provenance_ids):
+                session.add(PublicationObservation(
+                    publication_id=publication.publication_id,
+                    observation_id=observation_id,
+                    role="completeness_evidence",
+                    created_at=now,
+                ))
             if old:
                 previous = session.get(PublicationVersion, old)
                 if previous is not None:
@@ -1751,7 +1933,7 @@ class PublicationService(_SessionService):
 
     @staticmethod
     def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
-                             cutoff: datetime, manifest_id: str | None = None) -> None:
+                             cutoff: datetime, manifest_id: str | None = None) -> set[str]:
         required = set(json.loads(stream.required_observations))
         observations = list(session.scalars(select(CollectionObservation).where(
             CollectionObservation.season == season,
@@ -1764,11 +1946,18 @@ class PublicationService(_SessionService):
             manifest_ids = {row.manifest_id for row in observations}
         elif len(manifest_ids) > 1:
             raise ControlPlaneError("mixed_manifest")
-        observed = {row.observation_type for row in observations
-                    if row.provider == stream.provider and _observation_matches_scope(row, stream)}
+        matching_observations = [
+            row for row in observations
+            if row.provider == stream.provider and _observation_matches_scope(row, stream)
+        ]
+        observed = {row.observation_type for row in matching_observations}
         missing = sorted(required - observed)
         if missing:
             raise ControlPlaneError("incomplete_publication")
+        provenance_ids: set[str] = {
+            row.observation_id for row in matching_observations
+            if row.observation_type in required
+        }
         if stream.completeness_rule == "league_complete":
             team_ids: set[str] = set()
             team_codes: set[str] = set()
@@ -1808,6 +1997,8 @@ class PublicationService(_SessionService):
                             invalid_team_evidence = True
                         else:
                             team_codes.add(code)
+                if observation.provider == stream.provider and _observation_matches_scope(observation, stream):
+                    provenance_ids.add(observation.observation_id)
             if invalid_team_evidence:
                 raise ControlPlaneError("league_incomplete")
             if team_ids and team_ids != NBA_TEAM_IDS:
@@ -1838,6 +2029,7 @@ class PublicationService(_SessionService):
                 if not matching_bases:
                     continue
                 accepted = True
+                provenance_ids.add(observation.observation_id)
                 if expected_slices is not None:
                     for base, slice_key in _evidence_slice_pairs(evidence):
                         if base in matching_bases and slice_key in expected_slices:
@@ -1851,6 +2043,9 @@ class PublicationService(_SessionService):
                 )
             ):
                 raise ControlPlaneError("base_incomplete")
+        if required and not provenance_ids:
+            raise ControlPlaneError("incomplete_publication")
+        return provenance_ids
 
     def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                          expected_fence: int | None = None,
@@ -1889,6 +2084,43 @@ class PublicationService(_SessionService):
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
         return version
+
+    def prune_history(self, *, stream_key: str | None = None,
+                      season: str | None = None,
+                      session: Session | None = None) -> int:
+        """Prune rendered facts while retaining active/previous/rollback provenance.
+
+        The normalized ``PublicationObservation`` rows are immutable compact
+        history and are deliberately left intact even when an old rendered
+        publication is removed; active, immediate-previous, and rollback
+        versions retain both their facts and references.
+        """
+
+        with self._session_scope(session) as session:
+            pointer_query = select(PublicationPointer)
+            if stream_key is not None:
+                pointer_query = pointer_query.where(PublicationPointer.stream_key == stream_key)
+            protected: set[str] = set()
+            for pointer in session.scalars(pointer_query):
+                if pointer.active_publication_id:
+                    protected.add(pointer.active_publication_id)
+                if pointer.previous_publication_id:
+                    protected.add(pointer.previous_publication_id)
+            protected.update(session.scalars(select(PublicationVersion.publication_id).where(
+                PublicationVersion.status == "rollback"
+            )))
+            query = select(PublicationVersion).where(
+                PublicationVersion.status.in_(("superseded", "candidate")),
+                ~PublicationVersion.publication_id.in_(protected),
+            )
+            if stream_key is not None:
+                query = query.where(PublicationVersion.stream_key == stream_key)
+            if season is not None:
+                query = query.where(PublicationVersion.season == season)
+            rows = list(session.scalars(query))
+            for row in rows:
+                session.delete(row)
+            return len(rows)
 
 
 class CollectionOperationsService(_SessionService):
@@ -2232,9 +2464,19 @@ class CollectionOperationsService(_SessionService):
                     row = session.scalar(select(CollectorUsage).where(
                         CollectorUsage.collector_id == collector_id
                     ).with_for_update())
-            if row is None or (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
-                row = CollectorUsage(collector_id=collector_id, window_started_at=now)
-                session.add(row)
+            if row is None:
+                raise ControlPlaneError("usage_unavailable")
+            if (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
+                # Keep the locked primary-key row in place.  Replacing it
+                # creates an identity collision and can leave stale counters
+                # visible to another worker between the two writes.
+                row.window_started_at = now
+                row.poll_count = 0
+                row.envelope_count = 0
+                row.byte_count = 0
+            row.poll_count = int(row.poll_count or 0)
+            row.envelope_count = int(row.envelope_count or 0)
+            row.byte_count = int(row.byte_count or 0)
             if (row.poll_count + polls > max_polls or row.envelope_count + envelopes > max_envelopes
                     or row.byte_count + bytes_received > max_bytes):
                 raise ControlPlaneError("usage_limit")
@@ -2319,16 +2561,22 @@ class CollectionOperationsService(_SessionService):
             raise ControlPlaneError("invalid_retention")
         cutoff = _aware(now or self.clock()) - timedelta(days=retention_days)
         with self.session() as session, session.begin():
-            # Keep observations named by an active or rollback publication;
-            # provenance survives ordinary 30-day garbage collection.
-            protected: set[str] = set()
-            publications = session.scalars(select(PublicationVersion).where(PublicationVersion.status.in_(("active", "rollback")))).all()
-            for publication in publications:
-                try:
-                    document = json.loads(publication.payload)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                protected.update(_find_observation_ids(document))
+            # Retention joins exact normalized provenance rows.  It never
+            # searches arbitrary rendered publication JSON for identifiers.
+            protected_publication_ids: set[str] = set(session.scalars(select(
+                PublicationVersion.publication_id
+            ).where(PublicationVersion.status.in_(("active", "rollback")))))
+            for active_id, previous_id in session.execute(select(
+                PublicationPointer.active_publication_id,
+                PublicationPointer.previous_publication_id,
+            )):
+                if active_id:
+                    protected_publication_ids.add(active_id)
+                if previous_id:
+                    protected_publication_ids.add(previous_id)
+            protected = set(session.scalars(select(
+                PublicationObservation.observation_id
+            ).where(PublicationObservation.publication_id.in_(protected_publication_ids))))
             rows = session.scalars(select(CollectionObservation).where(CollectionObservation.accepted_at < cutoff)).all()
             rows = [row for row in rows if row.observation_id not in protected]
             count = len(rows)
@@ -2489,6 +2737,9 @@ def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
         identities: set[str] = set()
         for event in events:
             if not isinstance(event, Mapping):
+                continue
+            phase = str(event.get("phase", event.get("season_phase", event.get("season_type", "")))).strip().lower().replace("_", " ")
+            if phase not in {"regular season", "regular"}:
                 continue
             game_id = event.get("nba_game_id", event.get("game_id", event.get("id")))
             status = str(event.get("status", event.get("status_text", ""))).lower()
@@ -2657,10 +2908,7 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
             teams.update(row_teams)
             phase = row.get("phase", row.get("season_phase", row.get("season_type")))
             normalized_phase = str(phase or "").strip().lower().replace("_", " ")
-            if normalized_phase not in {
-                "regular season", "regular", "playoffs", "playoff", "play in", "play-in",
-                "play in tournament",
-            }:
+            if normalized_phase not in {"regular season", "regular"}:
                 raise ValueError("event phase required")
             phases.add(normalized_phase)
             status = row.get("status", row.get("status_text", row.get("status_code")))
@@ -2719,9 +2967,12 @@ def _validate_observation_payload(value: Any, *, observation_type: str,
         _validate_catalog_payload(
             value,
             "event" if observation_type == "event_catalog" else "athlete",
-            min_event_games=min_event_catalog_games,
-            min_event_teams=min_event_catalog_teams,
-            min_athlete_identities=min_athlete_catalog_identities,
+            # Envelope acceptance retains incomplete-but-well-formed catalog
+            # observations; governed equality decides whether publication can
+            # be complete.
+            min_event_games=1,
+            min_event_teams=2,
+            min_athlete_identities=1,
         )
         _validate_payload_shape(value)
         return
@@ -2823,7 +3074,7 @@ def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _dep
     if isinstance(value, dict):
         unresolved = value.get("unresolved_identities")
         if unresolved:
-            raise ValueError("unresolved identity")
+            raise UnresolvedIdentityError("identity unresolved")
         for key, child in value.items():
             if not isinstance(key, str) or len(key) > 512:
                 raise ValueError("invalid payload key")
@@ -2863,7 +3114,7 @@ def _valid_season(season: str) -> bool:
 
 
 __all__ = [
-    "CURRENT_ENVELOPE_VERSION", "SURFACE_REGISTRY", "SurfaceDefinition", "ControlPlaneError", "CollectorClaims", "CollectorTokenService",
+    "CURRENT_ENVELOPE_VERSION", "SURFACE_REGISTRY", "SurfaceDefinition", "ControlPlaneError", "CollectorClaims", "CollectorLeaseGrant", "CollectorTokenService",
     "CollectionControlService", "ObservationIngestionService", "ObservationReceipt", "PublicationService", "CollectionOperationsService", "EmailAlertAdapter",
     "OperatorActionResult", "decompress_gzip_limited",
 ]

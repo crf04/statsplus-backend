@@ -338,6 +338,7 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         CollectionObservation,
         PublicationStream,
         PublicationVersion,
+        PublicationObservation,
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
@@ -361,6 +362,7 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         CollectionObservation,
         PublicationStream,
         PublicationVersion,
+        PublicationObservation,
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
@@ -451,6 +453,28 @@ def _upgrade_collector_surface_authorization(connection: Connection) -> None:
             ))
 
 
+def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
+    """Normalize publication provenance and dedupe unresolved identities."""
+
+    from app.models.collection_control import PublicationObservation
+
+    PublicationObservation.__table__.create(connection, checkfirst=True)
+    table = "collection_reconciliation_items"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    if "dedupe_key" not in existing:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+            f"{preparer.quote('dedupe_key')} VARCHAR(128)"
+        ))
+    connection.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        f"{preparer.quote('uq_reconciliation_dedupe_key')} ON "
+        f"{preparer.quote(table)} ({preparer.quote('dedupe_key')}) "
+        "WHERE dedupe_key IS NOT NULL"
+    ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -481,6 +505,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(19, "019_surface_registry_metadata", _upgrade_surface_registry),
     Migration(20, "020_operator_control", _upgrade_operator_control),
     Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
+    Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
 )
 
 

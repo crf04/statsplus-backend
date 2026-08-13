@@ -1430,7 +1430,7 @@ Operator mutations require Firebase administrator authentication.
 An invalid machine secret or bearer token is `401 invalid_token`; malformed
 token input such as a non-integer TTL is `400 invalid_input`; a valid token
 without the required collector scope is `403 forbidden`. Durable collection
-state conflicts (stale publication fences, immutable cycles, duplicate
+state conflicts (stale publication/lease fences, immutable cycles, duplicate
 idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 
 ```http
@@ -1490,19 +1490,33 @@ checksum returns the original publication, while expired or already-completed
 requests are rejected. Railway then creates the
 immutable cutoff manifest only after both Event and Athlete Catalog
 publications pass their governed freshness checks. Event Catalog rows must have
-unique canonical game IDs, two canonical teams, recognized phase/status, and a
-scheduled date, and satisfy the configured whole-season volume/team bounds;
-an empty catalog can never assert a no-game cycle. Athlete Catalog rows must
-have unique canonical identities, team and season-coverage evidence, and cover
-the identities derived from accepted Event/Railway evidence. Caller-supplied
+unique canonical game IDs, exactly two canonical teams, Regular Season phase,
+recognized status, and a scheduled date. Completeness is exact equality with
+the governed Active Season/Event Catalog schedule at the cutoff, not a mutable
+environment floor; Playoffs, Play-In, mixed-phase, partial, and empty catalogs
+remain `complete: false` and cannot authorize a manifest or no-game cycle.
+Athlete Catalog rows must have unique canonical identities, team and
+season-coverage evidence, and exactly cover the active governed roster plus
+identities derived from accepted Event/Railway evidence. Caller-supplied
 identity lists and `completed_game_count` values do not establish completeness.
 
 Observation ingestion uses a database-backed per-collector lease. PostgreSQL
 acquires the identity row with `SELECT ... FOR UPDATE`; the short lease expires
 after a bounded interval so a crashed Railway worker can be recovered. A live
 lease returns `429 rate_limited` with an explicit `retry_after_seconds` and does
-not rely on a process-local semaphore for correctness. Collector usage counters
-are updated under the same database row-lock discipline.
+not rely on a process-local semaphore for correctness. The acquired owner and
+monotonic fence are checked under the same row lock immediately before the
+observation and composition enqueue commit; a worker taken over after expiry
+fails closed with `stale_lease`. Collector usage counters reset the existing
+locked row in place after 24 hours and retain the same row-lock discipline.
+
+Every completed publication has normalized `publication_observations` rows
+pointing to the exact accepted Observation IDs used for completeness. Retention
+joins those references through active, previous, and rollback pointers; it
+never searches arbitrary rendered payload JSON. History pruning removes old
+rendered facts while retaining compact immutable provenance and audit metadata.
+Unresolved identity rejection atomically appends a bounded, deduplicated
+Reconciliation Item before returning `identity_unresolved`.
 
 Lifecycle audit events are append-only and contain only bounded safe fields.
 Successful token issuance/use, rotation, revocation, and same-ID/different-

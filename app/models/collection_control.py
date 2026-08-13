@@ -178,6 +178,28 @@ class PublicationVersion(Base):
     )
 
 
+class PublicationObservation(Base):
+    """Immutable normalized provenance for one publication version.
+
+    A publication names the exact accepted observations that supplied its
+    completeness evidence.  It is intentionally separate from the rendered
+    publication payload so retention never has to search arbitrary JSON for
+    identifiers.
+    """
+
+    __tablename__ = "publication_observations"
+
+    publication_id = Column(String(36), primary_key=True)
+    observation_id = Column(String(36), primary_key=True)
+    role = Column(String(64), nullable=False, default="source")
+    slice_key = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_publication_observations_observation", "observation_id"),
+    )
+
+
 class PublicationPointer(Base):
     __tablename__ = "publication_pointers"
 
@@ -274,6 +296,9 @@ class ReconciliationItem(Base):
     kind = Column(String(64), nullable=False)
     reason = Column(String(64), nullable=False)
     details = Column(Text, nullable=False, default="{}")
+    # Stable bounded dedupe identity for repeated rejected evidence.  It is
+    # nullable for rows created before migration 022.
+    dedupe_key = Column(String(128), nullable=True, unique=True)
     status = Column(String(16), nullable=False, default="open")
     created_at = Column(DateTime(timezone=True), nullable=False)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
@@ -355,7 +380,7 @@ class CredentialDelivery(Base):
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectionObservation", "PublicationStream",
-    "PublicationVersion", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
+    "PublicationVersion", "PublicationObservation", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",

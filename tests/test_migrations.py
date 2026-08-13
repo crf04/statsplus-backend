@@ -60,6 +60,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "019_surface_registry_metadata",
         "020_operator_control",
         "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -96,6 +97,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "collection_observations",
             "publication_streams",
             "publication_versions",
+            "publication_observations",
             "publication_pointers",
             "composition_jobs",
             "collector_token_replays",
@@ -313,6 +315,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (19, "019_surface_registry_metadata"),
             (20, "020_operator_control"),
             (21, "021_collector_surface_authorization"),
+            (22, "022_publication_provenance_reconciliation"),
         ]
 
 
@@ -348,6 +351,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "019_surface_registry_metadata",
         "020_operator_control",
         "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -451,6 +455,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "collection_observations",
             "publication_streams",
             "publication_versions",
+            "publication_observations",
             "publication_pointers",
             "composition_jobs",
             "collector_token_replays",
@@ -592,6 +597,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "019_surface_registry_metadata",
         "020_operator_control",
         "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -634,10 +640,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "019_surface_registry_metadata",
         "020_operator_control",
         "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
     )
-    assert upgraded.current_version == 21
+    assert upgraded.current_version == 22
     assert repeated.applied == ()
-    assert repeated.current_version == 21
+    assert repeated.current_version == 22
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -689,6 +696,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "019_surface_registry_metadata",
         "020_operator_control",
         "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

@@ -2079,12 +2079,26 @@ Catalog cannot establish a no-game cycle.
 Collector ingestion is serialized by a database-backed identity lease rather
 than a process-local semaphore. PostgreSQL acquires the lease row with
 `SELECT ... FOR UPDATE`, increments its fence, and expires it after a bounded
-interval for crash recovery; a busy worker receives explicit retry timing.
-Usage counters use the same row-lock discipline. Lifecycle audits are
+interval for crash recovery; a busy worker receives explicit retry timing. The
+owner/fence pair is rechecked under the row lock immediately before accepted
+observation and composition-enqueue commit, so an expired worker that was
+taken over fails closed with `stale_lease`.
+Usage counters reset locked rows in place at the 24-hour boundary and use the
+same row-lock discipline. Event/Athlete Catalog completeness is proven by
+exact equality with governed Active Season/Event schedule and roster evidence;
+only Regular Season rows qualify, and provider/env floors never assert a whole
+season. Lifecycle audits are
 append-only and include token issue/use, rotation/revocation, and rejected
 same-ID/different-checksum observations. Maintenance emits deterministic
 first-failure, stale-threshold, six-hour attention, and recovery alerts while
 suppressing false failure/stale alerts when work is queued or running.
+
+Publication versions retain normalized references to exact accepted
+Observation IDs in `publication_observations`. Garbage collection follows
+active, previous, and rollback pointer relations instead of searching payload
+JSON, and pruning removes old rendered facts while preserving immutable
+provenance/audit metadata. Identity-unresolved validation writes one bounded,
+deduplicated Reconciliation Item before rejecting the input.
 
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap

@@ -89,7 +89,7 @@ def _control_error(error: Exception) -> AppError:
     if reason in {
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
-        "composition_not_retryable", "rollback_unavailable",
+        "composition_not_retryable", "rollback_unavailable", "stale_lease",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
