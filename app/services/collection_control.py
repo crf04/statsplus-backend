@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import math
+import threading
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -57,10 +58,19 @@ ATHLETE_REUSE_DAYS = 7
 MAX_PAYLOAD_VALUES = 100_000
 
 SURFACE_REGISTRY: tuple[dict[str, Any], ...] = (
-    {"stream_key": "event_catalog", "provider": "nba", "owner": "residential_collector", "scope": "season", "enabled": True},
-    {"stream_key": "athlete_catalog", "provider": "nba", "owner": "residential_collector", "scope": "season", "enabled": True},
-    {"stream_key": "canonical_game_ledger", "provider": "pbp", "owner": "railway", "scope": "game", "enabled": True},
-    {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "enabled": False, "reason": "provider_window_unsupported"},
+    {"stream_key": "event_catalog", "provider": "nba", "owner": "residential_collector", "scope": "whole_season", "required": ("event_catalog",), "schema": (1, 2), "complete": "catalog_complete", "strategy": "keyed_reconcile", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": True},
+    {"stream_key": "athlete_catalog", "provider": "nba", "owner": "residential_collector", "scope": "whole_season", "required": ("athlete_catalog",), "schema": (1, 2), "complete": "identity_complete", "strategy": "keyed_reconcile", "freshness": "seven_day", "windows": ("regular_season",), "enabled": True},
+    {"stream_key": "canonical_game_ledger", "provider": "pbp", "owner": "railway", "scope": "one_completed_game", "required": ("game_stats",), "schema": (1, 2), "complete": "game_complete", "strategy": "atomic_replace", "freshness": "daily_recheck", "windows": ("regular_season",), "enabled": True},
+    {"stream_key": "player_game_logs", "provider": "ledger", "owner": "railway", "scope": "season_date_query", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "since_date"), "enabled": True},
+    {"stream_key": "traditional_opponent", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": True},
+    {"stream_key": "assist_locations", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": True},
+    {"stream_key": "player_per36", "provider": "ledger", "owner": "railway", "scope": "full_regular_season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": True},
+    {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": True},
+    {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": True},
+    {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": True},
+    {"stream_key": "dfs_boards", "provider": "railway", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": True},
+    {"stream_key": "injury_reports", "provider": "rotowire", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": True},
+    {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
 )
 
 
@@ -134,6 +144,8 @@ class CollectorTokenService(_SessionService):
     def __init__(self, engine: Engine, *, environment: str, signing_secret: str | bytes | None = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
+        if environment == "production" and not signing_secret:
+            raise ControlPlaneError("signing_secret_required")
         self.environment = environment
         self.signing_secret = (signing_secret.encode() if isinstance(signing_secret, str) else signing_secret) or secrets.token_bytes(32)
 
@@ -416,7 +428,8 @@ class CollectionControlService(_SessionService):
             session.add(cycle)
         return cycle
 
-    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None) -> CollectionCycle:
+    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None,
+                     not_applicable_streams: Iterable[str] = ()) -> CollectionCycle:
         if status not in {"complete", "attention", "failed"}:
             raise ControlPlaneError("invalid_cycle_status")
         now = self.clock()
@@ -426,6 +439,19 @@ class CollectionControlService(_SessionService):
                 raise ControlPlaneError("cycle_not_found")
             if cycle.status in {"complete", "no_game", "superseded"}:
                 raise ControlPlaneError("cycle_immutable")
+            if status == "complete":
+                exempt = set(not_applicable_streams)
+                enabled = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+                missing = []
+                for stream in enabled:
+                    if stream.stream_key in exempt:
+                        continue
+                    pointer = session.get(PublicationPointer, stream.stream_key)
+                    publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
+                    if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
+                        missing.append(stream.stream_key)
+                if missing:
+                    raise ControlPlaneError("cycle_incomplete")
             cycle.status, cycle.completed_at, cycle.attention_reason = status, now, reason
         return cycle
 
@@ -443,7 +469,30 @@ class CollectionControlService(_SessionService):
 class ObservationIngestionService(_SessionService):
     """Validate and durably accept one complete observation envelope."""
 
+    def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
+                 operations_service: "CollectionOperationsService | None" = None,
+                 clock: Callable[[], datetime] = utcnow) -> None:
+        super().__init__(engine, clock=clock)
+        self.publication_service = publication_service
+        self.operations_service = operations_service
+        self._identity_locks: dict[str, threading.BoundedSemaphore] = {}
+        self._identity_locks_guard = threading.Lock()
+
     def ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
+               *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+               max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
+        """Serialize one in-process envelope per collector identity."""
+        with self._identity_locks_guard:
+            lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
+        if not lock.acquire(blocking=False):
+            raise ControlPlaneError("usage_limit")
+        try:
+            return self._ingest(claims, envelope, payload, compressed=compressed,
+                                max_payload_bytes=max_payload_bytes, max_compressed_bytes=max_compressed_bytes)
+        finally:
+            lock.release()
+
+    def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
                *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
                max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
         if compressed and isinstance(payload, str):
@@ -487,6 +536,8 @@ class ObservationIngestionService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None or manifest.status != "active":
                 raise ControlPlaneError("manifest_expired")
+            if _aware(now) >= _aware(manifest.collect_before):
+                raise ControlPlaneError("manifest_expired")
             if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
                 raise ControlPlaneError("manifest_scope_mismatch")
             allowed_scopes = set(json.loads(manifest.scopes))
@@ -508,6 +559,11 @@ class ObservationIngestionService(_SessionService):
             except IntegrityError as error:
                 session.rollback()
                 raise ControlPlaneError("observation_race") from error
+        if self.publication_service is not None:
+            self.publication_service.enqueue_for_observation(
+                str(envelope["observation_type"]), season=str(envelope["season"]),
+                cutoff=_parse_datetime(envelope["cutoff"])
+            )
         return ObservationReceipt(row.observation_id, client_id, checksum)
 
 
@@ -516,7 +572,9 @@ class PublicationService(_SessionService):
 
     def register_stream(self, stream_key: str, *, provider: str, owner: str,
                         required_observations: Iterable[str], publication_strategy: str,
-                        supported_windows: Iterable[str] = (), enabled: bool = False) -> PublicationStream:
+                        supported_windows: Iterable[str] = (), enabled: bool = False,
+                        schema_versions: Iterable[int] = (1, 2), completeness_rule: str = "base_complete",
+                        freshness_rule: str = "cutoff_current") -> PublicationStream:
         if not stream_key or not provider or not owner:
             raise ControlPlaneError("invalid_stream")
         now = self.clock()
@@ -525,10 +583,16 @@ class PublicationService(_SessionService):
             if row is None:
                 row = PublicationStream(stream_key=stream_key, provider=provider, owner=owner,
                     required_observations=_json(sorted(set(required_observations))), publication_strategy=publication_strategy,
-                    supported_windows=_json(sorted(set(supported_windows))), enabled=enabled, created_at=now)
+                    supported_windows=_json(sorted(set(supported_windows))), schema_versions=_json(sorted(set(schema_versions))),
+                    completeness_rule=completeness_rule, freshness_rule=freshness_rule, enabled=enabled, created_at=now)
                 session.add(row)
             else:
-                row.enabled = enabled
+                row.provider, row.owner = provider, owner
+                row.required_observations = _json(sorted(set(required_observations)))
+                row.publication_strategy = publication_strategy
+                row.supported_windows = _json(sorted(set(supported_windows)))
+                row.schema_versions = _json(sorted(set(schema_versions)))
+                row.completeness_rule, row.freshness_rule, row.enabled = completeness_rule, freshness_rule, enabled
         return row
 
     def register_default_streams(self) -> tuple[PublicationStream, ...]:
@@ -536,8 +600,9 @@ class PublicationService(_SessionService):
         for definition in SURFACE_REGISTRY:
             rows.append(self.register_stream(
                 definition["stream_key"], provider=definition["provider"], owner=definition["owner"],
-                required_observations=[definition["stream_key"]], publication_strategy="replace",
-                supported_windows=[definition["scope"]], enabled=bool(definition["enabled"]),
+                required_observations=definition["required"], publication_strategy=definition["strategy"],
+                supported_windows=definition["windows"], enabled=bool(definition["enabled"]), schema_versions=definition["schema"],
+                completeness_rule=definition["complete"], freshness_rule=definition["freshness"],
             ))
         return tuple(rows)
 
@@ -565,6 +630,14 @@ class PublicationService(_SessionService):
             session.add(row)
         return row
 
+    def enqueue_for_observation(self, observation_type: str, *, season: str, cutoff: datetime) -> int:
+        with self.session() as session:
+            streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+            matching = [stream.stream_key for stream in streams if observation_type in set(json.loads(stream.required_observations))]
+        for stream_key in matching:
+            self.enqueue(stream_key, season=season, cutoff=cutoff)
+        return len(matching)
+
     def retry(self, job_id: str, *, reason: str) -> CompositionJob:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -578,14 +651,39 @@ class PublicationService(_SessionService):
             row.status, row.attempts, row.updated_at, row.last_error = "queued", row.attempts + 1, now, None
         return row
 
+    def reconcile_pending(self, *, season: str, cutoff: datetime, limit: int = 100) -> int:
+        """Scheduled backstop that enqueues accepted observations lacking a job."""
+        cutoff = _aware(cutoff)
+        with self.session() as session:
+            streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+            candidates: set[tuple[str, str]] = set()
+            for stream in streams:
+                required = set(json.loads(stream.required_observations))
+                if not required:
+                    continue
+                observed = set(session.scalars(select(CollectionObservation.observation_type).where(
+                    CollectionObservation.season == season, CollectionObservation.cutoff == cutoff
+                )))
+                if required & observed:
+                    candidates.add((stream.stream_key, season))
+        count = 0
+        for stream_key, selected_season in sorted(candidates):
+            if count >= min(max(limit, 1), 1000):
+                break
+            self.enqueue(stream_key, season=selected_season, cutoff=cutoff)
+            count += 1
+        return count
+
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
-                expected_fence: int | None = None, reason: str | None = None) -> PublicationVersion:
+                expected_fence: int | None = None, reason: str | None = None,
+                completeness: Mapping[str, Any] | None = None) -> PublicationVersion:
         encoded = _json(payload)
         now = self.clock()
         with self.session() as session, session.begin():
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
+            self._assert_completeness(session, stream, season=season, cutoff=_aware(cutoff), completeness=completeness)
             pointer = session.get(PublicationPointer, stream_key)
             if pointer is None:
                 pointer = PublicationPointer(stream_key=stream_key, fence=0, updated_at=now)
@@ -608,12 +706,36 @@ class PublicationService(_SessionService):
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
         return publication
 
+    @staticmethod
+    def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
+                             cutoff: datetime, completeness: Mapping[str, Any] | None) -> None:
+        if not isinstance(completeness, Mapping):
+            raise ControlPlaneError("completeness_required")
+        exempt = set(map(str, completeness.get("not_applicable", ())))
+        required = set(json.loads(stream.required_observations))
+        observed = set(session.scalars(select(CollectionObservation.observation_type).where(
+            CollectionObservation.season == season, CollectionObservation.cutoff == cutoff
+        )))
+        missing = sorted(required - observed - exempt)
+        if missing:
+            raise ControlPlaneError("incomplete_publication")
+        required_teams = set(map(str, completeness.get("required_team_ids", ())))
+        observed_teams = set(map(str, completeness.get("observed_team_ids", ())))
+        if stream.completeness_rule == "league_complete" and (len(observed_teams) != 30 or required_teams != observed_teams):
+            raise ControlPlaneError("league_incomplete")
+        required_bases = set(map(str, completeness.get("required_base_slices", ())))
+        complete_bases = set(map(str, completeness.get("complete_base_slices", ())))
+        if not required_bases <= complete_bases:
+            raise ControlPlaneError("base_incomplete")
+        # A caller's convenience boolean is never authoritative; all gates
+        # above are derived from registered requirements and evidence.
+
     def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                          completeness: Mapping[str, Any], expected_fence: int | None = None) -> PublicationVersion:
         if not bool(completeness.get("complete")):
             raise ControlPlaneError("incomplete_publication")
         return self.compose(stream_key, season=season, cutoff=cutoff, payload=payload,
-                            expected_fence=expected_fence)
+                            expected_fence=expected_fence, completeness=completeness)
 
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:
@@ -686,21 +808,29 @@ class CollectionOperationsService(_SessionService):
         return row
 
     def record_usage(self, collector_id: str, *, envelopes: int = 0, bytes_received: int = 0,
-                     polls: int = 0, max_envelopes: int = 1000, max_bytes: int = 50 * 1024 * 1024) -> CollectorUsage:
-        if min(envelopes, bytes_received, polls) < 0 or envelopes > max_envelopes or bytes_received > max_bytes:
+                     polls: int = 0, max_polls: int = 100, max_envelopes: int = 1000, max_bytes: int = 50 * 1024 * 1024) -> CollectorUsage:
+        if min(envelopes, bytes_received, polls) < 0 or polls > max_polls or envelopes > max_envelopes or bytes_received > max_bytes:
             raise ControlPlaneError("usage_limit")
         now = self.clock()
         with self.session() as session, session.begin():
             row = session.get(CollectorUsage, collector_id)
             if row is None or (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
                 row = CollectorUsage(collector_id=collector_id, window_started_at=now)
-                session.merge(row)
-            if row.envelope_count + envelopes > max_envelopes or row.byte_count + bytes_received > max_bytes:
+                session.add(row)
+            if (row.poll_count + polls > max_polls or row.envelope_count + envelopes > max_envelopes
+                    or row.byte_count + bytes_received > max_bytes):
                 raise ControlPlaneError("usage_limit")
             row.envelope_count += envelopes
             row.byte_count += bytes_received
             row.poll_count += polls
         return row
+
+    def list_reconciliation(self, *, limit: int = 50) -> list[ReconciliationItem]:
+        bounded_limit = max(1, min(int(limit), 100))
+        with self.session() as session:
+            return list(session.scalars(select(ReconciliationItem).where(
+                ReconciliationItem.status == "open"
+            ).order_by(ReconciliationItem.created_at.desc()).limit(bounded_limit)))
 
     def validate_completeness(self, *, required_team_ids: Iterable[str] = (), observed_team_ids: Iterable[str] = (),
                               required_base_slices: Iterable[str] = (), complete_base_slices: Iterable[str] = (),

@@ -2042,7 +2042,13 @@ consuming its ID, and rotated machine secrets overlap only until their bounded
 expiry. A repeated collector/client observation ID with the same checksum is
 an idempotent receipt; a conflicting checksum is rejected. Publication
 advancement increments a per-stream database fence, preserving the prior
-active version for rollback and rejecting stale composition workers.
+active version for rollback and rejecting stale composition workers. Accepted
+observations enqueue a deduplicated composition job immediately, while
+`reconcile_pending` is the scheduled backstop. Composition derives its gate
+from registered required observations plus league/Base completeness evidence;
+a caller-provided `complete` flag alone cannot advance a pointer. Production
+requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
+may use a process-local key.
 
 Migration 017 creates these records without changing existing public readers.
 The collector routes are narrow HTTP adapters under `/api/collector`, while

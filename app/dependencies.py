@@ -9,6 +9,7 @@ from typing import Any
 
 from flask import current_app
 from sqlalchemy.engine import Engine
+from sqlalchemy import inspect
 
 from app.config.settings import RuntimeSettings
 from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
@@ -136,9 +137,13 @@ def build_dependencies(
             engine, environment=settings.environment, signing_secret=signing_secret
         )
         collection_control = CollectionControlService(engine)
-        observation_ingestion = ObservationIngestionService(engine)
         publication_service = PublicationService(engine)
         collection_operations = CollectionOperationsService(engine)
+        if inspect(engine).has_table("publication_streams"):
+            publication_service.register_default_streams()
+        observation_ingestion = ObservationIngestionService(
+            engine, publication_service=publication_service, operations_service=collection_operations
+        )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)
     )

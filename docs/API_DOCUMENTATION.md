@@ -1418,9 +1418,9 @@ after an intended contract change, and review the diff.
 ## Collection control-plane endpoints
 
 The control plane is additive and does not alter existing public readers.
-Collector routes use a short-lived signed bearer token issued by an
-administrator; tokens are bound to the deployment environment, audience, and
-scope. Operator mutations require Firebase administrator authentication.
+Collector routes use a machine-secret exchange for a short-lived signed bearer
+token; tokens are bound to the deployment environment, audience, and scope.
+Operator mutations require Firebase administrator authentication.
 
 ```http
 POST /api/collector/token
@@ -1430,6 +1430,8 @@ POST /api/admin/collection/seasons/<season>
 POST /api/admin/collection/streams/<stream_key>/rollback
 POST /api/admin/collection/streams/<stream_key>/activate
 POST /api/admin/collection/compositions/<job_id>/retry
+POST /api/admin/collection/cycles/start
+POST /api/admin/collection/repair
 POST /api/admin/collection/bootstrap
 POST /api/admin/collection/collectors/<identity_id>/revoke
 POST /api/admin/collection/collectors/<identity_id>/rotate
@@ -1439,12 +1441,17 @@ POST /api/admin/collection/reconciliation/<item_id>/resolve
 
 `POST /api/collector/observations` accepts one complete normalized envelope
 and payload. The server validates the manifest, schema version, environment,
-scope, checksum, and size before one atomic insert. Repeating the same
+scope, checksum, size, and `collect_before` deadline before one atomic insert.
+Repeating the same
 collector/client observation ID and checksum returns the original receipt;
 reusing the ID with a different checksum is rejected. Operator actions return
 bounded durable identifiers and require a human-readable reason where they
 mutate publication state. Raw observations, credentials, and player-level
-payloads are never returned by these routes.
+payloads are never returned by these routes. Collector limits return `429
+rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
+The rotation endpoint returns only a durable job/identity status; the new
+long-lived machine secret is delivered through the deployment credential
+channel, never over this API.
 
 ## User Endpoints
 

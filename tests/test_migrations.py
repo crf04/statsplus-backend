@@ -57,6 +57,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "016_pbp_game_log_primitives",
         "017_collection_control_plane",
         "018_collection_operations",
+        "019_surface_registry_metadata",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -303,6 +304,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (16, "016_pbp_game_log_primitives"),
             (17, "017_collection_control_plane"),
             (18, "018_collection_operations"),
+            (19, "019_surface_registry_metadata"),
         ]
 
 
@@ -335,6 +337,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "016_pbp_game_log_primitives",
         "017_collection_control_plane",
         "018_collection_operations",
+        "019_surface_registry_metadata",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -572,6 +575,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "016_pbp_game_log_primitives",
         "017_collection_control_plane",
         "018_collection_operations",
+        "019_surface_registry_metadata",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -611,10 +615,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "016_pbp_game_log_primitives",
         "017_collection_control_plane",
         "018_collection_operations",
+        "019_surface_registry_metadata",
     )
-    assert upgraded.current_version == 18
+    assert upgraded.current_version == 19
     assert repeated.applied == ()
-    assert repeated.current_version == 18
+    assert repeated.current_version == 19
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -663,6 +668,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "016_pbp_game_log_primitives",
         "017_collection_control_plane",
         "018_collection_operations",
+        "019_surface_registry_metadata",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

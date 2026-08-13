@@ -141,6 +141,9 @@ class PublicationStream(Base):
     required_observations = Column(Text, nullable=False)
     publication_strategy = Column(String(64), nullable=False)
     supported_windows = Column(Text, nullable=False)
+    schema_versions = Column(Text, nullable=False, default="[1, 2]")
+    completeness_rule = Column(String(128), nullable=False, default="base_complete")
+    freshness_rule = Column(String(128), nullable=False, default="cutoff_current")
     enabled = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
 

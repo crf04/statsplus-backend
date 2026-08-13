@@ -394,6 +394,22 @@ def _upgrade_collection_operations(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _upgrade_surface_registry(connection: Connection) -> None:
+    """Add explicit schema/completeness/freshness registry metadata."""
+    table = "publication_streams"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table)
+    additions = {
+        "schema_versions": "TEXT NOT NULL DEFAULT '[1, 2]'",
+        "completeness_rule": "VARCHAR(128) NOT NULL DEFAULT 'base_complete'",
+        "freshness_rule": "VARCHAR(128) NOT NULL DEFAULT 'cutoff_current'",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(f"ALTER TABLE {quoted} ADD COLUMN {preparer.quote(name)} {type_sql}"))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -421,6 +437,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(17, "017_collection_control_plane", _create_collection_control_plane_tables),
     Migration(18, "018_collection_operations", _upgrade_collection_operations),
+    Migration(19, "019_surface_registry_metadata", _upgrade_surface_registry),
 )
 
 

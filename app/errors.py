@@ -238,6 +238,22 @@ class InvalidTokenError(AuthenticationError):
     default_message = "The provided Firebase token is invalid."
 
 
+class RateLimitedError(AppError):
+    """A bounded machine client limit was exceeded."""
+
+    status_code = 429
+    code = "rate_limited"
+    default_message = "The client has exceeded its collection limit."
+
+    def __init__(self, retry_after: int = 60, *, detail: Any = None):
+        self.retry_after = max(1, int(retry_after))
+        super().__init__(detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        return {"retry_after_seconds": self.retry_after}
+
+
 class AuthorizationError(AppError):
     """An authenticated user is not allowed to perform the operation."""
 
@@ -323,12 +339,15 @@ def register_error_handlers(app: Flask) -> None:
         if error.code != "provider_unavailable":
             record_application_failure(error.code)
 
-        return _error_response(
+        response = _error_response(
             error.code,
             error.public_message,
             error.status_code,
             error.public_details,
         )
+        if isinstance(error, RateLimitedError):
+            response[0].headers["Retry-After"] = str(error.retry_after)
+        return response
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException):  # type: ignore[no-untyped-def]
