@@ -63,6 +63,7 @@ The public error categories and HTTP statuses are:
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
 
@@ -1414,6 +1415,200 @@ after an intended contract change, and review the diff.
   HTTP API.
 - **Scope.** NBA pregame Player Projection Markets only. Live, closed, settled,
   team, match, futures, entry-placement, and non-NBA offerings are out of scope.
+
+## Collection control-plane endpoints
+
+The control plane is additive and does not alter existing public readers.
+Collector routes use a machine-secret exchange for a short-lived signed bearer
+token; tokens are bound to the deployment environment, audience, operation,
+collector owner, provider set, and explicit surface set. `poll`, `ingest`, and
+`catalog_publish` are operation capabilities only; they never authorize an
+unrelated provider or surface. Discovery, manifest reads, bootstrap status,
+catalog publication, and observation ingestion all re-check the persisted
+identity binding.
+Operator mutations require Firebase administrator authentication.
+An invalid machine secret or bearer token is `401 invalid_token`; malformed
+token input such as a non-integer TTL is `400 invalid_input`; a valid token
+without the required collector scope is `403 forbidden`. Durable collection
+state conflicts (stale publication/lease fences, immutable cycles, duplicate
+idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
+
+```http
+POST /api/collector/token
+POST /api/collector/status
+GET /api/collector/discovery
+GET /api/collector/bootstrap
+GET /api/collector/bootstrap/<request_id>
+GET /api/collector/bootstrap/<request_id>/status
+POST /api/collector/catalog/<request_id>
+GET /api/collector/manifest/<manifest_id>
+POST /api/collector/observations
+POST /api/collector/credential-deliveries/<delivery_id>/claim
+POST /api/admin/collection/seasons/<season>
+POST /api/admin/collection/streams/<stream_key>/rollback
+POST /api/admin/collection/streams/<stream_key>/activate
+POST /api/admin/collection/compositions/<job_id>/retry
+POST /api/admin/collection/cycles/start
+POST /api/admin/collection/repair
+POST /api/admin/collection/cycles/<cycle_id>/finish
+POST /api/admin/collection/cycles/<cycle_id>/not-applicable
+POST /api/admin/collection/bootstrap
+POST /api/admin/collection/collectors/<identity_id>/revoke
+POST /api/admin/collection/collectors/<identity_id>/rotate
+GET /api/admin/collection/credential-deliveries/<delivery_id>
+GET /api/admin/collection/reconciliation
+GET /api/admin/collection/diagnostics
+POST /api/admin/collection/reconciliation/<item_id>/resolve
+```
+
+`POST /api/collector/observations` accepts one complete normalized envelope
+and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The
+server validates exact envelope fields, registered provider ownership, accepted
+schema/window, manifest, environment, scope, checksum, finite/non-negative
+payload values, size, and `collect_before` deadline before one atomic insert.
+Repeating the same
+collector/client observation ID and checksum returns the original receipt;
+reusing the ID with a different checksum is rejected. Operator actions return
+bounded durable identifiers and require a human-readable reason where they
+mutate publication state. Raw observations and player-level
+payloads are never returned by these routes. Collector limits return `429
+rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
+The token exchange may request a subset of the identity's `providers` and
+`surfaces` in addition to its operation `scopes`; omitting them uses the
+identity's persisted binding, while an empty or unauthorized set is rejected.
+`GET /api/collector/discovery` (also available as `GET /api/collector/bootstrap`)
+is the machine-authenticated, bounded polling seam: it returns pending bootstrap
+requests and active manifests authorized for the caller's owner/provider/surface
+binding, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
+catalog type, cutoff, expiry, and version; it never returns catalog payload
+facts. A collector with the bootstrap/catalog scope publishes one catalog using
+the same gzip-compressed Observation Envelope contract at
+`POST /api/collector/catalog/<request_id>`. The envelope carries the request's
+catalog observation type, provider/environment, scope, season/cutoff, schema,
+retrieval time, client observation ID, and checksum. The accepted observation
+and governed catalog publication commit together; repeating the same ID and
+checksum returns the original publication, while expired or already-completed
+requests are rejected. Railway then creates the
+immutable cutoff manifest only after both Event and Athlete Catalog
+publications pass their governed freshness checks. Event Catalog rows must have
+unique canonical game IDs, exactly two canonical teams, Regular Season phase,
+recognized status, and a scheduled date. Completeness is exact equality with
+the governed Active Season/Event Catalog schedule at the cutoff, not a mutable
+environment floor; Playoffs, Play-In, mixed-phase, partial, and empty catalogs
+remain `complete: false` and cannot authorize a manifest or no-game cycle.
+Athlete Catalog rows must have unique canonical identities, team and
+season-coverage evidence, and exactly cover the active governed roster plus
+identities derived from accepted Event/Railway evidence. Caller-supplied
+identity lists and `completed_game_count` values do not establish completeness.
+Catalog publication also performs keyed reconciliation into the governed
+EventCatalog/AthleteCatalog tables in the same transaction as the publication.
+Additions and corrections are accepted into the next complete snapshot;
+omitted rows are never destructively removed unless the payload explicitly
+sets `complete_snapshot: true` and names matching `tombstones`. An incomplete
+attempt is retained as `complete: false` and leaves governed rows, manifests,
+and cycles unchanged. A changed event identity or completed-game set
+supersedes affected active manifests/cycles rather than mutating their frozen
+cutoff facts. Manifest selection orders only complete publications and skips
+newer incomplete attempts; Athlete Catalog selection additionally requires all
+Event-derived identities within its seven-day freshness window.
+
+Observation ingestion uses a database-backed per-collector lease. PostgreSQL
+acquires the identity row with `SELECT ... FOR UPDATE`; the short lease expires
+after a bounded interval so a crashed Railway worker can be recovered. A live
+lease returns `429 rate_limited` with an explicit `retry_after_seconds` and does
+not rely on a process-local semaphore for correctness. The acquired owner and
+monotonic fence are checked under the same row lock immediately before the
+observation and composition enqueue commit; a worker taken over after expiry
+fails closed with `stale_lease`. Collector usage counters reset the existing
+locked row in place after 24 hours and retain the same row-lock discipline.
+
+Every completed publication has normalized `publication_observations` rows
+pointing to the exact accepted Observation IDs used for completeness. Retention
+joins those references through active, previous, and rollback pointers; it
+never searches arbitrary rendered payload JSON. History pruning removes old
+rendered facts while retaining compact immutable provenance and audit metadata.
+Unresolved identity rejection atomically appends a bounded, deduplicated
+Reconciliation Item before returning `identity_unresolved`.
+
+Lifecycle audit events are append-only and contain only bounded safe fields.
+Successful token issuance/use, rotation, revocation, and same-ID/different-
+checksum observation rejection are recorded. Maintenance emits one first-failure
+alert, one stale-threshold alert, a six-hour `cycle_attention` alert, and one
+`recovery` alert when state clears; queued/running work suppresses failure and
+stale false positives.
+
+`POST /api/collector/status` accepts exactly `release_version` and
+`release_checksum`. The version is 1-64 characters from the bounded release
+identifier vocabulary (`A-Z`, `a-z`, digits, `.`, `_`, `+`, `-`), and the
+checksum is exactly 64 hexadecimal characters. The authenticated identity's
+`last_seen_at` and release evidence are persisted; payloads, secrets, player
+data, and arbitrary status fields are rejected.
+
+`GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
+rows per category). Its additive stream, collector, and usage rows have this
+exact shape; absent evidence is JSON `null`:
+
+```json
+{
+  "streams": [{
+    "stream_key": "synergy_play_types",
+    "provider": "nba",
+    "owner": "residential_collector",
+    "enabled": true,
+    "available": true,
+    "activation_status": "active",
+    "freshness_rule": "cutoff_current",
+    "publication_id": "publication-id",
+    "coverage_cutoff": "2026-08-12T00:00:00+00:00",
+    "fence": 4,
+    "freshness_status": "fresh",
+    "age_seconds": 30
+  }],
+  "collectors": [{
+    "identity_id": "collector-id",
+    "environment": "production",
+    "revoked": false,
+    "last_seen_at": "2026-08-12T00:00:00+00:00",
+    "release_version": "collector-1.2.3",
+    "release_checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }],
+  "usage": [{
+    "collector_id": "collector-id",
+    "poll_count": 2,
+    "envelope_count": 1,
+    "byte_count": 1024,
+    "concurrency_count": 0,
+    "limits": {
+      "poll_count": 100,
+      "envelope_count": 1000,
+      "byte_count": 52428800,
+      "concurrency_count": 1
+    },
+    "window_started_at": "2026-08-12T00:00:00+00:00",
+    "window_resets_at": "2026-08-13T00:00:00+00:00",
+    "retry_after_seconds": 3600,
+    "concurrency_retry_after_seconds": 0
+  }]
+}
+```
+
+`freshness_status` is closed to `fresh`, `stale`, `missing`, or
+`unavailable`. Age is the non-negative bounded age of the active publication;
+`cutoff_current`, `daily_recheck`, and `seven_day` use one-hour, 24-hour, and
+seven-day thresholds respectively, with the threshold instant still fresh. A
+missing active pointer is `missing`. Registry `never_schedule` streams are
+`unavailable`, report `available: false`, and remain rejected by activation.
+Usage retry timing is the remaining 24-hour counter window; concurrency retry
+timing is the remaining database lease.
+
+The rotation endpoint returns only a durable job/identity status; the new
+long-lived machine secret is never returned by an admin GET. During the
+explicit overlap window, the rotated machine presents its old secret over the
+machine-authenticated `POST /api/collector/credential-deliveries/<delivery_id>/claim`
+route (with a short-lived token carrying `credential` or `ingest`) and receives
+the replacement once. The delivery is encrypted at rest, expires, and is
+invalidated atomically on retrieval. `GET
+/api/admin/collection/credential-deliveries/<delivery_id>` returns metadata only.
 
 ## User Endpoints
 

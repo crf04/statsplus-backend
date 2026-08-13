@@ -2030,6 +2030,110 @@ GET /api/health/pbp-stats or PUT /api/data/*_PBP
 instances from `ApplicationDependencies`; they do not create duplicate
 providers or perform provider calls in route modules.
 
+### Collection control plane
+
+Issue #84's Railway control plane is an additive seam beside the legacy data
+refresh queue. `app.services.collection_control` owns the Active Season,
+catalog bootstrap/publication, immutable cutoff-specific Collection Manifest,
+collector identity/token, atomic Observation ingestion, and fenced Publication
+pointer services. Collectors receive short-lived HMAC-signed tokens bound to an
+environment, audience, operation, owner, provider, and explicit surface scopes;
+generic `poll`/`ingest` capabilities never widen that binding. Token replay can be rejected by
+consuming its ID, and rotated machine secrets overlap only until their bounded
+expiry. A repeated collector/client observation ID with the same checksum is
+an idempotent receipt; a conflicting checksum is rejected. Publication
+advancement increments a per-stream database fence, preserving the prior
+active version for rollback and rejecting stale composition workers. Accepted
+observations enqueue a deduplicated composition job immediately, while
+`reconcile_pending` is the scheduled backstop. Composition derives its gate
+from registered required observations plus league/Base completeness evidence;
+a caller-provided `complete` flag alone cannot advance a pointer. Production
+requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
+may use a process-local key.
+
+Migration 017 creates these records without changing existing public readers.
+The collector routes are narrow HTTP adapters under `/api/collector`, while
+reasoned Firebase-admin mutations live under `/api/admin/collection`; raw
+observations and credentials are never returned. Machine discovery/polling is
+environment-, owner-, provider-, and surface-bound, deterministic, and bounded;
+bootstrap status and
+catalog publication complete the executable Request -> Catalog -> Manifest
+handshake.
+Every operator mutation is coordinated by one service transaction that writes
+the state change, a durable `OperatorJob`, and its audit event together; a
+failed mutation cannot leave a succeeded job or audit trail. Publication
+composition locks its per-stream pointer row on PostgreSQL and checks the
+worker's expected fence before advancing it. Completeness filters accepted
+observations by manifest, provider, and registered scope, then applies the
+canonical 30-team or registered Base evidence gate. Catalog publication enters
+through the same bounded, gzip Observation Envelope path as other collector
+evidence; the accepted catalog observation and its governed publication are one
+transaction, so a direct complete flag cannot bypass row validation. Event
+Catalog validation requires unique canonical game IDs, canonical home/away
+teams, phase/status/date evidence, and configurable whole-season volume/team
+bounds. Athlete Catalog validation requires unique identity/team rows with
+season-coverage evidence and the identities derived from accepted Event/Railway
+evidence; an optional caller list cannot assert completeness and an empty Event
+Catalog cannot establish a no-game cycle.
+
+Collector ingestion is serialized by a database-backed identity lease rather
+than a process-local semaphore. PostgreSQL acquires the lease row with
+`SELECT ... FOR UPDATE`, increments its fence, and expires it after a bounded
+interval for crash recovery; a busy worker receives explicit retry timing. The
+owner/fence pair is rechecked under the row lock immediately before accepted
+observation and composition-enqueue commit, so an expired worker that was
+taken over fails closed with `stale_lease`.
+Usage counters reset locked rows in place at the 24-hour boundary and use the
+same row-lock discipline. Event/Athlete Catalog completeness is proven by
+exact equality with governed Active Season/Event schedule and roster evidence;
+only Regular Season rows qualify, and provider/env floors never assert a whole
+season. Lifecycle audits are
+append-only and include token issue/use, rotation/revocation, and rejected
+same-ID/different-checksum observations. Maintenance emits deterministic
+first-failure, stale-threshold, six-hour attention, and recovery alerts while
+suppressing false failure/stale alerts when work is queued or running.
+
+Publication versions retain normalized references to exact accepted
+Observation IDs in `publication_observations`. Garbage collection follows
+active, previous, and rollback pointer relations instead of searching payload
+JSON, and pruning removes old rendered facts while preserving immutable
+provenance/audit metadata. Identity-unresolved validation writes one bounded,
+deduplicated Reconciliation Item before rejecting the input.
+
+Catalog publication and keyed reconciliation share one transaction. Additions
+and corrections update governed EventCatalog/AthleteCatalog rows for the next
+complete snapshot; missing rows remain untouched unless an explicit complete
+snapshot supplies an exact tombstone set. Incomplete attempts are retained as
+incomplete evidence without destructive reconciliation. A changed event ID or
+completed-game set supersedes affected frozen manifests/cycles. Catalog reads
+select the newest complete Event publication and the newest fresh complete
+Athlete publication that covers every Event-derived identity, skipping newer
+incomplete attempts. Maintenance runs publication pruning after reconciliation
+and observation GC, while active/previous/rollback provenance remains
+protected.
+
+Collector release health crosses a separate machine-authenticated status seam.
+It persists only a validated 64-character release identifier/checksum pair and
+the report time on `collector_identities`; arbitrary fields, secrets, payloads,
+and player data do not cross that seam. Migration 023 adds the checksum column
+for existing deployments.
+
+Admin diagnostics join publication streams to their active pointer/version and
+join usage to the database lease. Stream availability is registry-derived:
+`never_schedule` is always `unavailable` and cannot be activated. Otherwise a
+missing active version is `missing`; active versions use the closed freshness
+rule thresholds (`cutoff_current` one hour, `daily_recheck` 24 hours,
+`seven_day` seven days) against the injected clock. Age and retry values are
+clamped to finite non-negative integers. Usage reports the configured 24-hour
+poll/envelope/byte ceilings, one active database lease as concurrency, the
+counter reset instant, and lease retry timing. Diagnostics expose identifiers
+and operational metadata only.
+
+Credential rotation returns only a durable status to the admin console. A
+short-lived machine token plus the old secret during the configured overlap
+window claims an encrypted one-time delivery; the admin metadata endpoint
+cannot decrypt or expose the replacement.
+
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and

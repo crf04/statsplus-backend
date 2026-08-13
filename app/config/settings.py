@@ -82,6 +82,7 @@ class AuthenticationSettings(BaseModel):
     firebase_project_id: str | None = None
     firebase_private_key: str | None = None
     firebase_client_email: str | None = None
+    collector_signing_secret: str | None = None
 
     @property
     def has_individual_credentials(self) -> bool:
@@ -647,6 +648,7 @@ def _build_settings(
         firebase_project_id=reader.text("FIREBASE_PROJECT_ID"),
         firebase_private_key=reader.text("FIREBASE_PRIVATE_KEY"),
         firebase_client_email=reader.text("FIREBASE_CLIENT_EMAIL"),
+        collector_signing_secret=reader.text("COLLECTOR_SIGNING_SECRET"),
     )
     cache = _validated_model(
         CacheSettings,

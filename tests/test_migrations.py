@@ -55,6 +55,13 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
         "016_pbp_game_log_primitives",
+        "017_collection_control_plane",
+        "018_collection_operations",
+        "019_surface_registry_metadata",
+        "020_operator_control",
+        "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
+        "023_collector_release_status",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -83,6 +90,28 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "player_game_logs",
             "player_game_log_refreshes",
             "player_game_log_sync",
+            "active_seasons",
+            "collection_bootstrap_requests",
+            "collection_catalog_publications",
+            "collection_manifests",
+            "collector_identities",
+            "collection_observations",
+            "publication_streams",
+            "publication_versions",
+            "publication_observations",
+            "publication_pointers",
+            "composition_jobs",
+            "collector_token_replays",
+            "collector_ingestion_leases",
+            "collection_cycles",
+            "collection_audit_events",
+            "collection_reconciliation_items",
+            "collection_alerts",
+            "collector_usage",
+            "collection_validation_summaries",
+            "governed_not_applicable",
+            "collection_operator_jobs",
+            "collector_credential_deliveries",
             "team_matchup_facts",
             "team_matchup_surface_observations",
             "player_diet_facts",
@@ -91,6 +120,10 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "injury_source_snapshots",
         ]
     )
+    collector_columns = {
+        column["name"] for column in inspect(engine).get_columns("collector_identities")
+    }
+    assert {"release_version", "release_checksum"} <= collector_columns
     assert {
         column["name"] for column in inspect(engine).get_columns("users")
     } == {
@@ -282,6 +315,13 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (14, "014_create_injury_snapshots"),
             (15, "015_share_injury_source_snapshots"),
             (16, "016_pbp_game_log_primitives"),
+            (17, "017_collection_control_plane"),
+            (18, "018_collection_operations"),
+            (19, "019_surface_registry_metadata"),
+            (20, "020_operator_control"),
+            (21, "021_collector_surface_authorization"),
+            (22, "022_publication_provenance_reconciliation"),
+            (23, "023_collector_release_status"),
         ]
 
 
@@ -312,6 +352,13 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
         "016_pbp_game_log_primitives",
+        "017_collection_control_plane",
+        "018_collection_operations",
+        "019_surface_registry_metadata",
+        "020_operator_control",
+        "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
+        "023_collector_release_status",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -326,6 +373,27 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
     assert inspect(engine).has_table("player_diet_surface_observations")
     assert inspect(engine).has_table("injury_snapshots")
     assert inspect(engine).has_table("injury_source_snapshots")
+
+
+def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-022.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 22),
+        )
+        assert run_migrations(engine).current_version == 22
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE collector_identities DROP COLUMN release_checksum"))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == ("023_collector_release_status",)
+    assert upgraded.current_version == 23
+    columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
+    assert {"release_version", "release_checksum"} <= columns
 
 
 def test_demo_database_validation_is_read_only():
@@ -407,6 +475,28 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "player_game_logs",
             "player_game_log_refreshes",
             "player_game_log_sync",
+            "active_seasons",
+            "collection_bootstrap_requests",
+            "collection_catalog_publications",
+            "collection_manifests",
+            "collector_identities",
+            "collection_observations",
+            "publication_streams",
+            "publication_versions",
+            "publication_observations",
+            "publication_pointers",
+            "composition_jobs",
+            "collector_token_replays",
+            "collector_ingestion_leases",
+            "collection_cycles",
+            "collection_audit_events",
+            "collection_reconciliation_items",
+            "collection_alerts",
+            "collector_usage",
+            "collection_validation_summaries",
+            "governed_not_applicable",
+            "collection_operator_jobs",
+            "collector_credential_deliveries",
             "team_matchup_facts",
             "team_matchup_surface_observations",
             "player_diet_facts",
@@ -530,6 +620,13 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
         "016_pbp_game_log_primitives",
+        "017_collection_control_plane",
+        "018_collection_operations",
+        "019_surface_registry_metadata",
+        "020_operator_control",
+        "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
+        "023_collector_release_status",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -567,10 +664,17 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "014_create_injury_snapshots",
         "015_share_injury_source_snapshots",
         "016_pbp_game_log_primitives",
+        "017_collection_control_plane",
+        "018_collection_operations",
+        "019_surface_registry_metadata",
+        "020_operator_control",
+        "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
+        "023_collector_release_status",
     )
-    assert upgraded.current_version == 16
+    assert upgraded.current_version == 23
     assert repeated.applied == ()
-    assert repeated.current_version == 16
+    assert repeated.current_version == 23
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -617,6 +721,13 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
     assert upgraded.applied == (
         "015_share_injury_source_snapshots",
         "016_pbp_game_log_primitives",
+        "017_collection_control_plane",
+        "018_collection_operations",
+        "019_surface_registry_metadata",
+        "020_operator_control",
+        "021_collector_surface_authorization",
+        "022_publication_provenance_reconciliation",
+        "023_collector_release_status",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

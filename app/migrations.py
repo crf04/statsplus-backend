@@ -327,6 +327,172 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
         )
 
 
+def _create_collection_control_plane_tables(connection: Connection) -> None:
+    """Create the additive Railway collection-control schema (#84)."""
+    from app.models.collection_control import (
+        ActiveSeason,
+        BootstrapRequest,
+        CatalogPublication,
+        CollectionManifest,
+        CollectorIdentity,
+        CollectionObservation,
+        PublicationStream,
+        PublicationVersion,
+        PublicationObservation,
+        PublicationPointer,
+        CompositionJob,
+        CollectorTokenReplay,
+        CollectorLease,
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    )
+
+    # Creation order is intentionally explicit for PostgreSQL deployments and
+    # keeps this migration usable on SQLite temporary databases.
+    for model in (
+        ActiveSeason,
+        BootstrapRequest,
+        CatalogPublication,
+        CollectionManifest,
+        CollectorIdentity,
+        CollectionObservation,
+        PublicationStream,
+        PublicationVersion,
+        PublicationObservation,
+        PublicationPointer,
+        CompositionJob,
+        CollectorTokenReplay,
+        CollectorLease,
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def _upgrade_collection_operations(connection: Connection) -> None:
+    """Add cycle, audit, alert, usage, and reconciliation evidence (#84)."""
+    from app.models.collection_control import (
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    )
+    for model in (
+        CollectionCycle,
+        AuditEvent,
+        ReconciliationItem,
+        CollectionAlert,
+        CollectorUsage,
+        ValidationSummary,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def _upgrade_surface_registry(connection: Connection) -> None:
+    """Add explicit schema/completeness/freshness registry metadata."""
+    table = "publication_streams"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table)
+    additions = {
+        "schema_versions": "TEXT NOT NULL DEFAULT '[1, 2]'",
+        "completeness_rule": "VARCHAR(128) NOT NULL DEFAULT 'base_complete'",
+        "freshness_rule": "VARCHAR(128) NOT NULL DEFAULT 'cutoff_current'",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(f"ALTER TABLE {quoted} ADD COLUMN {preparer.quote(name)} {type_sql}"))
+
+
+def _upgrade_operator_control(connection: Connection) -> None:
+    from app.models.collection_control import GovernedNotApplicable, OperatorJob, CredentialDelivery
+    for model in (GovernedNotApplicable, OperatorJob, CredentialDelivery):
+        model.__table__.create(connection, checkfirst=True)
+    # Preserve provenance for databases that applied the original control
+    # plane before manifest-bound completeness was introduced.  Fresh
+    # databases receive these columns from the model-driven create above.
+    preparer = connection.dialect.identifier_preparer
+    for table, column in (("collection_observations", "manifest_id"), ("composition_jobs", "manifest_id")):
+        existing = {item["name"] for item in inspect(connection).get_columns(table)}
+        if column not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(column)} VARCHAR(36)"
+            ))
+
+
+def _upgrade_collector_surface_authorization(connection: Connection) -> None:
+    """Bind collector identities to owner/provider/surface and add leases."""
+
+    from app.models.collection_control import CollectorLease
+
+    CollectorLease.__table__.create(connection, checkfirst=True)
+    table = "collector_identities"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "owner": "VARCHAR(64) NOT NULL DEFAULT 'residential_collector'",
+        "providers": "TEXT NOT NULL DEFAULT '[]'",
+        "surfaces": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            ))
+
+
+def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
+    """Normalize publication provenance and dedupe unresolved identities."""
+
+    from app.models.collection_control import PublicationObservation
+
+    PublicationObservation.__table__.create(connection, checkfirst=True)
+    table = "collection_reconciliation_items"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    if "dedupe_key" not in existing:
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+            f"{preparer.quote('dedupe_key')} VARCHAR(128)"
+        ))
+    connection.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        f"{preparer.quote('uq_reconciliation_dedupe_key')} ON "
+        f"{preparer.quote(table)} ({preparer.quote('dedupe_key')}) "
+        "WHERE dedupe_key IS NOT NULL"
+    ))
+
+
+def _upgrade_collector_release_status(connection: Connection) -> None:
+    """Persist bounded machine release evidence for operator diagnostics."""
+
+    table = "collector_identities"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "release_version": "VARCHAR(64)",
+        "release_checksum": "VARCHAR(64)",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -352,6 +518,13 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "016_pbp_game_log_primitives",
         _upgrade_player_game_log_primitives,
     ),
+    Migration(17, "017_collection_control_plane", _create_collection_control_plane_tables),
+    Migration(18, "018_collection_operations", _upgrade_collection_operations),
+    Migration(19, "019_surface_registry_metadata", _upgrade_surface_registry),
+    Migration(20, "020_operator_control", _upgrade_operator_control),
+    Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
+    Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
+    Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
 )
 
 
