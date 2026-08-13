@@ -79,10 +79,24 @@ PBP_GAME_LOG_COUNTING_COLUMNS: tuple[str, ...] = (
     "Fouls",
     "Points",
 )
+#: Optional FullGame primitives used by the canonical ledger's assist-location
+#: stream.  They are accepted and retained by the adapter, but deliberately
+#: remain separate from the legacy game-log zero-fill vocabulary: an absent
+#: location observation must stay absent so ledger derivation can fail closed.
+PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS: tuple[str, ...] = (
+    "TwoPtAssists",
+    "ThreePtAssists",
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
 PBP_GAME_LOG_COLUMNS: tuple[str, ...] = (
     *PBP_GAME_LOG_REQUIRED_COLUMNS,
     *PBP_GAME_LOG_ATTACHED_COLUMNS,
     *PBP_GAME_LOG_COUNTING_COLUMNS,
+    *PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS,
 )
 
 
@@ -365,6 +379,7 @@ def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
 __all__ = [
     "PBP_GAME_LOG_COLUMNS",
     "PBP_GAME_LOG_COUNTING_COLUMNS",
+    "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_REQUIRED_COLUMNS",
     "PBP_GAME_LOGS_URL",
     "PBP_GAME_STATS_URL",

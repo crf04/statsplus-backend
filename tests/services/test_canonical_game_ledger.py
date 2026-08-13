@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
@@ -24,6 +25,8 @@ from app.services.canonical_game_ledger import (
     canonical_game_from_pbp,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
+from app.services.ledger_derivations import derive_assist_location_facts
+from app.providers.pbp_game_logs import PBPGameLogAdapter
 
 
 def _event() -> dict[str, object]:
@@ -282,6 +285,43 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
         assert "team identity" in str(error)
     else:
         raise AssertionError("contradictory FullGame envelope unexpectedly passed")
+
+
+def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_derivation():
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
+        .read_text(encoding="utf-8")
+    )
+    frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
+
+    game = canonical_game_from_pbp(
+        frame,
+        event=_event(),
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+
+    facts = derive_assist_location_facts((game,))
+    assert len(facts) == len(game.player_facts)
+    assert all(
+        all(
+            getattr(player, field) is not None
+            for field in (
+                "two_point_assists",
+                "three_point_assists",
+                "arc3_assists",
+                "corner3_assists",
+                "at_rim_assists",
+                "short_mid_range_assists",
+                "long_mid_range_assists",
+            )
+        )
+        for player in game.player_facts
+    )
+    assert facts[0].two_point_assists == 2
+    assert facts[0].corner3_assists == 0
 
 
 def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path):
