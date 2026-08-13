@@ -139,22 +139,24 @@ class TeamMatchupRepository:
                 if callable(checker):
                     stream_by_surface = {
                         "traditional": (
+                            "traditional_opponent",
                             "traditional_opponent_l15"
                             if scope.window_games is not None
-                            else "traditional_opponent_season"
+                            else "traditional_opponent_season",
                         ),
                         "assist_locations": (
+                            "assist_locations",
                             "assist_locations_l15"
                             if scope.window_games is not None
-                            else "assist_locations_season"
+                            else "assist_locations_season",
                         ),
                     }
                     # Lock/check only the stream(s) represented by this
                     # snapshot.  A season write must not fence L15, and a
                     # traditional-only write must not fence assist locations.
                     for observation in observation_rows:
-                        stream_key = stream_by_surface.get(observation.surface)
-                        if stream_key is not None:
+                        stream_keys = stream_by_surface.get(observation.surface, ())
+                        for stream_key in stream_keys:
                             checker(stream_key, connection=connection)
                 identity = {
                     "season": scope.season,
