@@ -2037,7 +2037,8 @@ refresh queue. `app.services.collection_control` owns the Active Season,
 catalog bootstrap/publication, immutable cutoff-specific Collection Manifest,
 collector identity/token, atomic Observation ingestion, and fenced Publication
 pointer services. Collectors receive short-lived HMAC-signed tokens bound to an
-environment, audience, and explicit scopes; token replay can be rejected by
+environment, audience, operation, owner, provider, and explicit surface scopes;
+generic `poll`/`ingest` capabilities never widen that binding. Token replay can be rejected by
 consuming its ID, and rotated machine secrets overlap only until their bounded
 expiry. A repeated collector/client observation ID with the same checksum is
 an idempotent receipt; a conflicting checksum is rejected. Publication
@@ -2054,7 +2055,8 @@ Migration 017 creates these records without changing existing public readers.
 The collector routes are narrow HTTP adapters under `/api/collector`, while
 reasoned Firebase-admin mutations live under `/api/admin/collection`; raw
 observations and credentials are never returned. Machine discovery/polling is
-environment- and scope-bound, deterministic, and bounded; bootstrap status and
+environment-, owner-, provider-, and surface-bound, deterministic, and bounded;
+bootstrap status and
 catalog publication complete the executable Request -> Catalog -> Manifest
 handshake.
 Every operator mutation is coordinated by one service transaction that writes
@@ -2066,7 +2068,23 @@ observations by manifest, provider, and registered scope, then applies the
 canonical 30-team or registered Base evidence gate. Catalog publication enters
 through the same bounded, gzip Observation Envelope path as other collector
 evidence; the accepted catalog observation and its governed publication are one
-transaction, so a direct complete flag cannot bypass row validation.
+transaction, so a direct complete flag cannot bypass row validation. Event
+Catalog validation requires unique canonical game IDs, canonical home/away
+teams, phase/status/date evidence, and configurable whole-season volume/team
+bounds. Athlete Catalog validation requires unique identity/team rows with
+season-coverage evidence and the identities derived from accepted Event/Railway
+evidence; an optional caller list cannot assert completeness and an empty Event
+Catalog cannot establish a no-game cycle.
+
+Collector ingestion is serialized by a database-backed identity lease rather
+than a process-local semaphore. PostgreSQL acquires the lease row with
+`SELECT ... FOR UPDATE`, increments its fence, and expires it after a bounded
+interval for crash recovery; a busy worker receives explicit retry timing.
+Usage counters use the same row-lock discipline. Lifecycle audits are
+append-only and include token issue/use, rotation/revocation, and rejected
+same-ID/different-checksum observations. Maintenance emits deterministic
+first-failure, stale-threshold, six-hour attention, and recovery alerts while
+suppressing false failure/stale alerts when work is queued or running.
 
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap

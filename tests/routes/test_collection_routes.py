@@ -19,7 +19,9 @@ def _install_collection_services(app):
     dependencies.collection_operations.list_reconciliation.return_value = []
     dependencies.collection_operations.record_usage.return_value = None
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"poll", "ingest"}), "jti", None
+        "collector-1", "statsplus-collector", "testing", frozenset({"poll", "ingest"}), "jti", None,
+        "residential_collector", frozenset({"nba"}),
+        frozenset({"event_catalog", "athlete_catalog", "synergy_play_types"}),
     )
     dependencies.observation_ingestion.ingest.return_value = SimpleNamespace(
         to_dict=lambda: {"observation_id": "obs", "replay": False}
@@ -118,7 +120,7 @@ def test_machine_discovery_returns_bounded_authorized_work(client, app):
     assert response.json["bootstrap_requests"][0]["request_id"] == "request-1"
     assert response.json["manifests"][0]["manifest_id"] == "manifest-1"
     dependencies.collection_control.discover.assert_called_once_with(
-        environment="testing", scopes=frozenset({"poll", "ingest"}), limit=10
+        claims=dependencies.collector_tokens.validate.return_value, limit=10
     )
 
 
@@ -232,13 +234,25 @@ def test_admin_and_collector_security_boundaries_have_stable_errors(client, app,
     assert forbidden.json["error"]["code"] == "forbidden"
 
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None
+        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None,
+        "residential_collector", frozenset({"nba"}), frozenset({"synergy_play_types"}),
     )
     insufficient = client.get(
         "/api/collector/manifest/manifest-1", headers={"Authorization": "Bearer token"}
     )
     assert insufficient.status_code == 403
     assert insufficient.json["error"]["code"] == "forbidden"
+
+    dependencies.collector_tokens.validate.return_value = CollectorClaims(
+        "collector-1", "statsplus-collector", "testing", frozenset({"poll"}), "jti", None,
+        "residential_collector", frozenset({"nba"}), frozenset({"grouped_shot_types"}),
+    )
+    dependencies.collection_control.get_manifest.side_effect = ControlPlaneError("scope_denied")
+    cross_surface = client.get(
+        "/api/collector/manifest/manifest-1", headers={"Authorization": "Bearer token"}
+    )
+    assert cross_surface.status_code == 403
+    assert cross_surface.json["error"]["code"] == "forbidden"
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
     dependencies.collection_operations.rollback_publication.side_effect = ControlPlaneError("stale_composition")
@@ -260,7 +274,8 @@ def test_admin_domain_errors_and_credential_claim_contract(client, app):
     assert missing.json["error"]["code"] == "resource_not_found"
 
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None
+        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None,
+        "residential_collector", frozenset({"nba"}), frozenset({"event_catalog"}),
     )
     dependencies.collector_tokens.claim_delivery.return_value = {
         "delivery_id": "delivery-1", "identity_id": "collector-1", "secret": "replacement"

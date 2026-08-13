@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import threading
 import secrets
 import uuid
@@ -39,6 +40,7 @@ from app.models.collection_control import (
     CollectorIdentity,
     CollectionObservation,
     CollectorTokenReplay,
+    CollectorLease,
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
@@ -66,6 +68,12 @@ ATHLETE_REUSE_DAYS = 7
 MAX_PAYLOAD_VALUES = 100_000
 MAX_PAYLOAD_DEPTH = 64
 MAX_RECORDS_PER_OBSERVATION = 100_000
+COLLECTOR_LEASE_SECONDS = 30
+COLLECTOR_LEASE_RETRY_SECONDS = 1
+STALE_ALERT_SECONDS = 60 * 60
+ATTENTION_ALERT_SECONDS = 6 * 60 * 60
+MAX_EVENT_CATALOG_GAMES = 3_000
+MAX_ATHLETE_CATALOG_IDENTITIES = 100_000
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 REGISTERED_BASES = frozenset({"play_types", "shot_zones", "shot_types", "assist_locations"})
 STREAM_BASES: dict[str, frozenset[str]] = {
@@ -138,6 +146,91 @@ SURFACE_REGISTRY: tuple[SurfaceDefinition, ...] = tuple(
 )
 
 
+def _surface_definition(surface: str) -> SurfaceDefinition | None:
+    normalized = str(surface or "").strip()
+    return next(
+        (definition for definition in SURFACE_REGISTRY
+         if normalized == definition.stream_key or normalized in definition.required),
+        None,
+    )
+
+
+def _stream_definition(stream: PublicationStream) -> SurfaceDefinition:
+    definition = _surface_definition(stream.stream_key)
+    if definition is not None:
+        # The persisted stream is the deploy-time owner/provider authority;
+        # the immutable registry contributes the reviewed scope vocabulary.
+        return SurfaceDefinition(
+            stream_key=definition.stream_key,
+            provider=stream.provider,
+            owner=stream.owner,
+            scope=definition.scope,
+            required=tuple(json.loads(stream.required_observations)) or definition.required,
+            schema=tuple(json.loads(stream.schema_versions)),
+            complete=stream.completeness_rule,
+            strategy=stream.publication_strategy,
+            freshness=stream.freshness_rule,
+            windows=tuple(json.loads(stream.supported_windows)) or definition.windows,
+            enabled=stream.enabled,
+            reason=definition.reason,
+        )
+    return SurfaceDefinition(
+        stream_key=stream.stream_key,
+        provider=stream.provider,
+        owner=stream.owner,
+        scope=stream.stream_key,
+        required=tuple(json.loads(stream.required_observations)),
+        schema=tuple(json.loads(stream.schema_versions)),
+        complete=stream.completeness_rule,
+        strategy=stream.publication_strategy,
+        freshness=stream.freshness_rule,
+        windows=tuple(json.loads(stream.supported_windows)),
+        enabled=stream.enabled,
+    )
+
+
+def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
+    names = {definition.stream_key, definition.scope, *definition.required}
+    if observation_type:
+        names.add(str(observation_type).strip())
+    return {name for name in names if name}
+
+
+def _claims_allow_surface(claims: CollectorClaims, *, definition: SurfaceDefinition,
+                          provider: str | None = None,
+                          surface: str | None = None) -> bool:
+    """Require owner/provider/surface authorization for one governed surface."""
+
+    providers = {str(value).strip() for value in claims.providers if str(value).strip()}
+    surfaces = {str(value).strip() for value in claims.surfaces if str(value).strip()}
+    if not claims.owner or claims.owner != definition.owner:
+        return False
+    if provider is not None and provider != definition.provider:
+        return False
+    if definition.provider not in providers:
+        return False
+    allowed_names = _surface_names(definition, surface)
+    return bool(allowed_names.intersection(surfaces))
+
+
+def _identity_matches_claims(identity: CollectorIdentity, claims: CollectorClaims) -> bool:
+    """Reject forged/manual claims that do not match the persisted identity."""
+
+    try:
+        providers = frozenset(json.loads(identity.providers or "[]"))
+        surfaces = frozenset(json.loads(identity.surfaces or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        identity.identity_id == claims.collector_id
+        and identity.revoked_at is None
+        and identity.environment == claims.environment
+        and identity.owner == claims.owner
+        and claims.providers <= providers
+        and claims.surfaces <= surfaces
+    )
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -168,6 +261,21 @@ def _bootstrap_dict(row: BootstrapRequest) -> dict[str, Any]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _add_audit(session: Session, *, actor: str, action: str, resource: str,
+               reason: str, details: Mapping[str, Any] | None = None,
+               created_at: datetime | None = None) -> AuditEvent:
+    """Append one bounded, non-secret lifecycle record to the audit log."""
+
+    row = AuditEvent(
+        event_id=_uuid(), actor=str(actor)[:128], action=str(action)[:64],
+        resource=str(resource)[:128], reason=str(reason)[:255],
+        details=_json(dict(details or {}))[:16_384],
+        created_at=created_at or utcnow(),
+    )
+    session.add(row)
+    return row
 
 
 def _checksum(value: bytes | str) -> str:
@@ -210,8 +318,10 @@ def _uuid() -> str:
 class ControlPlaneError(ValueError):
     """A stable, safe reason for a rejected control-plane operation."""
 
-    def __init__(self, reason: str, message: str | None = None) -> None:
+    def __init__(self, reason: str, message: str | None = None,
+                 *, retry_after_seconds: int | None = None) -> None:
         self.reason = reason
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(message or reason)
 
 
@@ -223,6 +333,9 @@ class CollectorClaims:
     scopes: frozenset[str]
     token_id: str
     expires_at: datetime
+    owner: str = ""
+    providers: frozenset[str] = frozenset()
+    surfaces: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,11 +421,18 @@ class CollectorTokenService(_SessionService):
             return False
 
     def create_identity(self, label: str, *, audience: str = "statsplus-collector",
-                        scopes: Iterable[str] = (), identity_id: str | None = None) -> dict[str, str]:
+                        scopes: Iterable[str] = (), identity_id: str | None = None,
+                        owner: str = "residential_collector",
+                        providers: Iterable[str] = (), surfaces: Iterable[str] = ()) -> dict[str, str]:
         if not label.strip() or not audience.strip():
             raise ControlPlaneError("invalid_identity")
         scope_set = frozenset(str(scope).strip() for scope in scopes if str(scope).strip())
-        if len(scope_set) > MAX_SCOPE_COUNT:
+        owner = str(owner).strip()
+        provider_set = frozenset(str(provider).strip() for provider in providers if str(provider).strip())
+        surface_set = frozenset(str(surface).strip() for surface in surfaces if str(surface).strip())
+        if not owner or not provider_set or not surface_set:
+            raise ControlPlaneError("surface_scope_required")
+        if len(scope_set) > MAX_SCOPE_COUNT or len(provider_set) > MAX_SCOPE_COUNT or len(surface_set) > MAX_SCOPE_COUNT:
             raise ControlPlaneError("scope_limit")
         identity_id = identity_id or secrets.token_urlsafe(18)
         secret = secrets.token_urlsafe(32)
@@ -321,16 +441,21 @@ class CollectorTokenService(_SessionService):
             session.add(CollectorIdentity(
                 identity_id=identity_id, label=label.strip(), environment=self.environment,
                 audience=audience.strip(), secret_hash=self._hash_secret(secret),
-                scopes=_json(sorted(scope_set)), created_at=now,
+                scopes=_json(sorted(scope_set)), owner=owner,
+                providers=_json(sorted(provider_set)), surfaces=_json(sorted(surface_set)),
+                created_at=now,
             ))
+            session.add(CollectorUsage(collector_id=identity_id, window_started_at=now))
         return {"identity_id": identity_id, "secret": secret, "audience": audience.strip()}
 
     def issue(self, identity_id: str, *, scopes: Iterable[str] | None = None,
+              providers: Iterable[str] | None = None,
+              surfaces: Iterable[str] | None = None,
               ttl_seconds: int = 300) -> str:
         if not 1 <= ttl_seconds <= 900:
             raise ControlPlaneError("invalid_token_ttl")
         now = self.clock()
-        with self.session() as session:
+        with self.session() as session, session.begin():
             identity = session.get(CollectorIdentity, identity_id)
             if identity is None or identity.revoked_at is not None or identity.environment != self.environment:
                 raise ControlPlaneError("identity_revoked")
@@ -338,17 +463,40 @@ class CollectorTokenService(_SessionService):
             requested = allowed if scopes is None else frozenset(str(s).strip() for s in scopes)
             if not requested <= allowed:
                 raise ControlPlaneError("scope_denied")
+            allowed_providers = frozenset(json.loads(identity.providers or "[]"))
+            allowed_surfaces = frozenset(json.loads(identity.surfaces or "[]"))
+            requested_providers = allowed_providers if providers is None else frozenset(
+                str(provider).strip() for provider in providers if str(provider).strip()
+            )
+            requested_surfaces = allowed_surfaces if surfaces is None else frozenset(
+                str(surface).strip() for surface in surfaces if str(surface).strip()
+            )
+            if not requested_providers or not requested_surfaces:
+                raise ControlPlaneError("surface_scope_required")
+            if not requested_providers <= allowed_providers or not requested_surfaces <= allowed_surfaces:
+                raise ControlPlaneError("scope_denied")
+            token_id = secrets.token_urlsafe(18)
             claims = {
                 "sub": identity_id, "aud": identity.audience, "env": self.environment,
                 "scope": sorted(requested), "iat": int(_aware(now).timestamp()),
                 "exp": int((_aware(now) + timedelta(seconds=ttl_seconds)).timestamp()),
-                "jti": secrets.token_urlsafe(18),
+                "jti": token_id, "owner": identity.owner,
+                "providers": sorted(requested_providers), "surfaces": sorted(requested_surfaces),
             }
             body = self._encode(claims)
+            _add_audit(
+                session, actor=identity_id, action="collector.token_issued",
+                resource=identity_id, reason="token_issued",
+                details={"token_id": token_id, "scopes": sorted(requested),
+                         "providers": sorted(requested_providers),
+                         "surfaces": sorted(requested_surfaces)}, created_at=now,
+            )
             return body + "." + self._sign(body)
 
     def issue_for_secret(self, identity_id: str, secret: str, *,
                          scopes: Iterable[str] | None = None,
+                         providers: Iterable[str] | None = None,
+                         surfaces: Iterable[str] | None = None,
                          ttl_seconds: int = 300) -> str:
         """Issue a token after proving possession of the machine secret.
 
@@ -370,7 +518,8 @@ class CollectorTokenService(_SessionService):
             )
             if not current and not previous:
                 raise ControlPlaneError("invalid_identity_secret")
-        return self.issue(identity_id, scopes=scopes, ttl_seconds=ttl_seconds)
+        return self.issue(identity_id, scopes=scopes, providers=providers,
+                          surfaces=surfaces, ttl_seconds=ttl_seconds)
 
     def _encode(self, claims: Mapping[str, Any]) -> str:
         raw = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
@@ -413,7 +562,31 @@ class CollectorTokenService(_SessionService):
                     raise ControlPlaneError("token_replayed")
                 session.add(CollectorTokenReplay(token_id=token_id, collector_id=identity_id, expires_at=expires))
             identity.last_seen_at = now
-        return CollectorClaims(identity_id, str(payload["aud"]), self.environment, scopes, token_id, expires)
+            try:
+                token_providers = frozenset(str(item) for item in payload["providers"])
+                token_surfaces = frozenset(str(item) for item in payload["surfaces"])
+                token_owner = str(payload["owner"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ControlPlaneError("invalid_token") from error
+            if (
+                not token_owner
+                or token_owner != identity.owner
+                or not token_providers
+                or not token_providers <= frozenset(json.loads(identity.providers or "[]"))
+                or not token_surfaces
+                or not token_surfaces <= frozenset(json.loads(identity.surfaces or "[]"))
+            ):
+                raise ControlPlaneError("scope_denied")
+            _add_audit(
+                session, actor=identity_id, action="collector.token_used",
+                resource=identity_id, reason="token_used",
+                details={"token_id": token_id, "required_scope": required_scope,
+                         "consume": bool(consume)}, created_at=now,
+            )
+        return CollectorClaims(
+            identity_id, str(payload["aud"]), self.environment, scopes, token_id,
+            expires, token_owner, token_providers, token_surfaces,
+        )
 
     def revoke(self, identity_id: str, *, session: Session | None = None) -> CollectorIdentity:
         with self._session_scope(session) as session:
@@ -421,6 +594,11 @@ class CollectorTokenService(_SessionService):
             if identity is None:
                 raise ControlPlaneError("identity_not_found")
             identity.revoked_at = self.clock()
+            _add_audit(
+                session, actor="operator", action="collector.revoked",
+                resource=identity_id, reason="collector_revoked",
+                details={"identity_id": identity_id}, created_at=identity.revoked_at,
+            )
             return identity
 
     def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,
@@ -442,6 +620,12 @@ class CollectorTokenService(_SessionService):
                 encrypted_secret=self._credential_cipher.encrypt(secret.encode()).decode(),
                 created_at=now, expires_at=_aware(now) + timedelta(hours=24),
             ))
+            _add_audit(
+                session, actor="operator", action="collector.rotated",
+                resource=identity_id, reason="collector_rotated",
+                details={"identity_id": identity_id, "delivery_id": delivery_id,
+                         "overlap_seconds": int(overlap_seconds)}, created_at=now,
+            )
         return {"identity_id": identity_id, "secret": secret, "delivery_id": delivery_id}
 
     def retrieve_delivery(self, delivery_id: str) -> dict[str, str]:
@@ -511,6 +695,12 @@ class CollectorTokenService(_SessionService):
             except (FernetInvalidToken, UnicodeDecodeError) as error:
                 raise ControlPlaneError("credential_delivery_unavailable") from error
             delivery.retrieved_at = now
+            _add_audit(
+                session, actor=collector_id, action="collector.credential_claimed",
+                resource=delivery_id, reason="credential_claimed",
+                details={"delivery_id": delivery_id, "identity_id": collector_id},
+                created_at=now,
+            )
             return {"delivery_id": delivery_id, "identity_id": collector_id, "secret": secret}
 
 
@@ -518,9 +708,42 @@ class CollectionControlService(_SessionService):
     """Manage active seasons, bootstrap requests, catalogs, and manifests."""
 
     def __init__(self, engine: Engine, *, environment: str = "testing",
-                 clock: Callable[[], datetime] = utcnow) -> None:
+                 clock: Callable[[], datetime] = utcnow,
+                 min_event_catalog_games: int | None = None,
+                 min_event_catalog_teams: int | None = None,
+                 min_athlete_catalog_identities: int | None = None) -> None:
         super().__init__(engine, clock=clock)
         self.environment = environment.strip() or "testing"
+        # Test deployments can use deterministic small fixtures while a
+        # production control plane keeps a meaningful whole-season volume
+        # floor.  Deployments may override all three values explicitly.
+        production = self.environment == "production"
+        self.min_event_catalog_games = max(1, self._catalog_bound(
+            min_event_catalog_games, "COLLECTOR_MIN_EVENT_CATALOG_GAMES", 100 if production else 1,
+        ))
+        self.min_event_catalog_teams = max(2, min(30, self._catalog_bound(
+            min_event_catalog_teams, "COLLECTOR_MIN_EVENT_CATALOG_TEAMS", 30 if production else 2,
+        )))
+        self.min_athlete_catalog_identities = max(1, self._catalog_bound(
+            min_athlete_catalog_identities, "COLLECTOR_MIN_ATHLETE_CATALOG_IDENTITIES", 1,
+        ))
+        if (
+            self.min_event_catalog_games > MAX_EVENT_CATALOG_GAMES
+            or self.min_athlete_catalog_identities > MAX_ATHLETE_CATALOG_IDENTITIES
+        ):
+            raise ControlPlaneError("invalid_catalog_bounds")
+
+    @staticmethod
+    def _catalog_bound(explicit: int | None, environment_name: str, default: int) -> int:
+        if explicit is not None:
+            return int(explicit)
+        raw = os.getenv(environment_name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError as error:
+            raise ControlPlaneError("invalid_catalog_bounds") from error
 
     def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
                         session: Session | None = None) -> ActiveSeason:
@@ -574,7 +797,25 @@ class CollectionControlService(_SessionService):
                 request.status = "expired" if request.status == "pending" else request.status
                 raise ControlPlaneError("bootstrap_expired")
             try:
-                _validate_catalog_payload(payload, request.catalog_type)
+                _validate_catalog_payload(
+                    payload, request.catalog_type,
+                    min_event_games=self.min_event_catalog_games,
+                    min_event_teams=self.min_event_catalog_teams,
+                    min_athlete_identities=self.min_athlete_catalog_identities,
+                )
+                if request.catalog_type == "athlete":
+                    event = session.scalar(select(CatalogPublication).where(
+                        CatalogPublication.season == request.season,
+                        CatalogPublication.catalog_type == "event",
+                        CatalogPublication.cutoff == request.cutoff,
+                        CatalogPublication.complete.is_(True),
+                    ).order_by(CatalogPublication.published_at.desc()))
+                    if event is None:
+                        raise ValueError("event evidence required")
+                    required_ids = _required_athlete_ids(event.payload)
+                    catalog_ids = _catalog_identity_ids(payload)
+                    if not required_ids or not required_ids <= catalog_ids:
+                        raise ValueError("athlete catalog incomplete")
             except ValueError as error:
                 raise ControlPlaneError("catalog_payload_invalid") from error
             publication = CatalogPublication(publication_id=_uuid(), season=request.season, catalog_type=request.catalog_type,
@@ -584,70 +825,141 @@ class CollectionControlService(_SessionService):
             request.status, request.completed_at, request.catalog_version = "succeeded", now, version
         return publication
 
-    def bootstrap_status(self, request_id: str, *, now: datetime | None = None) -> BootstrapRequest:
+    @staticmethod
+    def _assert_claims_identity(session: Session, claims: CollectorClaims) -> CollectorIdentity:
+        identity = session.get(CollectorIdentity, claims.collector_id)
+        if identity is None or not _identity_matches_claims(identity, claims):
+            raise ControlPlaneError("invalid_token")
+        return identity
+
+    def _claims_allow_catalog(self, claims: CollectorClaims, catalog_type: str) -> bool:
+        definition = _surface_definition(f"{catalog_type}_catalog")
+        return definition is not None and _claims_allow_surface(
+            claims, definition=definition, provider=definition.provider,
+            surface=f"{catalog_type}_catalog",
+        )
+
+    @staticmethod
+    def _authorized_manifest_scopes(session: Session, manifest: CollectionManifest,
+                                    claims: CollectorClaims) -> set[str]:
+        frozen_scopes = set(json.loads(manifest.scopes))
+        authorized: set[str] = set()
+        for stream in _manifest_streams(session, manifest):
+            definition = _stream_definition(stream)
+            if _claims_allow_surface(claims, definition=definition, provider=stream.provider):
+                authorized.update(frozen_scopes.intersection(_surface_names(definition)))
+        return authorized
+
+    def bootstrap_status(self, request_id: str, *, claims: CollectorClaims | None = None,
+                         now: datetime | None = None) -> BootstrapRequest:
         """Read bounded bootstrap state and expire pending work truthfully."""
 
         current = _aware(now or self.clock())
         with self.session() as session, session.begin():
+            if claims is not None:
+                self._assert_claims_identity(session, claims)
             request = session.get(BootstrapRequest, request_id)
             if request is None:
                 raise ControlPlaneError("bootstrap_not_found")
+            if claims is not None and not self._claims_allow_catalog(claims, request.catalog_type):
+                raise ControlPlaneError("scope_denied")
             if request.status == "pending" and _aware(request.expires_at) <= current:
                 request.status = "expired"
             return request
 
-    def discover(self, *, environment: str, scopes: Iterable[str], limit: int = 50,
+    def discover(self, *, claims: CollectorClaims | None = None,
+                 environment: str | None = None, scopes: Iterable[str] = (),
+                 collector_id: str | None = None, owner: str | None = None,
+                 providers: Iterable[str] = (), surfaces: Iterable[str] = (),
+                 limit: int = 50,
                  now: datetime | None = None) -> dict[str, Any]:
         """Return bounded pending work visible to one collector deployment.
 
         Bootstrap requests are deployment-local state, so the service rejects
         a token from a different environment before reading any rows.  A
-        generic ``poll`` scope can discover active manifests; narrower scope
-        tokens only see manifests whose frozen scope they explicitly carry.
+        generic ``poll`` is only an operation capability; a token can discover
+        only manifests whose frozen surfaces match its owner/provider binding.
         Results are ordered newest-first with stable IDs for deterministic
         polling and are never allowed to grow beyond the caller's bound.
         """
 
-        caller_environment = str(environment or "").strip()
+        caller_environment = str(environment or (claims.environment if claims else "")).strip()
         if caller_environment != self.environment:
             raise ControlPlaneError("environment_mismatch")
-        caller_scopes = {str(scope).strip() for scope in scopes if str(scope).strip()}
+        if claims is not None:
+            caller_scopes = set(claims.scopes)
+            collector_id, owner = claims.collector_id, claims.owner
+            providers, surfaces = claims.providers, claims.surfaces
+        else:
+            caller_scopes = {str(scope).strip() for scope in scopes if str(scope).strip()}
+        if not collector_id or not owner:
+            raise ControlPlaneError("surface_scope_required")
         if not caller_scopes.intersection({"poll", "bootstrap", "catalog_publish"}):
             raise ControlPlaneError("scope_denied")
+        caller_providers = {str(value).strip() for value in providers if str(value).strip()}
+        caller_surfaces = {str(value).strip() for value in surfaces if str(value).strip()}
+        if not caller_providers or not caller_surfaces:
+            raise ControlPlaneError("surface_scope_required")
         bounded = max(1, min(int(limit), 100))
         current = _aware(now or self.clock())
+        effective_claims = claims or CollectorClaims(
+            collector_id, "", caller_environment, frozenset(caller_scopes), "", current,
+            owner, frozenset(caller_providers), frozenset(caller_surfaces),
+        )
+        visible_requests: list[BootstrapRequest] = []
+        visible_manifests: list[dict[str, Any]] = []
         with self.session() as session, session.begin():
-            pending = list(session.scalars(select(BootstrapRequest).where(
+            if claims is not None:
+                self._assert_claims_identity(session, claims)
+            request_stmt = select(BootstrapRequest).where(
                 BootstrapRequest.status == "pending",
                 BootstrapRequest.expires_at > current,
             ).order_by(
                 BootstrapRequest.created_at.desc(),
                 BootstrapRequest.request_id.asc(),
-            ).limit(bounded)))
-            manifests = list(session.scalars(select(CollectionManifest).where(
+            )
+            for request in session.scalars(request_stmt):
+                definition = _surface_definition(f"{request.catalog_type}_catalog")
+                if definition is not None and _claims_allow_surface(
+                    effective_claims, definition=definition, provider=definition.provider,
+                    surface=f"{request.catalog_type}_catalog",
+                ):
+                    visible_requests.append(request)
+                    if len(visible_requests) >= bounded:
+                        break
+            manifest_stmt = select(CollectionManifest).where(
                 CollectionManifest.status == "active",
                 CollectionManifest.collect_before > current,
             ).order_by(
                 CollectionManifest.created_at.desc(),
                 CollectionManifest.manifest_id.asc(),
-            ).limit(bounded)))
-        visible_manifests = []
-        for manifest in manifests:
-            frozen_scopes = set(json.loads(manifest.scopes))
-            if "poll" in caller_scopes or frozen_scopes.intersection(caller_scopes):
-                visible_manifests.append({
-                    "manifest_id": manifest.manifest_id,
-                    "season": manifest.season,
-                    "cutoff": _iso(manifest.cutoff),
-                    "collect_before": _iso(manifest.collect_before),
-                    "accepted_versions": json.loads(manifest.accepted_versions),
-                    "scopes": sorted(frozen_scopes),
-                    "checksum": manifest.checksum,
-                    "status": manifest.status,
-                })
+            )
+            for manifest in session.scalars(manifest_stmt):
+                frozen_scopes = set(json.loads(manifest.scopes))
+                selected_streams = _manifest_streams(session, manifest)
+                authorized_scopes: set[str] = set()
+                for stream in selected_streams:
+                    definition = _stream_definition(stream)
+                    if _claims_allow_surface(
+                        effective_claims, definition=definition, provider=stream.provider,
+                    ):
+                        authorized_scopes.update(frozen_scopes.intersection(_surface_names(definition)))
+                if authorized_scopes:
+                    visible_manifests.append({
+                        "manifest_id": manifest.manifest_id,
+                        "season": manifest.season,
+                        "cutoff": _iso(manifest.cutoff),
+                        "collect_before": _iso(manifest.collect_before),
+                        "accepted_versions": json.loads(manifest.accepted_versions),
+                        "scopes": sorted(authorized_scopes),
+                        "checksum": manifest.checksum,
+                        "status": manifest.status,
+                    })
+                    if len(visible_manifests) >= bounded:
+                        break
         return {
             "environment": self.environment,
-            "bootstrap_requests": [_bootstrap_dict(row) for row in pending],
+            "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
         }
 
@@ -680,19 +992,34 @@ class CollectionControlService(_SessionService):
         athlete = self.latest_catalog(season, "athlete", cutoff=cutoff, now=now)
         # A newer cutoff can never inherit an old Event Catalog.  Athlete
         # identity may reuse the last-good publication for at most seven days,
-        # but only when the optional required identity set is fully present.
+        # but only after its required identities are derived from the governed
+        # Event Catalog.  ``required_athlete_ids`` is retained as a compatibility
+        # keyword and deliberately cannot expand or assert completeness.
         if event is None or _aware(event.cutoff) != cutoff:
             raise ControlPlaneError("event_catalog_required")
         if athlete is None or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400:
             raise ControlPlaneError("athlete_catalog_required")
-        required_ids = {str(item) for item in required_athlete_ids}
-        if required_ids:
-            try:
-                catalog_ids = {str(item) for item in json.loads(athlete.payload).get("identities", [])}
-            except (AttributeError, json.JSONDecodeError, TypeError):
-                catalog_ids = set()
-            if not required_ids <= catalog_ids:
-                raise ControlPlaneError("identity_unresolved")
+        try:
+            event_document = json.loads(event.payload)
+            athlete_document = json.loads(athlete.payload)
+            _validate_catalog_payload(
+                event_document, "event",
+                min_event_games=self.min_event_catalog_games,
+                min_event_teams=self.min_event_catalog_teams,
+                min_athlete_identities=self.min_athlete_catalog_identities,
+            )
+            _validate_catalog_payload(
+                athlete_document, "athlete",
+                min_event_games=self.min_event_catalog_games,
+                min_event_teams=self.min_event_catalog_teams,
+                min_athlete_identities=self.min_athlete_catalog_identities,
+            )
+        except (TypeError, json.JSONDecodeError, ValueError) as error:
+            raise ControlPlaneError("catalog_incomplete") from error
+        required_ids = _required_athlete_ids(event.payload)
+        catalog_ids = _catalog_identity_ids(athlete_document)
+        if not required_ids or not required_ids <= catalog_ids:
+            raise ControlPlaneError("identity_unresolved")
         scope_list = sorted({str(scope).strip() for scope in scopes if str(scope).strip()})
         try:
             versions = sorted({int(version) for version in accepted_versions})
@@ -727,13 +1054,21 @@ class CollectionControlService(_SessionService):
                 old.superseded_by = row.manifest_id
         return row
 
-    def get_manifest(self, manifest_id: str, *, now: datetime | None = None) -> CollectionManifest:
+    def get_manifest(self, manifest_id: str, *, claims: CollectorClaims | None = None,
+                     now: datetime | None = None) -> CollectionManifest:
         with self.session() as session:
+            if claims is not None:
+                self._assert_claims_identity(session, claims)
             row = session.get(CollectionManifest, manifest_id)
             if row is None:
                 raise ControlPlaneError("manifest_not_found")
             if row.status != "active" or _aware(row.collect_before) <= _aware(now or self.clock()):
                 raise ControlPlaneError("manifest_expired")
+            if claims is not None:
+                authorized_scopes = self._authorized_manifest_scopes(session, row, claims)
+                if not authorized_scopes:
+                    raise ControlPlaneError("scope_denied")
+                row._authorized_scopes = sorted(authorized_scopes)
             return row
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
@@ -765,7 +1100,12 @@ class CollectionControlService(_SessionService):
                 raise ControlPlaneError("event_catalog_required")
             try:
                 event_document = json.loads(event.payload)
-                _validate_catalog_payload(event_document, "event")
+                _validate_catalog_payload(
+                    event_document, "event",
+                    min_event_games=self.min_event_catalog_games,
+                    min_event_teams=self.min_event_catalog_teams,
+                    min_athlete_identities=self.min_athlete_catalog_identities,
+                )
             except (TypeError, json.JSONDecodeError, ValueError) as error:
                 raise ControlPlaneError("event_catalog_invalid") from error
             game_count = _completed_game_count(event.payload, cutoff=_aware(manifest.cutoff))
@@ -845,25 +1185,127 @@ class ObservationIngestionService(_SessionService):
 
     def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
                  collection_control: "CollectionControlService | None" = None,
+                 min_event_catalog_games: int = 1,
+                 min_event_catalog_teams: int = 2,
+                 min_athlete_catalog_identities: int = 1,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
         self.collection_control = collection_control
+        self.min_event_catalog_games = max(1, int(min_event_catalog_games))
+        self.min_event_catalog_teams = max(2, min(30, int(min_event_catalog_teams)))
+        self.min_athlete_catalog_identities = max(1, int(min_athlete_catalog_identities))
         self._identity_locks: dict[str, threading.BoundedSemaphore] = {}
         self._identity_locks_guard = threading.Lock()
+
+    def _acquire_identity_lease(self, claims: CollectorClaims) -> str:
+        """Acquire the cross-worker database lease for one collector identity."""
+
+        now = _aware(self.clock())
+        owner = secrets.token_urlsafe(18)
+        with self.session() as session, session.begin():
+            identity = session.get(CollectorIdentity, claims.collector_id)
+            if identity is None or not _identity_matches_claims(identity, claims):
+                raise ControlPlaneError("invalid_token")
+            lease = session.scalar(select(CollectorLease).where(
+                CollectorLease.collector_id == claims.collector_id
+            ).with_for_update())
+            if lease is None:
+                try:
+                    with session.begin_nested():
+                        lease = CollectorLease(
+                            collector_id=claims.collector_id,
+                            lease_owner=owner,
+                            lease_expires_at=now + timedelta(seconds=COLLECTOR_LEASE_SECONDS),
+                            fence=1,
+                            updated_at=now,
+                        )
+                        session.add(lease)
+                        session.flush()
+                except IntegrityError:
+                    lease = session.scalar(select(CollectorLease).where(
+                        CollectorLease.collector_id == claims.collector_id
+                    ).with_for_update())
+            if lease is None:
+                raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
+            if lease.lease_owner and lease.lease_owner != owner and lease.lease_expires_at is not None and _aware(lease.lease_expires_at) > now:
+                retry_after = max(
+                    COLLECTOR_LEASE_RETRY_SECONDS,
+                    int(math.ceil((_aware(lease.lease_expires_at) - now).total_seconds())),
+                )
+                raise ControlPlaneError("collector_busy", retry_after_seconds=retry_after)
+            lease.lease_owner = owner
+            lease.lease_expires_at = now + timedelta(seconds=COLLECTOR_LEASE_SECONDS)
+            lease.fence = int(lease.fence or 0) + 1
+            lease.updated_at = now
+            session.flush()
+        return owner
+
+    def _release_identity_lease(self, claims: CollectorClaims, owner: str) -> None:
+        now = _aware(self.clock())
+        with self.session() as session, session.begin():
+            lease = session.scalar(select(CollectorLease).where(
+                CollectorLease.collector_id == claims.collector_id
+            ).with_for_update())
+            if lease is not None and lease.lease_owner == owner:
+                lease.lease_owner = None
+                lease.lease_expires_at = now
+                lease.updated_at = now
+
+    def _preflight_payload(self, envelope: Mapping[str, Any], payload: bytes | str,
+                           *, compressed: bool, max_payload_bytes: int,
+                           max_compressed_bytes: int) -> None:
+        """Reject oversized/malformed input before taking a database lease."""
+
+        if compressed and isinstance(payload, str):
+            payload = payload.encode()
+        if not isinstance(payload, (bytes, bytearray)):
+            raise ControlPlaneError("malformed_payload")
+        raw = bytes(payload)
+        if len(raw) > (max_compressed_bytes if compressed else max_payload_bytes):
+            raise ControlPlaneError("payload_too_large")
+        decoded = (
+            decompress_gzip_limited(
+                raw, max_output_bytes=max_payload_bytes,
+                max_input_bytes=max_compressed_bytes,
+            ) if compressed else raw
+        )
+        try:
+            value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
+            _validate_observation_payload(
+                value, observation_type=str(envelope.get("observation_type", "")),
+                min_event_catalog_games=self.min_event_catalog_games,
+                min_event_catalog_teams=self.min_event_catalog_teams,
+                min_athlete_catalog_identities=self.min_athlete_catalog_identities,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+            raise ControlPlaneError("malformed_payload") from error
 
     def ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
                *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
                max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
-        """Serialize one in-process envelope per collector identity."""
+        """Accept an envelope under the database-backed identity lease.
+
+        The semaphore only reduces local contention.  The lease row is the
+        authority across Railway workers and expires for crash recovery.
+        """
         with self._identity_locks_guard:
             lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
         if not lock.acquire(blocking=False):
-            raise ControlPlaneError("usage_limit")
+            raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
+        lease_owner = None
         try:
+            self._preflight_payload(
+                envelope, payload, compressed=compressed,
+                max_payload_bytes=max_payload_bytes,
+                max_compressed_bytes=max_compressed_bytes,
+            )
+            lease_owner = self._acquire_identity_lease(claims)
             return self._ingest(claims, envelope, payload, compressed=compressed,
                                 max_payload_bytes=max_payload_bytes, max_compressed_bytes=max_compressed_bytes)
         finally:
+            if lease_owner is not None:
+                self._release_identity_lease(claims, lease_owner)
             lock.release()
 
     def ingest_catalog(self, claims: CollectorClaims, envelope: Mapping[str, Any],
@@ -876,8 +1318,15 @@ class ObservationIngestionService(_SessionService):
         with self._identity_locks_guard:
             lock = self._identity_locks.setdefault(claims.collector_id, threading.BoundedSemaphore(1))
         if not lock.acquire(blocking=False):
-            raise ControlPlaneError("usage_limit")
+            raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
+        lease_owner = None
         try:
+            self._preflight_payload(
+                envelope, payload, compressed=False,
+                max_payload_bytes=max_payload_bytes,
+                max_compressed_bytes=max_compressed_bytes,
+            )
+            lease_owner = self._acquire_identity_lease(claims)
             return self._ingest(
                 claims,
                 envelope,
@@ -890,6 +1339,8 @@ class ObservationIngestionService(_SessionService):
                 catalog_expires_at=expires_at,
             )
         finally:
+            if lease_owner is not None:
+                self._release_identity_lease(claims, lease_owner)
             lock.release()
 
     def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
@@ -917,7 +1368,12 @@ class ObservationIngestionService(_SessionService):
         )
         try:
             value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
-            _validate_observation_payload(value, observation_type=str(envelope.get("observation_type", "")))
+            _validate_observation_payload(
+                value, observation_type=str(envelope.get("observation_type", "")),
+                min_event_catalog_games=self.min_event_catalog_games,
+                min_event_catalog_teams=self.min_event_catalog_teams,
+                min_athlete_catalog_identities=self.min_athlete_catalog_identities,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
         if not isinstance(value, (dict, list)):
@@ -997,6 +1453,12 @@ class ObservationIngestionService(_SessionService):
                 expected_type = f"{catalog_request.catalog_type}_catalog"
                 if observation_type != expected_type:
                     raise ControlPlaneError("catalog_observation_invalid")
+                catalog_definition = _surface_definition(observation_type)
+                if catalog_definition is None or not _claims_allow_surface(
+                    claims, definition=catalog_definition,
+                    provider=str(envelope["provider"]).strip(), surface=observation_type,
+                ):
+                    raise ControlPlaneError("scope_denied")
                 if catalog_request.season != str(envelope["season"]):
                     raise ControlPlaneError("manifest_scope_mismatch")
                 if _aware(catalog_request.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
@@ -1026,6 +1488,11 @@ class ObservationIngestionService(_SessionService):
                 stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
+                if not _claims_allow_surface(
+                    claims, definition=_stream_definition(stream),
+                    provider=envelope["provider"].strip(), surface=observation_type,
+                ):
+                    raise ControlPlaneError("scope_denied")
                 if schema_version not in set(json.loads(stream.schema_versions)):
                     raise ControlPlaneError("schema_unsupported")
                 supported_windows = set(json.loads(stream.supported_windows))
@@ -1033,14 +1500,35 @@ class ObservationIngestionService(_SessionService):
                     window = scope_value.get("window", scope_value.get("scope"))
                     if supported_windows and window is None:
                         raise ControlPlaneError("scope_unsupported")
-                    if window is not None and str(window) not in supported_windows:
-                        raise ControlPlaneError("scope_unsupported")
+                if window is not None and str(window) not in supported_windows:
+                    raise ControlPlaneError("scope_unsupported")
+            elif catalog_request is None:
+                definition = _surface_definition(observation_type)
+                if definition is None or not _claims_allow_surface(
+                    claims, definition=definition,
+                    provider=envelope["provider"].strip(), surface=observation_type,
+                ):
+                    raise ControlPlaneError("scope_denied")
             if not isinstance(scope_value, (str, Mapping, list, tuple)):
                 raise ControlPlaneError("invalid_scope")
             existing = session.scalar(select(CollectionObservation).where(CollectionObservation.collector_id == claims.collector_id,
                 CollectionObservation.client_observation_id == client_id))
             if existing is not None:
                 if existing.checksum != checksum:
+                    # The rejection itself is append-only evidence.  It is
+                    # intentionally written through a short independent
+                    # transaction because the enclosing ingestion transaction
+                    # must roll back and cannot erase the audit record.
+                    with self.session() as audit_session, audit_session.begin():
+                        _add_audit(
+                            audit_session, actor=claims.collector_id,
+                            action="observation.rejected", resource=client_id,
+                            reason="observation_id_checksum_conflict",
+                            details={"collector_id": claims.collector_id,
+                                     "existing_checksum": existing.checksum[:12],
+                                     "received_checksum": checksum[:12]},
+                            created_at=now,
+                        )
                     raise ControlPlaneError("observation_id_conflict")
                 if catalog_request is not None:
                     publication = session.scalar(select(CatalogPublication).where(
@@ -1605,11 +2093,69 @@ class CollectionOperationsService(_SessionService):
         row = CollectionAlert(alert_id=_uuid(), cycle_id=cycle_id, severity=severity, code=code[:64], created_at=self.clock())
         with self.session() as session, session.begin():
             session.add(row)
+            _add_audit(
+                session, actor="system", action="alert.open", resource=cycle_id or "collection",
+                reason=code, details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
+                created_at=row.created_at,
+            )
             # The durable alert and its external notification are one service
             # operation: a failed adapter must roll back the alert row so the
             # scheduler can retry without inventing an acknowledged alert.
             self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
         return row
+
+    def _open_lifecycle_alert(self, session: Session, *, cycle_id: str,
+                              severity: str, code: str, now: datetime) -> bool:
+        existing = session.scalar(select(CollectionAlert).where(
+            CollectionAlert.cycle_id == cycle_id,
+            CollectionAlert.code == code,
+            CollectionAlert.status == "open",
+        ))
+        if existing is not None:
+            return False
+        row = CollectionAlert(
+            alert_id=_uuid(), cycle_id=cycle_id, severity=severity,
+            code=code[:64], status="open", created_at=now,
+        )
+        session.add(row)
+        _add_audit(
+            session, actor="system", action="alert.open", resource=cycle_id,
+            reason=code, details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
+            created_at=now,
+        )
+        session.flush()
+        self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
+        return True
+
+    def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str,
+                                  now: datetime) -> bool:
+        open_alerts = list(session.scalars(select(CollectionAlert).where(
+            CollectionAlert.cycle_id == cycle_id,
+            CollectionAlert.status == "open",
+            CollectionAlert.code.in_(("first_failure", "stale_threshold", "cycle_attention")),
+        )))
+        if not open_alerts:
+            return False
+        for alert in open_alerts:
+            alert.status, alert.resolved_at = "resolved", now
+        prior_recovery = session.scalar(select(CollectionAlert).where(
+            CollectionAlert.cycle_id == cycle_id,
+            CollectionAlert.code == "recovery",
+        ))
+        if prior_recovery is not None:
+            return True
+        recovery = CollectionAlert(
+            alert_id=_uuid(), cycle_id=cycle_id, severity="warning",
+            code="recovery", status="resolved", created_at=now, resolved_at=now,
+        )
+        session.add(recovery)
+        _add_audit(
+            session, actor="system", action="alert.recovered", resource=cycle_id,
+            reason="collection_recovered", details={"cycle_id": cycle_id}, created_at=now,
+        )
+        session.flush()
+        self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
+        return True
 
     def run_maintenance(self, *, season: str, cutoff: datetime, now: datetime | None = None) -> dict[str, int]:
         """Run deterministic reconciliation, GC, validation and stale alerts."""
@@ -1618,7 +2164,9 @@ class CollectionOperationsService(_SessionService):
         deleted = self.gc_observations(now=current)
         attention = 0
         with self.session() as session, session.begin():
-            cycles = session.scalars(select(CollectionCycle).where(CollectionCycle.status == "collecting")).all()
+            cycles = session.scalars(select(CollectionCycle).where(CollectionCycle.status.in_(
+                ("collecting", "attention", "failed", "complete")
+            ))).all()
             for cycle in cycles:
                 governed = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
                     GovernedNotApplicable.cycle_id == cycle.cycle_id
@@ -1636,13 +2184,32 @@ class CollectionOperationsService(_SessionService):
                 session.add(ValidationSummary(summary_id=_uuid(), cycle_id=cycle.cycle_id,
                     status="attention" if missing else "passed", counts=_json({"missing_streams": sorted(missing)}), created_at=current))
                 age = (current - _aware(cycle.created_at)).total_seconds()
-                if age >= 6 * 3600:
+                jobs = session.scalars(select(CompositionJob).where(
+                    CompositionJob.season == cycle.season,
+                    CompositionJob.cutoff == cycle.cutoff,
+                    CompositionJob.manifest_id == cycle.manifest_id,
+                )).all()
+                work_pending = any(job.status in {"queued", "running"} for job in jobs)
+                actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
+                if not missing and not work_pending and not actual_failure:
+                    self._recover_lifecycle_alerts(session, cycle_id=cycle.cycle_id, now=current)
+                elif not work_pending:
+                    if actual_failure:
+                        self._open_lifecycle_alert(
+                            session, cycle_id=cycle.cycle_id,
+                            severity="critical", code="first_failure", now=current,
+                        )
+                    elif age >= STALE_ALERT_SECONDS:
+                        self._open_lifecycle_alert(
+                            session, cycle_id=cycle.cycle_id,
+                            severity="warning", code="stale_threshold", now=current,
+                        )
+                if missing and not work_pending and age >= ATTENTION_ALERT_SECONDS:
                     cycle.status, cycle.attention_reason = "attention", "cycle_window_expired"
-                    prior = session.scalar(select(CollectionAlert).where(CollectionAlert.cycle_id == cycle.cycle_id,
-                        CollectionAlert.code == "cycle_attention", CollectionAlert.status == "open"))
-                    if prior is None:
-                        session.add(CollectionAlert(alert_id=_uuid(), cycle_id=cycle.cycle_id, severity="critical", code="cycle_attention", created_at=current))
-                        self.alert_adapter.send(code="cycle_attention", severity="critical", cycle_id=cycle.cycle_id)
+                    if self._open_lifecycle_alert(
+                        session, cycle_id=cycle.cycle_id,
+                        severity="critical", code="cycle_attention", now=current,
+                    ):
                         attention += 1
         return {"jobs_enqueued": enqueued, "observations_deleted": deleted, "cycles_attention": attention}
 
@@ -1652,7 +2219,19 @@ class CollectionOperationsService(_SessionService):
             raise ControlPlaneError("usage_limit")
         now = self.clock()
         with self.session() as session, session.begin():
-            row = session.get(CollectorUsage, collector_id)
+            row = session.scalar(select(CollectorUsage).where(
+                CollectorUsage.collector_id == collector_id
+            ).with_for_update())
+            if row is None:
+                try:
+                    with session.begin_nested():
+                        row = CollectorUsage(collector_id=collector_id, window_started_at=now)
+                        session.add(row)
+                        session.flush()
+                except IntegrityError:
+                    row = session.scalar(select(CollectorUsage).where(
+                        CollectorUsage.collector_id == collector_id
+                    ).with_for_update())
             if row is None or (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
                 row = CollectorUsage(collector_id=collector_id, window_started_at=now)
                 session.add(row)
@@ -1982,48 +2561,167 @@ def _catalog_rows(value: Any, *, catalog_type: str) -> list[Any] | None:
     return rows if isinstance(rows, list) else None
 
 
-def _validate_catalog_payload(value: Any, catalog_type: str) -> None:
-    """Validate the governed row shape before a catalog becomes complete."""
+def _catalog_identity_ids(value: Any) -> set[str]:
+    rows = _catalog_rows(value, catalog_type="athlete") or []
+    identities: set[str] = set()
+    for row in rows:
+        if isinstance(row, Mapping):
+            identity = row.get("player_id", row.get("id", row.get("identity_id")))
+        else:
+            identity = row
+        if identity not in (None, ""):
+            identities.add(str(identity).strip())
+    return identities
+
+
+def _required_athlete_ids(payload: str | Mapping[str, Any]) -> set[str]:
+    """Derive athlete coverage from persisted Event Catalog evidence only."""
+
+    try:
+        document = json.loads(payload) if isinstance(payload, str) else payload
+    except (TypeError, json.JSONDecodeError):
+        return set()
+    rows = _catalog_rows(document, catalog_type="event") or []
+    required: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        for key in ("athlete_ids", "player_ids", "participants", "identities"):
+            values = row.get(key)
+            if isinstance(values, Mapping):
+                values = values.keys()
+            if isinstance(values, (list, tuple, set, frozenset)):
+                required.update(str(value).strip() for value in values if str(value).strip())
+    return required
+
+
+def _canonical_catalog_team(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        value = value.get("team_id", value.get("id", value.get(
+            "tricode", value.get("abbreviation", value.get("team"))
+        )))
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text in NBA_TEAM_IDS:
+        return text
+    code = canonical_nba_team_abbreviation(text)
+    return code if code in NBA_TEAM_TRICODES else None
+
+
+def _event_team_evidence(row: Mapping[str, Any]) -> set[str]:
+    values: list[Any] = []
+    for home_key, away_key in (
+        ("home_team_id", "away_team_id"),
+        ("home_team", "away_team"),
+        ("home_team_tricode", "away_team_tricode"),
+        ("home_tricode", "away_tricode"),
+    ):
+        if home_key in row or away_key in row:
+            values.extend((row.get(home_key), row.get(away_key)))
+            break
+    if not values and isinstance(row.get("teams"), (list, tuple)):
+        values.extend(row["teams"])
+    return {team for value in values if (team := _canonical_catalog_team(value))}
+
+
+def _validate_catalog_payload(value: Any, catalog_type: str, *,
+                              min_event_games: int = 1,
+                              min_event_teams: int = 2,
+                              min_athlete_identities: int = 1) -> None:
+    """Validate a whole-season catalog before it can become complete."""
 
     if catalog_type not in {"event", "athlete"}:
         raise ValueError("invalid catalog type")
     rows = _catalog_rows(value, catalog_type=catalog_type)
-    if rows is None or len(rows) > MAX_RECORDS_PER_OBSERVATION:
-        raise ValueError("catalog rows required")
+    max_catalog_records = MAX_EVENT_CATALOG_GAMES if catalog_type == "event" else MAX_ATHLETE_CATALOG_IDENTITIES
+    if rows is None or not rows or len(rows) > min(MAX_RECORDS_PER_OBSERVATION, max_catalog_records):
+        raise ValueError("catalog_incomplete: rows required")
     identities: set[str] = set()
-    for row in rows:
-        if catalog_type == "event":
+    if catalog_type == "event":
+        teams: set[str] = set()
+        phases: set[str] = set()
+        for row in rows:
             if not isinstance(row, Mapping):
                 raise ValueError("event row required")
             identity = row.get("nba_game_id", row.get("game_id", row.get("id")))
             if identity in (None, ""):
                 raise ValueError("event identity required")
+            identity_text = str(identity).strip()
+            if identity_text in identities:
+                raise ValueError("duplicate canonical game identity")
+            identities.add(identity_text)
+            row_teams = _event_team_evidence(row)
+            if len(row_teams) != 2:
+                raise ValueError("canonical event teams required")
+            teams.update(row_teams)
+            phase = row.get("phase", row.get("season_phase", row.get("season_type")))
+            normalized_phase = str(phase or "").strip().lower().replace("_", " ")
+            if normalized_phase not in {
+                "regular season", "regular", "playoffs", "playoff", "play in", "play-in",
+                "play in tournament",
+            }:
+                raise ValueError("event phase required")
+            phases.add(normalized_phase)
             status = row.get("status", row.get("status_text", row.get("status_code")))
             if status in (None, "") and "completed" not in row:
                 raise ValueError("event status required")
-            scheduled = row.get("scheduled_at", row.get("date"))
-            if scheduled is not None:
+            if status not in (None, ""):
+                status_text = str(status).strip().lower()
+                if status_text not in {
+                    "scheduled", "final", "finished", "completed", "closed", "in progress",
+                    "live", "postponed", "canceled", "cancelled", "game over", "1", "2", "3",
+                } and not status_text.startswith("final"):
+                    raise ValueError("event status invalid")
+            scheduled = row.get("scheduled_at", row.get("date", row.get("game_date")))
+            if scheduled in (None, ""):
+                raise ValueError("event date required")
+            try:
                 _parse_datetime(str(scheduled))
-        else:
-            if isinstance(row, Mapping):
-                identity = row.get("player_id", row.get("id", row.get("identity_id")))
-            else:
-                identity = row
-            if identity in (None, ""):
-                raise ValueError("athlete identity required")
-        identity_text = str(identity)
+            except ControlPlaneError as error:
+                raise ValueError("event date invalid") from error
+        if len(identities) < max(1, int(min_event_games)):
+            raise ValueError("catalog_incomplete: event volume below bound")
+        if len(teams) < max(2, int(min_event_teams)):
+            raise ValueError("catalog_incomplete: team coverage below bound")
+        if not phases:
+            raise ValueError("catalog_incomplete: governed evidence missing")
+        return
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("athlete roster row required")
+        identity = row.get("player_id", row.get("id", row.get("identity_id")))
+        if identity in (None, ""):
+            raise ValueError("athlete identity required")
+        identity_text = str(identity).strip()
         if identity_text in identities:
-            raise ValueError("duplicate catalog identity")
+            raise ValueError("duplicate athlete identity")
         identities.add(identity_text)
+        if _canonical_catalog_team(row.get("team_id", row.get("team", row.get("tricode")))) is None:
+            raise ValueError("athlete team evidence required")
+        if not str(row.get("status", row.get("phase", "active"))).strip():
+            raise ValueError("athlete roster status required")
+        coverage = row.get("event_ids", row.get("game_ids", row.get("games")))
+        if not isinstance(coverage, (list, tuple, set, frozenset)) or not coverage:
+            raise ValueError("athlete season coverage required")
+    if len(identities) < max(1, int(min_athlete_identities)):
+        raise ValueError("catalog_incomplete: athlete volume below bound")
 
 
-def _validate_observation_payload(value: Any, *, observation_type: str) -> None:
+def _validate_observation_payload(value: Any, *, observation_type: str,
+                                  min_event_catalog_games: int = 1,
+                                  min_event_catalog_teams: int = 2,
+                                  min_athlete_catalog_identities: int = 1) -> None:
     """Run the closed registry validator before durable observation insert."""
 
     if observation_type in {"event_catalog", "athlete_catalog"}:
         _validate_catalog_payload(
             value,
             "event" if observation_type == "event_catalog" else "athlete",
+            min_event_games=min_event_catalog_games,
+            min_event_teams=min_event_catalog_teams,
+            min_athlete_identities=min_athlete_catalog_identities,
         )
         _validate_payload_shape(value)
         return

@@ -103,6 +103,11 @@ class CollectorIdentity(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     release_version = Column(String(64), nullable=True)
+    # Authorization is bound to the machine owner and the provider/surface
+    # registry, not inferred from the generic operation scopes in ``scopes``.
+    owner = Column(String(64), nullable=False, default="residential_collector")
+    providers = Column(Text, nullable=False, default="[]")
+    surfaces = Column(Text, nullable=False, default="[]")
 
     __table_args__ = (Index("ix_collector_identity_environment", "environment"),)
 
@@ -209,6 +214,23 @@ class CollectorTokenReplay(Base):
     token_id = Column(String(64), primary_key=True)
     collector_id = Column(String(64), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CollectorLease(Base):
+    """Database-backed per-identity ingestion lease.
+
+    PostgreSQL workers serialize acquisition with ``FOR UPDATE``.  An
+    expired owner can be recovered by the next worker, so the lease is not
+    tied to a process surviving or to a process-local semaphore.
+    """
+
+    __tablename__ = "collector_ingestion_leases"
+
+    collector_id = Column(String(64), primary_key=True)
+    lease_owner = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    fence = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class CollectionCycle(Base):
@@ -334,6 +356,7 @@ __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectionObservation", "PublicationStream",
     "PublicationVersion", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
+    "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",
     "GovernedNotApplicable", "OperatorJob", "CredentialDelivery",

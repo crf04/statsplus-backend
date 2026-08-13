@@ -70,8 +70,15 @@ def _control_error(error: Exception) -> AppError:
         "identity_revoked", "invalid_identity_secret", "invalid_token", "token_replayed",
     }:
         return InvalidTokenError("The collector identity or token is invalid.", detail=reason)
-    if reason in {"scope_denied", "provider_not_registered", "season_not_active"}:
+    if reason in {
+        "scope_denied", "provider_not_registered", "season_not_active",
+        "surface_scope_required", "environment_mismatch",
+    }:
         return AuthorizationError("The collector is not authorized for this operation.", detail=reason)
+    if reason == "collector_busy":
+        return RateLimitedError(
+            int(getattr(error, "retry_after_seconds", None) or 1), detail=reason
+        )
     if reason.endswith("_not_found") or reason in {
         "manifest_not_found", "bootstrap_not_found", "cycle_not_found",
         "manifest_expired", "bootstrap_expired", "stream_not_found",
@@ -97,6 +104,8 @@ def issue_collector_token():
     secret = body.get("secret")
     ttl_seconds = body.get("ttl_seconds", 300)
     scopes = body.get("scopes")
+    providers = body.get("providers")
+    surfaces = body.get("surfaces")
     if (
         not isinstance(identity_id, str)
         or not identity_id.strip()
@@ -108,6 +117,16 @@ def issue_collector_token():
             not isinstance(scopes, (list, tuple, set, frozenset))
             or any(not isinstance(scope, str) or not scope.strip() for scope in scopes)
         ))
+        or (providers is not None and (
+            not isinstance(providers, (list, tuple, set, frozenset))
+            or not providers
+            or any(not isinstance(provider, str) or not provider.strip() for provider in providers)
+        ))
+        or (surfaces is not None and (
+            not isinstance(surfaces, (list, tuple, set, frozenset))
+            or not surfaces
+            or any(not isinstance(surface, str) or not surface.strip() for surface in surfaces)
+        ))
     ):
         raise InvalidInputError(
             "The collector token request is malformed.", detail="malformed_input"
@@ -115,7 +134,8 @@ def issue_collector_token():
     try:
         token = _service("collector_tokens").issue_for_secret(
             identity_id.strip(), secret,
-            scopes=scopes, ttl_seconds=ttl_seconds
+            scopes=scopes, providers=providers, surfaces=surfaces,
+            ttl_seconds=ttl_seconds
         )
     except ControlPlaneError as error:
         raise _control_error(error) from error
@@ -142,9 +162,9 @@ def _bootstrap_response(row):
 @collection_bp.get("/collector/bootstrap/<request_id>/status")
 @route_error_boundary("Failed to retrieve the bootstrap request.")
 def get_bootstrap_status(request_id: str):
-    _collector_claims_any(("bootstrap", "poll"))
+    claims = _collector_claims_any(("bootstrap", "poll"))
     try:
-        row = _service("collection_control").bootstrap_status(request_id)
+        row = _service("collection_control").bootstrap_status(request_id, claims=claims)
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify(_bootstrap_response(row))
@@ -160,8 +180,7 @@ def discover_collection_work():
         if isinstance(limit, str) and not limit.isdigit():
             raise ValueError("limit must be an integer")
         result = _service("collection_control").discover(
-            environment=claims.environment,
-            scopes=claims.scopes,
+            claims=claims,
             limit=int(limit),
         )
     except ControlPlaneError as error:
@@ -292,18 +311,18 @@ def _collector_claims_any(required_scopes: tuple[str, ...]):
 @collection_bp.get("/collector/manifest/<manifest_id>")
 @route_error_boundary("Failed to retrieve the collection manifest.")
 def get_manifest(manifest_id: str):
-    _collector_claims("poll")
+    claims = _collector_claims("poll")
     try:
-        manifest = _service("collection_control").get_manifest(manifest_id)
+        manifest = _service("collection_control").get_manifest(manifest_id, claims=claims)
     except ControlPlaneError as error:
-        raise ResourceNotFoundError("The collection manifest is unavailable.", detail=error.reason) from error
+        raise _control_error(error) from error
     return jsonify({
         "manifest_id": manifest.manifest_id,
         "season": manifest.season,
         "cutoff": manifest.cutoff.isoformat(),
         "collect_before": manifest.collect_before.isoformat(),
         "accepted_versions": __import__("json").loads(manifest.accepted_versions),
-        "scopes": __import__("json").loads(manifest.scopes),
+        "scopes": getattr(manifest, "_authorized_scopes", __import__("json").loads(manifest.scopes)),
         "checksum": manifest.checksum,
     })
 

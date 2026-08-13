@@ -341,6 +341,7 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
+        CollectorLease,
         CollectionCycle,
         AuditEvent,
         ReconciliationItem,
@@ -363,6 +364,7 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
         PublicationPointer,
         CompositionJob,
         CollectorTokenReplay,
+        CollectorLease,
         CollectionCycle,
         AuditEvent,
         ReconciliationItem,
@@ -427,6 +429,28 @@ def _upgrade_operator_control(connection: Connection) -> None:
             ))
 
 
+def _upgrade_collector_surface_authorization(connection: Connection) -> None:
+    """Bind collector identities to owner/provider/surface and add leases."""
+
+    from app.models.collection_control import CollectorLease
+
+    CollectorLease.__table__.create(connection, checkfirst=True)
+    table = "collector_identities"
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "owner": "VARCHAR(64) NOT NULL DEFAULT 'residential_collector'",
+        "providers": "TEXT NOT NULL DEFAULT '[]'",
+        "surfaces": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    for name, type_sql in additions.items():
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote(name)} {type_sql}"
+            ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -456,6 +480,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(18, "018_collection_operations", _upgrade_collection_operations),
     Migration(19, "019_surface_registry_metadata", _upgrade_surface_registry),
     Migration(20, "020_operator_control", _upgrade_operator_control),
+    Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
 )
 
 

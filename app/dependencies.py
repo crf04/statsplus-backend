@@ -154,6 +154,9 @@ def build_dependencies(
             engine,
             publication_service=publication_service,
             collection_control=collection_control,
+            min_event_catalog_games=collection_control.min_event_catalog_games,
+            min_event_catalog_teams=collection_control.min_event_catalog_teams,
+            min_athlete_catalog_identities=collection_control.min_athlete_catalog_identities,
         )
     injury_snapshot_repository = (
         None if demo_database else InjurySnapshotRepository(engine)

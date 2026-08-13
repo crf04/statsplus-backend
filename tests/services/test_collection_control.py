@@ -11,6 +11,7 @@ from app.models.collection_control import (
     CollectionAlert,
     CompositionJob,
     CollectionObservation,
+    CollectorLease,
     OperatorJob,
     PublicationStream,
 )
@@ -31,10 +32,28 @@ from app.services.collection_control import (
 UTC = timezone.utc
 
 
-def _catalog_payload(kind):
+def _catalog_payload(kind, *, future=False):
+    team_ids = sorted(NBA_TEAM_IDS)
     if kind == "event":
-        return {"events": []}
-    return {"identities": ["1"]}
+        scheduled = "2026-08-12T00:00:00+00:00" if future else "2026-08-11T00:00:00+00:00"
+        return {
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": team_ids[index * 2],
+                    "away_team_id": team_ids[index * 2 + 1],
+                    "phase": "Regular Season",
+                    "status": "Scheduled" if future else "Final",
+                    "scheduled_at": scheduled,
+                    "athlete_ids": ["1"],
+                }
+                for index in range(15)
+            ]
+        }
+    return {"identities": [{
+        "player_id": "1", "team_id": team_ids[0], "status": "active",
+        "event_ids": [f"game-{index}" for index in range(15)],
+    }]}
 
 
 @pytest.fixture
@@ -49,7 +68,10 @@ def test_collector_tokens_are_scoped_expiring_and_one_time_when_consumed(control
     def clock():
         return now[0]
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=clock)
-    identity = tokens.create_identity("pc", scopes=["poll", "ingest"])
+    identity = tokens.create_identity(
+        "pc", scopes=["poll", "ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=["event_catalog", "athlete_catalog", "synergy_play_types"],
+    )
     token = tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
     claims = tokens.validate(token, required_scope="ingest", consume=True)
     assert claims.collector_id == identity["identity_id"]
@@ -70,6 +92,10 @@ def test_collector_tokens_are_scoped_expiring_and_one_time_when_consumed(control
     now[0] += timedelta(minutes=6)
     with pytest.raises(ControlPlaneError, match="invalid_token"):
         tokens.validate(expiring, required_scope="poll")
+    tokens.revoke(identity["identity_id"])
+    with control_db.connect() as connection:
+        actions = [row.action for row in connection.execute(select(AuditEvent)).all()]
+    assert {"collector.token_issued", "collector.token_used", "collector.revoked"} <= set(actions)
 
 
 def test_production_token_service_requires_deployment_signing_secret(control_db):
@@ -86,7 +112,7 @@ def test_bootstrap_requires_active_season_and_manifest_uses_exact_cutoff(control
     control.activate_season("2025-26", actor="operator")
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     assert manifest.cutoff == cutoff
     assert json.loads(manifest.accepted_versions) == [1, 2]
@@ -104,7 +130,10 @@ def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(cont
         control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now[0] + timedelta(minutes=1))
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=clock)
-    identity = tokens.create_identity("pc", scopes=["ingest"])
+    identity = tokens.create_identity(
+        "pc", scopes=["ingest"], owner="collector", providers=["nba"],
+        surfaces=["synergy_play_types"],
+    )
     claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"]))
     publication = PublicationService(control_db, clock=clock)
     publication.register_stream("synergy_play_types", provider="nba", owner="collector", required_observations=["synergy_play_types"], publication_strategy="snapshot_replace", enabled=True)
@@ -133,7 +162,10 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
         control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    identity = tokens.create_identity("pc", scopes=["ingest"])
+    identity = tokens.create_identity(
+        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
+        surfaces=["synergy_play_types"],
+    )
     claims = tokens.validate(tokens.issue(identity["identity_id"], scopes=["ingest"]))
     payload = json.dumps({
         "base": "play_types",
@@ -155,6 +187,17 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     envelope["checksum"] = __import__("hashlib").sha256(bad_payload).hexdigest()
     with pytest.raises(ControlPlaneError, match="malformed_payload"):
         ingestion.ingest(claims, envelope, bad_payload)
+    conflict_payload = json.dumps({
+        "base": "play_types", "rows": [{"slice_key": "Isolation"}],
+    }, separators=(",", ":")).encode()
+    envelope["checksum"] = __import__("hashlib").sha256(conflict_payload).hexdigest()
+    with pytest.raises(ControlPlaneError, match="observation_id_conflict"):
+        ingestion.ingest(claims, envelope, conflict_payload)
+    with control_db.connect() as connection:
+        conflict_audits = connection.execute(
+            select(AuditEvent).where(AuditEvent.action == "observation.rejected")
+        ).all()
+    assert len(conflict_audits) == 1
 
 
 def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
@@ -185,7 +228,7 @@ def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
+        control.publish_catalog(request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1")
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=0)
     assert cycle.status == "no_game"
@@ -244,17 +287,15 @@ def test_cycle_game_count_comes_from_event_catalog_not_request_body(control_db):
     control = CollectionControlService(control_db, clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
-    control.publish_catalog(event_request.request_id, {
-        "events": [{"nba_game_id": "001", "status": "Final", "scheduled_at": cutoff.isoformat()}]
-    }, version="event-v1")
+    control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
-    control.publish_catalog(athlete_request.request_id, {"identities": ["1"]}, version="athlete-v1")
+    control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1")
     manifest = control.create_manifest(
         "2025-26", cutoff=cutoff, scopes=["synergy"],
         collect_before=now + timedelta(hours=1), required_athlete_ids=["1"],
     )
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=999)
-    assert cycle.completed_game_count == 1
+    assert cycle.completed_game_count == 15
     assert cycle.status == "collecting"
 
 
@@ -333,7 +374,8 @@ def test_base_completeness_requires_registered_base(control_db):
 def test_compressed_observation_is_rejected_before_oversize_allocation(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     claims = __import__("app.services.collection_control", fromlist=["CollectorClaims"]).CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", now
+        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", now,
+        "collector", frozenset({"nba"}), frozenset({"synergy_play_types"}),
     )
     ingestion = ObservationIngestionService(control_db, clock=lambda: now)
     payload = gzip.compress(json.dumps({"rows": ["x"] * 100}).encode())
@@ -353,7 +395,7 @@ def test_catalog_bootstrap_uses_the_observation_envelope_and_is_idempotent(contr
     control = CollectionControlService(control_db, clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
     request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
-    payload = {"events": [{"id": "game-1", "status": "Final"}]}
+    payload = _catalog_payload("event")
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     envelope = {
         "manifest_id": None, "client_observation_id": "catalog-1", "environment": "testing",
@@ -363,9 +405,12 @@ def test_catalog_bootstrap_uses_the_observation_envelope_and_is_idempotent(contr
         "retrieved_at": now.isoformat(),
         "checksum": __import__("hashlib").sha256(encoded).hexdigest(),
     }
-    claims = __import__("app.services.collection_control", fromlist=["CollectorClaims"]).CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"catalog_publish"}), "jti", now
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    identity = tokens.create_identity(
+        "pc", scopes=["catalog_publish"], owner="residential_collector", providers=["nba"],
+        surfaces=["event_catalog"], identity_id="collector-1",
     )
+    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["catalog_publish"]))
     ingestion = ObservationIngestionService(control_db, collection_control=control, clock=lambda: now)
     publication = ingestion.ingest_catalog(
         claims, envelope, encoded, request_id=request.request_id, catalog_version="v1"
@@ -386,12 +431,202 @@ def test_discovery_is_environment_and_scope_bound(control_db):
     request = control.create_bootstrap_request(
         "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
     )
-    discovered = control.discover(environment="testing", scopes=["poll"])
+    discovered = control.discover(
+        environment="testing", scopes=["poll"], collector_id="collector",
+        owner="residential_collector", providers=["nba"], surfaces=["event_catalog", "athlete_catalog"],
+    )
     assert [item["request_id"] for item in discovered["bootstrap_requests"]] == [request.request_id]
     with pytest.raises(ControlPlaneError, match="scope_denied"):
-        control.discover(environment="testing", scopes=["ingest"])
+        control.discover(
+            environment="testing", scopes=["ingest"], collector_id="collector",
+            owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+        )
     with pytest.raises(ControlPlaneError, match="environment_mismatch"):
-        control.discover(environment="production", scopes=["poll"])
+        control.discover(
+            environment="production", scopes=["poll"], collector_id="collector",
+            owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+        )
+
+
+def test_surface_authorization_denies_cross_collector_and_cross_provider_ingest(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy_play_types"],
+        collect_before=now + timedelta(hours=1),
+    )
+    publication = PublicationService(control_db, clock=lambda: now)
+    publication.register_stream(
+        "synergy_play_types", provider="nba", owner="collector",
+        required_observations=["synergy_play_types"], publication_strategy="snapshot_replace",
+        supported_windows=["season"], enabled=True,
+    )
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    foreign = tokens.create_identity(
+        "other", scopes=["ingest"], owner="collector", providers=["nba"],
+        surfaces=["grouped_shot_types"],
+    )
+    foreign_claims = tokens.validate(tokens.issue_for_secret(
+        foreign["identity_id"], foreign["secret"], scopes=["ingest"]
+    ))
+    payload = json.dumps({
+        "base": "play_types", "rows": [{"slice_key": "Transition"}],
+    }, separators=(",", ":")).encode()
+    envelope = {
+        "manifest_id": manifest.manifest_id, "client_observation_id": "foreign-1",
+        "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types",
+        "scope": {"window": "season"}, "season": "2025-26", "cutoff": cutoff.isoformat(),
+        "schema_version": 2, "retrieved_at": now.isoformat(),
+        "checksum": __import__("hashlib").sha256(payload).hexdigest(),
+    }
+    ingestion = ObservationIngestionService(
+        control_db, publication_service=publication, clock=lambda: now,
+    )
+    with pytest.raises(ControlPlaneError, match="scope_denied"):
+        ingestion.ingest(foreign_claims, envelope, payload)
+    provider_mismatch = tokens.create_identity(
+        "pbp", scopes=["ingest"], owner="collector", providers=["pbp"],
+        surfaces=["synergy_play_types"],
+    )
+    provider_claims = tokens.validate(tokens.issue_for_secret(
+        provider_mismatch["identity_id"], provider_mismatch["secret"], scopes=["ingest"]
+    ))
+    with pytest.raises(ControlPlaneError, match="scope_denied"):
+        ingestion.ingest(provider_claims, {**envelope, "client_observation_id": "provider-1"}, payload)
+
+
+def test_catalog_validation_rejects_empty_fabricated_and_incomplete_evidence(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    empty = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(empty.request_id, {"events": []}, version="empty")
+    malformed = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(malformed.request_id, {
+            "events": [{"id": "g1", "status": "Final", "phase": "Regular Season",
+                        "scheduled_at": cutoff.isoformat()}],
+        }, version="malformed")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(athlete_request.request_id, {
+            "identities": [{"player_id": "999", "team_id": sorted(NBA_TEAM_IDS)[0]}],
+        }, version="athlete-fabricated")
+
+
+def test_catalog_bounds_are_configurable_and_manifest_ignores_optional_identity_assertions(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(
+        control_db, clock=lambda: now, min_event_catalog_games=15,
+        min_event_catalog_teams=30, min_athlete_catalog_identities=1,
+    )
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        collect_before=now + timedelta(hours=1), required_athlete_ids=["fabricated-by-caller"],
+    )
+    assert manifest.status == "active"
+
+
+def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    control = CollectionControlService(control_db, clock=lambda: clock[0])
+    control.activate_season("2025-26", actor="operator")
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        collect_before=clock[0] + timedelta(days=1),
+    )
+    publication = PublicationService(control_db, clock=lambda: clock[0])
+    publication.register_stream(
+        "synergy_play_types", provider="nba", owner="collector", required_observations=[],
+        publication_strategy="replace", supported_windows=["season"], enabled=True,
+    )
+    cycle = control.open_cycle(manifest.manifest_id)
+    operations = CollectionOperationsService(
+        control_db, collection_control=control, clock=lambda: clock[0],
+    )
+    with control_db.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="lifecycle-job", stream_key="synergy_play_types", manifest_id=manifest.manifest_id,
+            season="2025-26", cutoff=cutoff, status="queued", attempts=0,
+            created_at=clock[0], updated_at=clock[0],
+        ))
+    clock[0] += timedelta(hours=2)
+    operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionAlert)).first() is None
+    with control_db.begin() as connection:
+        connection.execute(CompositionJob.__table__.update().where(
+            CompositionJob.job_id == "lifecycle-job"
+        ).values(status="failed", last_error="provider_unavailable", updated_at=clock[0]))
+    operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "first_failure")).first() is not None
+    with control_db.begin() as connection:
+        connection.execute(CompositionJob.__table__.update().where(
+            CompositionJob.job_id == "lifecycle-job"
+        ).values(status="succeeded", updated_at=clock[0]))
+    operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
+    with control_db.connect() as connection:
+        stale = connection.execute(select(CollectionAlert).where(CollectionAlert.code == "stale_threshold")).all()
+    assert len(stale) == 1
+    clock[0] += timedelta(hours=4)
+    operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "cycle_attention")).first() is not None
+    publication.compose("synergy_play_types", season="2025-26", cutoff=cutoff, payload={"ok": True}, manifest_id=manifest.manifest_id)
+    operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
+    with control_db.connect() as connection:
+        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "recovery")).first() is not None
+        assert connection.execute(select(CollectionAlert).where(
+            CollectionAlert.code == "stale_threshold", CollectionAlert.status == "open"
+        )).first() is None
+    assert cycle.status == "collecting"
+
+
+def test_database_identity_lease_contends_and_recovers_after_expiry(control_db):
+    now = [datetime(2026, 8, 12, tzinfo=UTC)]
+    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
+    identity = tokens.create_identity(
+        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
+        surfaces=["synergy_play_types"], identity_id="lease-collector",
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    first = ObservationIngestionService(control_db, clock=lambda: now[0])
+    second = ObservationIngestionService(control_db, clock=lambda: now[0])
+    owner = first._acquire_identity_lease(claims)
+    with pytest.raises(ControlPlaneError, match="collector_busy") as error:
+        second._acquire_identity_lease(claims)
+    assert error.value.retry_after_seconds >= 1
+    with control_db.begin() as connection:
+        connection.execute(
+            CollectorLease.__table__.update().where(
+                CollectorLease.collector_id == claims.collector_id
+            ).values(lease_expires_at=now[0] - timedelta(seconds=1))
+        )
+    recovered = second._acquire_identity_lease(claims)
+    assert recovered != owner
+    second._release_identity_lease(claims, recovered)
 
 
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):

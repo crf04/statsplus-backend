@@ -1420,7 +1420,12 @@ after an intended contract change, and review the diff.
 
 The control plane is additive and does not alter existing public readers.
 Collector routes use a machine-secret exchange for a short-lived signed bearer
-token; tokens are bound to the deployment environment, audience, and scope.
+token; tokens are bound to the deployment environment, audience, operation,
+collector owner, provider set, and explicit surface set. `poll`, `ingest`, and
+`catalog_publish` are operation capabilities only; they never authorize an
+unrelated provider or surface. Discovery, manifest reads, bootstrap status,
+catalog publication, and observation ingestion all re-check the persisted
+identity binding.
 Operator mutations require Firebase administrator authentication.
 An invalid machine secret or bearer token is `401 invalid_token`; malformed
 token input such as a non-integer TTL is `400 invalid_input`; a valid token
@@ -1467,10 +1472,13 @@ bounded durable identifiers and require a human-readable reason where they
 mutate publication state. Raw observations and player-level
 payloads are never returned by these routes. Collector limits return `429
 rate_limited`, a bounded `retry_after_seconds`, and a `Retry-After` header.
+The token exchange may request a subset of the identity's `providers` and
+`surfaces` in addition to its operation `scopes`; omitting them uses the
+identity's persisted binding, while an empty or unauthorized set is rejected.
 `GET /api/collector/discovery` (also available as `GET /api/collector/bootstrap`)
 is the machine-authenticated, bounded polling seam: it returns pending bootstrap
-requests and active manifests visible to the caller's environment and token
-scopes, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
+requests and active manifests authorized for the caller's owner/provider/surface
+binding, in deterministic newest-first order. Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
 facts. A collector with the bootstrap/catalog scope publishes one catalog using
 the same gzip-compressed Observation Envelope contract at
@@ -1481,7 +1489,27 @@ and governed catalog publication commit together; repeating the same ID and
 checksum returns the original publication, while expired or already-completed
 requests are rejected. Railway then creates the
 immutable cutoff manifest only after both Event and Athlete Catalog
-publications pass their governed freshness checks.
+publications pass their governed freshness checks. Event Catalog rows must have
+unique canonical game IDs, two canonical teams, recognized phase/status, and a
+scheduled date, and satisfy the configured whole-season volume/team bounds;
+an empty catalog can never assert a no-game cycle. Athlete Catalog rows must
+have unique canonical identities, team and season-coverage evidence, and cover
+the identities derived from accepted Event/Railway evidence. Caller-supplied
+identity lists and `completed_game_count` values do not establish completeness.
+
+Observation ingestion uses a database-backed per-collector lease. PostgreSQL
+acquires the identity row with `SELECT ... FOR UPDATE`; the short lease expires
+after a bounded interval so a crashed Railway worker can be recovered. A live
+lease returns `429 rate_limited` with an explicit `retry_after_seconds` and does
+not rely on a process-local semaphore for correctness. Collector usage counters
+are updated under the same database row-lock discipline.
+
+Lifecycle audit events are append-only and contain only bounded safe fields.
+Successful token issuance/use, rotation, revocation, and same-ID/different-
+checksum observation rejection are recorded. Maintenance emits one first-failure
+alert, one stale-threshold alert, a six-hour `cycle_attention` alert, and one
+`recovery` alert when state clears; queued/running work suppresses failure and
+stale false positives.
 
 The rotation endpoint returns only a durable job/identity status; the new
 long-lived machine secret is never returned by an admin GET. During the
