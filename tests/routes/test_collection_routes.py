@@ -55,6 +55,73 @@ def test_invalid_collector_token_is_401(client, app):
     assert response.json["error"]["code"] == "invalid_token"
 
 
+def test_collector_status_report_is_machine_authenticated_and_bounded(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collector_tokens.report_status.return_value = SimpleNamespace(
+        identity_id="collector-1", last_seen_at=datetime(2026, 8, 12),
+        release_version="collector-1.2.3", release_checksum="a" * 64,
+    )
+    response = client.post(
+        "/api/collector/status",
+        headers={"Authorization": "Bearer token"},
+        json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64},
+    )
+    assert response.status_code == 200
+    assert response.json == {
+        "identity_id": "collector-1",
+        "last_seen_at": "2026-08-12T00:00:00",
+        "release_version": "collector-1.2.3",
+        "release_checksum": "a" * 64,
+    }
+    dependencies.collector_tokens.report_status.assert_called_once()
+
+    unsafe = client.post(
+        "/api/collector/status", headers={"Authorization": "Bearer token"},
+        json={
+            "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+            "secret": "must-not-be-accepted",
+        },
+    )
+    assert unsafe.status_code == 400
+
+    unauthenticated = client.post("/api/collector/status", json={
+        "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+    })
+    assert unauthenticated.status_code == 401
+
+
+def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
+    dependencies = _install_collection_services(app)
+    contract = {
+        "cycles": [], "alerts": [], "reconciliation": [], "validation": [], "jobs": [],
+        "streams": [{
+            "stream_key": "synergy_play_types", "provider": "nba",
+            "owner": "residential_collector", "enabled": True, "available": True,
+            "activation_status": "active", "freshness_rule": "cutoff_current",
+            "publication_id": "publication-1", "coverage_cutoff": "2026-08-12T00:00:00+00:00",
+            "fence": 4, "freshness_status": "fresh", "age_seconds": 30,
+        }],
+        "collectors": [{
+            "identity_id": "collector-1", "environment": "production", "revoked": False,
+            "last_seen_at": "2026-08-12T00:00:00+00:00",
+            "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+        }],
+        "usage": [{
+            "collector_id": "collector-1", "poll_count": 2, "envelope_count": 1,
+            "byte_count": 1024, "concurrency_count": 0,
+            "limits": {"poll_count": 100, "envelope_count": 1000,
+                       "byte_count": 50 * 1024 * 1024, "concurrency_count": 1},
+            "window_started_at": "2026-08-12T00:00:00+00:00",
+            "window_resets_at": "2026-08-13T00:00:00+00:00",
+            "retry_after_seconds": 3600, "concurrency_retry_after_seconds": 0,
+        }],
+    }
+    dependencies.collection_operations.diagnostics.return_value = contract
+    response = client.get("/api/admin/collection/diagnostics")
+    assert response.status_code == 200
+    assert response.json == contract
+
+
 def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
     dependencies = _install_collection_services(app)
     row = SimpleNamespace(
@@ -122,26 +189,6 @@ def test_machine_discovery_returns_bounded_authorized_work(client, app):
     dependencies.collection_control.discover.assert_called_once_with(
         claims=dependencies.collector_tokens.validate.return_value, limit=10
     )
-
-
-def test_collector_status_accepts_only_bounded_release_metadata(client, app):
-    dependencies = _install_collection_services(app)
-    expected = {
-        "state": "complete", "reason": "work_complete", "release_version": "0.1.0",
-        "release_checksum": "a" * 64, "last_seen_at": "2026-08-13T08:00:00Z",
-    }
-    dependencies.collection_control.report_collector_status.return_value = expected
-    response = client.post(
-        "/api/collector/status", headers={"Authorization": "Bearer token"},
-        json={key: expected[key] for key in ("state", "reason", "release_version", "release_checksum")},
-    )
-    assert response.status_code == 200
-    assert response.json == expected
-    malformed = client.post(
-        "/api/collector/status", headers={"Authorization": "Bearer token"},
-        json={**expected, "raw_response": {}},
-    )
-    assert malformed.status_code == 400
 
 
 def test_machine_secret_exchange_is_reachable_and_never_returns_secret(client, app):

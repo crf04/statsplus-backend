@@ -293,8 +293,8 @@ def test_runner_reports_bounded_start_and_terminal_status(tmp_path: Path):
     )
     assert collector.run().disposition is RunDisposition.NO_WORK
     status_calls = [call for call in transport.calls if call[1].endswith("/api/collector/status")]
-    assert [call[4]["state"] for call in status_calls] == ["running", "no_work"]
-    assert all(set(call[4]) == {"state", "reason", "release_version", "release_checksum"} for call in status_calls)
+    assert len(status_calls) == 1
+    assert all(set(call[4]) == {"release_version", "release_checksum"} for call in status_calls)
     outbox.close()
 
 

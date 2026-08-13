@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import threading
 import secrets
 import uuid
@@ -76,6 +77,18 @@ STALE_ALERT_SECONDS = 60 * 60
 ATTENTION_ALERT_SECONDS = 6 * 60 * 60
 MAX_EVENT_CATALOG_GAMES = 3_000
 MAX_ATHLETE_CATALOG_IDENTITIES = 100_000
+USAGE_WINDOW_SECONDS = 24 * 60 * 60
+USAGE_MAX_POLLS = 100
+USAGE_MAX_ENVELOPES = 1_000
+USAGE_MAX_BYTES = 50 * 1024 * 1024
+USAGE_MAX_CONCURRENCY = 1
+MAX_DIAGNOSTIC_AGE_SECONDS = 2_147_483_647
+FRESHNESS_RULE_SECONDS = {
+    "cutoff_current": STALE_ALERT_SECONDS,
+    "daily_recheck": 24 * 60 * 60,
+    "seven_day": ATHLETE_REUSE_DAYS * 24 * 60 * 60,
+    "request_time": 0,
+}
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {
     "1610612737": "ATL", "1610612738": "BOS", "1610612739": "CLE",
@@ -658,6 +671,29 @@ class CollectorTokenService(_SessionService):
                 resource=identity_id, reason="collector_revoked",
                 details={"identity_id": identity_id}, created_at=identity.revoked_at,
             )
+            return identity
+
+    def report_status(self, claims: CollectorClaims, *, release_version: str,
+                      release_checksum: str) -> CollectorIdentity:
+        """Persist bounded release evidence reported by the authenticated machine."""
+
+        version = str(release_version).strip()
+        checksum = str(release_checksum).strip().lower()
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}", version) is None
+            or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+        ):
+            raise ControlPlaneError("invalid_release_status")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            identity = session.scalar(select(CollectorIdentity).where(
+                CollectorIdentity.identity_id == claims.collector_id,
+            ).with_for_update())
+            if identity is None or not _identity_matches_claims(identity, claims):
+                raise ControlPlaneError("invalid_token")
+            identity.release_version = version
+            identity.release_checksum = checksum
+            identity.last_seen_at = now
             return identity
 
     def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,
@@ -1327,37 +1363,6 @@ class CollectionControlService(_SessionService):
             "environment": self.environment,
             "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
-        }
-
-    def report_collector_status(
-        self, *, claims: CollectorClaims, state: str, reason: str,
-        release_version: str, release_checksum: str,
-    ) -> dict[str, Any]:
-        """Record bounded operational metadata without accepting collection facts."""
-
-        allowed_states = {"running", "no_work", "pending", "complete", "retry", "non_retryable", "busy"}
-        state = str(state).strip()
-        reason = str(reason).strip()
-        version = str(release_version).strip()
-        checksum = str(release_checksum).strip().casefold()
-        if (
-            state not in allowed_states
-            or not reason or len(reason) > 80 or not reason.replace("_", "").isalnum()
-            or not version or len(version) > 64
-            or len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum)
-        ):
-            raise ControlPlaneError("invalid_collector_status")
-        now = _aware(self.clock())
-        with self.session() as session, session.begin():
-            identity = self._assert_claims_identity(session, claims)
-            identity.last_seen_at = now
-            identity.release_version = version
-            identity.release_checksum = checksum
-            identity.collector_status = state
-            identity.status_reason = reason
-        return {
-            "state": state, "reason": reason, "release_version": version,
-            "release_checksum": checksum, "last_seen_at": _iso(now),
         }
 
     @staticmethod
@@ -2789,7 +2794,9 @@ class CollectionOperationsService(_SessionService):
         }
 
     def record_usage(self, collector_id: str, *, envelopes: int = 0, bytes_received: int = 0,
-                     polls: int = 0, max_polls: int = 100, max_envelopes: int = 1000, max_bytes: int = 50 * 1024 * 1024) -> CollectorUsage:
+                     polls: int = 0, max_polls: int = USAGE_MAX_POLLS,
+                     max_envelopes: int = USAGE_MAX_ENVELOPES,
+                     max_bytes: int = USAGE_MAX_BYTES) -> CollectorUsage:
         if min(envelopes, bytes_received, polls) < 0 or polls > max_polls or envelopes > max_envelopes or bytes_received > max_bytes:
             raise ControlPlaneError("usage_limit")
         now = self.clock()
@@ -2809,7 +2816,7 @@ class CollectionOperationsService(_SessionService):
                     ).with_for_update())
             if row is None:
                 raise ControlPlaneError("usage_unavailable")
-            if (_aware(now) - _aware(row.window_started_at)).total_seconds() >= 86400:
+            if (_aware(now) - _aware(row.window_started_at)).total_seconds() >= USAGE_WINDOW_SECONDS:
                 # Keep the locked primary-key row in place.  Replacing it
                 # creates an identity collision and can leave stale counters
                 # visible to another worker between the two writes.
@@ -2837,25 +2844,115 @@ class CollectionOperationsService(_SessionService):
 
     def diagnostics(self, *, limit: int = 50) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 100))
+        now = _aware(self.clock())
         with self.session() as session:
             def rows(model):
                 return list(session.scalars(select(model).order_by(model.created_at.desc()).limit(bounded)))
             cycles = rows(CollectionCycle)
-            streams = list(session.scalars(select(PublicationStream).limit(bounded)))
+            streams = list(session.scalars(select(PublicationStream).order_by(
+                PublicationStream.stream_key.asc()
+            ).limit(bounded)))
             alerts = rows(CollectionAlert)
             items = rows(ReconciliationItem)
             validations = rows(ValidationSummary)
             jobs = rows(OperatorJob)
-            usage = list(session.scalars(select(CollectorUsage).limit(bounded)))
-            collectors = list(session.scalars(select(CollectorIdentity).limit(bounded)))
+            usage = list(session.scalars(select(CollectorUsage).order_by(
+                CollectorUsage.collector_id.asc()
+            ).limit(bounded)))
+            collectors = list(session.scalars(select(CollectorIdentity).order_by(
+                CollectorIdentity.identity_id.asc()
+            ).limit(bounded)))
+            pointers = {
+                row.stream_key: row for row in session.scalars(select(PublicationPointer).where(
+                    PublicationPointer.stream_key.in_([stream.stream_key for stream in streams])
+                ))
+            }
+            active_ids = [row.active_publication_id for row in pointers.values()
+                          if row.active_publication_id]
+            publications = {
+                row.publication_id: row for row in session.scalars(select(PublicationVersion).where(
+                    PublicationVersion.publication_id.in_(active_ids)
+                ))
+            }
+            leases = {
+                row.collector_id: row for row in session.scalars(select(CollectorLease).where(
+                    CollectorLease.collector_id.in_([row.collector_id for row in usage])
+                ))
+            }
+
+        def stream_diagnostic(row: PublicationStream) -> dict[str, Any]:
+            available = row.publication_strategy != "never_schedule"
+            pointer = pointers.get(row.stream_key)
+            publication = publications.get(pointer.active_publication_id) if pointer else None
+            age_seconds: int | None = None
+            if not available:
+                freshness_status = "unavailable"
+            elif publication is None:
+                freshness_status = "missing"
+            else:
+                raw_age = max(0, math.floor((now - _aware(publication.created_at)).total_seconds()))
+                age_seconds = min(raw_age, MAX_DIAGNOSTIC_AGE_SECONDS)
+                threshold = FRESHNESS_RULE_SECONDS.get(row.freshness_rule)
+                freshness_status = "fresh" if threshold is not None and raw_age <= threshold else "stale"
+            activation_status = (
+                "unavailable" if not available else "active" if row.enabled else "inactive"
+            )
+            return {
+                "stream_key": row.stream_key, "provider": row.provider, "owner": row.owner,
+                "enabled": bool(row.enabled), "available": available,
+                "activation_status": activation_status,
+                "freshness_rule": row.freshness_rule,
+                "publication_id": publication.publication_id if publication else None,
+                "coverage_cutoff": _iso(publication.cutoff) if publication else None,
+                "fence": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(pointer.fence)))
+                if pointer else None,
+                "freshness_status": freshness_status, "age_seconds": age_seconds,
+            }
+
+        def usage_diagnostic(row: CollectorUsage) -> dict[str, Any]:
+            reset_at = _aware(row.window_started_at) + timedelta(seconds=USAGE_WINDOW_SECONDS)
+            retry_after = min(
+                MAX_DIAGNOSTIC_AGE_SECONDS,
+                max(0, math.ceil((reset_at - now).total_seconds())),
+            )
+            lease = leases.get(row.collector_id)
+            lease_active = lease is not None and _aware(lease.lease_expires_at) > now
+            concurrency_retry = (
+                min(MAX_DIAGNOSTIC_AGE_SECONDS, max(
+                    0, math.ceil((_aware(lease.lease_expires_at) - now).total_seconds())
+                )) if lease_active else 0
+            )
+            return {
+                "collector_id": row.collector_id,
+                "poll_count": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.poll_count or 0))),
+                "envelope_count": min(
+                    MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.envelope_count or 0))
+                ),
+                "byte_count": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.byte_count or 0))),
+                "concurrency_count": 1 if lease_active else 0,
+                "limits": {
+                    "poll_count": USAGE_MAX_POLLS, "envelope_count": USAGE_MAX_ENVELOPES,
+                    "byte_count": USAGE_MAX_BYTES,
+                    "concurrency_count": USAGE_MAX_CONCURRENCY,
+                },
+                "window_started_at": _iso(row.window_started_at),
+                "window_resets_at": _iso(reset_at),
+                "retry_after_seconds": retry_after,
+                "concurrency_retry_after_seconds": concurrency_retry,
+            }
         return {
             "cycles": [{"cycle_id": row.cycle_id, "season": row.season, "status": row.status, "cutoff": row.cutoff.isoformat()} for row in cycles],
-            "streams": [{"stream_key": row.stream_key, "provider": row.provider, "owner": row.owner, "enabled": row.enabled, "freshness_rule": row.freshness_rule} for row in streams],
-            "collectors": [{"identity_id": row.identity_id, "environment": row.environment, "revoked": row.revoked_at is not None, "last_seen_at": _iso(row.last_seen_at)} for row in collectors],
+            "streams": [stream_diagnostic(row) for row in streams],
+            "collectors": [{
+                "identity_id": row.identity_id, "environment": row.environment,
+                "revoked": row.revoked_at is not None, "last_seen_at": _iso(row.last_seen_at),
+                "release_version": row.release_version,
+                "release_checksum": row.release_checksum,
+            } for row in collectors],
             "alerts": [{"alert_id": row.alert_id, "severity": row.severity, "code": row.code, "status": row.status} for row in alerts],
             "reconciliation": [{"item_id": row.item_id, "season": row.season, "kind": row.kind, "reason": row.reason, "status": row.status} for row in items],
             "validation": [{"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status} for row in validations],
-            "usage": [{"collector_id": row.collector_id, "poll_count": row.poll_count, "envelope_count": row.envelope_count, "byte_count": row.byte_count} for row in usage],
+            "usage": [usage_diagnostic(row) for row in usage],
             "jobs": [{
                 "job_id": row.job_id, "action": row.action, "resource": row.resource,
                 "status": row.status, "created_at": row.created_at.isoformat(),

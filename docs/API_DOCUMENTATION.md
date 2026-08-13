@@ -1435,6 +1435,7 @@ idempotency keys, or non-retryable jobs) are `409 operation_conflict`.
 
 ```http
 POST /api/collector/token
+POST /api/collector/status
 GET /api/collector/discovery
 GET /api/collector/bootstrap
 GET /api/collector/bootstrap/<request_id>
@@ -1442,7 +1443,6 @@ GET /api/collector/bootstrap/<request_id>/status
 POST /api/collector/catalog/<request_id>
 GET /api/collector/manifest/<manifest_id>
 POST /api/collector/observations
-POST /api/collector/status
 POST /api/collector/credential-deliveries/<delivery_id>/claim
 POST /api/admin/collection/seasons/<season>
 POST /api/admin/collection/streams/<stream_key>/rollback
@@ -1484,9 +1484,6 @@ Each returned manifest also contains additive `scope_descriptors`. Every
 descriptor is bound to one authorized frozen scope and fixes its subject,
 category, all-30-team opponent identity, Season/exact-L15 window, and
 cutoff-derived `date_to`; the collector does not invent those parameters.
-`POST /api/collector/status` accepts exactly `state`, stable `reason`,
-`release_version`, and a 64-character `release_checksum`. Railway supplies
-`last_seen_at`; facts, provider responses, and arbitrary diagnostics are rejected.
 Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
 facts. A collector with the bootstrap/catalog scope publishes one catalog using
@@ -1544,6 +1541,70 @@ checksum observation rejection are recorded. Maintenance emits one first-failure
 alert, one stale-threshold alert, a six-hour `cycle_attention` alert, and one
 `recovery` alert when state clears; queued/running work suppresses failure and
 stale false positives.
+
+`POST /api/collector/status` accepts exactly `release_version` and
+`release_checksum`. The version is 1-64 characters from the bounded release
+identifier vocabulary (`A-Z`, `a-z`, digits, `.`, `_`, `+`, `-`), and the
+checksum is exactly 64 hexadecimal characters. The authenticated identity's
+`last_seen_at` and release evidence are persisted; payloads, secrets, player
+data, and arbitrary status fields are rejected.
+
+`GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
+rows per category). Its additive stream, collector, and usage rows have this
+exact shape; absent evidence is JSON `null`:
+
+```json
+{
+  "streams": [{
+    "stream_key": "synergy_play_types",
+    "provider": "nba",
+    "owner": "residential_collector",
+    "enabled": true,
+    "available": true,
+    "activation_status": "active",
+    "freshness_rule": "cutoff_current",
+    "publication_id": "publication-id",
+    "coverage_cutoff": "2026-08-12T00:00:00+00:00",
+    "fence": 4,
+    "freshness_status": "fresh",
+    "age_seconds": 30
+  }],
+  "collectors": [{
+    "identity_id": "collector-id",
+    "environment": "production",
+    "revoked": false,
+    "last_seen_at": "2026-08-12T00:00:00+00:00",
+    "release_version": "collector-1.2.3",
+    "release_checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }],
+  "usage": [{
+    "collector_id": "collector-id",
+    "poll_count": 2,
+    "envelope_count": 1,
+    "byte_count": 1024,
+    "concurrency_count": 0,
+    "limits": {
+      "poll_count": 100,
+      "envelope_count": 1000,
+      "byte_count": 52428800,
+      "concurrency_count": 1
+    },
+    "window_started_at": "2026-08-12T00:00:00+00:00",
+    "window_resets_at": "2026-08-13T00:00:00+00:00",
+    "retry_after_seconds": 3600,
+    "concurrency_retry_after_seconds": 0
+  }]
+}
+```
+
+`freshness_status` is closed to `fresh`, `stale`, `missing`, or
+`unavailable`. Age is the non-negative bounded age of the active publication;
+`cutoff_current`, `daily_recheck`, and `seven_day` use one-hour, 24-hour, and
+seven-day thresholds respectively, with the threshold instant still fresh. A
+missing active pointer is `missing`. Registry `never_schedule` streams are
+`unavailable`, report `available: false`, and remain rejected by activation.
+Usage retry timing is the remaining 24-hour counter window; concurrency retry
+timing is the remaining database lease.
 
 The rotation endpoint returns only a durable job/identity status; the new
 long-lived machine secret is never returned by an admin GET. During the

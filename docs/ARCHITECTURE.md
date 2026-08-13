@@ -2076,8 +2076,8 @@ catalog publication complete the executable Request -> Catalog -> Manifest
 handshake.
 Manifest discovery additively expands frozen authorized surfaces into bounded
 `scope_descriptors`; each descriptor fixes the team, category, Season/L15
-window, and cutoff-derived `date_to`. Collector status reports contain only a
-stable state/reason, release version/checksum, and server-owned `last_seen_at`.
+window, and cutoff-derived `date_to`. Collector status reports contain only
+the release version/checksum; Railway owns the persisted `last_seen_at`.
 Every operator mutation is coordinated by one service transaction that writes
 the state change, a durable `OperatorJob`, and its audit event together; a
 failed mutation cannot leave a succeeded job or audit trail. Publication
@@ -2130,6 +2130,23 @@ Athlete publication that covers every Event-derived identity, skipping newer
 incomplete attempts. Maintenance runs publication pruning after reconciliation
 and observation GC, while active/previous/rollback provenance remains
 protected.
+
+Collector release health crosses a separate machine-authenticated status seam.
+It persists only a validated 64-character release identifier/checksum pair and
+the report time on `collector_identities`; arbitrary fields, secrets, payloads,
+and player data do not cross that seam. Migration 023 adds the checksum column
+for existing deployments.
+
+Admin diagnostics join publication streams to their active pointer/version and
+join usage to the database lease. Stream availability is registry-derived:
+`never_schedule` is always `unavailable` and cannot be activated. Otherwise a
+missing active version is `missing`; active versions use the closed freshness
+rule thresholds (`cutoff_current` one hour, `daily_recheck` 24 hours,
+`seven_day` seven days) against the injected clock. Age and retry values are
+clamped to finite non-negative integers. Usage reports the configured 24-hour
+poll/envelope/byte ceilings, one active database lease as concurrency, the
+counter reset instant, and lease retry timing. Diagnostics expose identifiers
+and operational metadata only.
 
 Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap

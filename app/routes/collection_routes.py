@@ -190,20 +190,6 @@ def discover_collection_work():
     return jsonify(result)
 
 
-@collection_bp.post("/collector/status")
-@route_error_boundary("Failed to update collector status.")
-def update_collector_status():
-    claims = _collector_claims_any(("poll", "ingest", "bootstrap"))
-    body = _body()
-    if set(body) != {"state", "reason", "release_version", "release_checksum"}:
-        raise InvalidInputError("Collector status is malformed.", detail="invalid_collector_status")
-    try:
-        result = _service("collection_control").report_collector_status(claims=claims, **body)
-    except (ControlPlaneError, TypeError) as error:
-        raise _control_error(error) from error
-    return jsonify(result)
-
-
 @collection_bp.post("/collector/catalog/<request_id>")
 @route_error_boundary("Failed to publish the bootstrap catalog.")
 def publish_bootstrap_catalog(request_id: str):
@@ -320,6 +306,32 @@ def _collector_claims_any(required_scopes: tuple[str, ...]):
         if error.reason == "usage_limit":
             raise RateLimitedError(60, detail=error.reason) from error
         raise _control_error(error) from error
+
+
+@collection_bp.post("/collector/status")
+@route_error_boundary("Failed to record collector status.")
+def report_collector_status():
+    claims = _collector_claims_any(("poll", "ingest", "catalog_publish"))
+    body = _body()
+    if set(body) != {"release_version", "release_checksum"}:
+        raise InvalidInputError(
+            "Only bounded collector release metadata is accepted.",
+            detail="invalid_release_status",
+        )
+    try:
+        row = _service("collector_tokens").report_status(
+            claims,
+            release_version=body.get("release_version"),
+            release_checksum=body.get("release_checksum"),
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    return jsonify({
+        "identity_id": row.identity_id,
+        "last_seen_at": row.last_seen_at.isoformat(),
+        "release_version": row.release_version,
+        "release_checksum": row.release_checksum,
+    })
 
 
 @collection_bp.get("/collector/manifest/<manifest_id>")

@@ -197,13 +197,13 @@ class ResidentialCollector:
     def _token(self) -> CollectorToken:
         return self.client.exchange_token(self._secret_value(), ttl_seconds=self.token_ttl_seconds)
 
-    def _report_status(self, token: CollectorToken, *, state: str, reason: str) -> None:
+    def _report_status(self, token: CollectorToken) -> None:
         if not self.release_checksum:
             return
         try:
             self.client.report_status(
-                token, state=state, reason=safe_code(reason),
-                release_version=self.release_version, release_checksum=self.release_checksum,
+                token, release_version=self.release_version,
+                release_checksum=self.release_checksum,
             )
         except CollectorHTTPError:
             self.status.record("railway_unavailable")
@@ -354,7 +354,7 @@ class ResidentialCollector:
             token_failure: str | None = None
             try:
                 token = self._token()
-                self._report_status(token, state="running", reason="work_pending")
+                self._report_status(token)
             except CollectorHTTPError as error:
                 token_failure = safe_code(error.reason, fallback="token_failure")
                 if not error.retryable:
@@ -466,9 +466,6 @@ class ResidentialCollector:
                 attempted=attempted, spooled=spooled, uploaded=uploaded,
                 skipped=tuple(skipped), failures=tuple(local_failures),
             )
-            if token is not None:
-                state = "pending" if disposition is RunDisposition.RETRY else disposition.value
-                self._report_status(token, state=state, reason=(local_failures[0] if local_failures else disposition.value))
             return result
         finally:
             lease_context.__exit__(None, None, None)
