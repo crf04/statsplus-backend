@@ -767,6 +767,54 @@ whole-unit retry never erases working game logs.  The legacy season-wide NBA
 refresh remains available as a tested backfill seam but is no longer wired
 into Nightly Refresh.
 
+### Canonical Game Ledger and derived Regular Season streams (#86)
+
+The inactive Canonical Game Ledger is the governed source for the next
+generation of Regular Season Matchups facts. It is deliberately separate from
+the public `player_game_logs` reader and from the Railway control-plane
+routes. `app.services.canonical_game_ledger` accepts one normalized PBP
+`FullGame` observation and requires one canonical game identity, exactly two
+team fact sets, and all participating player facts. The stored superset is
+count primitives only (shooting, rebounds, assists, turnovers, steals,
+blocks, fouls, free throws, and minutes, plus optional assist-location
+counters); plus/minus and permanent period rows are not part of the ledger.
+
+`CanonicalGameLedgerRepository.replace_game` and
+`replace_games_atomic` validate the complete-game participant and count
+invariants before deleting anything. A repeated checksum is idempotent; a
+new observation with the same game identity replaces the game, team facts,
+and player facts in one transaction. A failed or incomplete candidate leaves
+the prior correction and its checksum untouched. The repository creates its
+additive tables on an application database (never the read-only demo fixture)
+so historical rehearsal can run against a temporary database without
+activating a public reader.
+
+`app.services.ledger_backfill.LedgerBackfillService` discovers final,
+non-postponed Regular Season Event Catalog games through an explicit cutoff,
+fetches newest first behind an injected bounded worker pool, and persists
+cursor/completed/failed progress. Missing games have priority, games seven
+days old or newer are rechecked daily, games through day 30 are rechecked
+weekly, and older games require explicit historical repair. Any failed target
+keeps the previous valid publication and reports the season as unavailable;
+unknown player identities can be sent to a bounded reconciliation sink rather
+than dropped.
+
+`app.services.ledger_derivations` owns all derived semantics: traditional
+opponent facts read the opposing team fact, assist locations require a
+complete location observation, and per-36 values aggregate count primitives by
+canonical player while retaining every team-at-game identity. Season and
+exact L15 materialization selects governed game IDs only and refuses to call a
+window complete until all 30 governed teams are present (and L15 has 15
+eligible games for each). League averages use the population denominator;
+team values are normalized to per-48 from the retained effective team-minute
+denominator (player minutes divided by five, with count-per-game fallback for
+hand-built replay facts), and competition ranks are deterministic with ties
+represented as `1, 1, 3`.
+`LedgerMaterializationService` records inactive stream metadata and never
+enables public Matchups routes. `ledger_parity` produces semantic PBP-versus-
+legacy differences for adjudication; it deliberately does not claim byte
+parity for provider percentages or rates.
+
 ### Database-first game-log reads
 
 Stage 3 makes Postgres the preferred read path.  `PlayerGameLogRepository`

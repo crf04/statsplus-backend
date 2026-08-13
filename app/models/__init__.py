@@ -77,6 +77,13 @@ from .player_game_log import (  # noqa: E402
     PlayerGameLogRefresh,
     PlayerGameLogSync,
 )
+from .canonical_game_ledger import (  # noqa: E402
+    CanonicalGameLedgerGame,
+    CanonicalGameLedgerTeamFact,
+    CanonicalGameLedgerPlayerFact,
+    LedgerBackfillState,
+    LedgerPublication,
+)
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
@@ -134,6 +141,11 @@ __all__ = [
     'PlayerGameLog',
     'PlayerGameLogRefresh',
     'PlayerGameLogSync',
+    'CanonicalGameLedgerGame',
+    'CanonicalGameLedgerTeamFact',
+    'CanonicalGameLedgerPlayerFact',
+    'LedgerBackfillState',
+    'LedgerPublication',
     'TeamMatchupFactRow',
     'TeamMatchupSurfaceObservationRow',
     'InjurySnapshot',

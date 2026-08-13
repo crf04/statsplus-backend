@@ -475,6 +475,29 @@ def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
     ))
 
 
+def _create_canonical_game_ledger_tables(connection: Connection) -> None:
+    """Create the inactive Canonical Game Ledger publication family (#86)."""
+
+    from app.models.canonical_game_ledger import (
+        CanonicalGameLedgerGame,
+        CanonicalGameLedgerPlayerFact,
+        CanonicalGameLedgerTeamFact,
+        LedgerBackfillState,
+        LedgerPublication,
+    )
+
+    # The game row is the parent for both complete fact sets.  Explicit order
+    # keeps PostgreSQL foreign-key additions safe when the models gain them.
+    for model in (
+        CanonicalGameLedgerGame,
+        CanonicalGameLedgerTeamFact,
+        CanonicalGameLedgerPlayerFact,
+        LedgerBackfillState,
+        LedgerPublication,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -506,6 +529,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(20, "020_operator_control", _upgrade_operator_control),
     Migration(21, "021_collector_surface_authorization", _upgrade_collector_surface_authorization),
     Migration(22, "022_publication_provenance_reconciliation", _upgrade_provenance_and_reconciliation),
+    Migration(23, "023_canonical_game_ledger", _create_canonical_game_ledger_tables),
 )
 
 

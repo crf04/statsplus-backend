@@ -1034,6 +1034,37 @@ governed only by their season sidecar and are not hidden by missing, stale, or
 newer current-season observations.
 These stored facts back future matchup rail and selection reads; this slice
 adds no public matchup route and does not change `GET /api/games/game_logs`.
+
+### Canonical Game Ledger rehearsal (#86)
+
+The #86 ledger is an inactive scheduled/materialization seam, not an HTTP
+surface. `LedgerBackfillService` reads only final, non-postponed Regular
+Season Event Catalog games through an explicit cutoff and fetches PBP
+`/get-game-stats` observations newest first with bounded concurrency. Missing
+games are fetched before daily rechecks (through day seven); weekly rechecks
+continue through day 30; older games require an explicit historical repair.
+The service stores resumable cursor/completed/failed progress and reports an
+incomplete season as unavailable rather than exposing a partial publication.
+
+Each accepted observation is one atomic Canonical Game Ledger unit: one game
+identity, two team fact sets, and all participating player FullGame facts.
+Repeated normalized checksums are idempotent. A correction with the same
+canonical game identity replaces the complete game and all dependent facts in
+one transaction. Invalid counts, missing active participants, contradictory
+phase/team identity, or unresolved athletes fail closed and retain the prior
+valid game.
+
+Traditional opponent, assist-location, and player per-36 facts are derived
+from ledger count primitives. Traded players aggregate counts by canonical
+identity while retaining team-at-game evidence; provider percentages are never
+summed. Season and exact Regular Season L15 team windows require League
+Complete evidence for all 30 teams, normalize team count totals to per-48 from
+the retained effective team-minute denominator, use population sigma and deterministic
+competition ranks, and stay unavailable before the L15 15-game floor. These
+streams produce inactive publication metadata only and do not activate a
+public Matchups reader or change frontend behavior. PBP-versus-legacy
+semantic differences are retained as adjudication evidence rather than
+treated as false byte-parity failures.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns
