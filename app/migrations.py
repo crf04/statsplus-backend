@@ -505,7 +505,15 @@ def _repair_canonical_game_ledger_tables(connection: Connection) -> None:
 
 
 def _create_ledger_raw_row_evidence(connection: Connection) -> None:
-    """Create the immutable complete PBP row archive for accepted games (#112)."""
+    """Create the immutable complete PBP row archive for accepted games (#112).
+
+    Games accepted before this migration were archived only as typed facts:
+    they carry ``raw_checksum`` NULL and no ``canonical_game_ledger_raw_rows``
+    rows.  The backfill re-fetches and re-archives them
+    (``game_ids_without_raw_evidence``) before a season reports complete, so
+    every accepted governed game eventually retains both team-summary and every
+    player-row evidence.
+    """
 
     from app.models.canonical_game_ledger import LedgerGameRowEvidence
 

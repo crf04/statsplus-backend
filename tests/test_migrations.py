@@ -375,6 +375,47 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
+def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-031.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 31),
+        )
+        assert run_migrations(engine).current_version == 31
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO canonical_game_ledger_games (
+                game_id, season, season_type, game_date,
+                home_team_id, home_team_tricode, away_team_id, away_team_tricode,
+                status, source_observation_id, checksum, retrieved_at, updated_at
+            ) VALUES (
+                '0022400001', '2024-25', 'Regular Season', '2024-11-15',
+                1610612747, 'LAL', 1610612759, 'SAS',
+                'final', 'legacy:0022400001', 'legacy-checksum',
+                '2024-11-16 00:00:00', '2024-11-16 00:00:00'
+            )
+        """))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == ("032_ledger_raw_row_evidence",)
+    assert upgraded.current_version == 32
+    assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
+    with engine.connect() as connection:
+        raw_checksum = connection.execute(text(
+            "SELECT raw_checksum FROM canonical_game_ledger_games "
+            "WHERE game_id = '0022400001'"
+        )).scalar_one()
+        raw_count = connection.execute(text(
+            "SELECT COUNT(*) FROM canonical_game_ledger_raw_rows WHERE game_id = '0022400001'"
+        )).scalar_one()
+    assert raw_checksum is None
+    assert raw_count == 0
+
+
 def test_postgres_migrations_take_one_transaction_advisory_lock():
     from unittest.mock import Mock
 

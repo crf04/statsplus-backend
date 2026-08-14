@@ -289,7 +289,7 @@ class LedgerBackfillService:
             raise LedgerValidationError("canonical game ledger manifest scope is required")
         if accepted_versions is None or schema_version not in accepted_versions:
             raise LedgerValidationError("authorized ledger schema version is required")
-        retrieved_at = _aware(self.clock())
+        started_at = _aware(self.clock())
         through = _aware(cutoff)
         with self.repository.engine.connect() as connection:
             manifest = connection.execute(select(CollectionManifest).where(
@@ -301,7 +301,7 @@ class LedgerBackfillService:
         if (
             manifest is None
             or _aware(manifest["collect_before"]) != _aware(collect_before)
-            or _aware(manifest["collect_before"]) <= retrieved_at
+            or _aware(manifest["collect_before"]) <= started_at
             or manifest_scope not in set(json.loads(manifest["scopes"]))
             or schema_version not in set(json.loads(manifest["accepted_versions"]))
         ):
@@ -313,12 +313,16 @@ class LedgerBackfillService:
             summary.game_id: summary
             for summary in self.repository.list_games(season, through=through.date())
         }
+        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(
+            season, through=through.date()
+        )
         targets = self._targets(
             events,
             checksums=checksums,
             summaries=summaries,
-            now=retrieved_at,
+            now=started_at,
             repair=historical_repair,
+            missing_raw_evidence=missing_raw_evidence,
         )
         if max_games is not None:
             if isinstance(max_games, bool) or max_games < 1:
@@ -329,7 +333,7 @@ class LedgerBackfillService:
             selected = targets
             lower_priority_remaining = 0
 
-        athlete_ids = self._athlete_ids(season, now=retrieved_at)
+        athlete_ids = self._athlete_ids(season, now=started_at)
         failures: list[str] = []
         writes = []
         processed = 0
@@ -344,6 +348,10 @@ class LedgerBackfillService:
             validated = False
             try:
                 observation = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
+                # Provenance is per retrieval: capture the time this response
+                # was actually returned, not the batch start, so each staged
+                # observation and archived row records its own retrieval time.
+                retrieved_at = _aware(self.clock())
                 observation_id, observation_values = self.observation_recorder.stage(
                     observation,
                     season=season,
@@ -430,7 +438,10 @@ class LedgerBackfillService:
             summary.game_id
             for summary in self.repository.list_games(season, through=through.date())
         }
-        complete = expected_ids == resulting_ids
+        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(
+            season, through=through.date()
+        )
+        complete = expected_ids == resulting_ids and not missing_raw_evidence
         pending = tuple(sorted(expected_ids - resulting_ids))
         status = "complete" if complete else "unavailable"
         self._save_progress(
@@ -492,12 +503,18 @@ class LedgerBackfillService:
         summaries: Mapping[str, object],
         now: datetime,
         repair: bool,
+        missing_raw_evidence: Iterable[str] = (),
     ) -> tuple[_Target, ...]:
         targets: list[_Target] = []
+        missing_raw_evidence = frozenset(missing_raw_evidence)
         for event in events:
             game_id = str(event["nba_game_id"])
             summary = summaries.get(game_id)
-            if game_id not in checksums:
+            # A stored game without complete raw PBP evidence (for example a
+            # game accepted before migration 032) is as incomplete as a missing
+            # game: re-fetch it regardless of age so it cannot permanently lack
+            # both team-summary and player-row evidence.
+            if game_id not in checksums or game_id in missing_raw_evidence:
                 targets.append(_Target(event, 0))
                 continue
             if repair:

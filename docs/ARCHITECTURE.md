@@ -797,8 +797,10 @@ and player facts in one transaction. A failed or incomplete candidate leaves
 the prior correction and its checksum untouched. Provider participant evidence
 must exactly equal the retained player set (including zero-minute participants).
 Migration `024_canonical_game_ledger` remains the schema owner for the typed
-ledger tables; repository construction fails clearly when it has not run, and
-the read-only demo fixture is never eligible.
+ledger tables and migration `032_ledger_raw_row_evidence` owns the raw archive;
+repository construction fails clearly naming migration 032 (the latest ledger
+migration) when any owned table is missing, and the read-only demo fixture is
+never eligible.
 
 #### Complete PBP row evidence archive (#113)
 
@@ -808,7 +810,11 @@ Home and Away `FullGame` row sets as immutable raw JSON evidence. Migration
 `raw_checksum` column to the canonical game row; the raw archive is written in
 the same transaction as the typed game, team, and player facts, so acceptance,
 replacement, and correction remain one atomic operation and readers never see a
-mixed raw/typed version.
+mixed raw/typed version. Games accepted before migration 032 were archived only
+as typed facts: they carry `raw_checksum` NULL and no raw rows. The backfill
+treats those games as incomplete (`game_ids_without_raw_evidence`) and re-fetches
+them regardless of age, and the season never reports complete until every
+governed game retains both team-summary and every player-row evidence.
 
 `canonical_game_from_pbp` archives both the provider team-summary rows
 (`EntityId == 0` / `Name == Team`) and every participating player row from each
@@ -821,7 +827,11 @@ retrieval time, a deterministic row checksum, the exact observed field set
 `observed_fields` is stored separately from the payload so additive schema drift
 is visible and non-destructive: a corrected observation that adds a provider
 field changes the field-set metadata and the raw checksum without touching the
-typed primitive set. At the repository boundary each archived row's row type
+typed primitive set. A replacement whose corresponding archived rows change
+their observed field sets also records an operator alert: the repository emits
+a bounded `schema_drift` reconciliation item (`record_schema_drift`) inside the
+same correction transaction, so drift is recorded and alerted while the valid
+correction still lands. At the repository boundary each archived row's row type
 and entity metadata must agree with its payload identity: a team-summary row
 must be payload-identified as a team aggregate (`EntityId` `0`/`None` or
 `Name` `Team`) and carry no player entity metadata, and a player row's metadata
@@ -851,7 +861,10 @@ repository boundary). The order is used consistently for
 hashing, persistence, and reload, so a game loaded from storage and replaced
 unchanged is an idempotent replay that changes no persisted evidence.
 Semantically identical replays produce identical checksums, so replaying an
-accepted observation is idempotent and changes no persisted evidence. Because
+accepted observation is idempotent and changes no persisted evidence: the
+repository detects the checksum no-op before inserting the accepted observation,
+so an identical replay persists no new `CollectionObservation` row and the
+per-attempt observation identity never collides. Because
 the raw checksum is independent of
 the typed `checksum`, a raw-only correction (a provider field that does not
 change any typed primitive) is still recognized as a replacement rather than an
@@ -907,10 +920,15 @@ non-postponed Regular Season Event Catalog games through an explicit cutoff,
 fetches newest first behind an injected bounded worker pool, and persists
 cursor/completed/failed progress. Missing games have priority, games seven
 days old or newer are rechecked daily, games through day 30 are rechecked
-weekly, and older games require explicit historical repair. Any failed target
-keeps the previous valid publication and reports the season as unavailable;
-unknown player identities can be sent to a bounded reconciliation sink rather
-than dropped.
+weekly, and older games require explicit historical repair; a stored game that
+lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
+priority regardless of age. Each provider response records its own timezone-aware
+retrieval time at the moment it returns, so every staged observation and
+archived row carries that response's retrieval time rather than the batch start.
+Any failed target keeps the previous valid publication and reports the season as
+unavailable; the season reports complete only when every governed game is
+stored with complete raw evidence. Unknown player identities can be sent to a
+bounded reconciliation sink rather than dropped.
 
 `app.services.ledger_derivations` owns all derived semantics: traditional
 opponent facts read the opposing team fact, assist locations require a

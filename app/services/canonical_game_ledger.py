@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
@@ -20,7 +21,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import case, delete, insert, inspect, select, update
+from sqlalchemy import case, delete, exists, insert, inspect, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -109,7 +110,7 @@ class LedgerValidationError(ValueError):
 
 
 class LedgerSchemaUnavailable(RuntimeError):
-    """Migration 024 has not provisioned the Canonical Game Ledger schema."""
+    """Migration 032 has not provisioned the Canonical Game Ledger schema."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1529,6 +1530,28 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     return replace(game, checksum=checksum, retrieved_at=assume_utc(game.retrieved_at))
 
 
+def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> None:
+    """Record one additive schema-drift correction as an operator alert.
+
+    The reconciliation row is written inside the ledger correction transaction,
+    so the drift alert commits atomically with the replacement evidence it
+    describes and is surfaced through the control-plane reconciliation queue.
+    """
+
+    from app.models.collection_control import ReconciliationItem
+
+    details = dict(drift.get("details") or {})
+    connection.execute(ReconciliationItem.__table__.insert().values(
+        item_id=str(uuid.uuid4()),
+        season=str(drift.get("season") or "")[:7],
+        kind=str(drift.get("kind") or "schema_drift")[:64],
+        reason=str(drift.get("reason") or "field_set_change")[:64],
+        details=json.dumps(details, sort_keys=True, separators=(",", ":")),
+        status="open",
+        created_at=datetime.now(timezone.utc),
+    ))
+
+
 class CanonicalGameLedgerRepository:
     """Temporary-DB friendly atomic repository for complete games and progress."""
 
@@ -1537,11 +1560,13 @@ class CanonicalGameLedgerRepository:
         engine: Engine,
         *,
         correction_sink: Callable[[Connection, CanonicalGame], None] | None = None,
+        schema_drift_sink: Callable[[Connection, Mapping[str, object]], None] | None = None,
     ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store ledger facts")
         self.engine = engine
         self.correction_sink = correction_sink
+        self.schema_drift_sink = schema_drift_sink
         required = {
             CanonicalGameLedgerGame.__tablename__,
             CanonicalGameLedgerTeamFact.__tablename__,
@@ -1553,8 +1578,9 @@ class CanonicalGameLedgerRepository:
         missing = sorted(required - set(inspect(engine).get_table_names()))
         if missing:
             raise LedgerSchemaUnavailable(
-                "Canonical Game Ledger schema is unavailable; apply migration 024 "
-                f"before constructing the repository (missing: {', '.join(missing)})"
+                "Canonical Game Ledger schema is unavailable; apply migration 032 "
+                "and the latest migrations before constructing the repository "
+                f"(missing: {', '.join(missing)})"
             )
 
     def replace_game(self, game: CanonicalGame) -> LedgerWriteResult:
@@ -1598,10 +1624,37 @@ class CanonicalGameLedgerRepository:
                     candidates,
                     accepted_observations,
                 )
-                connection.execute(
-                    CollectionObservation.__table__.insert(),
-                    [dict(accepted_observations[observation_id]) for observation_id in sorted(expected_observations)],
-                )
+                candidate_by_observation = {
+                    candidate.source_observation_id: candidate
+                    for candidate in candidates
+                }
+                existing_rows = {
+                    row["game_id"]: row
+                    for row in connection.execute(select(
+                        tables["game"].c.game_id,
+                        tables["game"].c.checksum,
+                        tables["game"].c.raw_checksum,
+                    ).where(tables["game"].c.game_id.in_(
+                        [candidate.game_id for candidate in candidates]
+                    ))).mappings()
+                }
+                # An identical replay is an idempotent no-op: persist no new
+                # observation evidence for it.  Inserting the observation before
+                # the checksum no-op would otherwise append evidence on every
+                # replay, and reusing one observation identity would collide.
+                pending_observations = {
+                    observation_id: accepted_observations[observation_id]
+                    for observation_id in expected_observations
+                    if not self._is_idempotent_replay(
+                        existing_rows.get(candidate_by_observation[observation_id].game_id),
+                        candidate_by_observation[observation_id],
+                    )
+                }
+                if pending_observations:
+                    connection.execute(
+                        CollectionObservation.__table__.insert(),
+                        [dict(pending_observations[observation_id]) for observation_id in sorted(pending_observations)],
+                    )
             for candidate in candidates:
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
@@ -1679,6 +1732,77 @@ class CanonicalGameLedgerRepository:
             ):
                 raise LedgerValidationError("accepted ledger evidence is not manifest authorized")
 
+    @staticmethod
+    def _is_idempotent_replay(
+        existing: Mapping[str, Any] | None,
+        candidate: CanonicalGame,
+    ) -> bool:
+        """True when the stored game already matches this exact candidate.
+
+        The raw checksum is compared separately from the typed checksum so a
+        raw-only correction (a provider field that changes no typed primitive)
+        is still recognized as a replacement rather than an idempotent replay.
+        """
+        return (
+            existing is not None
+            and existing["checksum"] == candidate.checksum
+            and (existing["raw_checksum"] or "") == (candidate.raw_checksum or "")
+        )
+
+    def _schema_drift_payload(
+        self,
+        connection: Connection,
+        candidate: CanonicalGame,
+        existing: Mapping[str, Any] | None,
+        tables: Mapping[str, Any],
+    ) -> Mapping[str, object] | None:
+        """Compare a replacement's observed field sets with the prior evidence.
+
+        A correction whose corresponding archived rows gain or lose provider
+        fields is additive schema drift: it must be recorded and alerted to
+        operators without rejecting the otherwise valid replacement.
+        """
+        if existing is None or not candidate.raw_rows:
+            return None
+        raw_rows = connection.execute(select(
+            tables["raw"].c.side,
+            tables["raw"].c.row_type,
+            tables["raw"].c.row_index,
+            tables["raw"].c.observed_fields,
+        ).where(tables["raw"].c.game_id == candidate.game_id)).mappings().all()
+        if not raw_rows:
+            return None
+
+        def row_key(row: Any) -> tuple[Any, Any, Any]:
+            return (row["side"], row["row_type"], row["row_index"])
+
+        existing_fields = {
+            row_key(row): frozenset(json.loads(row["observed_fields"] or "[]"))
+            for row in raw_rows
+        }
+        candidate_fields = {
+            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
+            for row in candidate.raw_rows
+        }
+        added: set[str] = set()
+        removed: set[str] = set()
+        for key in existing_fields.keys() & candidate_fields.keys():
+            added |= candidate_fields[key] - existing_fields[key]
+            removed |= existing_fields[key] - candidate_fields[key]
+        if not added and not removed:
+            return None
+        return {
+            "season": candidate.season,
+            "game_id": candidate.game_id,
+            "kind": "schema_drift",
+            "reason": "field_set_change",
+            "details": {
+                "added_fields": tuple(sorted(added))[:25],
+                "removed_fields": tuple(sorted(removed))[:25],
+                "schema_version": LEDGER_SCHEMA_VERSION,
+            },
+        }
+
     def _replace_candidate(
         self,
         connection: Connection,
@@ -1690,12 +1814,9 @@ class CanonicalGameLedgerRepository:
         ).mappings().one_or_none()
         if existing is not None and self._identity_changed(existing, candidate):
             raise LedgerValidationError("a correction cannot change a game's canonical identity")
-        if (
-            existing is not None
-            and existing["checksum"] == candidate.checksum
-            and (existing["raw_checksum"] or "") == (candidate.raw_checksum or "")
-        ):
+        if self._is_idempotent_replay(existing, candidate):
             return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
+        drift = self._schema_drift_payload(connection, candidate, existing, tables)
         self._delete_game(connection, candidate.game_id, tables)
         connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
         connection.execute(
@@ -1721,6 +1842,8 @@ class CanonicalGameLedgerRepository:
             )
         if self.correction_sink is not None:
             self.correction_sink(connection, candidate)
+        if drift is not None and self.schema_drift_sink is not None:
+            self.schema_drift_sink(connection, drift)
         return LedgerWriteResult(
             candidate.game_id,
             candidate.checksum or "",
@@ -1774,6 +1897,36 @@ class CanonicalGameLedgerRepository:
         with self.engine.connect() as connection:
             rows = connection.execute(statement).all()
         return {str(game_id): str(checksum) for game_id, checksum in rows}
+
+    def game_ids_without_raw_evidence(
+        self,
+        season: str,
+        *,
+        through: date | datetime | None = None,
+    ) -> frozenset[str]:
+        """Return stored game rows that lack the complete raw PBP row archive.
+
+        Migration 032 creates the raw archive after earlier ledger games were
+        already accepted, so those games carry ``raw_checksum`` NULL and no
+        ``canonical_game_ledger_raw_rows``.  The backfill must re-fetch them and
+        the season must not report complete until every governed game retains
+        both team-summary and every player-row evidence.
+        """
+        canonical_season = validate_canonical_season(season)
+        game_table = CanonicalGameLedgerGame.__table__
+        raw_table = LedgerGameRowEvidence.__table__
+        statement = (
+            select(game_table.c.game_id)
+            .where(game_table.c.season == canonical_season)
+            .where(or_(
+                game_table.c.raw_checksum.is_(None),
+                ~exists(select(1).where(raw_table.c.game_id == game_table.c.game_id)),
+            ))
+        )
+        if through is not None:
+            statement = statement.where(game_table.c.game_date <= _canonical_date(through))
+        with self.engine.connect() as connection:
+            return frozenset(str(row[0]) for row in connection.execute(statement).all())
 
     def save_progress(self, progress: LedgerBackfillProgress) -> None:
         table = LedgerBackfillState.__table__
@@ -2035,5 +2188,6 @@ __all__ = [
     "game_checksum",
     "raw_checksum",
     "raw_rows_from_facts",
+    "record_schema_drift",
     "validate_complete_game",
 ]

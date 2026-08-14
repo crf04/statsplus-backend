@@ -18,7 +18,7 @@ from app.models.canonical_game_ledger import (
     LedgerGameRowEvidence,
     LedgerPublication,
 )
-from app.models.collection_control import CompositionJob
+from app.models.collection_control import CompositionJob, ReconciliationItem
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerValidationError,
@@ -27,6 +27,7 @@ from app.services.canonical_game_ledger import (
     canonical_game_from_pbp,
     canonical_row_checksum,
     raw_rows_from_facts,
+    record_schema_drift,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_derivations import derive_assist_location_facts
@@ -74,7 +75,7 @@ def test_repository_requires_versioned_ledger_migration(tmp_path):
     try:
         CanonicalGameLedgerRepository(engine)
     except LedgerSchemaUnavailable as error:
-        assert "migration 024" in str(error)
+        assert "migration 032" in str(error)
     else:
         raise AssertionError("unmigrated ledger repository unexpectedly constructed")
 
@@ -926,10 +927,13 @@ def test_missing_optional_expanded_field_preserves_game_and_dependent_fact():
     assert "Arc3Assists" not in archived.payload
 
 
-def test_schema_drift_is_observed_in_field_set_metadata(tmp_path):
+def test_schema_drift_is_recorded_and_alerted_when_field_sets_change(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'schema_drift.sqlite3'}")
     run_migrations(engine)
-    repository = CanonicalGameLedgerRepository(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        schema_drift_sink=record_schema_drift,
+    )
     payload = _raw_observation_with_unknown_fields()
     game = canonical_game_from_pbp(
         payload,
@@ -962,8 +966,69 @@ def test_schema_drift_is_observed_in_field_set_metadata(tmp_path):
         row = connection.execute(select(LedgerGameRowEvidence).where(
             LedgerGameRowEvidence.entity_id == 2544
         )).mappings().one()
+        alert = connection.execute(select(ReconciliationItem).where(
+            ReconciliationItem.kind == "schema_drift"
+        )).mappings().one()
     assert "ProviderAddedField" in json.loads(row["observed_fields"])
     assert json.loads(row["payload"])["ProviderAddedField"] == 7
+    assert alert["season"] == "2024-25"
+    assert alert["reason"] == "field_set_change"
+    assert alert["status"] == "open"
+    assert json.loads(alert["details"])["added_fields"] == ["ProviderAddedField"]
+    assert json.loads(alert["details"])["removed_fields"] == []
+
+
+def test_unchanged_replacement_emits_no_schema_drift_alert(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'no-drift.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        schema_drift_sink=record_schema_drift,
+    )
+    game = canonical_game_from_pbp(
+        _raw_observation_with_unknown_fields(),
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+    repository.replace_game(game)
+    assert repository.replace_game(game).inserted is False
+    assert repository.replace_game(game).replaced is False
+    with engine.connect() as connection:
+        assert connection.execute(select(ReconciliationItem)).all() == []
+
+
+def test_pre_migration_games_without_raw_evidence_are_detected(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'pre032.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    repository.replace_game(game)
+    assert repository.game_ids_without_raw_evidence("2024-25") == frozenset()
+
+    # Simulate a game accepted before migration 032: typed facts only, a NULL
+    # raw_checksum, and no archived raw rows.
+    with engine.begin() as connection:
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id="0022400002", season="2024-25", season_type="Regular Season",
+            game_date=date(2024, 11, 14),
+            home_team_id=1610612747, home_team_tricode="LAL",
+            away_team_id=1610612759, away_team_tricode="SAS",
+            status="final", source_observation_id="legacy:0022400002",
+            checksum="legacy-typed-checksum",
+            raw_checksum=None,
+            retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+        ))
+    assert repository.game_ids_without_raw_evidence("2024-25") == frozenset({"0022400002"})
+    assert repository.game_ids_without_raw_evidence(
+        "2024-25", through=date(2024, 11, 14),
+    ) == frozenset({"0022400002"})
+    assert repository.game_ids_without_raw_evidence(
+        "2024-25", through=date(2024, 11, 13),
+    ) == frozenset()
 
 
 def test_missing_required_count_evidence_rejects_the_complete_game_atomically(tmp_path):

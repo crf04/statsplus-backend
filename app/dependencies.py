@@ -307,6 +307,7 @@ def build_dependencies(
         from app.services.canonical_game_ledger import (
             CanonicalGameLedgerRepository,
             LedgerSchemaUnavailable,
+            record_schema_drift,
         )
         from app.services.ledger_backfill import (
             AcceptedObservationParticipantCatalog,
@@ -326,12 +327,13 @@ def build_dependencies(
             canonical_game_ledger_repository = CanonicalGameLedgerRepository(
                 engine,
                 correction_sink=LedgerCorrectionQueue(require_governance=True),
+                schema_drift_sink=record_schema_drift,
             )
         except LedgerSchemaUnavailable:
             # Narrow route tests intentionally bind the app to minimal fixture
             # databases while disabling schema creation.  Ledger workers are
             # not part of those request seams; production/staging must still
-            # fail startup when migration 024 has not been applied.
+            # fail startup when migration 032 has not been applied.
             if settings.environment != "testing":
                 raise
         else:
