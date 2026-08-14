@@ -252,6 +252,11 @@ class LedgerMaterializationService:
                 )
             parity_specs = (
                 (
+                    "player_game_logs",
+                    "player_game_logs",
+                    "legacy_rows",
+                ),
+                (
                     "traditional_opponent_season",
                     "traditional_opponent",
                     "legacy_traditional_rows",
@@ -277,12 +282,19 @@ class LedgerMaterializationService:
                 else:
                     try:
                         diagnostic_rows = self.parity_reader.read(diagnostic_key)
-                        report = compare_ledger_to_legacy(
-                            eligible,
-                            None,
-                            season=canonical_season,
-                            **{comparison_key: diagnostic_rows},
-                        )
+                        if comparison_key == "legacy_rows":
+                            report = compare_ledger_to_legacy(
+                                eligible,
+                                diagnostic_rows,
+                                season=canonical_season,
+                            )
+                        else:
+                            report = compare_ledger_to_legacy(
+                                eligible,
+                                None,
+                                season=canonical_season,
+                                **{comparison_key: diagnostic_rows},
+                            )
                     except (KeyError, RuntimeError, ValueError) as error:
                         report = _unavailable_parity_report(
                             canonical_season,

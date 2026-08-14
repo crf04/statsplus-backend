@@ -2316,6 +2316,7 @@ class PublicationService(_SessionService):
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
             parity_stream = stream_key if stream_key in {
+                "player_game_logs",
                 "traditional_opponent",
                 "traditional_opponent_season",
                 "traditional_opponent_l15",

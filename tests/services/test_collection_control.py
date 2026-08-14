@@ -223,10 +223,10 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             candidate_publication_id="parity-candidate",
         )
 
-    unrelated = publications.activate_stream(
-        "player_game_logs", reason="independent rehearsal reviewed"
-    )
-    assert unrelated.enabled
+    with pytest.raises(ControlPlaneError, match="ledger_parity_evidence_required"):
+        publications.activate_stream(
+            "player_game_logs", reason="unproven ledger candidate"
+        )
     with control_db.begin() as connection:
         connection.execute(LedgerParityArtifact.__table__.update().where(
             LedgerParityArtifact.artifact_id == "pending-parity",

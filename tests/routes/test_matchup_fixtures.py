@@ -24,6 +24,7 @@ from app.models.collection_control import (
     PublicationObservation,
     PublicationVersion,
 )
+from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.event_catalog_service import EventCatalogService
 from app.services.database_first_activation import (
@@ -1021,14 +1022,41 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     second_log = "journey-log-second"
     first_log_payload = log_payload(25)
     second_log_payload = log_payload(26)
-    candidate(
+    first_log_checksum = candidate(
         "player_game_logs", first_log_payload, publication_id=first_log,
         observation_id="journey-observation-first",
     )
-    candidate(
+    second_log_checksum = candidate(
         "player_game_logs", second_log_payload, publication_id=second_log,
         observation_id="journey-observation-second",
     )
+    first_parity = "journey-parity-first"
+    second_parity = "journey-parity-second"
+    with engine.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.insert(), [
+            {
+                "artifact_id": first_parity,
+                "publication_id": first_log,
+                "payload_checksum": first_log_checksum,
+                "stream_key": "player_game_logs",
+                "season": SEASON,
+                "cutoff": NOW - timedelta(days=1),
+                "status": "exact",
+                "report": "{}",
+                "created_at": NOW,
+            },
+            {
+                "artifact_id": second_parity,
+                "publication_id": second_log,
+                "payload_checksum": second_log_checksum,
+                "stream_key": "player_game_logs",
+                "season": SEASON,
+                "cutoff": NOW - timedelta(days=1),
+                "status": "exact",
+                "report": "{}",
+                "created_at": NOW,
+            },
+        ])
     diet_rows = [
         {
             key: value
@@ -1045,11 +1073,13 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     )
     operations.activate_stream(
         "player_game_logs", actor="journey-operator", reason="activate first logs",
-        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=first_log,
+        season=SEASON, cutoff=NOW - timedelta(days=1),
+        parity_artifact_id=first_parity, candidate_publication_id=first_log,
     )
     operations.activate_stream(
         "player_game_logs", actor="journey-operator", reason="advance logs",
-        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=second_log,
+        season=SEASON, cutoff=NOW - timedelta(days=1),
+        parity_artifact_id=second_parity, candidate_publication_id=second_log,
     )
     operations.activate_stream(
         "synergy_play_types", actor="journey-operator", reason="activate diet",

@@ -144,6 +144,7 @@ class LegacyParityDiagnosticReader:
     """Read existing NBA diagnostic tables through an injected DB boundary."""
 
     TABLES = {
+        "player_game_logs": "player_game_logs",
         "traditional_opponent": "general_opponent_stats",
         "player_per36": "player_per36_stats",
     }

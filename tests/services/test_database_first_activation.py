@@ -201,18 +201,18 @@ def test_legacy_write_fence_fails_only_after_stream_activation(tmp_path):
     engine = _db(tmp_path)
     service = PublicationService(engine, clock=lambda: NOW)
     service.register_stream(
-        "player_game_logs",
-        provider="ledger",
-        owner="railway",
+        "synergy_play_types",
+        provider="nba",
+        owner="residential_collector",
         required_observations=(),
         publication_strategy="replace",
         enabled=False,
     )
     fence = LegacyWriteFence(engine)
-    fence.assert_writable("player_game_logs")
-    service.activate_stream("player_game_logs", reason="approved activation")
+    fence.assert_writable("synergy_play_types")
+    service.activate_stream("synergy_play_types", reason="approved activation")
     try:
-        fence.assert_writable("player_game_logs")
+        fence.assert_writable("synergy_play_types")
     except Exception as error:
         assert str(error) == "legacy_write_fenced"
     else:  # pragma: no cover - assertion makes the contract explicit
