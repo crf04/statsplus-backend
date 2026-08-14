@@ -30,6 +30,7 @@ from app.models.canonical_game_ledger import (
     CanonicalGameLedgerPlayerFact,
     CanonicalGameLedgerTeamFact,
     LedgerBackfillState,
+    LedgerGameRowEvidence,
     LedgerPublication,
 )
 from app.models.collection_control import CollectionManifest, CollectionObservation
@@ -66,6 +67,18 @@ ASSIST_LOCATION_FIELDS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
+#: Count primitives with a documented additive-equivalence relationship between
+#: the provider team-summary row and the sum of participating player rows.
+#: Rebound fields are deliberately excluded: team-summary totals may
+#: legitimately include team rebounds (and their offensive/defensive
+#: partition) that no single player is credited with.
+ADDITIVE_EQUIVALENT_COUNT_FIELDS = tuple(
+    field_name for field_name in COUNT_FIELDS
+    if field_name not in {"rebounds", "offensive_rebounds", "defensive_rebounds"}
+)
+#: The typed extractor version that produced canonical facts and raw row
+#: schema evidence.  Bump it only when the extraction vocabulary changes.
+LEDGER_SCHEMA_VERSION = 1
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
 
@@ -144,6 +157,23 @@ class TeamGameFact:
 
 
 @dataclass(frozen=True, slots=True)
+class LedgerGameRow:
+    """One complete archived PBP boxscore row (team summary or player)."""
+
+    game_id: str
+    row_type: str
+    side: str
+    row_index: int
+    entity_id: int | None
+    entity_name: str | None
+    team_id: int
+    payload: Mapping[str, Any]
+    checksum: str
+    observed_fields: tuple[str, ...]
+    schema_version: int = LEDGER_SCHEMA_VERSION
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalGame:
     """One complete, replacement-safe Regular Season game observation."""
 
@@ -162,9 +192,15 @@ class CanonicalGame:
     season_type: str = REGULAR_SEASON_TYPE
     status: str = "final"
     checksum: str | None = None
+    raw_rows: tuple[LedgerGameRow, ...] = ()
+    raw_checksum: str | None = None
 
     def with_checksum(self) -> CanonicalGame:
-        return replace(self, checksum=game_checksum(self))
+        return replace(
+            self,
+            checksum=game_checksum(self),
+            raw_checksum=raw_checksum(self.raw_rows),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +311,100 @@ def _raw_value(row: Mapping[str, Any], *names: str) -> Any:
         if name in row:
             return row[name]
     return None
+
+
+def _canonical_row_json(payload: Mapping[str, Any]) -> str:
+    """Serialize one provider row deterministically while preserving all values."""
+
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _raw_row_checksum(payload: Mapping[str, Any]) -> str:
+    """Hash the canonical serialization of one complete provider row."""
+
+    return hashlib.sha256(_canonical_row_json(payload).encode()).hexdigest()
+
+
+def _ledger_raw_rows(
+    observation: Mapping[str, Any],
+    *,
+    game_id: str,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[LedgerGameRow, ...]:
+    """Archive every Home/Away FullGame row, including the team summaries.
+
+    Provider keys and values are preserved verbatim.  Only canonical identity
+    (game, side, team, entity) is recorded as metadata beside the payload; a
+    ``team`` row is the provider's aggregate (``EntityId == 0`` or ``Team``)
+    and is the declared authority for team-game facts.
+    """
+
+    stats = observation.get("stats")
+    if not isinstance(stats, Mapping):
+        raise LedgerValidationError("PBP game observation is missing a stats envelope")
+    team_by_side = {"Home": home_team_id, "Away": away_team_id}
+    output: list[LedgerGameRow] = []
+    for side in ("Home", "Away"):
+        period = stats.get(side)
+        period_rows = period.get("FullGame") if isinstance(period, Mapping) else None
+        if not isinstance(period_rows, Sequence) or isinstance(period_rows, (str, bytes, bytearray)):
+            raise LedgerValidationError(f"PBP FullGame rows are required for {side} evidence")
+        for index, row in enumerate(period_rows):
+            if not isinstance(row, Mapping):
+                raise LedgerValidationError("PBP FullGame contains a malformed raw row")
+            raw_id = _raw_value(row, "EntityId", "PLAYER_ID", "player_id")
+            raw_name = _raw_value(row, "Name", "PLAYER_NAME", "player_name")
+            if raw_id in (None, "0", 0) or str(raw_name or "") == "Team":
+                row_type = "team"
+                entity_id = None
+                entity_name = None
+            else:
+                row_type = "player"
+                entity_id = _integer(raw_id, "entity_id") or 0
+                entity_name = _required_text(raw_name, "entity_name")
+            payload = dict(row)
+            output.append(
+                LedgerGameRow(
+                    game_id=game_id,
+                    row_type=row_type,
+                    side=side,
+                    row_index=index,
+                    entity_id=entity_id,
+                    entity_name=entity_name,
+                    team_id=team_by_side[side],
+                    payload=payload,
+                    checksum=_raw_row_checksum(payload),
+                    observed_fields=tuple(sorted(payload)),
+                )
+            )
+    if not output:
+        raise LedgerValidationError("PBP game observation contains no FullGame rows")
+    return tuple(output)
+
+
+def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
+    """Hash the complete archived raw evidence set for one game."""
+
+    rows = tuple(raw_rows)
+    if not rows:
+        return None
+    payload = [
+        {
+            "game_id": row.game_id,
+            "row_type": row.row_type,
+            "side": row.side,
+            "row_index": row.row_index,
+            "entity_id": row.entity_id,
+            "entity_name": row.entity_name,
+            "team_id": row.team_id,
+            "observed_fields": row.observed_fields,
+            "payload": row.payload,
+        }
+        for row in rows
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
@@ -399,6 +529,28 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
     )
 
 
+_TEAM_ROW_ALIASES = {
+    "points": ("Points", "PTS", "points"),
+    "field_goals_made": ("FGM", "field_goals_made"),
+    "field_goals_attempted": ("FGA", "field_goals_attempted"),
+    "two_pointers_made": ("FG2M", "two_pointers_made"),
+    "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
+    "three_pointers_made": ("FG3M", "three_pointers_made"),
+    "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
+    "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
+    "free_throws_attempted": ("FTA", "free_throws_attempted"),
+    "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
+    "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
+    "rebounds": ("Rebounds", "REB", "rebounds"),
+    "assists": ("Assists", "AST", "assists"),
+    "turnovers": ("Turnovers", "TOV", "turnovers"),
+    "steals": ("Steals", "STL", "steals"),
+    "blocks": ("Blocks", "BLK", "blocks"),
+    "personal_fouls": ("Fouls", "PF", "personal_fouls"),
+}
+_TEAM_ROW_REBOUND_FIELDS = ("offensive_rebounds", "defensive_rebounds", "rebounds")
+
+
 def _sum_team_facts(
     team_id: int,
     team_tricode: str,
@@ -406,8 +558,20 @@ def _sum_team_facts(
     opponent_team_tricode: str,
     is_home: bool,
     players: Sequence[PlayerGameFact],
+    team_row: Mapping[str, Any] | None = None,
     provider_total: Mapping[str, Any] | None = None,
 ) -> TeamGameFact:
+    """Build the team-game fact set from its declared row authority.
+
+    The provider team-summary row (``EntityId == 0``) is the authority for
+    team-game facts; player rows are the authority for player-game facts.
+    Additive-equivalence checks apply only where semantic equality is valid.
+    Rebounds are a documented team-only concept: the team-summary row may
+    include team rebounds no single player is credited with, so no additive
+    equality is required there.  ``provider_total`` (the ``team_results``
+    envelope) is diagnostic only and never overwrites the declared authority.
+    """
+
     total = provider_total or {}
     values = {
         field_name: sum(getattr(player, field_name) for player in players)
@@ -415,29 +579,34 @@ def _sum_team_facts(
         if field_name != "rebounds"
     }
     values["rebounds"] = sum(player.rebounds for player in players)
-    # Team-results payloads are diagnostic only.  Canonical facts are always
-    # sums of the complete participating-player primitive set; an explicitly
-    # published provider total must agree rather than overwriting those sums.
-    aliases = {
-        "points": ("Points", "PTS", "points"),
-        "field_goals_made": ("FGM", "field_goals_made"),
-        "field_goals_attempted": ("FGA", "field_goals_attempted"),
-        "two_pointers_made": ("FG2M", "two_pointers_made"),
-        "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
-        "three_pointers_made": ("FG3M", "three_pointers_made"),
-        "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
-        "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
-        "free_throws_attempted": ("FTA", "free_throws_attempted"),
-        "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
-        "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
-        "rebounds": ("Rebounds", "REB", "rebounds"),
-        "assists": ("Assists", "AST", "assists"),
-        "turnovers": ("Turnovers", "TOV", "turnovers"),
-        "steals": ("Steals", "STL", "steals"),
-        "blocks": ("Blocks", "BLK", "blocks"),
-        "personal_fouls": ("Fouls", "PF", "personal_fouls"),
-    }
-    for field_name, names in aliases.items():
+    if team_row is not None:
+        rebound_evidence = any(
+            _raw_value(team_row, *_TEAM_ROW_ALIASES[field_name]) is not None
+            for field_name in _TEAM_ROW_REBOUND_FIELDS
+        )
+        for field_name, names in _TEAM_ROW_ALIASES.items():
+            raw = _raw_value(team_row, *names)
+            if raw is None:
+                continue
+            authoritative = _integer(raw, field_name) or 0
+            if field_name in ADDITIVE_EQUIVALENT_COUNT_FIELDS:
+                if authoritative != values[field_name]:
+                    raise LedgerValidationError(
+                        f"PBP team-summary {field_name} does not reconcile with player facts"
+                    )
+                values[field_name] = authoritative
+            elif rebound_evidence:
+                values[field_name] = authoritative
+        if rebound_evidence:
+            values["rebounds"] = (
+                values["offensive_rebounds"] + values["defensive_rebounds"]
+                if _raw_value(team_row, *_TEAM_ROW_ALIASES["rebounds"]) is None
+                else values["rebounds"]
+            )
+    # Team-results payloads are diagnostic only.  Canonical facts come from
+    # the declared authority; an explicitly published provider total must
+    # agree rather than overwriting it.
+    for field_name, names in _TEAM_ROW_ALIASES.items():
         raw = _raw_value(total, *names)
         if raw is not None:
             diagnostic = _integer(raw, field_name) or 0
@@ -445,6 +614,13 @@ def _sum_team_facts(
                 raise LedgerValidationError(
                     f"PBP team aggregate {field_name} does not reconcile with player facts"
                 )
+    possession_value = (
+        _raw_value(team_row, "Possessions", "possessions")
+        if team_row is not None
+        else None
+    )
+    if possession_value is None:
+        possession_value = _raw_value(total, "Possessions", "possessions")
     return TeamGameFact(
         team_id=team_id,
         team_tricode=team_tricode,
@@ -456,7 +632,7 @@ def _sum_team_facts(
         # 48 for a regulation game and remains correct for overtime when the
         # retained player-minute total grows beyond 240.
         team_minutes=sum(player.minutes for player in players) / 5.0,
-        possessions=_number(_raw_value(total, "Possessions", "possessions"), "possessions", nullable=True),
+        possessions=_number(possession_value, "possessions", nullable=True),
     )
 
 
@@ -614,6 +790,20 @@ def canonical_game_from_pbp(
     away_players = tuple(player for player in players if player.team_id == away_id)
     if not home_players or not away_players:
         raise LedgerValidationError("a complete game must contain both event teams")
+    raw_rows: tuple[LedgerGameRow, ...] = ()
+    team_row_by_team: dict[int, Mapping[str, Any]] = {}
+    if raw_observation is not None:
+        raw_rows = _ledger_raw_rows(
+            raw_observation,
+            game_id=game_id,
+            home_team_id=home_id,
+            away_team_id=away_id,
+        )
+        team_row_by_team = {
+            row.team_id: row.payload
+            for row in raw_rows
+            if row.row_type == "team"
+        }
     participant_evidence = _participant_evidence(
         raw_observation,
         participant_ids_by_team=participant_ids_by_team,
@@ -645,8 +835,14 @@ def canonical_game_from_pbp(
                     raise LedgerValidationError("PBP team totals contradict the governed event")
                 team_result_map[team_id] = result
     teams = (
-        _sum_team_facts(home_id, home_code, away_id, away_code, True, home_players, team_result_map.get(home_id)),
-        _sum_team_facts(away_id, away_code, home_id, home_code, False, away_players, team_result_map.get(away_id)),
+        _sum_team_facts(
+            home_id, home_code, away_id, away_code, True,
+            home_players, team_row_by_team.get(home_id), team_result_map.get(home_id),
+        ),
+        _sum_team_facts(
+            away_id, away_code, home_id, home_code, False,
+            away_players, team_row_by_team.get(away_id), team_result_map.get(away_id),
+        ),
     )
     observation_id = _required_text(source_observation_id or game_id, "source_observation_id")
     retrieved = assume_utc(retrieved_at or datetime.now(timezone.utc))
@@ -670,6 +866,8 @@ def canonical_game_from_pbp(
             (team_id, tuple(sorted(player_ids)))
             for team_id, player_ids in sorted(participant_evidence.items())
         ),
+        raw_rows=raw_rows,
+        raw_checksum=raw_checksum(raw_rows),
     ).with_checksum()
 
 
@@ -845,13 +1043,65 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         raise LedgerValidationError(
             "player facts must exactly match provider participant evidence"
         )
+    if (
+        not isinstance(game.raw_rows, Sequence)
+        or isinstance(game.raw_rows, (str, bytes, bytearray))
+    ):
+        raise LedgerValidationError("raw evidence must be a sequence of archived rows")
+    seen_raw_rows: set[tuple[object, ...]] = set()
+    raw_player_rows: dict[int, int] = {}
+    for row in game.raw_rows:
+        if not isinstance(row, LedgerGameRow):
+            raise LedgerValidationError("raw evidence contains an invalid archived row")
+        row_key = (row.game_id, row.row_type, row.side, row.row_index)
+        if row_key in seen_raw_rows:
+            raise LedgerValidationError("raw evidence contains a duplicate row identity")
+        seen_raw_rows.add(row_key)
+        if row.game_id != game.game_id:
+            raise LedgerValidationError("raw evidence game identity contradicts the game")
+        if row.row_type not in {"team", "player"} or row.side not in {"Home", "Away"}:
+            raise LedgerValidationError("raw evidence has an invalid row type or side")
+        if row.team_id not in {game.home_team_id, game.away_team_id}:
+            raise LedgerValidationError("raw evidence team is outside the game identity")
+        expected_side = "Home" if row.team_id == game.home_team_id else "Away"
+        if row.side != expected_side:
+            raise LedgerValidationError("raw evidence side contradicts its team identity")
+        if not isinstance(row.payload, Mapping):
+            raise LedgerValidationError("raw evidence payload must be a mapping")
+        if (
+            not row.observed_fields
+            or tuple(row.observed_fields) != tuple(sorted(row.payload))
+        ):
+            raise LedgerValidationError("raw evidence observed fields must match the payload")
+        if row.checksum != _raw_row_checksum(row.payload):
+            raise LedgerValidationError("raw evidence checksum does not match the payload")
+        if row.row_type == "player":
+            if row.entity_id is None or row.entity_id in raw_player_rows:
+                raise LedgerValidationError("raw player evidence has an invalid entity identity")
+            raw_player_rows[row.entity_id] = row.team_id
+    if game.raw_rows:
+        observed_raw_players = {
+            team_id: {entity_id for entity_id, team in raw_player_rows.items() if team == team_id}
+            for team_id in observed_by_team
+        }
+        if observed_raw_players != observed_by_team:
+            raise LedgerValidationError(
+                "raw player evidence must exactly match the retained player set"
+            )
+        if not isinstance(game.raw_checksum, str) or game.raw_checksum != raw_checksum(game.raw_rows):
+            raise LedgerValidationError("raw evidence checksum does not match archived rows")
+    elif game.raw_checksum is not None:
+        raise LedgerValidationError("raw evidence checksum cannot be set without archived rows")
     players_by_team = {
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
     }
     for team_fact in game.team_facts:
         team_players = players_by_team[team_fact.team_id]
-        for field_name in COUNT_FIELDS:
+        # Rebounds are excluded: the provider team-summary row may legitimately
+        # include team rebounds no player is credited with, so only the
+        # documented additive-equivalent primitives must reconcile.
+        for field_name in ADDITIVE_EQUIVALENT_COUNT_FIELDS:
             if getattr(team_fact, field_name) != sum(
                 getattr(player, field_name) for player in team_players
             ):
@@ -869,7 +1119,15 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             if player_possessions and all(value is not None for value in player_possessions)
             else None
         )
-        if team_fact.possessions != expected_possessions:
+        # Team possessions may come from the provider team-summary row, which is
+        # the declared authority for team-game facts and may legitimately expose
+        # a value players do not carry.  Reconciliation applies only when the
+        # value was derived from the participating player set.
+        if (
+            team_fact.possessions is not None
+            and expected_possessions is not None
+            and team_fact.possessions != expected_possessions
+        ):
             raise LedgerValidationError(
                 "team_fact.possessions must reconcile with player primitives"
             )
@@ -903,6 +1161,7 @@ class CanonicalGameLedgerRepository:
             CanonicalGameLedgerGame.__tablename__,
             CanonicalGameLedgerTeamFact.__tablename__,
             CanonicalGameLedgerPlayerFact.__tablename__,
+            LedgerGameRowEvidence.__tablename__,
             LedgerBackfillState.__tablename__,
             LedgerPublication.__tablename__,
         }
@@ -1046,7 +1305,11 @@ class CanonicalGameLedgerRepository:
         ).mappings().one_or_none()
         if existing is not None and self._identity_changed(existing, candidate):
             raise LedgerValidationError("a correction cannot change a game's canonical identity")
-        if existing is not None and existing["checksum"] == candidate.checksum:
+        if (
+            existing is not None
+            and existing["checksum"] == candidate.checksum
+            and (existing["raw_checksum"] or "") == (candidate.raw_checksum or "")
+        ):
             return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
         self._delete_game(connection, candidate.game_id, tables)
         connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
@@ -1058,6 +1321,19 @@ class CanonicalGameLedgerRepository:
             insert(tables["player"]),
             [self._player_values(candidate.game_id, value) for value in candidate.player_facts],
         )
+        if candidate.raw_rows:
+            connection.execute(
+                insert(tables["raw"]),
+                [
+                    self._raw_row_values(
+                        candidate.game_id,
+                        row,
+                        source_observation_id=candidate.source_observation_id,
+                        retrieved_at=candidate.retrieved_at,
+                    )
+                    for row in candidate.raw_rows
+                ],
+            )
         if self.correction_sink is not None:
             self.correction_sink(connection, candidate)
         return LedgerWriteResult(
@@ -1076,7 +1352,8 @@ class CanonicalGameLedgerRepository:
                 return None
             team_rows = connection.execute(select(tables["team"]).where(tables["team"].c.game_id == game_id).order_by(tables["team"].c.team_id)).mappings().all()
             player_rows = connection.execute(select(tables["player"]).where(tables["player"].c.game_id == game_id).order_by(tables["player"].c.team_id, tables["player"].c.player_id)).mappings().all()
-        return _game_from_rows(game_row, team_rows, player_rows)
+            raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(tables["raw"].c.side, tables["raw"].c.row_index)).mappings().all()
+        return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
 
     def list_games(self, season: str, *, through: date | datetime | None = None) -> tuple[LedgerGameSummary, ...]:
         canonical_season = validate_canonical_season(season)
@@ -1199,6 +1476,7 @@ class CanonicalGameLedgerRepository:
             "game": CanonicalGameLedgerGame.__table__,
             "team": CanonicalGameLedgerTeamFact.__table__,
             "player": CanonicalGameLedgerPlayerFact.__table__,
+            "raw": LedgerGameRowEvidence.__table__,
         }
 
     @staticmethod
@@ -1220,6 +1498,7 @@ class CanonicalGameLedgerRepository:
     def _delete_game(connection: Connection, game_id: str, tables: Mapping[str, Any]) -> None:
         connection.execute(delete(tables["player"]).where(tables["player"].c.game_id == game_id))
         connection.execute(delete(tables["team"]).where(tables["team"].c.game_id == game_id))
+        connection.execute(delete(tables["raw"]).where(tables["raw"].c.game_id == game_id))
         connection.execute(delete(tables["game"]).where(tables["game"].c.game_id == game_id))
 
     @staticmethod
@@ -1236,6 +1515,7 @@ class CanonicalGameLedgerRepository:
             "status": game.status,
             "source_observation_id": game.source_observation_id,
             "checksum": game.checksum or game_checksum(game),
+            "raw_checksum": game.raw_checksum or raw_checksum(game.raw_rows),
             "retrieved_at": assume_utc(game.retrieved_at),
             "updated_at": assume_utc(game.retrieved_at),
         }
@@ -1247,6 +1527,30 @@ class CanonicalGameLedgerRepository:
     @staticmethod
     def _player_values(game_id: str, fact: PlayerGameFact) -> dict[str, Any]:
         return {"game_id": game_id, **asdict(fact)}
+
+    @staticmethod
+    def _raw_row_values(
+        game_id: str,
+        row: LedgerGameRow,
+        *,
+        source_observation_id: str,
+        retrieved_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "game_id": game_id,
+            "row_type": row.row_type,
+            "side": row.side,
+            "row_index": row.row_index,
+            "entity_id": row.entity_id,
+            "entity_name": row.entity_name,
+            "team_id": row.team_id,
+            "source_observation_id": source_observation_id,
+            "retrieved_at": assume_utc(retrieved_at),
+            "checksum": row.checksum,
+            "schema_version": row.schema_version,
+            "observed_fields": json.dumps(row.observed_fields, sort_keys=True, separators=(",", ":")),
+            "payload": _canonical_row_json(row.payload),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1265,9 +1569,30 @@ class LedgerPublicationRecord:
     payload: str = "{}"
 
 
-def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str, Any]], player_rows: Sequence[Mapping[str, Any]]) -> CanonicalGame:
+def _game_from_rows(
+    game_row: Mapping[str, Any],
+    team_rows: Sequence[Mapping[str, Any]],
+    player_rows: Sequence[Mapping[str, Any]],
+    raw_rows: Sequence[Mapping[str, Any]] = (),
+) -> CanonicalGame:
     teams = tuple(TeamGameFact(**{key: row[key] for key in TeamGameFact.__dataclass_fields__}) for row in team_rows)
     players = tuple(PlayerGameFact(**{key: row[key] for key in PlayerGameFact.__dataclass_fields__}) for row in player_rows)
+    archived = tuple(
+        LedgerGameRow(
+            game_id=row["game_id"],
+            row_type=row["row_type"],
+            side=row["side"],
+            row_index=row["row_index"],
+            entity_id=row["entity_id"],
+            entity_name=row["entity_name"],
+            team_id=row["team_id"],
+            payload=json.loads(row["payload"]),
+            checksum=row["checksum"],
+            observed_fields=tuple(json.loads(row["observed_fields"] or "[]")),
+            schema_version=row["schema_version"],
+        )
+        for row in raw_rows
+    )
     return CanonicalGame(
         game_id=game_row["game_id"],
         season=game_row["season"],
@@ -1287,15 +1612,20 @@ def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str
         season_type=game_row["season_type"],
         status=game_row["status"],
         checksum=game_row["checksum"],
+        raw_rows=archived,
+        raw_checksum=game_row.get("raw_checksum"),
     )
 
 
 __all__ = [
     "ASSIST_LOCATION_FIELDS",
+    "ADDITIVE_EQUIVALENT_COUNT_FIELDS",
     "COUNT_FIELDS",
+    "LEDGER_SCHEMA_VERSION",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",
     "LedgerBackfillProgress",
+    "LedgerGameRow",
     "LedgerGameSummary",
     "LedgerPublicationRecord",
     "LedgerSchemaUnavailable",
@@ -1305,5 +1635,6 @@ __all__ = [
     "TeamGameFact",
     "canonical_game_from_pbp",
     "game_checksum",
+    "raw_checksum",
     "validate_complete_game",
 ]

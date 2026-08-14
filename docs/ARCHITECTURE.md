@@ -795,11 +795,61 @@ invariants before deleting anything. A repeated checksum is idempotent; a
 new observation with the same game identity replaces the game, team facts,
 and player facts in one transaction. A failed or incomplete candidate leaves
 the prior correction and its checksum untouched. Provider participant evidence
-must exactly equal the retained player set (including zero-minute participants),
-and team aggregate rows are diagnostics that must reconcile with player count
-primitives rather than overwrite them. Migration `024_canonical_game_ledger`
-is the only schema owner; repository construction fails clearly when it has not
-run, and the read-only demo fixture is never eligible.
+must exactly equal the retained player set (including zero-minute participants).
+Migration `024_canonical_game_ledger` remains the schema owner for the typed
+ledger tables; repository construction fails clearly when it has not run, and
+the read-only demo fixture is never eligible.
+
+#### Complete PBP row evidence archive (#113)
+
+Every accepted game also durably archives the complete provider `/get-game-stats`
+Home and Away `FullGame` row sets as immutable raw JSON evidence. Migration
+`032_ledger_raw_row_evidence` creates `canonical_game_ledger_raw_rows` and adds a
+`raw_checksum` column to the canonical game row; the raw archive is written in
+the same transaction as the typed game, team, and player facts, so acceptance,
+replacement, and correction remain one atomic operation and readers never see a
+mixed raw/typed version.
+
+`canonical_game_from_pbp` archives both the provider team-summary rows
+(`EntityId == 0` / `Name == Team`) and every participating player row from each
+side, preserving every provider key and value verbatim. Unknown additive fields
+survive schema growth instead of being projected away. Each archived row records
+the canonical game identity, side, row type, canonical team identity, provider
+entity identity (for player rows), the source observation ID, the timezone-aware
+retrieval time, a deterministic row checksum, the exact observed field set
+(`observed_fields`), and the typed extractor version (`LEDGER_SCHEMA_VERSION`).
+`observed_fields` is stored separately from the payload so additive schema drift
+is visible and non-destructive: a corrected observation that adds a provider
+field changes the field-set metadata and the raw checksum without touching the
+typed primitive set.
+
+Raw JSON canonicalization is deterministic and lossless: each payload is
+serialized with sorted keys and compact separators, and the game-level
+`raw_checksum` hashes the complete ordered row set together with its identity,
+row type, observed fields, and payloads. Semantically identical replays
+produce identical checksums, so replaying an accepted observation is idempotent
+and changes no persisted evidence. Because the raw checksum is independent of
+the typed `checksum`, a raw-only correction (a provider field that does not
+change any typed primitive) is still recognized as a replacement rather than an
+idempotent replay, and the complete raw and typed evidence is replaced
+atomically. Missing core identity, participants, minutes, or required count
+evidence rejects the whole candidate game before anything is written; missing
+optional expanded fields preserve the game and leave only the dependent typed
+facts (such as assist locations) null/unavailable.
+
+The declared typed authority is per row type. Player-game typed facts come from
+the provider player rows; team-game typed facts come from the provider
+team-summary row. Additive-equivalence checks apply only to the documented
+`ADDITIVE_EQUIVALENT_COUNT_FIELDS` set (every count primitive except rebounds):
+a team-summary value that disagrees with the participating-player sum rejects
+the complete game. Rebound fields are deliberately excluded because team
+rebounds (and their offensive/defensive partition) are a provider team-only
+concept no single player is credited with, so the team-summary rebound totals
+are authoritative and never compared against player sums. The legacy
+`team_results` envelope remains diagnostic only and must agree rather than
+overwrite the declared authority. The game identity row carries both the typed
+and raw checksums, so an operator can always prove that a stored typed game and
+its archived raw evidence came from the same observation.
 
 `app.services.ledger_backfill.LedgerBackfillService` discovers final,
 non-postponed Regular Season Event Catalog games through an explicit cutoff,

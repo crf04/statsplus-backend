@@ -504,6 +504,25 @@ def _repair_canonical_game_ledger_tables(connection: Connection) -> None:
     _create_canonical_game_ledger_tables(connection)
 
 
+def _create_ledger_raw_row_evidence(connection: Connection) -> None:
+    """Create the immutable complete PBP row archive for accepted games (#112)."""
+
+    from app.models.canonical_game_ledger import LedgerGameRowEvidence
+
+    LedgerGameRowEvidence.__table__.create(connection, checkfirst=True)
+    # A corrected source observation can change only the raw archived rows
+    # while typed primitives remain identical.  The game identity row carries
+    # a separate raw-evidence checksum so such a correction still atomically
+    # replaces evidence instead of replaying as an idempotent no-op.
+    table = "canonical_game_ledger_games"
+    columns = {column["name"] for column in inspect(connection).get_columns(table)}
+    if "raw_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table)} "
+            "ADD COLUMN raw_checksum VARCHAR(64)"
+        ))
+
+
 def _upgrade_collector_release_status(connection: Connection) -> None:
     """Persist bounded machine release evidence for operator diagnostics."""
 
@@ -788,6 +807,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(29, "029_publication_activations", _create_publication_activations),
     Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
     Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
+    Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
 )
 
 
