@@ -546,6 +546,56 @@ def test_reload_then_replace_unchanged_is_idempotent_and_changes_no_evidence(tmp
     assert {row["checksum"] for row in raw_rows} == {row.checksum for row in game.raw_rows}
 
 
+def test_reordered_raw_rows_hash_stably_and_replay_idempotently(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'reordered.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    reordered = replace(
+        game,
+        raw_rows=tuple(reversed(game.raw_rows)),
+        checksum=None,
+    ).with_checksum()
+
+    # Identical evidence arriving in a different order must hash identically
+    # and replay idempotently rather than registering as a replacement.
+    assert reordered.raw_checksum == game.raw_checksum
+    result = repository.replace_game(reordered)
+    assert result.inserted
+    repeated = repository.replace_game(reordered)
+    assert not repeated.inserted and not repeated.replaced
+    stored = repository.get_game(game.game_id)
+    assert stored.raw_checksum == game.raw_checksum
+
+
+def test_duplicate_side_index_raw_rows_reject_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'duplicate_index.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    # The Home team-summary row occupies (Home, 0); a player row sharing that
+    # provider array position must be rejected even though row_type differs,
+    # because the canonical raw-row order and checksum are ambiguous otherwise.
+    duplicated = replace(
+        game,
+        raw_rows=tuple(
+            replace(row, row_index=0) if row.entity_id == 101 else row
+            for row in game.raw_rows
+        ),
+        checksum=None,
+    ).with_checksum()
+
+    try:
+        repository.replace_game(duplicated)
+    except LedgerValidationError as error:
+        assert "one archived row per side and provider index" in str(error)
+    else:
+        raise AssertionError("raw evidence with duplicate side/provider index unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
 def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
     payload = _raw_observation_with_unknown_fields()
     game = canonical_game_from_pbp(

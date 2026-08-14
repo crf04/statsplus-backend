@@ -467,7 +467,27 @@ _RAW_ROW_SIDE_ORDER = {"Home": 0, "Away": 1}
 def _raw_row_order(row: LedgerGameRow) -> tuple[int, int]:
     """Canonical raw-row sort key (side order first, then within-side index)."""
 
-    return (_RAW_ROW_SIDE_ORDER.get(row.side, 2), row.row_index)
+    return (_RAW_ROW_SIDE_ORDER.get(row.side, len(_RAW_ROW_SIDE_ORDER)), row.row_index)
+
+
+def _side_order_expression(column: Any):
+    """SQL expression mapping a raw-row side to its canonical priority.
+
+    Derived from the same ``_RAW_ROW_SIDE_ORDER`` mapping used for hashing and
+    Python-side reload sorting, so the database query and the checksum sort can
+    never drift.  Unknown sides sort after every declared side, matching
+    ``_raw_row_order``.
+    """
+
+    return case(
+        *[
+            (column == side, priority)
+            for side, priority in sorted(
+                _RAW_ROW_SIDE_ORDER.items(), key=lambda item: item[1]
+            )
+        ],
+        else_=len(_RAW_ROW_SIDE_ORDER),
+    )
 
 
 def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
@@ -1376,9 +1396,14 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     for row in game.raw_rows:
         if not isinstance(row, LedgerGameRow):
             raise LedgerValidationError("raw evidence contains an invalid archived row")
-        row_key = (row.game_id, row.row_type, row.side, row.row_index)
+        # Provider FullGame array positions are unique per side regardless of
+        # row type.  Enforcing one archived row per (side, row_index) keeps the
+        # canonical raw-row order and raw_checksum deterministic.
+        row_key = (row.game_id, row.side, row.row_index)
         if row_key in seen_raw_rows:
-            raise LedgerValidationError("raw evidence contains a duplicate row identity")
+            raise LedgerValidationError(
+                "raw evidence must contain exactly one archived row per side and provider index"
+            )
         seen_raw_rows.add(row_key)
         if row.game_id != game.game_id:
             raise LedgerValidationError("raw evidence game identity contradicts the game")
@@ -1663,7 +1688,7 @@ class CanonicalGameLedgerRepository:
             team_rows = connection.execute(select(tables["team"]).where(tables["team"].c.game_id == game_id).order_by(tables["team"].c.team_id)).mappings().all()
             player_rows = connection.execute(select(tables["player"]).where(tables["player"].c.game_id == game_id).order_by(tables["player"].c.team_id, tables["player"].c.player_id)).mappings().all()
             raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(
-                case((tables["raw"].c.side == "Home", 0), else_=1),
+                _side_order_expression(tables["raw"].c.side),
                 tables["raw"].c.row_index,
             )).mappings().all()
         return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
