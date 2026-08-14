@@ -921,7 +921,15 @@ arithmetically with the retained scoring components (`Points` equals
 `2*FG2M + 3*FG3M + FtPoints`), and every other omitted player or team count must
 stay consistent with the complete `team_results` diagnostic reconciliation, so a
 missing nonzero count rejects the candidate atomically rather than fabricating a
-zero while a proven zero passes. Missing optional expanded
+zero while a proven zero passes. Because that proof depends on the diagnostics,
+an accepted raw observation must carry the `team_results` Home and Away
+`FullGame` envelopes and every governed diagnostic count inside them — `Points`,
+`FG2M`/`FG2A`, `FG3M`/`FG3A`, `FtPoints`/`FTA`, offensive, defensive, and total
+rebounds, `Assists`, `Turnovers`, `Steals`, `Blocks`, and `Fouls`. A missing
+envelope, a missing, null, or malformed diagnostic field, or a diagnostic count
+that does not reconcile with the declared team authority (player sums plus the
+`EntityId == 0` team-summary residual) rejects the candidate atomically rather
+than letting an unprovable omission pass as a zero. Missing optional expanded
 fields preserve the game and leave only the dependent typed facts (such as
 assist locations) null/unavailable.
 
@@ -937,9 +945,13 @@ player rows and the team row are sparse, the repository re-proves that
 equivalence for every count primitive — rebounds included — so a team value
 cannot disagree with its player primitives and team-only evidence. Optional
 team-summary fields such as possessions remain team authority and are never
-compared against summed player possessions. The `team_results` envelope remains
-diagnostic/parity only: where it publishes a comparable field it must reconcile
-with the declared authority, and it never populates persisted facts.
+compared against summed player possessions. The `team_results` envelope is
+required diagnostic/parity evidence for every accepted raw game, not an
+optional extra: both Home and Away `FullGame` envelopes must exist with every
+governed diagnostic count present and well-formed, each must reconcile with the
+declared authority, and a missing envelope, a missing/null/malformed diagnostic
+field, or a reconciliation failure rejects the candidate atomically. It never
+populates persisted facts.
 
 The repository boundary repeats these invariants for direct callers.
 `validate_complete_game` re-checks the strict evidence on every archived row —
@@ -947,8 +959,9 @@ identity, minutes (including team-summary minutes, which must be present and in
 the accepted format (`00:00` and other valid `MM:SS` values) but is never
 treated as a player-additive fact), row presence, and malformed values — while
 sparse count primitives are not required per row: each omitted count is
-re-extracted and reconciled, so a missing count that independent arithmetic or
-the complete `team_results` diagnostic proves nonzero rejects the candidate
+re-extracted and reconciled against the typed authority that intake proved
+against the complete `team_results` diagnostic, so a missing count that the
+typed evidence proves nonzero rejects the candidate
 atomically and a proven zero passes. It then proves the stored
 typed version equals extraction from its authoritative raw rows: each typed
 player fact must equal extraction from its archived player row and each typed

@@ -60,6 +60,23 @@ COUNT_FIELDS = (
     "blocks",
     "personal_fouls",
 )
+#: The ``team_results`` ``FullGame`` diagnostic count vocabulary an accepted raw
+#: observation must carry completely.  These are the provider wire spellings of
+#: the governed count primitives (``COUNT_FIELDS`` without the derived
+#: ``FGM``/``FGA`` composites).  ``Points`` is independently provable from
+#: retained scoring components, but every other primitive has no in-row
+#: arithmetic identity, so a sparse player omission is only a governed zero
+#: when the complete team total proves it can be zero.  A raw acceptance
+#: missing any of these fields -- or carrying a null or malformed value --
+#: cannot prove a sparse omission and rejects the candidate atomically.
+LEDGER_GOVERNED_DIAGNOSTIC_COUNTS = (
+    "Points",
+    "FG2M", "FG2A",
+    "FG3M", "FG3A",
+    "FtPoints", "FTA",
+    "OffRebounds", "DefRebounds", "Rebounds",
+    "Assists", "Turnovers", "Steals", "Blocks", "Fouls",
+)
 ASSIST_LOCATION_FIELDS = (
     "two_point_assists",
     "three_point_assists",
@@ -77,11 +94,16 @@ ASSIST_LOCATION_FIELDS = (
 #: proven: an omitted ``Points`` must reconcile arithmetically with the retained
 #: scoring components and every other omitted count must stay consistent with
 #: the complete ``team_results`` diagnostic reconciliation, so a missing nonzero
-#: count rejects the candidate atomically.  Identity, minutes, row presence, and
-#: malformed values stay strict: they are never zero-filled and always reject
-#: the candidate game atomically.  ``FGM``/``FGA``/``Rebounds`` are derived from
-#: the two-pointer and three-pointer components and from offensive plus
-#: defensive rebounds.
+#: count rejects the candidate atomically.  Because that proof depends on the
+#: diagnostics, an accepted raw observation must carry the ``team_results``
+#: Home and Away ``FullGame`` envelopes with every governed diagnostic count
+#: (``LEDGER_GOVERNED_DIAGNOSTIC_COUNTS``) present, well-formed, and reconciling
+#: with the declared team authority; a missing envelope, a missing/null/malformed
+#: diagnostic field, or a reconciliation failure rejects the candidate atomically.
+#: Identity, minutes, row presence, and malformed values stay strict: they are
+#: never zero-filled and always reject the candidate game atomically.
+#: ``FGM``/``FGA``/``Rebounds`` are derived from the two-pointer and three-pointer
+#: components and from offensive plus defensive rebounds.
 
 #: The typed extractor version that produced canonical facts and raw row
 #: schema evidence.  Bump it only when the extraction vocabulary changes.
@@ -1076,10 +1098,12 @@ def _sum_team_facts(
     player rows (the player rows are their own authority) plus that
     team-summary residual; both are sparse, so an omitted additive counter is
     an observed zero.  ``provider_total`` (the ``team_results`` envelope) is
-    diagnostic only and must equal that complete total where it carries a
-    field, rather than overwriting the declared authority.  ``require_team_row``
-    is set for accepted raw observations: a complete game may never omit a
-    side's team-summary row.
+    diagnostic and corruption-evidence only: an accepted raw observation
+    requires the complete governed diagnostic count vocabulary present,
+    well-formed, and reconciling with the declared team authority, and the
+    diagnostics never populate a typed fact.  ``require_team_row`` is set for
+    accepted raw observations: a complete game may never omit a side's
+    team-summary row.
     """
 
     if require_team_row and team_row is None:
@@ -1104,9 +1128,20 @@ def _sum_team_facts(
             # the complete team value is the participating-player sum.
             residual = 0 if raw is None else _integer(raw, field_name)
             values[field_name] = player_sums[field_name] + residual
-    # Team-results payloads are diagnostic only.  The complete team total is
-    # the declared authority; an explicitly published provider total must
-    # agree rather than overwriting it.
+    # Team-results payloads are diagnostic and corruption-evidence only: they
+    # never populate a typed fact, and the complete team total is the declared
+    # authority.  An accepted raw observation supplies the full diagnostic
+    # envelope, so every governed diagnostic count must be present, well-formed,
+    # and reconcile with that authority; a missing, null, or malformed field
+    # cannot prove a sparse omission and rejects the candidate atomically.
+    if provider_total is not None:
+        for wire_name in LEDGER_GOVERNED_DIAGNOSTIC_COUNTS:
+            if total.get(wire_name) is None:
+                raise LedgerValidationError(
+                    f"team_results diagnostics are missing the {wire_name} count"
+                )
+    # An explicitly published provider total must agree rather than overwriting
+    # the declared authority.
     for field_name, names in _TEAM_ROW_ALIASES.items():
         raw = _raw_value(total, *names)
         if raw is not None:
@@ -1332,20 +1367,26 @@ def canonical_game_from_pbp(
         )
 
     team_result_map: dict[int, Mapping[str, Any]] = {}
-    if isinstance(team_results, Mapping):
-        for side, team_id in (("Home", home_id), ("Away", away_id)):
+    for side, team_id in (("Home", home_id), ("Away", away_id)):
+        result = None
+        if isinstance(team_results, Mapping):
             value = team_results.get(side)
             if isinstance(value, Mapping) and isinstance(value.get("FullGame"), Mapping):
                 result = value["FullGame"]
-            elif isinstance(value, Mapping):
-                result = value
-            else:
-                result = None
-            if result is not None:
-                result_team_id = _raw_value(result, "TeamId", "team_id", "TEAM_ID")
-                if result_team_id is not None and _integer(result_team_id, "team_id") != team_id:
-                    raise LedgerValidationError("PBP team totals contradict the governed event")
-                team_result_map[team_id] = result
+        # Sparse zero acceptance depends on the complete diagnostics, so an
+        # accepted raw observation must carry the team_results FullGame
+        # envelope for every governed side.  A missing envelope leaves a sparse
+        # omission unprovable and rejects the candidate atomically.
+        if raw_observation is not None and not isinstance(result, Mapping):
+            raise LedgerValidationError(
+                "accepted PBP evidence requires the team_results diagnostic "
+                f"envelope for {side}"
+            )
+        if result is not None:
+            result_team_id = _raw_value(result, "TeamId", "team_id", "TEAM_ID")
+            if result_team_id is not None and _integer(result_team_id, "team_id") != team_id:
+                raise LedgerValidationError("PBP team totals contradict the governed event")
+            team_result_map[team_id] = result
     teams = (
         _sum_team_facts(
             home_id, home_code, away_id, away_code, True,
@@ -2473,6 +2514,7 @@ def _game_from_rows(
 __all__ = [
     "ASSIST_LOCATION_FIELDS",
     "COUNT_FIELDS",
+    "LEDGER_GOVERNED_DIAGNOSTIC_COUNTS",
     "LEDGER_GOVERNED_FULLGAME_FIELDS",
     "LEDGER_SCHEMA_VERSION",
     "CanonicalGame",

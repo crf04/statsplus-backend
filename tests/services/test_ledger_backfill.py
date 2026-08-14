@@ -134,7 +134,6 @@ def _event():
 
 def _payload():
     payload = json.loads(Path("tests/fixtures/pbp_stats/game_stats.valid.json").read_text())
-    payload.pop("team_results", None)
     payload["participant_ids_by_team"] = {
         "1610612747": [2544, 203507],
         "1610612759": [201935],
@@ -796,7 +795,47 @@ def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_
     payload = _payload()
     # The provider wire is sparse: a null or omitted additive counter is an
     # observed zero, so the game ingests atomically through the production
-    # adapter seam rather than being rejected as missing evidence.
+    # adapter seam rather than being rejected as missing evidence.  Reaves
+    # finished with no blocks and the complete team_results diagnostic
+    # (Home Blocks 1) reconciles against the retained player sum plus the zero
+    # residual, so the null is a proven governed zero.
+    next(
+        row for row in payload["stats"]["Home"]["FullGame"]
+        if row.get("EntityId") == "203507"
+    )["Blocks"] = None
+    adapter, _session = _production_adapter(payload)
+    recorder = CollectionObservationLedgerRecorder(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+
+    result = LedgerBackfillService(
+        provider=adapter,
+        athlete_catalog=_Athletes(),
+        participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
+        reconciliation_sink=lambda game_id, details: None,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    ).refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.complete
+    stored = repository.get_game("0022400001")
+    assert stored is not None
+    reaves = next(fact for fact in stored.player_facts if fact.player_id == 203507)
+    assert reaves.blocks == 0
+
+
+def test_null_provably_nonzero_count_rejects_through_the_production_backfill_seam(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'backfill_null_count_reject.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    _install_manifest(engine, cutoff)
+    _seed_participant_event(engine, cutoff)
+    payload = _payload()
+    # Wembanyama finished with three assists and the complete Away diagnostic
+    # (Assists 3) proves it, so a null Assists value cannot be a governed zero:
+    # the diagnostic reconciliation fails and the candidate rejects atomically
+    # through the production backfill seam with nothing written.
     next(
         row for row in payload["stats"]["Away"]["FullGame"]
         if row.get("EntityId") == "201935"
@@ -816,11 +855,13 @@ def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_
         clock=lambda: cutoff,
     ).refresh("2024-25", **_authorized(_event(), cutoff))
 
-    assert result.complete
-    stored = repository.get_game("0022400001")
-    assert stored is not None
-    wemby = next(fact for fact in stored.player_facts if fact.player_id == 201935)
-    assert wemby.assists == 0
+    assert not result.complete
+    assert repository.get_game("0022400001") is None
+    assert recorder.pending_count() == 0
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(CollectionObservation)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
 
 
 def test_missing_minutes_rejects_through_the_production_backfill_seam(tmp_path):

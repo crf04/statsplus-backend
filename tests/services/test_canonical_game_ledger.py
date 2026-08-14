@@ -74,6 +74,7 @@ def _game():
         {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}},
+      "team_results": {"Home": {"FullGame": {"Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4, "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2}}, "Away": {"FullGame": {"Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4, "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2}}},
       "home_team_abbreviation": "LAL", "away_team_abbreviation": "SAS", "date": "2024-11-15",
       "participant_ids_by_team": {"1610612747": [101, 102], "1610612759": [201, 202]}
     }""")
@@ -301,6 +302,24 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                 "home_team_id": "1610612747",
                 "away_team_id": "1610612759",
                 "date": "2024-11-15",
+                "team_results": {
+                    "Home": {
+                        "FullGame": {
+                            "Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4,
+                            "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4,
+                            "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2,
+                            "Blocks": 0, "Fouls": 2,
+                        }
+                    },
+                    "Away": {
+                        "FullGame": {
+                            "Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4,
+                            "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4,
+                            "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2,
+                            "Blocks": 0, "Fouls": 2,
+                        }
+                    },
+                },
                 "participant_ids_by_team": {
                     "1610612747": [101, 102],
                     "1610612759": [201, 202],
@@ -367,7 +386,6 @@ def test_complete_assist_location_observation_derives_with_sparse_core_counts():
     # every assist-location field; LeBron and Wembanyama already carry a
     # complete location observation.  A complete location observation derives
     # even when core counts are sparse.
-    payload.pop("team_results", None)
     for side in ("Home", "Away"):
         for row in payload["stats"][side]["FullGame"]:
             if row.get("EntityId") in (None, "0", 0):
@@ -401,7 +419,6 @@ def test_game_date_uses_nba_calendar_day_for_after_midnight_utc_tipoff():
         (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
         .read_text(encoding="utf-8")
     )
-    payload.pop("team_results", None)
     event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
 
     game = canonical_game_from_pbp(
@@ -447,7 +464,6 @@ def _clean_observation() -> dict[str, object]:
         (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
         .read_text(encoding="utf-8")
     )
-    payload.pop("team_results", None)
     return payload
 
 
@@ -802,10 +818,10 @@ def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
 
 def test_team_results_diagnostic_must_reconcile_with_player_sums_and_residuals():
     payload = _raw_observation_with_unknown_fields()
-    payload["team_results"] = {
-        side: {"FullGame": {"Points": 99 if side == "Home" else 25}}
-        for side in ("Home", "Away")
-    }
+    # The diagnostic envelope is complete but contradicts the declared team
+    # authority: Home player points sum to 40 with no team residual, while the
+    # diagnostic publishes 99.  The parity check must reject atomically.
+    payload["team_results"]["Home"]["FullGame"]["Points"] = 99
     try:
         canonical_game_from_pbp(
             payload,
@@ -863,7 +879,7 @@ def test_correction_atomically_replaces_raw_and_typed_evidence(tmp_path):
 
     corrected_payload = json.loads(json.dumps(payload))
     corrected_payload["stats"]["Home"]["FullGame"][1]["Points"] = 26
-    corrected_payload["stats"]["Home"]["FullGame"][0]["Points"] = 41
+    corrected_payload["team_results"]["Home"]["FullGame"]["Points"] = 41
     corrected = canonical_game_from_pbp(
         corrected_payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -1386,7 +1402,7 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
 
     corrected_payload = json.loads(json.dumps(payload))
     corrected_payload["stats"]["Home"]["FullGame"][1]["Points"] = 26
-    corrected_payload["stats"]["Home"]["FullGame"][0]["Points"] = 41
+    corrected_payload["team_results"]["Home"]["FullGame"]["Points"] = 41
     second_id = "obs-retain-second"
     corrected = canonical_game_from_pbp(
         corrected_payload,
@@ -1599,7 +1615,7 @@ def test_missing_provably_nonzero_points_rejects_atomically():
         raise AssertionError("player row missing provably nonzero points unexpectedly published")
 
 
-def test_missing_nonzero_count_rejects_through_team_results_reconciliation():
+def test_missing_nonzero_player_blocks_with_diagnostics_rejects():
     payload = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
         .read_text(encoding="utf-8")
@@ -1608,14 +1624,12 @@ def test_missing_nonzero_count_rejects_through_team_results_reconciliation():
         row for row in payload["stats"]["Home"]["FullGame"]
         if row.get("EntityId") == "2544"
     )
-    # Blocks/Steals/Turnovers have no in-row arithmetic identity, so a missing
-    # value is a governed zero only when the complete team_results diagnostic
-    # reconciliation stays consistent.  LeBron finished with nonzero counts and
-    # the team_results totals prove it, so the omission is corrupted evidence
-    # and must reject atomically rather than persisting a fabricated zero.
+    # Blocks has no in-row arithmetic identity, so a missing value is a governed
+    # zero only when the complete team_results diagnostic reconciliation stays
+    # consistent.  LeBron finished with a block and the complete Home diagnostic
+    # (Blocks 1) proves it, so the omission is corrupted evidence and must reject
+    # atomically rather than persisting a fabricated zero.
     leon_row.pop("Blocks", None)
-    leon_row.pop("Steals", None)
-    leon_row.pop("Turnovers", None)
     try:
         canonical_game_from_pbp(
             payload,
@@ -1628,7 +1642,103 @@ def test_missing_nonzero_count_rejects_through_team_results_reconciliation():
     except LedgerValidationError as error:
         assert "does not reconcile" in str(error)
     else:
-        raise AssertionError("player row missing diagnostic-proven nonzero counts unexpectedly published")
+        raise AssertionError("player row missing diagnostic-proven nonzero Blocks unexpectedly published")
+
+
+def test_missing_team_results_envelope_rejects_atomically():
+    payload = _raw_observation_with_unknown_fields()
+    payload.pop("team_results", None)
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "team_results diagnostic envelope" in str(error)
+    else:
+        raise AssertionError("accepted evidence without the team_results envelope unexpectedly passed")
+
+
+def test_missing_one_side_team_results_envelope_rejects_atomically():
+    payload = _raw_observation_with_unknown_fields()
+    payload["team_results"].pop("Away", None)
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "team_results diagnostic envelope for Away" in str(error)
+    else:
+        raise AssertionError("accepted evidence missing an Away diagnostic envelope unexpectedly passed")
+
+
+def test_missing_team_results_full_game_envelope_rejects_atomically():
+    payload = _raw_observation_with_unknown_fields()
+    payload["team_results"]["Home"] = {"Name": "LAL"}
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "team_results diagnostic envelope for Home" in str(error)
+    else:
+        raise AssertionError("accepted evidence without a Home FullGame diagnostic envelope unexpectedly passed")
+
+
+@pytest.mark.parametrize(
+    ("field", "mutation"),
+    [
+        ("Blocks", "remove"),
+        ("Blocks", "null"),
+        ("Blocks", "malformed"),
+        ("Blocks", "negative"),
+        ("Points", "remove"),
+        ("Assists", "remove"),
+    ],
+)
+def test_missing_null_or_malformed_team_results_diagnostic_field_rejects(field, mutation):
+    payload = _raw_observation_with_unknown_fields()
+    diagnostic = payload["team_results"]["Home"]["FullGame"]
+    if mutation == "remove":
+        diagnostic.pop(field, None)
+    elif mutation == "null":
+        diagnostic[field] = None
+    elif mutation == "malformed":
+        diagnostic[field] = "not-a-count"
+    else:
+        diagnostic[field] = -1
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        message = str(error)
+        assert (
+            "team_results" in message
+            or "does not reconcile" in message
+            or "must be a non-negative integer" in message
+        )
+    else:
+        raise AssertionError("accepted evidence with incomplete or malformed team_results diagnostics unexpectedly passed")
 
 
 def test_archived_player_row_missing_provably_nonzero_points_rejects_at_repository_boundary(tmp_path):
@@ -1714,8 +1824,12 @@ def test_explicit_zero_required_count_remains_valid(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     payload = _raw_observation_with_unknown_fields()
-    payload["stats"]["Home"]["FullGame"][1]["Fouls"] = 0
-    payload["stats"]["Home"]["FullGame"][0]["Fouls"] = 1
+    # Reaves finished with no blocks and no offensive rebounds; spelling those
+    # governed-zero counters explicitly stays consistent with the complete
+    # team_results diagnostic (Home Blocks 1 and OffRebounds 3 reconcile), so
+    # explicit zeroes remain valid evidence rather than a contradiction.
+    payload["stats"]["Home"]["FullGame"][2]["Blocks"] = 0
+    payload["stats"]["Home"]["FullGame"][2]["OffRebounds"] = 0
     game = canonical_game_from_pbp(
         payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -1724,8 +1838,9 @@ def test_explicit_zero_required_count_remains_valid(tmp_path):
             1610612759: (201935,),
         },
     )
-    leon = next(fact for fact in game.player_facts if fact.player_id == 2544)
-    assert leon.personal_fouls == 0
+    reaves = next(fact for fact in game.player_facts if fact.player_id == 203507)
+    assert reaves.blocks == 0
+    assert reaves.offensive_rebounds == 0
     assert repository.replace_game(game).inserted
 
 
