@@ -21,6 +21,10 @@ def get_session(engine: Engine | None = None):
     Returns:
         Session: A new SQLAlchemy session bound to the application engine
     """
+    # Import database configuration lazily.  ``app.config.settings`` imports
+    # lightweight model metadata, so importing it at module load time here
+    # would make the migration CLI circular (settings -> catalogs -> models
+    # -> db -> settings).
     if engine is None:
         from app.utils.db import get_engine
 
@@ -108,6 +112,7 @@ from .collection_control import (  # noqa: E402
     PublicationVersion,
     PublicationObservation,
     PublicationPointer,
+    PublicationActivation,
     CompositionJob,
     CollectorTokenReplay,
     CollectorLease,
@@ -168,6 +173,7 @@ __all__ = [
     'PublicationVersion',
     'PublicationObservation',
     'PublicationPointer',
+    'PublicationActivation',
     'CompositionJob',
     'CollectorTokenReplay',
     'CollectorLease',

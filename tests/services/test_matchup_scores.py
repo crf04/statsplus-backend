@@ -237,7 +237,7 @@ def _window(metrics, *, last_15=False, unsupported=(), metric_trackers=None):
         StoredTeamMatchupObservation(
             base,
             "unavailable" if base in unsupported or base not in available else "available",
-            "provider_unsupported" if base in unsupported or base not in available else None,
+            "provider_window_unsupported" if base in unsupported or base not in available else None,
             RETRIEVED_AT,
         )
         for base in DEFENSE_BASES

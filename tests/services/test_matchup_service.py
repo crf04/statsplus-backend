@@ -267,7 +267,7 @@ def _window(
         StoredTeamMatchupObservation(
             base,
             "unavailable" if last_15 and base == "play_types" else "available",
-            "provider_unsupported" if last_15 and base == "play_types" else None,
+            "provider_window_unsupported" if last_15 and base == "play_types" else None,
             RETRIEVED_AT,
         )
         for base in BASES
@@ -404,7 +404,7 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
         "season": {"status": "available", "unavailable_reason": None},
         "last_15": {
             "status": "unavailable",
-            "unavailable_reason": "provider_unsupported",
+            "unavailable_reason": "provider_window_unsupported",
         },
     }
     league_play = payload["league"]["defense_sheet"]["play_types"][0]
@@ -915,11 +915,15 @@ def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
         "retrieved_at": None,
         "providers": {},
     }
-    assert all(
-        availability[window]["status"] == "missing"
-        for availability in payload["league"]["surface_availability"].values()
-        for window in ("season", "last_15")
-    )
+    for base, availability in payload["league"]["surface_availability"].items():
+        assert availability["season"]["status"] == "missing"
+        if base == "play_types":
+            assert availability["last_15"] == {
+                "status": "unavailable",
+                "unavailable_reason": "provider_window_unsupported",
+            }
+        else:
+            assert availability["last_15"]["status"] == "missing"
     assert all(not rows for rows in payload["league"]["defense_sheet"].values())
 
 
@@ -952,7 +956,7 @@ def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():
             if base == "play_types" and window_name == "last_15":
                 assert state == {
                     "status": "unavailable",
-                    "unavailable_reason": "provider_unsupported",
+                    "unavailable_reason": "provider_window_unsupported",
                 }
             else:
                 assert state == {

@@ -20,6 +20,10 @@ from app.models.player_diet import (
     PlayerDietSurfaceObservationRow,
 )
 from app.providers.nba_stats import validate_canonical_season
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    decode_player_diet,
+)
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
 
@@ -105,10 +109,18 @@ class _ProviderDependencyUnavailable(ValueError):
 class PlayerDietRepository:
     """Persist available Bases while retaining prior facts for degraded Bases."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        write_fence: Any | None = None,
+        publication_reader: Any | None = None,
+    ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store player Diet facts")
         self.engine = engine
+        self._write_fence = write_fence
+        self._publication_reader = publication_reader
 
     def publish(
         self,
@@ -130,51 +142,148 @@ class PlayerDietRepository:
         fact_table = PlayerDietFactRow.__table__
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
+            existing_observations = {
+                row["base"]: row
+                for row in connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.season == season
+                    )
+                ).mappings()
+            }
+            existing_facts: dict[str, tuple[tuple[Any, ...], ...]] = {}
+            for base in facts_by_base:
+                existing_facts[base] = tuple(
+                    sorted(
+                        (
+                            row["player_id"],
+                            row["base"],
+                            row["slice_key"],
+                            float(row["share"]),
+                            float(row["volume"]),
+                            row["games_played"],
+                            row["volume_unit"],
+                            row["provider"],
+                            assume_utc(row["retrieved_at"]),
+                        )
+                        for row in connection.execute(
+                            select(fact_table).where(
+                                fact_table.c.season == season,
+                                fact_table.c.base == base,
+                            )
+                        ).mappings()
+                    )
+                )
+            changed_bases = {
+                observation.base
+                for observation in observation_rows
+                if self._base_changed(
+                    observation,
+                    facts_by_base[observation.base],
+                    existing_observations.get(observation.base),
+                    existing_facts.get(observation.base, ()),
+                    observed_at,
+                )
+            }
+            checker = getattr(self._write_fence, "assert_writable", None)
+            stream_by_base = {
+                "assist_locations": "player_assist_locations",
+                    "play_types": "synergy_play_types",
+                    "shot_types": "grouped_shot_types",
+                    "shot_zones": "exact_shot_zones",
+            }
+            if callable(checker):
+                # Lock only the Bases represented by this atomic update, in a
+                # stable order so concurrent independent refreshes cannot
+                # deadlock while still fencing activation races.
+                for stream_key in sorted(
+                    {
+                        stream_by_base[observation.base]
+                        for observation in observation_rows
+                        if observation.base in changed_bases
+                        and observation.status in {"available", "unavailable", "missing"}
+                    }
+                ):
+                    checker(stream_key, connection=connection)
             for observation in observation_rows:
-                if observation.status != "available":
+                if observation.base not in changed_bases:
                     continue
+                if observation.status == "available":
+                    connection.execute(
+                        delete(fact_table).where(
+                            fact_table.c.season == season,
+                            fact_table.c.base == observation.base,
+                        )
+                    )
+                    connection.execute(
+                        insert(fact_table),
+                        [
+                            {
+                                "season": season,
+                                "player_id": fact.player_id,
+                                "base": fact.base,
+                                "slice_key": fact.slice_key,
+                                "share": fact.share,
+                                "volume": fact.volume,
+                                "games_played": fact.games_played,
+                                "volume_unit": fact.volume_unit,
+                                "provider": fact.provider,
+                                "retrieved_at": observed_at,
+                            }
+                            for fact in facts_by_base[observation.base]
+                        ],
+                    )
                 connection.execute(
-                    delete(fact_table).where(
-                        fact_table.c.season == season,
-                        fact_table.c.base == observation.base,
+                    delete(observation_table).where(
+                        observation_table.c.season == season,
+                        observation_table.c.base == observation.base,
                     )
                 )
                 connection.execute(
-                    insert(fact_table),
-                    [
-                        {
-                            "season": season,
-                            "player_id": fact.player_id,
-                            "base": fact.base,
-                            "slice_key": fact.slice_key,
-                            "share": fact.share,
-                            "volume": fact.volume,
-                            "games_played": fact.games_played,
-                            "volume_unit": fact.volume_unit,
-                            "provider": fact.provider,
-                            "retrieved_at": observed_at,
-                        }
-                        for fact in facts_by_base[observation.base]
-                    ],
+                    insert(observation_table).values(
+                        season=season,
+                        base=observation.base,
+                        status=observation.status,
+                        unavailable_reason=observation.unavailable_reason,
+                        retrieved_at=observed_at,
+                    )
                 )
-            connection.execute(
-                delete(observation_table).where(
-                    observation_table.c.season == season
+
+    @staticmethod
+    def _base_changed(
+        observation: PlayerDietObservation,
+        facts: Sequence[PlayerDietFact],
+        existing_observation: Mapping[str, Any] | None,
+        existing_facts: tuple[tuple[Any, ...], ...],
+        observed_at: datetime,
+    ) -> bool:
+        if existing_observation is None:
+            return True
+        if (
+            existing_observation["status"] != observation.status
+            or existing_observation["unavailable_reason"]
+            != observation.unavailable_reason
+            or assume_utc(existing_observation["retrieved_at"]) != observed_at
+        ):
+            return True
+        if observation.status != "available":
+            return False
+        expected = tuple(
+            sorted(
+                (
+                    fact.player_id,
+                    fact.base,
+                    fact.slice_key,
+                    float(fact.share),
+                    float(fact.volume),
+                    fact.games_played,
+                    fact.volume_unit,
+                    fact.provider,
+                    observed_at,
                 )
+                for fact in facts
             )
-            connection.execute(
-                insert(observation_table),
-                [
-                    {
-                        "season": season,
-                        "base": observation.base,
-                        "status": observation.status,
-                        "unavailable_reason": observation.unavailable_reason,
-                        "retrieved_at": observed_at,
-                    }
-                    for observation in observation_rows
-                ],
-            )
+        )
+        return expected != existing_facts
 
     @staticmethod
     def _validate_publication(
@@ -237,10 +346,19 @@ class PlayerDietRepository:
             raise ValueError("player Diet provider is invalid")
 
     def get_for_players(
-        self, season: str, player_ids: Sequence[int]
+        self,
+        season: str,
+        player_ids: Sequence[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> PlayerDietResult:
         season = validate_canonical_season(season)
         requested = self._canonical_player_ids(player_ids)
+        publication_result = self._publication_result(
+            season, requested, publication_snapshot=publication_snapshot
+        )
+        if publication_result is not None:
+            return publication_result
         fact_table = PlayerDietFactRow.__table__
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with self.engine.connect() as connection:
@@ -300,6 +418,158 @@ class PlayerDietRepository:
             ),
         )
 
+    def _publication_result(
+        self,
+        season: str,
+        requested: tuple[int, ...],
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> PlayerDietResult | None:
+        """Serve activated Diet bases independently from immutable payloads."""
+
+        if self._publication_reader is None:
+            return None
+        stream_by_base = {
+            "assist_locations": "player_assist_locations",
+            "play_types": "synergy_play_types",
+            "shot_types": "grouped_shot_types",
+            "shot_zones": "exact_shot_zones",
+        }
+        facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
+        observations: list[StoredPlayerDietObservation] = []
+        fallback_bases: list[str] = []
+        used_publication = False
+        if publication_snapshot is not None:
+            publication_reads = {
+                stream_key: publication_snapshot.read(stream_key)
+                for stream_key in stream_by_base.values()
+            }
+        else:
+            read_many = getattr(self._publication_reader, "read_many", None)
+            publication_reads = (
+                read_many(tuple(stream_by_base.values()), season=season)
+                if callable(read_many)
+                else {
+                    stream_key: self._publication_reader.read(
+                        stream_key, season=season
+                    )
+                    for stream_key in stream_by_base.values()
+                }
+            )
+        for base in PLAYER_DIET_BASES:
+            stream_key = stream_by_base.get(base)
+            if stream_key is None:
+                continue
+            read = publication_reads[stream_key]
+            if read.legacy_fallback_allowed:
+                fallback_bases.append(base)
+                continue
+            used_publication = True
+            retrieved_at = read.retrieved_at or datetime.now(timezone.utc)
+            if not read.available:
+                observations.append(
+                    StoredPlayerDietObservation(
+                        base=base,
+                        status="unavailable" if read.status == "unavailable" else "missing",
+                        unavailable_reason=read.unavailable_reason or f"publication_{read.status}",
+                        retrieved_at=retrieved_at,
+                    )
+                )
+                continue
+            try:
+                facts = (
+                    tuple(read.decoded)
+                    if read.decoded is not None
+                    else decode_player_diet(
+                        read.payload, base=base, retrieved_at=retrieved_at
+                    )
+                )
+            except PublicationPayloadError:
+                observations.append(
+                    StoredPlayerDietObservation(
+                        base=base,
+                        status="unavailable",
+                        unavailable_reason="publication_payload_invalid",
+                        retrieved_at=retrieved_at,
+                    )
+                )
+                continue
+            observations.append(
+                StoredPlayerDietObservation(
+                    base=base,
+                    status="available",
+                    retrieved_at=retrieved_at,
+                )
+            )
+            for fact in facts:
+                if fact.player_id in requested:
+                    facts_by_player[fact.player_id].append(
+                        StoredPlayerDietFact(
+                            player_id=fact.player_id,
+                            base=fact.base,
+                            slice_key=fact.slice_key,
+                            share=fact.share,
+                            volume=fact.volume,
+                            games_played=fact.games_played,
+                            volume_unit=fact.volume_unit,
+                            provider=fact.provider,
+                            retrieved_at=retrieved_at,
+                        )
+                    )
+        if used_publication:
+            fact_table = PlayerDietFactRow.__table__
+            observation_table = PlayerDietSurfaceObservationRow.__table__
+            with self.engine.connect() as connection:
+                legacy_facts = connection.execute(
+                    select(fact_table).where(
+                        fact_table.c.season == season,
+                        fact_table.c.base.in_(fallback_bases),
+                        fact_table.c.player_id.in_(requested) if requested else False,
+                    )
+                ).mappings().all() if requested else ()
+                legacy_observations = connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.season == season,
+                        observation_table.c.base.in_(fallback_bases),
+                    )
+                ).mappings().all()
+            for row in legacy_facts:
+                facts_by_player[row["player_id"]].append(
+                    StoredPlayerDietFact(
+                        player_id=row["player_id"],
+                        base=row["base"],
+                        slice_key=row["slice_key"],
+                        share=row["share"],
+                        volume=row["volume"],
+                        games_played=row["games_played"],
+                        volume_unit=row["volume_unit"],
+                        provider=row["provider"],
+                        retrieved_at=assume_utc(row["retrieved_at"]),
+                    )
+                )
+            observations.extend(
+                StoredPlayerDietObservation(
+                    base=row["base"],
+                    status=row["status"],
+                    unavailable_reason=row["unavailable_reason"],
+                    retrieved_at=assume_utc(row["retrieved_at"]),
+                )
+                for row in legacy_observations
+            )
+        if not used_publication:
+            return None
+        return PlayerDietResult(
+            season=season,
+            players={
+                player_id: tuple(sorted(
+                    facts_by_player[player_id],
+                    key=lambda fact: (fact.base, fact.slice_key),
+                ))
+                for player_id in sorted(facts_by_player)
+            },
+            observations=tuple(sorted(observations, key=lambda row: row.base)),
+        )
+
     @staticmethod
     def _canonical_player_ids(player_ids: Sequence[int]) -> tuple[int, ...]:
         if isinstance(player_ids, (str, bytes)):
@@ -321,8 +591,14 @@ class PlayerDietService:
         nba_stats_provider: Any,
         pbp_stats_provider: Any,
         clock: Callable[[], datetime] | None = None,
+        write_fence: Any | None = None,
+        publication_reader: Any | None = None,
     ) -> None:
-        self.repository = PlayerDietRepository(engine)
+        self.repository = PlayerDietRepository(
+            engine,
+            write_fence=write_fence,
+            publication_reader=publication_reader,
+        )
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider
@@ -382,9 +658,15 @@ class PlayerDietService:
         )
 
     def get_for_players(
-        self, season: str, player_ids: Sequence[int]
+        self,
+        season: str,
+        player_ids: Sequence[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> PlayerDietResult:
-        return self.repository.get_for_players(season, player_ids)
+        return self.repository.get_for_players(
+            season, player_ids, publication_snapshot=publication_snapshot
+        )
 
     @staticmethod
     def _collect_base(

@@ -24,10 +24,12 @@ class PlayerService:
         db_engine,
         settings: RuntimeSettings | None = None,
         nba_stats_provider: NBAStatsProvider | None = None,
+        publication_reader=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
+        self.publication_reader = publication_reader
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -171,7 +173,7 @@ class PlayerService:
             gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
                     'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
             
-            per36_df = self._fetch_data_from_table('player_per36_stats')
+            per36_df = self._per36_frame()
             
             # Calculate per 36minute stats
             for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
@@ -193,6 +195,48 @@ class PlayerService:
         except Exception as e:
             logger.error("Error getting archetype gamelogs: %s", e)
             return []
+
+    def _per36_frame(self):
+        """Read active per-36 facts from the immutable publication first."""
+
+        if self.publication_reader is None:
+            return self._fetch_data_from_table("player_per36_stats")
+        from app.services.database_first_activation import (
+            PublicationPayloadError,
+            decode_player_per36,
+        )
+
+        season = self.settings.nba.current_season
+        read = self.publication_reader.read("player_per36", season=season)
+        if read.legacy_fallback_allowed:
+            return self._fetch_data_from_table("player_per36_stats")
+        if not read.available:
+            return pd.DataFrame(
+                columns=[
+                    "PLAYER_ID", "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA",
+                    "PTS", "TOV",
+                ]
+            )
+        try:
+            facts = decode_player_per36(read.payload, season=season)
+        except PublicationPayloadError:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            [
+                {
+                    "PLAYER_ID": fact.player_id,
+                    "FGM": fact.field_goals_made_per36,
+                    "FGA": fact.field_goals_attempted_per36,
+                    "FG3M": fact.three_pointers_made_per36,
+                    "FG3A": fact.three_pointers_attempted_per36,
+                    "FTM": fact.free_throws_made_per36,
+                    "FTA": fact.free_throws_attempted_per36,
+                    "PTS": fact.points_per36,
+                    "TOV": fact.turnovers_per36,
+                }
+                for fact in facts
+            ]
+        )
 
     def _get_archetype_players_from_player(self, player_name):
         """Get list of player IDs in the same cluster as the given player"""

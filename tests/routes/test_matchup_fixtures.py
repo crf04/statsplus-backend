@@ -1,6 +1,8 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,9 +19,20 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.migrations import run_migrations
+from app.models.collection_control import (
+    CollectionObservation,
+    PublicationObservation,
+    PublicationVersion,
+)
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.event_catalog_service import EventCatalogService
+from app.services.database_first_activation import (
+    DatabaseFirstPublicationReader,
+)
+from app.services.collection_control import CollectionOperationsService, PublicationService
 from app.services.matchup import MatchupService
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.player_diet import (
@@ -38,6 +51,7 @@ from app.services.player_pool_snapshot_repository import (
 )
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
+from app.services.slate_service import SlateService
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
@@ -240,7 +254,7 @@ def _team_matchups(
                     TeamMatchupObservation(
                         base,
                         "unavailable" if base == "play_types" else "available",
-                        "provider_unsupported" if base == "play_types" else None,
+                        "provider_window_unsupported" if base == "play_types" else None,
                     )
                     for base in bases
                 ),
@@ -571,7 +585,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     payload = response.get_json()
     assert payload["league"]["surface_availability"]["play_types"]["last_15"] == {
         "status": "unavailable",
-        "unavailable_reason": "provider_unsupported",
+        "unavailable_reason": "provider_window_unsupported",
     }
     assert payload["league"]["defense_sheet"]["play_types"][0]["last_15"] is None
     assert payload["teams"][0]["defense_sheet"]["play_types"][0]["last_15"] is None
@@ -924,3 +938,217 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
     )
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
     assert payload["injuries"]["status"] == "fresh"
+
+
+def test_authenticated_slate_matchup_selection_journey_uses_one_activated_generation(
+    tmp_path,
+):
+    """Exercise the public chain with activated, rollback, mixed, and L15 states."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'journey.sqlite3'}")
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    event_catalog = _event_catalog(engine, settings)
+    pool = _player_pool(engine)
+    player_logs = _player_logs(engine, catalog)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+    log_facts = player_logs.list_player_rows(SEASON, 2544)
+    diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
+    publication_service = PublicationService(engine, clock=lambda: NOW)
+    publication_service.register_default_streams()
+    operations = CollectionOperationsService(
+        engine, publication_service=publication_service, clock=lambda: NOW
+    )
+
+    def candidate(stream_key, payload, *, publication_id, observation_id, provider="nba"):
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        checksum = hashlib.sha256(encoded.encode()).hexdigest()
+        with engine.begin() as connection:
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season=SEASON,
+                cutoff=NOW - timedelta(days=1),
+                version=1,
+                status="candidate",
+                checksum=checksum,
+                payload=encoded,
+                created_at=NOW,
+                reason="authenticated journey candidate",
+                fence=0,
+            ))
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=observation_id,
+                collector_id="journey-collector",
+                manifest_id=None,
+                environment="testing",
+                provider=provider,
+                observation_type=stream_key,
+                scope=json.dumps({"stream": stream_key}),
+                season=SEASON,
+                cutoff=NOW - timedelta(days=1),
+                schema_version=1,
+                checksum=checksum,
+                payload=encoded,
+                payload_bytes=len(encoded.encode()),
+                retrieved_at=NOW,
+                accepted_at=NOW,
+            ))
+            connection.execute(PublicationObservation.__table__.insert().values(
+                publication_id=publication_id,
+                observation_id=observation_id,
+                role="accepted_candidate",
+                slice_key=None,
+                created_at=NOW,
+            ))
+        return checksum
+
+    def log_payload(points):
+        row = asdict(log_facts[0])
+        row["game_date"] = row["game_date"].isoformat()
+        row["points"] = points
+        return {"rows": [row]}
+
+    first_log = "journey-log-first"
+    second_log = "journey-log-second"
+    first_log_payload = log_payload(25)
+    second_log_payload = log_payload(26)
+    candidate(
+        "player_game_logs", first_log_payload, publication_id=first_log,
+        observation_id="journey-observation-first",
+    )
+    candidate(
+        "player_game_logs", second_log_payload, publication_id=second_log,
+        observation_id="journey-observation-second",
+    )
+    diet_rows = [
+        {
+            key: value
+            for key, value in asdict(fact).items()
+            if key not in {"base", "retrieved_at"}
+        }
+        for fact in diet_facts
+        if fact.base == "play_types"
+    ]
+    diet_candidate = "journey-diet"
+    candidate(
+        "synergy_play_types", {"base": "play_types", "rows": diet_rows},
+        publication_id=diet_candidate, observation_id="journey-observation-diet",
+    )
+    operations.activate_stream(
+        "player_game_logs", actor="journey-operator", reason="activate first logs",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=first_log,
+    )
+    operations.activate_stream(
+        "player_game_logs", actor="journey-operator", reason="advance logs",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=second_log,
+    )
+    operations.activate_stream(
+        "synergy_play_types", actor="journey-operator", reason="activate diet",
+        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=diet_candidate,
+    )
+    rollback = operations.rollback_publication(
+        "player_game_logs", actor="journey-operator", reason="restore first log payload"
+    )
+    assert rollback.resource.payload == json.dumps(
+        first_log_payload, sort_keys=True, separators=(",", ":")
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    player_logs._publication_reader = reader
+    player_diets.repository._publication_reader = reader
+    team_matchups._publication_reader = reader
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    matchup_service = MatchupService(
+        event_catalog=event_catalog,
+        player_pool=pool,
+        player_logs=player_logs,
+        player_diets=player_diets,
+        team_matchups=team_matchups,
+        stats_freshness=stats_freshness,
+        settings=settings,
+        injuries=None,
+        clock=lambda: NOW,
+        publication_reader=reader,
+    )
+    selection_service = MatchupSelectionService(
+        event_catalog=event_catalog,
+        player_pool=pool,
+        player_logs=player_logs,
+        archetypes=PlayerArchetypeRepository(engine),
+        statistic_catalog=catalog,
+        settings=settings,
+        publication_reader=reader,
+    )
+    provider_calls = {"nba": 0, "pbp": 0}
+
+    class ProviderCounter:
+        def __init__(self, name):
+            self.name = name
+
+        def __getattr__(self, operation):
+            provider_calls[self.name] += 1
+            raise AssertionError(f"unexpected {self.name}.{operation} request")
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                slate_service=SlateService(
+                    event_catalog,
+                    settings=settings,
+                    player_pool=None,
+                    injuries=None,
+                    clock=lambda: NOW,
+                ),
+                matchup_service=matchup_service,
+                matchup_selection_service=selection_service,
+                nba_stats_provider=ProviderCounter("nba"),
+                pbp_stats_provider=ProviderCounter("pbp"),
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    client = app.test_client()
+
+    slate_response = client.get("/api/games/slate?date=2026-01-15")
+    matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    selection_response = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    restored_snapshot = reader.snapshot(
+        ("player_game_logs", "synergy_play_types"), season=SEASON
+    )
+    assert restored_snapshot.read("player_game_logs").decoded[0].points == 25
+    assert restored_snapshot.read("player_game_logs").publication_id == rollback.resource.publication_id
+    assert restored_snapshot.generation
+
+    assert slate_response.status_code == 200
+    assert matchup_response.status_code == 200
+    assert selection_response.status_code == 200
+    matchup = matchup_response.get_json()
+    assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
+    assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
+    assert matchup["provenance"]["synergy_play_types"]["publication_id"] == diet_candidate
+    assert matchup["provenance"]["synergy:l15"]["unavailable_reason"] == "provider_window_unsupported"
+    assert matchup["coverage"]["mixed_cutoff"]
+    assert matchup["coverage"]["mixed_freshness"]
+    assert matchup["league"]["surface_availability"]["play_types"]["last_15"] == {
+        "status": "unavailable",
+        "unavailable_reason": "provider_window_unsupported",
+    }
+    assert selection_response.get_json()["h2h"]["rows"]
+    assert provider_calls == {"nba": 0, "pbp": 0}

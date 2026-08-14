@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from inspect import Parameter, signature
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,7 @@ from app.services.team_matchup_query import (
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
+from app.services.database_first_activation import DatabaseFirstPublicationReader
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -161,6 +163,26 @@ _DIET_SHARE_BOUNDS = {
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
 }
 
+_PUBLICATION_STREAM_KEYS = (
+    "player_game_logs",
+    "traditional_opponent_season",
+    "traditional_opponent_l15",
+    "assist_locations_season",
+    "assist_locations_l15",
+    "player_per36",
+    "synergy_play_types",
+    "grouped_shot_types",
+    "exact_shot_zones",
+    "player_assist_locations",
+    "synergy:l15",
+    "synergy_play_types_opponent_season",
+    "synergy_play_types_opponent_l15",
+    "grouped_shot_types_opponent_season",
+    "grouped_shot_types_opponent_l15",
+    "exact_shot_zones_opponent_season",
+    "exact_shot_zones_opponent_l15",
+)
+
 
 class EventCatalogReader(Protocol):
     def count_events(self, season: str) -> int: ...
@@ -176,15 +198,25 @@ class StoredPlayerPoolReader(Protocol):
 
 class PlayerLogReader(Protocol):
     def get_player_summaries(
-        self, season: str, player_ids: Sequence[int]
+        self,
+        season: str,
+        player_ids: Sequence[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> dict[int, PlayerSeasonLogSummary]: ...
 
-    def get_read_freshness(self, season: str) -> PlayerGameLogReadFreshness: ...
+    def get_read_freshness(
+        self, season: str, *, publication_snapshot: Any | None = None
+    ) -> PlayerGameLogReadFreshness: ...
 
 
 class PlayerDietReader(Protocol):
     def get_for_players(
-        self, season: str, player_ids: Sequence[int]
+        self,
+        season: str,
+        player_ids: Sequence[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> PlayerDietResult: ...
 
 
@@ -195,6 +227,7 @@ class TeamMatchupReader(Protocol):
         *,
         window_games: int | None = None,
         as_of: date | None = None,
+        publication_snapshot: Any | None = None,
     ) -> TeamMatchupWindow | None: ...
 
 
@@ -252,6 +285,8 @@ class MatchupService:
         settings: RuntimeSettings,
         injuries: MatchupInjuryReader | None = None,
         clock: Callable[[], datetime] | None = None,
+        database_only: bool = False,
+        publication_reader: DatabaseFirstPublicationReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
@@ -261,6 +296,8 @@ class MatchupService:
         self.stats_freshness = stats_freshness
         self.settings = settings
         self.injuries = injuries
+        self.database_only = bool(database_only)
+        self.publication_reader = publication_reader
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
@@ -271,6 +308,7 @@ class MatchupService:
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
+        publication_snapshot = self._publication_snapshot(season)
         event, events = self._event(season, game_id)
         schedule_freshness = self._schedule_freshness(season, observed_at=observed_at)
 
@@ -291,17 +329,36 @@ class MatchupService:
             for player in pool_players
             if player.canonical_player_id not in injury_result.out_player_ids
         )
-        summaries = self.player_logs.get_player_summaries(
-            season, tuple(player.canonical_player_id for player in players)
+        summaries = self._call_with_snapshot(
+            self.player_logs.get_player_summaries,
+            season,
+            tuple(player.canonical_player_id for player in players),
+            publication_snapshot=publication_snapshot,
         )
-        log_freshness = self.player_logs.get_read_freshness(season)
-        diets = self._diets(season, players)
+        log_freshness = self._call_with_snapshot(
+            self.player_logs.get_read_freshness,
+            season,
+            publication_snapshot=publication_snapshot,
+        )
+        diets = self._diets(
+            season, players, publication_snapshot=publication_snapshot
+        )
 
         slate_date = self._event_date(event)
         scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
         team_as_of = slate_date if scheduled_at <= observed_at else None
-        season_window = self._team_window(season, window_games=None, as_of=team_as_of)
-        last_15_window = self._team_window(season, window_games=15, as_of=team_as_of)
+        season_window = self._team_window(
+            season,
+            window_games=None,
+            as_of=team_as_of,
+            publication_snapshot=publication_snapshot,
+        )
+        last_15_window = self._team_window(
+            season,
+            window_games=15,
+            as_of=team_as_of,
+            publication_snapshot=publication_snapshot,
+        )
         windows = {"season": season_window, "last_15": last_15_window}
         metric_indexes = {
             name: None if not window else _WindowMetricIndex.build(window)
@@ -368,6 +425,67 @@ class MatchupService:
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
             },
+            **self._publication_metadata(season, publication_snapshot),
+        }
+
+    def _publication_snapshot(self, season: str):
+        if self.publication_reader is None:
+            return None
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(self.publication_reader, "read_snapshot", None)
+        if not callable(snapshot):
+            return None
+        return snapshot(_PUBLICATION_STREAM_KEYS, season=season)
+
+    @staticmethod
+    def _call_with_snapshot(method, *args, publication_snapshot=None, **kwargs):
+        """Keep injected legacy test seams compatible with the new kwarg."""
+
+        if publication_snapshot is None:
+            return method(*args, **kwargs)
+        try:
+            parameters = signature(method).parameters.values()
+            accepts_snapshot = any(
+                parameter.name == "publication_snapshot"
+                or parameter.kind == Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_snapshot = False
+        if accepts_snapshot:
+            kwargs["publication_snapshot"] = publication_snapshot
+        return method(*args, **kwargs)
+
+    def _publication_metadata(
+        self, season: str, publication_snapshot=None
+    ) -> dict[str, Any]:
+        """Add additive provenance without collapsing independent clocks."""
+
+        if publication_snapshot is not None:
+            metadata = publication_snapshot.metadata()
+        elif self.publication_reader is not None:
+            metadata = self.publication_reader.metadata(
+                _PUBLICATION_STREAM_KEYS,
+                season=season,
+            )
+        else:
+            # Legacy deployments without the activation table still expose a
+            # truthful additive document based on their stored read seams.
+            metadata = {
+                "streams": {},
+                "mixed_cutoff": False,
+                "mixed_freshness": False,
+                "coverage_cutoffs": [],
+            }
+        return {
+            "provenance": metadata["streams"],
+            "coverage": {
+                "mixed_cutoff": bool(metadata["mixed_cutoff"]),
+                "mixed_freshness": bool(metadata["mixed_freshness"]),
+                "coverage_cutoffs": list(metadata["coverage_cutoffs"]),
+                "source": "database",
+            },
         }
 
     def _injuries(
@@ -377,6 +495,10 @@ class MatchupService:
         pool_players: Sequence[PoolPlayer],
     ) -> MatchupInjuryResult:
         if self.injuries is not None:
+            # Database-first applies to governed statistical facts.  Injury
+            # Reports retain their existing live/snapshot contract, including
+            # the provider path used before this migration. Statistical
+            # activation does not change the Injury Reports contract.
             return self.injuries.get_injuries(
                 event=event,
                 season=season,
@@ -394,6 +516,14 @@ class MatchupService:
         events = self.event_catalog.get_events(season)
         for event in events:
             if str(event.get("nba_game_id")) == game_id:
+                classification = resolve_stored_event_classification(
+                    game_id,
+                    str(event.get("classification", event.get("season_type", ""))),
+                )
+                if classification.kind != "Regular Season":
+                    raise ResourceNotFoundError(
+                        "The requested matchup is outside the Regular Season window."
+                    )
                 return event, events
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
@@ -419,19 +549,37 @@ class MatchupService:
         return {"status": status, "retrieved_at": retrieved.isoformat()}
 
     def _team_window(
-        self, season: str, *, window_games: int | None, as_of: date | None
+        self,
+        season: str,
+        *,
+        window_games: int | None,
+        as_of: date | None,
+        publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         if self.team_matchups is None:
             return None
-        return self.team_matchups.get_latest_window(
-            season, window_games=window_games, as_of=as_of
+        return self._call_with_snapshot(
+            self.team_matchups.get_latest_window,
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            publication_snapshot=publication_snapshot,
         )
 
-    def _diets(self, season: str, players: Sequence[PoolPlayer]) -> PlayerDietResult:
+    def _diets(
+        self,
+        season: str,
+        players: Sequence[PoolPlayer],
+        *,
+        publication_snapshot=None,
+    ) -> PlayerDietResult:
         if self.player_diets is None:
             return PlayerDietResult(season, {}, ())
-        return self.player_diets.get_for_players(
-            season, tuple(player.canonical_player_id for player in players)
+        return self._call_with_snapshot(
+            self.player_diets.get_for_players,
+            season,
+            tuple(player.canonical_player_id for player in players),
+            publication_snapshot=publication_snapshot,
         )
 
     @classmethod
@@ -1033,6 +1181,15 @@ class MatchupService:
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
+                if base == "play_types" and window_name == "last_15":
+                    # NBA Synergy exposes no bounded Last-15/date window.
+                    # Keep this exact public reason even when an older legacy
+                    # snapshot happened to contain a similarly named row.
+                    result[base][window_name] = {
+                        "status": "unavailable",
+                        "unavailable_reason": "provider_window_unsupported",
+                    }
+                    continue
                 if state["status"] != "available" or metric_index is None:
                     result[base][window_name] = state
                     continue

@@ -86,10 +86,11 @@ class StoredTeamMatchupSnapshot:
 class TeamMatchupRepository:
     """Replace or read one season/as-of/window snapshot transactionally."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, write_fence=None) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
+        self._write_fence = write_fence
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -133,26 +134,111 @@ class TeamMatchupRepository:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
+            scoped_changes = []
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
+                existing_observations = {
+                    row["surface"]: row
+                    for row in connection.execute(
+                        select(observation_table).where(*self._scope(observation_table, scope))
+                    ).mappings()
+                }
+                facts_by_surface: dict[str, list[TeamMatchupFact]] = defaultdict(list)
+                for fact in fact_rows:
+                    facts_by_surface[fact.base].append(fact)
+                existing_facts: dict[str, tuple[tuple, ...]] = {}
+                for surface in {observation.surface for observation in observation_rows}:
+                    existing_facts[surface] = tuple(
+                        sorted(
+                            self._fact_signature(row)
+                            for row in connection.execute(
+                                select(fact_table).where(
+                                    *self._scope(fact_table, scope),
+                                    fact_table.c.base == surface,
+                                )
+                            ).mappings()
+                        )
+                    )
+                changed_surfaces = {
+                    observation.surface
+                    for observation in observation_rows
+                    if self._surface_changed(
+                        observation,
+                        facts_by_surface.get(observation.surface, ()),
+                        existing_observations.get(observation.surface),
+                        existing_facts.get(observation.surface, ()),
+                        observed_at,
+                        scope.as_of,
+                    )
+                }
+                scoped_changes.append(
+                    (scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces)
+                )
+            checker = getattr(self._write_fence, "assert_writable", None)
+            for scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces in scoped_changes:
+                if callable(checker):
+                    stream_by_surface = {
+                        "traditional": (
+                            "traditional_opponent",
+                            "traditional_opponent_l15"
+                            if scope.window_games is not None
+                            else "traditional_opponent_season",
+                        ),
+                        "assist_locations": (
+                            "assist_locations",
+                            "assist_locations_l15"
+                            if scope.window_games is not None
+                            else "assist_locations_season",
+                        ),
+                        "play_types": (
+                            "synergy_play_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "synergy_play_types_opponent_season",
+                        ),
+                        "shot_types": (
+                            "grouped_shot_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "grouped_shot_types_opponent_season",
+                        ),
+                        "shot_zones": (
+                            "exact_shot_zones_opponent_l15"
+                            if scope.window_games is not None
+                            else "exact_shot_zones_opponent_season",
+                        ),
+                    }
+                    # Lock/check only the stream(s) represented by this
+                    # snapshot.  A season write must not fence L15, and a
+                    # traditional-only write must not fence assist locations.
+                    for observation in observation_rows:
+                        if observation.surface not in changed_surfaces:
+                            continue
+                        stream_keys = stream_by_surface.get(observation.surface, ())
+                        for stream_key in stream_keys:
+                            checker(stream_key, connection=connection)
                 identity = {
                     "season": scope.season,
                     "as_of_date": scope.as_of,
                     "window_kind": scope.window_kind,
                     "window_games": scope.stored_window_games,
                 }
-                if replace_surfaces:
+                changed_replace_surfaces = set(replace_surfaces) & changed_surfaces
+                if changed_replace_surfaces:
                     connection.execute(
                         delete(fact_table).where(
                             *self._scope(fact_table, scope),
-                            fact_table.c.base.in_(replace_surfaces),
+                            fact_table.c.base.in_(changed_replace_surfaces),
                         )
                     )
-                connection.execute(
-                    delete(observation_table).where(
-                        *self._scope(observation_table, scope)
+                if changed_surfaces:
+                    connection.execute(
+                        delete(observation_table).where(
+                            *self._scope(observation_table, scope),
+                            observation_table.c.surface.in_(changed_surfaces),
+                        )
                     )
+                changed_fact_rows = tuple(
+                    fact for fact in fact_rows if fact.base in changed_replace_surfaces
                 )
-                if fact_rows:
+                if changed_fact_rows:
                     connection.execute(
                         insert(fact_table),
                         [
@@ -170,22 +256,85 @@ class TeamMatchupRepository:
                                 "window_end_date": scope.as_of,
                                 "retrieved_at": observed_at,
                             }
-                            for fact in fact_rows
+                            for fact in changed_fact_rows
                         ],
                     )
-                connection.execute(
-                    insert(observation_table),
-                    [
-                        {
-                            **identity,
-                            "surface": observation.surface,
-                            "status": observation.status,
-                            "unavailable_reason": observation.unavailable_reason,
-                            "retrieved_at": observed_at,
-                        }
-                        for observation in observation_rows
-                    ],
+                changed_observations = tuple(
+                    observation
+                    for observation in observation_rows
+                    if observation.surface in changed_surfaces
                 )
+                if changed_observations:
+                    connection.execute(
+                        insert(observation_table),
+                        [
+                            {
+                                **identity,
+                                "surface": observation.surface,
+                                "status": observation.status,
+                                "unavailable_reason": observation.unavailable_reason,
+                                "retrieved_at": observed_at,
+                            }
+                            for observation in changed_observations
+                        ],
+                    )
+
+    @staticmethod
+    def _fact_signature(row) -> tuple:
+        return (
+            row["team_id"],
+            row["base"],
+            row["slice_key"],
+            row["stat_key"],
+            row["raw_value"],
+            row["denominator_value"],
+            row["denominator_unit"],
+            row["provider"],
+            row["window_start_date"],
+            row["window_end_date"],
+            assume_utc(row["retrieved_at"]),
+        )
+
+    @classmethod
+    def _surface_changed(
+        cls,
+        observation: TeamMatchupObservation,
+        facts: Iterable[TeamMatchupFact],
+        existing_observation,
+        existing_facts: tuple[tuple, ...],
+        observed_at: datetime,
+        window_end_date: date,
+    ) -> bool:
+        if existing_observation is None:
+            return True
+        if (
+            existing_observation["status"] != observation.status
+            or existing_observation["unavailable_reason"]
+            != observation.unavailable_reason
+            or assume_utc(existing_observation["retrieved_at"]) != observed_at
+        ):
+            return True
+        if observation.status != "available":
+            return False
+        expected = tuple(
+            sorted(
+                (
+                    fact.team_id,
+                    fact.base,
+                    fact.slice_key,
+                    fact.stat_key,
+                    fact.raw_value,
+                    fact.denominator_value,
+                    fact.denominator_unit,
+                    fact.provider,
+                    fact.window_start_date,
+                    window_end_date,
+                    observed_at,
+                )
+                for fact in facts
+            )
+        )
+        return expected != existing_facts
 
     @staticmethod
     def _prepare_surface_publication(

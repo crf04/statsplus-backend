@@ -17,6 +17,10 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    decode_team_window,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -61,9 +65,11 @@ class TeamMatchupQueryService:
         repository: TeamMatchupRepository,
         *,
         clock: Callable[[], datetime] | None = None,
+        publication_reader=None,
     ) -> None:
         self.repository = repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._publication_reader = publication_reader
 
     def get_latest_window(
         self,
@@ -71,6 +77,7 @@ class TeamMatchupQueryService:
         *,
         window_games: int | None = None,
         as_of: date | None = None,
+        publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date."""
 
@@ -82,7 +89,13 @@ class TeamMatchupQueryService:
             season, window_games=window_games, as_of=cutoff
         )
         if observation_scope is None:
-            return None
+            return self._database_first_window(
+                season,
+                cutoff=cutoff,
+                window_games=window_games,
+                legacy=None,
+                publication_snapshot=publication_snapshot,
+            )
         observation_snapshot = self.repository.get_snapshot(observation_scope)
         observations = observation_snapshot.observations
         fact_scopes = self.repository.get_latest_fact_scopes(
@@ -105,20 +118,266 @@ class TeamMatchupQueryService:
                 for fact in snapshots_by_scope[fact_scope].facts
                 if fact.base in surfaces
             )
-        return self._build_window(
+        legacy_window = self._build_window(
             observation_scope,
             fact_scopes=fact_scopes,
             facts=facts,
             observations=observations,
         )
+        return self._database_first_window(
+            season,
+            cutoff=cutoff,
+            window_games=window_games,
+            legacy=legacy_window,
+            publication_snapshot=publication_snapshot,
+        )
 
-    def get_window(self, scope: TeamMatchupSnapshotScope) -> TeamMatchupWindow:
+    def get_window(
+        self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None
+    ) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
-        return self._build_window(
+        legacy_window = self._build_window(
             scope,
             fact_scopes={fact.base: scope for fact in snapshot.facts},
             facts=snapshot.facts,
             observations=snapshot.observations,
+        )
+        return self._database_first_window(
+            scope.season,
+            cutoff=scope.as_of,
+            window_games=scope.window_games,
+            legacy=legacy_window,
+            publication_snapshot=publication_snapshot,
+        )
+
+    def _database_first_window(
+        self,
+        season: str,
+        *,
+        cutoff: date,
+        window_games: int | None,
+        legacy: TeamMatchupWindow | None,
+        publication_snapshot=None,
+    ) -> TeamMatchupWindow | None:
+        """Overlay only activated windows; inactive bases remain legacy-backed."""
+
+        if self._publication_reader is None:
+            return legacy
+        window = "l15" if window_games is not None else "season"
+        stream_by_base = {
+            "traditional": f"traditional_opponent_{window}",
+            "assist_locations": f"assist_locations_{window}",
+            "play_types": f"synergy_play_types_opponent_{window}",
+            "shot_types": f"grouped_shot_types_opponent_{window}",
+            "shot_zones": f"exact_shot_zones_opponent_{window}",
+        }
+        if publication_snapshot is not None:
+            publication_reads = {
+                stream_key: publication_snapshot.read(stream_key)
+                for stream_key in stream_by_base.values()
+            }
+        else:
+            read_many = getattr(self._publication_reader, "read_many", None)
+            publication_reads = (
+                read_many(tuple(stream_by_base.values()), season=season)
+                if callable(read_many)
+                else {
+                    stream_key: self._publication_reader.read(
+                        stream_key, season=season
+                    )
+                    for stream_key in stream_by_base.values()
+                }
+            )
+        reads = {
+            base: publication_reads[stream_key]
+            for base, stream_key in stream_by_base.items()
+        }
+        active = {
+            base: read
+            for base, read in reads.items()
+            if not read.legacy_fallback_allowed
+        }
+        if not active:
+            return legacy
+        base_windows: dict[str, TeamMatchupWindow | None] = {}
+        for base, read in active.items():
+            if not read.available:
+                base_windows[base] = None
+                continue
+            try:
+                rows = (
+                    tuple(read.decoded)
+                    if read.decoded is not None
+                    else decode_team_window(
+                        read.payload, stream_key=stream_by_base[base]
+                    )
+                )
+            except PublicationPayloadError:
+                base_windows[base] = None
+                continue
+            base_windows[base] = self._publication_base_window(
+                season,
+                cutoff=cutoff,
+                window_games=window_games,
+                base=base,
+                rows=rows,
+                retrieved_at=read.retrieved_at or self._clock(),
+            )
+        scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
+            season=season, as_of=cutoff, window_games=window_games
+        )
+        legacy_league = () if legacy is None else legacy.league_metrics
+        legacy_team = {} if legacy is None else legacy.team_metrics
+        legacy_observations = () if legacy is None else legacy.observations
+        legacy_fact_scopes = {} if legacy is None else legacy.fact_scopes
+        legacy_retrieved = {} if legacy is None else legacy.fact_retrieved_at
+        league = [metric for metric in legacy_league if metric.base not in active]
+        team_metrics = {
+            team_id: [metric for metric in metrics if metric.base not in active]
+            for team_id, metrics in legacy_team.items()
+        }
+        observations = [
+            observation
+            for observation in legacy_observations
+            if observation.surface not in active
+        ]
+        fact_scopes = {
+            base: fact_scope
+            for base, fact_scope in legacy_fact_scopes.items()
+            if base not in active
+        }
+        fact_retrieved = {
+            base: retrieved
+            for base, retrieved in legacy_retrieved.items()
+            if base not in active
+        }
+        for base, read in active.items():
+            window = base_windows[base]
+            if window is None:
+                observations.append(StoredTeamMatchupObservation(
+                    surface=base,
+                    status="unavailable" if read.status == "unavailable" else "missing",
+                    unavailable_reason=(
+                        read.unavailable_reason or f"publication_{read.status}"
+                    ),
+                    retrieved_at=read.retrieved_at or self._clock(),
+                ))
+                continue
+            league.extend(window.league_metrics)
+            for team_id, metrics in window.team_metrics.items():
+                team_metrics.setdefault(team_id, []).extend(metrics)
+            observations.extend(window.observations)
+            fact_scopes[base] = window.scope
+            fact_retrieved[base] = next(iter(window.fact_retrieved_at.values()))
+        if legacy is None and not league and not observations:
+            return None
+        return TeamMatchupWindow(
+            scope=scope,
+            fact_scopes=fact_scopes,
+            fact_retrieved_at=fact_retrieved,
+            league_metrics=tuple(league),
+            team_metrics={
+                team_id: tuple(metrics)
+                for team_id, metrics in sorted(team_metrics.items())
+            },
+            observations=tuple(sorted(observations, key=lambda item: item.surface)),
+        )
+
+    @staticmethod
+    def _publication_base_window(
+        season: str,
+        *,
+        cutoff: date,
+        window_games: int | None,
+        base: str,
+        rows,
+        retrieved_at: datetime,
+    ) -> TeamMatchupWindow:
+        stat_names = {
+            "traditional": {
+                "OPP_REB": "rebounds",
+                "OPP_TOV": "turnovers",
+                "OPP_STL": "steals",
+                "OPP_BLK": "blocks",
+            },
+            "assist_locations": {
+                "Assists": "assists",
+                "Arc3Assists": "arc3_assists",
+                "Corner3Assists": "corner3_assists",
+                "AtRimAssists": "at_rim_assists",
+                "ShortMidRangeAssists": "short_mid_range_assists",
+                "LongMidRangeAssists": "long_mid_range_assists",
+            },
+        }.get(base)
+        if stat_names is None:
+            # Grouped shot/zone/Synergy publications carry their complete
+            # identity in the metric key (for example
+            # ``Isolation_PTS``).  Do not substitute the legacy surface when
+            # one of those streams is active; project exactly the keys the
+            # immutable payload supplied.
+            keys = tuple(rows[0].league_average)
+            stat_names = {
+                key: key.rsplit("_", 1)[-1] if "_" in key else key
+                for key in keys
+            }
+        league_by_key = rows[0].league_average
+        sigma_by_key = rows[0].population_sigma
+        league_metrics = []
+        for display_key, metric_key in stat_names.items():
+            if metric_key not in league_by_key:
+                # For canonical grouped metric keys, ``display_key`` itself
+                # is the map key.  The fallback keeps the decoder compatible
+                # with both ledger and normalized provider payloads.
+                metric_key = display_key
+            if metric_key not in league_by_key:
+                continue
+            league_metrics.append(LeagueMatchupMetric(
+                base=base,
+                slice_key=display_key,
+                stat_key=display_key,
+                average_allowed_per_48=league_by_key[metric_key],
+                sigma=sigma_by_key[metric_key],
+                team_count=len(rows),
+            ))
+        team_metrics = defaultdict(list)
+        for row in rows:
+            for display_key, metric_key in stat_names.items():
+                if metric_key not in row.per48:
+                    metric_key = display_key
+                if metric_key not in row.per48:
+                    continue
+                average = row.league_average[metric_key]
+                value = row.per48[metric_key]
+                team_metrics[row.team_id].append(TeamMatchupMetric(
+                    base=base,
+                    slice_key=display_key,
+                    stat_key=display_key,
+                    allowed_per_48=value,
+                    percent_vs_league_average=(
+                        (value / average - 1) * 100 if average else None
+                    ),
+                    sigma_deviation=(
+                        (value - average) / row.population_sigma[metric_key]
+                        if row.population_sigma[metric_key] else 0.0
+                    ),
+                    rank=row.competition_rank[metric_key],
+                ))
+        scope = TeamMatchupSnapshotScope(
+            season=season, as_of=cutoff, window_games=window_games
+        )
+        observation = StoredTeamMatchupObservation(
+            surface=base,
+            status="available" if league_metrics and team_metrics else "unavailable",
+            unavailable_reason=None if league_metrics and team_metrics else "publication_surface_incomplete",
+            retrieved_at=retrieved_at,
+        )
+        return TeamMatchupWindow(
+            scope=scope,
+            fact_scopes={base: scope},
+            fact_retrieved_at={base: retrieved_at},
+            league_metrics=tuple(league_metrics),
+            team_metrics={team_id: tuple(metrics) for team_id, metrics in team_metrics.items()},
+            observations=(observation,),
         )
 
     def _build_window(

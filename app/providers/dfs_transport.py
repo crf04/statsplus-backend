@@ -53,6 +53,45 @@ _request_slots = threading.BoundedSemaphore(_MAX_IN_FLIGHT_REQUESTS)
 _MAX_CONNECT_TIMEOUT_SECONDS = 3.0
 _MAX_READ_TIMEOUT_SECONDS = 8.0
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_PLATFORM_WAIT_SLICE_SECONDS = 1.0
+
+
+def _acquire_until(
+    lock: threading.Lock,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> bool:
+    """Acquire a lock without passing an unbounded platform timeout.
+
+    Windows raises ``OverflowError`` when a ``Lock`` or ``Semaphore`` is
+    given the multi-year timeout that a far-future fixture deadline can
+    produce.  Short retries preserve the absolute deadline while keeping the
+    wait argument within every supported platform's range.
+    """
+
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        if lock.acquire(timeout=min(remaining, _PLATFORM_WAIT_SLICE_SECONDS)):
+            return True
+
+
+def _wait_until(
+    event: threading.Event,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> bool:
+    """Wait for an event with a platform-safe absolute deadline."""
+
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        if event.wait(timeout=min(remaining, _PLATFORM_WAIT_SLICE_SECONDS)):
+            return True
 
 
 class _RequestResult:
@@ -213,8 +252,11 @@ def _run_bounded(
             prepared_release = prepare(monotonic_deadline)
         if monotonic() >= monotonic_deadline:
             raise DeadlineExceededError(deadline_message)
-        slot_wait = max(0.0, monotonic_deadline - monotonic())
-        if not _request_slots.acquire(timeout=slot_wait):
+        if not _acquire_until(
+            _request_slots,
+            deadline=monotonic_deadline,
+            monotonic=monotonic,
+        ):
             raise DeadlineExceededError(deadline_message)
         slot_acquired = True
 
@@ -252,8 +294,11 @@ def _run_bounded(
         if observe_result is not None:
             observe_result(result, monotonic_deadline)
 
-    remaining = max(0.0, monotonic_deadline - monotonic())
-    if not result.done.wait(timeout=remaining):
+    if not _wait_until(
+        result.done,
+        deadline=monotonic_deadline,
+        monotonic=monotonic,
+    ):
         observe()
         raise DeadlineExceededError(deadline_message)
 

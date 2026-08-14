@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -911,6 +912,16 @@ def test_serialized_lease_uses_injected_monotonic_domain() -> None:
     with pytest.raises(DeadlineExceededError):
         lease.get("https://example.test/late")
     session.get.assert_not_called()
+
+
+def test_serialized_lease_accepts_a_long_absolute_deadline() -> None:
+    """Long-lived fixture contexts must not overflow platform lock timers."""
+
+    session = Mock()
+    serialized = _SerializedSession(session)
+    lease = serialized.acquire_request(deadline=time.monotonic() + 10_000_000_000)
+
+    lease.release()
 
 
 def test_invalid_json_and_http_errors_are_provider_unavailable():

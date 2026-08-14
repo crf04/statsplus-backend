@@ -363,9 +363,10 @@ Provider-controlled player links are exposed only when they resolve to HTTPS on
 `rotowire.com` or one of its subdomains; every other value falls back to the
 fixed injury-report source URL.
 
-`SlateService` uses the injury service's stored-only read to apply the same Out
-override to targetable counts. It never refreshes injuries; opening a Slate
-cannot fan out league-feed requests across its games.
+`SlateService` uses its existing stored-snapshot injury read to apply the same
+Out override to targetable counts. It never refreshes injuries; opening a
+Slate cannot fan out league-feed requests across its games. This does not
+change the separate Matchup Injury Reports live/snapshot contract.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a
@@ -954,8 +955,9 @@ GET /api/games/matchup?game_id
 ```
 
 `MatchupService` has no NBA Stats, PBP Stats, DFS provider, or live Player Pool
-dependency; its injury dependency alone may invoke the separately gated
-RotoWire provider before tip. Missing stored
+dependency for statistical reads. Injury Reports retain the existing
+`MatchupInjuryService` live/snapshot contract in both assemblies; activating
+database-first statistical streams does not change that contract. Missing stored
 pool, player, Diet, or team-window facts degrade the response without starting
 collection. The team query's latest observation is the sole window-availability
 authority; when a Base/window is unavailable or missing, the response emits a
@@ -999,6 +1001,59 @@ an unavailable part is neutral zero rather than a reason to renormalize.
 Injury reconciliation can remove a canonical Out player or attach a badge
 reference; it does not change Matchup Scores, Diet Shares, scoring history, or
 projected roles.
+
+### Database-first Matchups activation (#87)
+
+`DatabaseFirstPublicationReader` is the read-side authority for the first
+activation. It follows one active `PublicationPointer` per stream, decodes
+only its immutable Publication payload, and returns bounded provenance
+(`publication_id`, version, Coverage Cutoff, age, and freshness). Freshness is
+computed independently for every stream; an active stale Publication remains
+the last-good value and is never replaced by a partial refresh or a provider
+fallback. Missing or corrupt payloads degrade only that contributor. The
+reader reports additive `mixed_cutoff` and `mixed_freshness` flags without
+collapsing the source clocks.
+
+`MatchupService(database_only=True)` is the production assembly used by the
+authenticated Matchup route for governed statistical facts. Active streams
+are decoded from immutable PublicationVersion payloads; an explicitly
+inactive stream is the only state that permits its legacy repository fallback,
+while a missing or malformed active payload degrades closed. The existing
+Injury Reports seam is unchanged: it may use the live/snapshot behavior
+already provided by `MatchupInjuryService`; statistical activation does not
+change that injury contract. `DatabaseOnlyProviderGuard` is available to
+tests and raises on any forbidden statistical provider attribute access. The
+route composes durable Regular Season facts and retains the existing
+success/degraded/missing shape. Event classification rejects Playoffs and
+Play-In during this first activation, and the registry keeps `synergy:l15` as
+`never_schedule`/`provider_window_unsupported`.
+
+`PublicationService.activate_stream` is additive and auditable through
+`PublicationActivation`; `rollback` and composition use the existing per-stream
+fence. `LegacyWriteFence` is injected into the legacy Event/Athlete Catalog,
+ player-log, Player Diet, and team-matchup writers, so activated streams reject
+ old writes while the tables remain readable for rollback and validation.
+Migrations 029 and 030 create and then bind the activation evidence table to
+an immutable PublicationVersion with a unique stream/candidate constraint;
+no legacy table is removed.
+
+`HistoricalRehearsalRunner` requires seven ordered dates, a concrete isolated
+collection/composition callback that returns raw governed facts, and a
+completed-season Synergy callback with a candidate publication and raw facts.
+It derives exact/normalized parity from isolated Publication payloads; a
+difference requires a persisted approved adjudication. Operator evidence also
+requires an explicit separate production snapshot database; unit evidence does
+not claim production immutability.
+`FailureDrillRunner` exercises a migrated temporary control plane, including
+publication, control-plane receipt idempotency, residential Outbox replay,
+alert recovery, and backup/restore seams. SQLite backup/restore is an explicit
+local unit adapter; a production gate refuses to claim evidence without a
+configured Postgres URL and a completed Postgres backup/restore artifact. The
+benchmark invokes distinct complete MatchupService callables, requires zero
+provider calls, and retains bounded SQLite or PostgreSQL query-plan evidence
+alongside p95 values; it records but does not claim a recovery-time or
+recovery-point SLA.
+
 If independently published windows have asymmetric identities, response-local
 availability normalization marks only the incomplete Base/window
 `unavailable/legacy_surface_incomplete` and nulls that window's rows. An event
@@ -1167,7 +1222,7 @@ league-wide cutoff is never used. The recorded BOS `2025-03-01` through
 `GamesPlayed=22`, so it is valid provider data and explicitly not a Last-15
 aggregate. Synergy exposes neither Last-N nor date
 bounds, so its fact-free Last-15 play-type observation is
-`unavailable/provider_unsupported`; no Season value is relabeled as Last-15.
+`unavailable/provider_window_unsupported`; no Season value is relabeled as Last-15.
 Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
 each governed slice; `GP` is provider evidence rather than a display metric.
 The traditional NBA surface persists `OPP_REB`, `OPP_TOV`, `OPP_STL`, and

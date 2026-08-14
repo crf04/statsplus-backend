@@ -99,6 +99,7 @@ class AthleteCatalogService:
         nba_stats_provider: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         freshness_days: int | None = None,
+        write_fence: Any | None = None,
     ) -> None:
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -109,6 +110,7 @@ class AthleteCatalogService:
             )
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self._clock = clock or _utc_now
+        self._write_fence = write_fence
         configured_days = (
             freshness_days
             if freshness_days is not None
@@ -170,6 +172,11 @@ class AthleteCatalogService:
         """Refresh one explicit season and return its publication state."""
 
         return self.refresh([season])[validate_canonical_season(season)]
+
+    def _assert_legacy_write_allowed(self) -> None:
+        checker = getattr(self._write_fence, "assert_writable", None)
+        if callable(checker):
+            checker("athlete_catalog")
 
     def get_catalog(
         self,
@@ -269,6 +276,9 @@ class AthleteCatalogService:
         catalog_table = AthleteCatalog.__table__
         freshness_table = AthleteCatalogFreshness.__table__
         with self.engine.begin() as connection:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                checker("athlete_catalog", connection=connection)
             # Delete and insert occur in this same transaction.  Any failure
             # rolls back the delete, preserving the prior successful season.
             connection.execute(

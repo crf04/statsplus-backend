@@ -44,6 +44,7 @@ class DataService:
         nba_stats_provider: NBAStatsProvider | None = None,
         clock: Callable[[], datetime] | None = None,
         stats_freshness: StatsFreshnessWriter | None = None,
+        write_fence=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -53,6 +54,7 @@ class DataService:
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.stats_freshness = stats_freshness
+        self.write_fence = write_fence
 
     def update_all_data(
         self,
@@ -80,9 +82,36 @@ class DataService:
                     )
 
                 publication_completion = record_stats_completion
+            def final_fence(connection):
+                if publication_fence is not None:
+                    publication_fence(connection)
+                checker = getattr(self.write_fence, "assert_writable", None)
+                if not callable(checker):
+                    return
+                table_streams = {
+                    "general_opponent_stats": "traditional_opponent_season",
+                    "player_per36_stats": "player_per36",
+                    "team_play_types": "synergy_play_types_opponent_season",
+                    "player_play_types": "synergy_play_types",
+                    "opp_shooting_zone": "exact_shot_zones_opponent_season",
+                    "player_shooting_zones": "exact_shot_zones",
+                    "processed_team_assists": "assist_locations_season",
+                    "processed_player_assists": "player_assist_locations",
+                    "pbp_opponent_stats": "assist_locations_season",
+                    "pbp_player_stats": "player_assist_locations",
+                }
+                table_streams.update({
+                    shooting_type.replace(" ", "_").lower():
+                    "grouped_shot_types_opponent_season"
+                    for shooting_type in SHOOTING_TYPES
+                })
+                for table_name in frames:
+                    stream_key = table_streams.get(table_name)
+                    if stream_key is not None:
+                        checker(stream_key, connection=connection)
             self.publisher.publish(
                 frames,
-                publication_fence=publication_fence,
+                publication_fence=final_fence,
                 publication_completion=publication_completion,
             )
             progress.complete()
@@ -103,7 +132,31 @@ class DataService:
         """Publish one legacy refresh frame without changing the job path."""
 
         if isinstance(self.engine, Engine):
-            frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
+            stream_by_table = {
+                "general_opponent_stats": "traditional_opponent_season",
+                "player_per36_stats": "player_per36",
+                "team_play_types": "synergy_play_types_opponent_season",
+                "player_play_types": "synergy_play_types",
+                "opp_shooting_zone": "exact_shot_zones_opponent_season",
+                "player_shooting_zones": "exact_shot_zones",
+                "processed_team_assists": "assist_locations_season",
+                "processed_player_assists": "player_assist_locations",
+                "pbp_opponent_stats": "assist_locations_season",
+                "pbp_player_stats": "player_assist_locations",
+            }
+            stream_by_table.update({
+                shooting_type.replace(" ", "_").lower():
+                "grouped_shot_types_opponent_season"
+                for shooting_type in SHOOTING_TYPES
+            })
+            stream_key = stream_by_table.get(table_name)
+            checker = getattr(self.write_fence, "assert_writable", None)
+            if stream_key is not None and callable(checker):
+                with self.engine.begin() as connection:
+                    checker(stream_key, connection=connection)
+                    frame.to_sql(table_name, connection, if_exists="replace", index=False)
+            else:
+                frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
             return
         frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
 
@@ -244,8 +297,19 @@ class DataService:
             # always expose ``begin`` and use the atomic publisher below.
             frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
         else:
+            def final_fence(connection):
+                if publication_fence is not None:
+                    publication_fence(connection)
+                checker = getattr(self.write_fence, "assert_writable", None)
+                stream_key = {
+                    "pbp_player_stats": "player_assist_locations",
+                    "pbp_opponent_stats": "assist_locations_season",
+                }.get(table_name)
+                if stream_key is not None and callable(checker):
+                    checker(stream_key, connection=connection)
+
             self.publisher.publish(
-                {table_name: frame}, publication_fence=publication_fence
+                {table_name: frame}, publication_fence=final_fence
             )
         progress.complete()
         return True

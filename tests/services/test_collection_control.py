@@ -188,11 +188,26 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
+    valid_per36 = json.dumps({
+        "rows": [{
+            "season": "2025-26", "player_id": 1, "minutes": 30.0,
+            "game_count": 1, "team_ids_at_game": [1],
+            "points_per36": 1.0, "rebounds_per36": 1.0,
+            "assists_per36": 1.0, "field_goals_made_per36": 1.0,
+            "field_goals_attempted_per36": 1.0,
+            "three_pointers_made_per36": 1.0,
+            "three_pointers_attempted_per36": 1.0,
+            "free_throws_made_per36": 1.0,
+            "free_throws_attempted_per36": 1.0,
+            "turnovers_per36": 1.0, "steals_per36": 1.0,
+            "blocks_per36": 1.0, "personal_fouls_per36": 1.0,
+        }]
+    })
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="parity-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum="a" * 64, payload="{}", created_at=now, fence=0,
+            checksum="a" * 64, payload=valid_per36, created_at=now, fence=0,
         ))
         connection.execute(LedgerParityArtifact.__table__.insert().values(
             artifact_id="pending-parity", publication_id="parity-candidate",

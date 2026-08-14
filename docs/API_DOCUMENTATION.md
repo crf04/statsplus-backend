@@ -268,8 +268,10 @@ period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
 When a prior Matchup read has stored a still-fresh or permitted-stale injury
 snapshot, a matched Out player is also removed from the corresponding Slate
-count. This is a stored-only read: Slate never calls the injury provider, and
-an expired or unavailable injury snapshot cannot change counts.
+count. This is Slate's existing stored-snapshot count contract: Slate never
+calls the injury provider, and an expired or unavailable injury snapshot
+cannot change counts. Matchup Injury Reports retain their separate
+live/snapshot contract.
 
 `freshness.pool.providers` uses the closed vocabulary `fresh | stale-served |
 missing` and retains each usable provider snapshot's actual retrieval time. A
@@ -380,7 +382,7 @@ status authority:
 
 When the status is not `available`, every metric value for that Base/window is
 `null`. In particular, exact Synergy play types Last-15 is always `null` with
-`status: "unavailable"` and `unavailable_reason: "provider_unsupported"`;
+`status: "unavailable"` and `unavailable_reason: "provider_window_unsupported"`;
 Season values are never substituted. Independently published Season and
 Last-15 scopes can contain different metric identities; the affected
 Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
@@ -1090,6 +1092,70 @@ bound publication ID and payload checksum must match that candidate. A
 rejected artifact always blocks, including when its
 raw comparison was exact; another season or cutoff is never reused. Unrelated
 ledger streams do not require parity adjudication.
+
+### Database-first Matchups activation (#87)
+
+The first activation is additive. `POST
+/api/admin/collection/streams/<stream_key>/activate` records an operator
+reason and enables only that stream; `POST
+/api/admin/collection/streams/<stream_key>/rollback` advances the same fenced
+pointer to its immediately prior Publication. A stale composition or legacy
+writer cannot overwrite a newer pointer. Activation evidence is retained in
+the `publication_activations` table and never contains raw observations.
+
+The authenticated Matchup and Matchup Selection routes read the durable
+Regular Season catalog, Player Pool, game-log, Diet, injury, and team-window
+seams. Activated statistical streams decode their immutable PublicationVersion
+payloads independently for player game logs, per-36, each Player Diet Base,
+and each Season/L15 team-window surface; an inactive stream alone permits its
+legacy fallback. These reads make zero request-time NBA Stats, PBP, or DFS
+calls. Injury
+Reports retain their existing live/snapshot contract; statistical activation
+does not change injury behavior. Existing fields remain
+backward compatible. Additive `provenance` stream entries identify the exact
+Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state;
+inactive streams explicitly report `legacy_database` fallback. Additive
+`coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
+when one contributor is older or unavailable. A stale active Publication is
+served as the last good fact with its real age; a failed partial attempt never
+replaces it. Synergy L15 is always `unavailable/provider_window_unsupported`
+and Playoff/Play-In requests are outside this first Regular Season activation.
+
+The isolated `scripts/database_first_rehearsal.py` command requires a concrete
+non-production environment, raw-facts collection/composition command,
+completed-season Synergy candidate/facts command, and exactly seven ordered
+dates; it derives parity from isolated publications and writes a validation
+report without changing production pointers. Operator evidence requires an
+explicit separate production snapshot database. `scripts/database_first_drills.py`
+records deterministic outage, duplicate delivery, Outbox replay, expired
+credential, provider failure, alert recovery, and restore/replay checks using
+temporary control-plane state; SQLite restore is explicitly a local unit
+adapter. Every URL-backed drill first opens a read-only target preflight and
+requires an out-of-band `statsplus_disposable_control` marker nonce; the
+`isolated` flag is not isolation evidence. A production gate additionally
+requires a dedicated Postgres schema, expected IDs/checksums, direct restored
+database verification, and explicit replay/repair evidence. The
+PBP repair expectation names only its known preconditions (`season`,
+`manifest_id`, `game_id`, and the expected ledger `checksum`). The drill
+captures restored observation and composition-job identities before invoking
+the repair, then reports only newly created IDs after binding the accepted PBP
+ledger observation and every invalidated derived stream to that manifest's
+cutoff. The observation must independently satisfy the runtime acceptance
+contract for environment, canonical scope, authorized schema version, and
+collection deadline; a pre-existing or merely inserted row cannot satisfy the
+drill. The
+marker is provisioned out-of-band (for example, a row in
+`statsplus_disposable_control(marker_nonce, purpose, schema_name)` with
+`purpose = 'database_first_drill'`) and the preflight rejects any existing
+domain rows before migration. The
+`scripts/benchmark_matchups.py` command requires a production-like fixture,
+game identity, and an explicitly disposable database. It loads and validates
+the fixture, invokes the complete legacy and activated MatchupService paths,
+retains measured p95 latency and bounded indexed publication/ledger query
+plans, and fails without plan evidence, instrumented zero provider calls, a
+sub-second p95, and a
+database-first p95 no greater than 110% of baseline. These artifacts claim no
+formal recovery SLA.
 Internal season rates default to Regular Season only unless a caller explicitly
 requests Playoffs or all phases. Last-ten minutes and H2H rows include both
 stored phases in deterministic chronology. The batch query seam returns

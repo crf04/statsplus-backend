@@ -239,6 +239,40 @@ class PublicationPointer(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class PublicationActivation(Base):
+    """Immutable evidence for one explicit publication-stream activation.
+
+    The stream's ``enabled`` flag is the executable gate.  This append-only
+    record supplies the operator-facing reason and exact candidate that made
+    the gate true, so a later read never has to infer activation from an
+    arbitrary rendered payload.
+    """
+
+    __tablename__ = "publication_activations"
+
+    activation_id = Column(String(36), primary_key=True)
+    stream_key = Column(String(96), nullable=False)
+    publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    actor = Column(String(128), nullable=False)
+    reason = Column(String(255), nullable=False)
+    fence = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_publication_activations_stream_created", "stream_key", "created_at"),
+        Index(
+            "uq_publication_activations_stream_publication",
+            "stream_key",
+            "publication_id",
+            unique=True,
+        ),
+    )
+
+
 class CompositionJob(Base):
     __tablename__ = "composition_jobs"
 
@@ -409,7 +443,7 @@ class CredentialDelivery(Base):
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectorStatusTransition", "CollectionObservation", "PublicationStream",
-    "PublicationVersion", "PublicationObservation", "PublicationPointer", "CompositionJob", "CollectorTokenReplay",
+    "PublicationVersion", "PublicationObservation", "PublicationPointer", "PublicationActivation", "CompositionJob", "CollectorTokenReplay",
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",

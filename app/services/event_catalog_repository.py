@@ -26,8 +26,9 @@ def _iso(value: datetime | None) -> str | None:
 class EventCatalogRepository:
     """Own transactional event upserts and persisted refresh state."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, write_fence: Any | None = None) -> None:
         self.engine = engine
+        self._write_fence = write_fence
 
     def publish(self, season: str, frame: pd.DataFrame, refreshed_at: datetime) -> int:
         table = EventCatalogEntry.__table__
@@ -39,6 +40,9 @@ class EventCatalogRepository:
             "classification",
         }
         with self.engine.begin() as connection:
+            checker = getattr(self._write_fence, "assert_writable", None)
+            if callable(checker):
+                checker("event_catalog", connection=connection)
             for record in frame.to_dict(orient="records"):
                 game_id = str(record["nba_game_id"])
                 values = {column: record[column] for column in provider_columns}

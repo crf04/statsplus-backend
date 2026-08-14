@@ -67,6 +67,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -105,6 +107,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "publication_versions",
             "publication_observations",
             "publication_pointers",
+            "publication_activations",
             "composition_jobs",
             "collector_token_replays",
             "collector_status_transitions",
@@ -339,6 +342,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (26, "026_repair_publication_provenance_foreign_keys"),
             (27, "027_bind_ledger_parity_to_publications"),
             (28, "028_collector_status_transitions"),
+            (29, "029_publication_activations"),
+            (30, "030_bind_publication_activation_candidates"),
         ]
 
 
@@ -381,6 +386,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -424,8 +431,10 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
-    assert upgraded.current_version == 28
+    assert upgraded.current_version == 30
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -487,7 +496,63 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
     assert result.applied == (
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
+
+
+def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_path):
+    """A real 029-era table upgrades without toggling PRAGMA in a transaction."""
+
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'activation-029.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 29),
+        )
+        run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE publication_activations"))
+        connection.execute(text(
+            "INSERT INTO publication_versions "
+            "(publication_id, stream_key, season, cutoff, version, status, checksum, payload, created_at, reason, fence) "
+            "VALUES ('legacy-publication', 'player_game_logs', '2025-26', "
+            "'2026-08-13 00:00:00', 1, 'active', "
+            "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', "
+            "'2026-08-13 00:00:00', 'legacy', 1)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE publication_activations ("
+            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, publication_id VARCHAR(36) NOT NULL, "
+            "actor VARCHAR(128) NOT NULL, reason VARCHAR(255) NOT NULL, "
+            "fence INTEGER NOT NULL, created_at DATETIME NOT NULL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO publication_activations "
+            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+            "VALUES ('legacy-activation', 'player_game_logs', 'legacy-publication', "
+            "'operator', 'legacy evidence', 1, '2026-08-13 00:00:00')"
+        ))
+        assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
+
+    result = run_migrations(engine)
+
+    assert result.current_version == 30
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+        foreign_keys = inspect(engine).get_foreign_keys("publication_activations")
+        assert any(
+            item["referred_table"] == "publication_versions"
+            and item["constrained_columns"] == ["publication_id"]
+            for item in foreign_keys
+        )
+        assert connection.execute(text(
+            "SELECT actor FROM publication_activations WHERE activation_id = 'legacy-activation'"
+        )).scalar() == "operator"
     with engine.connect() as connection:
         assert connection.scalar(text(
             "SELECT count(*) FROM canonical_game_ledger_parity_artifacts"
@@ -583,6 +648,7 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "publication_versions",
             "publication_observations",
             "publication_pointers",
+            "publication_activations",
             "composition_jobs",
             "collector_token_replays",
             "collector_status_transitions",
@@ -737,6 +803,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -786,10 +854,12 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
-    assert upgraded.current_version == 28
+    assert upgraded.current_version == 30
     assert repeated.applied == ()
-    assert repeated.current_version == 28
+    assert repeated.current_version == 30
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -848,6 +918,8 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "026_repair_publication_provenance_foreign_keys",
         "027_bind_ledger_parity_to_publications",
         "028_collector_status_transitions",
+        "029_publication_activations",
+        "030_bind_publication_activation_candidates",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
