@@ -127,6 +127,15 @@ class PBPGameLogProvider(Protocol):
     ) -> pd.DataFrame:
         """Fetch one game's participating player observations."""
 
+    def fetch_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+    ) -> dict[str, Any]:
+        """Fetch one game's complete raw ``/get-game-stats`` evidence."""
+
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a response served without a provider call."""
 
@@ -222,6 +231,32 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
                 _json_payload(response),
                 game_id=str(game_id),
             )
+
+    def fetch_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+    ) -> dict[str, Any]:
+        """Fetch one game's complete raw ``/get-game-stats`` evidence.
+
+        The ledger archives the full provider document (both team-summary rows
+        and every participating player row, preserving unknown additive keys),
+        so this seam returns the unprojected JSON payload instead of the
+        game-log DataFrame that ``fetch_game_player_logs`` normalizes.
+        """
+        del season, season_type
+        params = {
+            "GameId": str(game_id),
+            "Type": "Player",
+        }
+        with self._request_game_logs(
+            "game_player_stats",
+            self.game_stats_url,
+            params,
+        ) as response:
+            return _json_payload(response)
 
     def record_cache_hit(self, operation: str) -> None:
         """Record a cache-hit event for a PBP game-log operation."""

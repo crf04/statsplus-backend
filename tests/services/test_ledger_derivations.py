@@ -21,8 +21,10 @@ from app.services.collection_control import PublicationService
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
+    LedgerGameRow,
     PlayerGameFact,
     TeamGameFact,
+    canonical_row_checksum,
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
@@ -33,6 +35,32 @@ from app.models.collection_control import (
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
+
+
+def _raw_rows_for_game(game):
+    rows = []
+    for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
+        team_fact = next(fact for fact in game.team_facts if fact.team_id == team_id)
+        payload = {"EntityId": "0", "Name": "Team", "Points": team_fact.points}
+        rows.append(LedgerGameRow(
+            game_id=game.game_id, row_type="team", side=side, row_index=len(rows),
+            entity_id=None, entity_name=None, team_id=team_id, payload=payload,
+            checksum=canonical_row_checksum(payload), observed_fields=tuple(sorted(payload)),
+        ))
+    for player in game.player_facts:
+        side = "Home" if player.team_id == game.home_team_id else "Away"
+        payload = {
+            "EntityId": str(player.player_id),
+            "Name": player.player_name,
+            "Points": player.points,
+        }
+        rows.append(LedgerGameRow(
+            game_id=game.game_id, row_type="player", side=side, row_index=len(rows),
+            entity_id=player.player_id, entity_name=player.player_name,
+            team_id=player.team_id, payload=payload,
+            checksum=canonical_row_checksum(payload), observed_fields=tuple(sorted(payload)),
+        ))
+    return tuple(rows)
 
 
 class _ParityReader:
@@ -157,7 +185,7 @@ def _league_games():
                     personal_fouls=1,
                     team_minutes=48.0,
                 ))
-            games.append(CanonicalGame(
+            game = CanonicalGame(
                 game_id=game_id,
                 season="2025-26",
                 game_date=date(2025, 10, 1) + timedelta(days=round_index),
@@ -170,7 +198,10 @@ def _league_games():
                 source_observation_id=f"obs:{game_id}",
                 retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
                 participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
-            ).with_checksum())
+            )
+            games.append(
+                replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum()
+            )
         teams = [teams[0], teams[-1], *teams[1:-1]]
     return tuple(games)
 
@@ -444,11 +475,15 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()
+    base = games[0]
     later = replace(
-        games[0],
+        base,
         game_id="later-game",
         game_date=date(2025, 10, 16),
         source_observation_id="later-observation",
+        raw_rows=tuple(
+            replace(row, game_id="later-game") for row in base.raw_rows
+        ),
         checksum=None,
     ).with_checksum()
     repository.replace_games_atomic((*games, later))

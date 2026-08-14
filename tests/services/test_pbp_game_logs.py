@@ -307,6 +307,66 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
     assert event["operation"] == "game_player_stats"
 
 
+def test_adapter_fetch_game_stats_returns_complete_raw_evidence():
+    from app.config.settings import ProviderSettings, RuntimeSettings
+
+    class FakeResponse:
+        status_code = 200
+        payload = {
+            "stats": {
+                "Home": {
+                    "FullGame": [
+                        {"EntityId": "0", "Name": "Team", "Minutes": "00:00"},
+                        _pbp_row(),
+                    ]
+                },
+                "Away": {"FullGame": []},
+            },
+            "home_team_abbreviation": "AAA",
+            "away_team_abbreviation": "BBB",
+            "date": "2026-01-02",
+            "ProviderAddedField": "future-proof",
+        }
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params, timeout):
+            self.calls.append((url, params, timeout))
+            return FakeResponse()
+
+    session = FakeSession()
+    adapter = PBPGameLogAdapter(
+        RuntimeSettings(
+            environment="testing",
+            providers=ProviderSettings(
+                pbp_connect_timeout_seconds=1.0,
+                pbp_read_timeout_seconds=2.0,
+            ),
+        ),
+        session=session,
+    )
+    payload = adapter.fetch_game_stats("0022500001", "2025-26")
+
+    url, params, timeout = session.calls[0]
+    assert url == adapter.game_stats_url
+    assert params == {
+        "GameId": "0022500001",
+        "Type": "Player",
+    }
+    assert payload["stats"]["Home"]["FullGame"][0]["EntityId"] == "0"
+    assert payload["ProviderAddedField"] == "future-proof"
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert event["operation"] == "game_player_stats"
+
+
 def test_adapter_record_cache_hit_requires_closed_pbp_operation():
     from app.config.settings import ProviderSettings, RuntimeSettings
 

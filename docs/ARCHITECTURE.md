@@ -821,7 +821,13 @@ retrieval time, a deterministic row checksum, the exact observed field set
 `observed_fields` is stored separately from the payload so additive schema drift
 is visible and non-destructive: a corrected observation that adds a provider
 field changes the field-set metadata and the raw checksum without touching the
-typed primitive set.
+typed primitive set. The production backfill consumes the complete raw
+`/get-game-stats` document through a dedicated adapter seam
+(`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
+DataFrame, so team-summary rows and unknown additive keys always reach the
+archive. An accepted raw observation must contain exactly one team-summary row
+for each governed Home/Away side; the team-summary row is mandatory team-fact
+authority and may never fall back to player sums.
 
 Raw JSON canonicalization is deterministic and lossless: each payload is
 serialized with sorted keys and compact separators, and the game-level
@@ -833,9 +839,15 @@ the typed `checksum`, a raw-only correction (a provider field that does not
 change any typed primitive) is still recognized as a replacement rather than an
 idempotent replay, and the complete raw and typed evidence is replaced
 atomically. Missing core identity, participants, minutes, or required count
-evidence rejects the whole candidate game before anything is written; missing
-optional expanded fields preserve the game and leave only the dependent typed
-facts (such as assist locations) null/unavailable.
+evidence rejects the whole candidate game before anything is written; an
+explicit numeric zero for a required count remains valid. The required counts
+are the non-derivable core box-score fields on each player row
+(`REQUIRED_PLAYER_COUNT_FIELDS`: points, two- and three-point makes/attempts,
+free-throw points/attempts, offensive and defensive rebounds, assists,
+turnovers, steals, blocks, and fouls); `FGM`/`FGA`/`Rebounds` are derived from
+those components and are not separately required. Missing optional expanded
+fields preserve the game and leave only the dependent typed facts (such as
+assist locations) null/unavailable.
 
 The declared typed authority is per row type. Player-game typed facts come from
 the provider player rows; team-game typed facts come from the provider

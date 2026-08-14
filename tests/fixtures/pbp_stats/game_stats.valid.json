@@ -50,7 +50,7 @@
           "FGA": 13,
           "FtPoints": 1,
           "FTA": 2,
-          "OffRebounds": null,
+          "OffRebounds": 0,
           "DefRebounds": 4,
           "Rebounds": 4,
           "Assists": 5,
@@ -71,6 +71,13 @@
     },
     "Away": {
       "FullGame": [
+        {
+          "EntityId": "0",
+          "Name": "Team",
+          "Minutes": "00:00",
+          "OffRebounds": 4,
+          "DefRebounds": 1
+        },
         {
           "EntityId": "201935",
           "Name": "Victor Wembanyama",

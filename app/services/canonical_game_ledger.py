@@ -67,6 +67,28 @@ ASSIST_LOCATION_FIELDS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
+#: Required per-player count evidence on the raw FullGame wire.  These core
+#: box-score counts cannot be derived from other columns, so a missing or null
+#: value rejects the whole candidate game atomically instead of being asserted
+#: as zero; an explicit numeric zero remains valid.  ``FGM``/``FGA``/``Rebounds``
+#: are deliberately excluded because they are derived from the two-pointer and
+#: three-pointer components and from offensive plus defensive rebounds.
+REQUIRED_PLAYER_COUNT_FIELDS = {
+    "two_pointers_made": ("FG2M", "two_pointers_made"),
+    "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
+    "three_pointers_made": ("FG3M", "three_pointers_made"),
+    "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
+    "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
+    "free_throws_attempted": ("FTA", "free_throws_attempted"),
+    "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
+    "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
+    "assists": ("Assists", "AST", "assists"),
+    "turnovers": ("Turnovers", "TOV", "turnovers"),
+    "steals": ("Steals", "STL", "steals"),
+    "blocks": ("Blocks", "BLK", "blocks"),
+    "personal_fouls": ("Fouls", "PF", "personal_fouls"),
+    "points": ("Points", "PTS", "points"),
+}
 #: Count primitives with a documented additive-equivalence relationship between
 #: the provider team-summary row and the sum of participating player rows.
 #: Rebound fields are deliberately excluded: team-summary totals may
@@ -313,16 +335,22 @@ def _raw_value(row: Mapping[str, Any], *names: str) -> Any:
     return None
 
 
-def _canonical_row_json(payload: Mapping[str, Any]) -> str:
-    """Serialize one provider row deterministically while preserving all values."""
+def _canonical_json(payload: Any) -> str:
+    """Serialize arbitrary evidence deterministically for stable checksums."""
 
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _raw_row_checksum(payload: Mapping[str, Any]) -> str:
-    """Hash the canonical serialization of one complete provider row."""
+def _canonical_json_hash(payload: Any) -> str:
+    """SHA-256 over canonical JSON evidence, stable across identical replays."""
 
-    return hashlib.sha256(_canonical_row_json(payload).encode()).hexdigest()
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+
+
+def canonical_row_checksum(payload: Mapping[str, Any]) -> str:
+    """Deterministic per-row SHA-256 over canonical JSON provider evidence."""
+
+    return _canonical_json_hash(payload)
 
 
 def _ledger_raw_rows(
@@ -374,12 +402,21 @@ def _ledger_raw_rows(
                     entity_name=entity_name,
                     team_id=team_by_side[side],
                     payload=payload,
-                    checksum=_raw_row_checksum(payload),
+                    checksum=canonical_row_checksum(payload),
                     observed_fields=tuple(sorted(payload)),
                 )
             )
     if not output:
         raise LedgerValidationError("PBP game observation contains no FullGame rows")
+    team_rows_by_side = {"Home": 0, "Away": 0}
+    for row in output:
+        if row.row_type == "team":
+            team_rows_by_side[row.side] += 1
+    for side, count in team_rows_by_side.items():
+        if count != 1:
+            raise LedgerValidationError(
+                f"PBP FullGame requires exactly one team-summary row for {side} evidence"
+            )
     return tuple(output)
 
 
@@ -403,8 +440,7 @@ def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
         }
         for row in rows
     ]
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode()).hexdigest()
+    return _canonical_json_hash(payload)
 
 
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
@@ -477,21 +513,40 @@ def _validate_wire_game_identity(
         raise LedgerValidationError("PBP game is outside the governed Regular Season phase")
 
 
-def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode: str) -> PlayerGameFact:
-    """Map a PBP row while retaining the stable primitive superset."""
+def _player_fact_from_row(
+    row: Mapping[str, Any],
+    *,
+    team_id: int,
+    team_tricode: str,
+    wire: Mapping[str, Any] | None = None,
+) -> PlayerGameFact:
+    """Map a PBP row while retaining the stable primitive superset.
 
-    two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M") or 0
-    two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A") or 0
-    three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M") or 0
-    three_att = _integer(_raw_value(row, "FG3A", "three_pointers_attempted"), "FG3A") or 0
+    Required count evidence is judged against the raw provider row (``wire``),
+    which preserves sparse omissions.  The normalized frame zero-fills those
+    columns, so a missing or null required count must reject the whole
+    candidate here rather than being asserted as zero; an explicit numeric
+    zero remains valid.
+    """
+
+    source = row if wire is None else wire
+    for field_name, names in REQUIRED_PLAYER_COUNT_FIELDS.items():
+        if _raw_value(source, *names) is None:
+            raise LedgerValidationError(
+                f"player row is missing required {names[0]} count evidence"
+            )
+    two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
+    two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A")
+    three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
+    three_att = _integer(_raw_value(row, "FG3A", "three_pointers_attempted"), "FG3A")
     fgm = _integer(_raw_value(row, "FGM", "field_goals_made"), "FGM")
     fga = _integer(_raw_value(row, "FGA", "field_goals_attempted"), "FGA")
     fgm = two_made + three_made if fgm is None else fgm
     fga = two_att + three_att if fga is None else fga
-    ftm = _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM") or 0
-    fta = _integer(_raw_value(row, "FTA", "free_throws_attempted"), "FTA") or 0
-    oreb = _integer(_raw_value(row, "OffRebounds", "OREB", "offensive_rebounds"), "OREB") or 0
-    dreb = _integer(_raw_value(row, "DefRebounds", "DREB", "defensive_rebounds"), "DREB") or 0
+    ftm = _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM")
+    fta = _integer(_raw_value(row, "FTA", "free_throws_attempted"), "FTA")
+    oreb = _integer(_raw_value(row, "OffRebounds", "OREB", "offensive_rebounds"), "OREB")
+    dreb = _integer(_raw_value(row, "DefRebounds", "DREB", "defensive_rebounds"), "DREB")
     reb = _integer(_raw_value(row, "Rebounds", "REB", "rebounds"), "REB")
     if reb is None:
         reb = oreb + dreb
@@ -501,7 +556,7 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
         team_id=team_id,
         team_tricode=team_tricode,
         minutes=_number(_raw_value(row, "MIN", "Minutes", "minutes"), "minutes") or 0.0,
-        points=_integer(_raw_value(row, "Points", "PTS", "points"), "points") or 0,
+        points=_integer(_raw_value(row, "Points", "PTS", "points"), "points"),
         field_goals_made=fgm,
         field_goals_attempted=fga,
         two_pointers_made=two_made,
@@ -513,11 +568,11 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
         offensive_rebounds=oreb,
         defensive_rebounds=dreb,
         rebounds=reb,
-        assists=_integer(_raw_value(row, "Assists", "AST", "assists"), "assists") or 0,
-        turnovers=_integer(_raw_value(row, "Turnovers", "TOV", "turnovers"), "turnovers") or 0,
-        steals=_integer(_raw_value(row, "Steals", "STL", "steals"), "steals") or 0,
-        blocks=_integer(_raw_value(row, "Blocks", "BLK", "blocks"), "blocks") or 0,
-        personal_fouls=_integer(_raw_value(row, "Fouls", "PF", "personal_fouls"), "personal_fouls") or 0,
+        assists=_integer(_raw_value(row, "Assists", "AST", "assists"), "assists"),
+        turnovers=_integer(_raw_value(row, "Turnovers", "TOV", "turnovers"), "turnovers"),
+        steals=_integer(_raw_value(row, "Steals", "STL", "steals"), "steals"),
+        blocks=_integer(_raw_value(row, "Blocks", "BLK", "blocks"), "blocks"),
+        personal_fouls=_integer(_raw_value(row, "Fouls", "PF", "personal_fouls"), "personal_fouls"),
         two_point_assists=_integer(_raw_value(row, "TwoPtAssists", "two_point_assists"), "two_point_assists", nullable=True),
         three_point_assists=_integer(_raw_value(row, "ThreePtAssists", "three_point_assists"), "three_point_assists", nullable=True),
         arc3_assists=_integer(_raw_value(row, "Arc3Assists", "arc3_assists"), "arc3_assists", nullable=True),
@@ -560,6 +615,8 @@ def _sum_team_facts(
     players: Sequence[PlayerGameFact],
     team_row: Mapping[str, Any] | None = None,
     provider_total: Mapping[str, Any] | None = None,
+    *,
+    require_team_row: bool = False,
 ) -> TeamGameFact:
     """Build the team-game fact set from its declared row authority.
 
@@ -570,8 +627,15 @@ def _sum_team_facts(
     include team rebounds no single player is credited with, so no additive
     equality is required there.  ``provider_total`` (the ``team_results``
     envelope) is diagnostic only and never overwrites the declared authority.
+    ``require_team_row`` is set for accepted raw observations: a complete game
+    may never fall back to player sums for a side that lacks its team-summary
+    row authority.
     """
 
+    if require_team_row and team_row is None:
+        raise LedgerValidationError(
+            "accepted PBP evidence requires a team-summary row for every governed side"
+        )
     total = provider_total or {}
     values = {
         field_name: sum(getattr(player, field_name) for player in players)
@@ -773,10 +837,12 @@ def canonical_game_from_pbp(
     for row in normalized.to_dict(orient="records"):
         player_id = int(row["PLAYER_ID"])
         team_code = str(row["TEAM_ABBREVIATION"])
-        raw = {**raw_by_player.get((player_id, team_code), {}), **row}
+        wire = raw_by_player.get((player_id, team_code), {})
+        raw = {**wire, **row}
         players.append(
             _player_fact_from_row(
                 raw,
+                wire=wire,
                 team_id=int(row["TEAM_ID"]),
                 team_tricode=str(row["TEAM_ABBREVIATION"]),
             )
@@ -838,10 +904,12 @@ def canonical_game_from_pbp(
         _sum_team_facts(
             home_id, home_code, away_id, away_code, True,
             home_players, team_row_by_team.get(home_id), team_result_map.get(home_id),
+            require_team_row=raw_observation is not None,
         ),
         _sum_team_facts(
             away_id, away_code, home_id, home_code, False,
             away_players, team_row_by_team.get(away_id), team_result_map.get(away_id),
+            require_team_row=raw_observation is not None,
         ),
     )
     observation_id = _required_text(source_observation_id or game_id, "source_observation_id")
@@ -1048,8 +1116,11 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         or isinstance(game.raw_rows, (str, bytes, bytearray))
     ):
         raise LedgerValidationError("raw evidence must be a sequence of archived rows")
+    if not game.raw_rows:
+        raise LedgerValidationError("accepted raw evidence is required for a complete game")
     seen_raw_rows: set[tuple[object, ...]] = set()
     raw_player_rows: dict[int, int] = {}
+    team_rows_by_side: dict[str, int] = {"Home": 0, "Away": 0}
     for row in game.raw_rows:
         if not isinstance(row, LedgerGameRow):
             raise LedgerValidationError("raw evidence contains an invalid archived row")
@@ -1073,25 +1144,28 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             or tuple(row.observed_fields) != tuple(sorted(row.payload))
         ):
             raise LedgerValidationError("raw evidence observed fields must match the payload")
-        if row.checksum != _raw_row_checksum(row.payload):
+        if row.checksum != canonical_row_checksum(row.payload):
             raise LedgerValidationError("raw evidence checksum does not match the payload")
-        if row.row_type == "player":
+        if row.row_type == "team":
+            team_rows_by_side[row.side] += 1
+        else:
             if row.entity_id is None or row.entity_id in raw_player_rows:
                 raise LedgerValidationError("raw player evidence has an invalid entity identity")
             raw_player_rows[row.entity_id] = row.team_id
-    if game.raw_rows:
-        observed_raw_players = {
-            team_id: {entity_id for entity_id, team in raw_player_rows.items() if team == team_id}
-            for team_id in observed_by_team
-        }
-        if observed_raw_players != observed_by_team:
-            raise LedgerValidationError(
-                "raw player evidence must exactly match the retained player set"
-            )
-        if not isinstance(game.raw_checksum, str) or game.raw_checksum != raw_checksum(game.raw_rows):
-            raise LedgerValidationError("raw evidence checksum does not match archived rows")
-    elif game.raw_checksum is not None:
-        raise LedgerValidationError("raw evidence checksum cannot be set without archived rows")
+    if team_rows_by_side != {"Home": 1, "Away": 1}:
+        raise LedgerValidationError(
+            "raw evidence must contain exactly one team-summary row per side"
+        )
+    observed_raw_players = {
+        team_id: {entity_id for entity_id, team in raw_player_rows.items() if team == team_id}
+        for team_id in observed_by_team
+    }
+    if observed_raw_players != observed_by_team:
+        raise LedgerValidationError(
+            "raw player evidence must exactly match the retained player set"
+        )
+    if not isinstance(game.raw_checksum, str) or game.raw_checksum != raw_checksum(game.raw_rows):
+        raise LedgerValidationError("raw evidence checksum does not match archived rows")
     players_by_team = {
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
@@ -1549,7 +1623,7 @@ class CanonicalGameLedgerRepository:
             "checksum": row.checksum,
             "schema_version": row.schema_version,
             "observed_fields": json.dumps(row.observed_fields, sort_keys=True, separators=(",", ":")),
-            "payload": _canonical_row_json(row.payload),
+            "payload": _canonical_json(row.payload),
         }
 
 
@@ -1622,6 +1696,7 @@ __all__ = [
     "ADDITIVE_EQUIVALENT_COUNT_FIELDS",
     "COUNT_FIELDS",
     "LEDGER_SCHEMA_VERSION",
+    "REQUIRED_PLAYER_COUNT_FIELDS",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",
     "LedgerBackfillProgress",
@@ -1634,6 +1709,7 @@ __all__ = [
     "PlayerGameFact",
     "TeamGameFact",
     "canonical_game_from_pbp",
+    "canonical_row_checksum",
     "game_checksum",
     "raw_checksum",
     "validate_complete_game",

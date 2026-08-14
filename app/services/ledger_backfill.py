@@ -37,7 +37,7 @@ from app.utils.telemetry import ProviderResponseError
 class LedgerPBPProvider(Protocol):
     """Injected per-game PBP provider used by offline and Railway workers."""
 
-    def fetch_game_player_logs(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> object: ...
+    def fetch_game_stats(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> dict[str, object]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -47,7 +47,7 @@ class LedgerAthleteCatalogReader(Protocol):
 
 
 class LedgerParticipantCatalogReader(Protocol):
-    def get_participants(self, observation_id: str) -> Mapping[int, Iterable[int]]: ...
+    def get_participants(self, observation_id: str, *, game_id: str) -> Mapping[int, Iterable[int]]: ...
 
 
 class LedgerObservationRecorder(Protocol):
@@ -165,12 +165,12 @@ class AcceptedObservationParticipantCatalog:
         self.engine = engine
         self.recorder = recorder
 
-    def get_participants(self, observation_id: str) -> Mapping[int, Iterable[int]]:
+    def get_participants(self, observation_id: str, *, game_id: str) -> Mapping[int, Iterable[int]]:
         document = self.recorder.get_staged(observation_id)
-        rows = document if isinstance(document, list) else []
-        game_id = ""
-        if rows:
-            game_id = str(rows[0].get("GAME_ID", rows[0].get("GameId", "")))
+        if isinstance(document, Mapping):
+            rows = _raw_document_rows(document)
+        else:
+            rows = document if isinstance(document, list) else []
         with self.engine.connect() as connection:
             event = connection.execute(select(
                 EventCatalogEntry.home_team_id,
@@ -343,7 +343,7 @@ class LedgerBackfillService:
             committed = False
             validated = False
             try:
-                observation = self.provider.fetch_game_player_logs(game_id, season, season_type="Regular Season")
+                observation = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
                 observation_id, observation_values = self.observation_recorder.stage(
                     observation,
                     season=season,
@@ -356,7 +356,7 @@ class LedgerBackfillService:
                 )
                 with lifecycle_lock:
                     active_staged.add(observation_id)
-                participants = self.participant_catalog.get_participants(observation_id)
+                participants = self.participant_catalog.get_participants(observation_id, game_id=game_id)
                 game = canonical_game_from_pbp(
                     observation,
                     event=event,
@@ -560,6 +560,37 @@ class LedgerBackfillService:
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _raw_document_rows(document: Mapping[str, object]) -> list[dict[str, object]]:
+    """Flatten a raw ``/get-game-stats`` document into team-tagged row mappings.
+
+    The raw document carries team-summary and player rows under
+    ``stats.Home/Away.FullGame`` without per-row team identity, so each row is
+    tagged with its side's abbreviation for the event-driven team join.
+    """
+
+    stats = document.get("stats")
+    if not isinstance(stats, Mapping):
+        return []
+    side_codes = {
+        "Home": str(document.get("home_team_abbreviation") or ""),
+        "Away": str(document.get("away_team_abbreviation") or ""),
+    }
+    rows: list[dict[str, object]] = []
+    for side, team_code in side_codes.items():
+        period = stats.get(side)
+        period_rows = period.get("FullGame") if isinstance(period, Mapping) else None
+        if not isinstance(period_rows, list):
+            continue
+        for row in period_rows:
+            if not isinstance(row, Mapping):
+                continue
+            item = dict(row)
+            if "Team" not in item:
+                item["Team"] = team_code
+            rows.append(item)
+    return rows
 
 
 def _event_datetime(value: object) -> datetime:

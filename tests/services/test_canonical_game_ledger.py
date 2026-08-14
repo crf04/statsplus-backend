@@ -48,9 +48,11 @@ def _event() -> dict[str, object]:
 def _game():
     payload = json.loads("""{
       "stats": {"Home": {"FullGame": [
+        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "OffRebounds": 2, "DefRebounds": 1},
         {"EntityId": "101", "Name": "Home One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "102", "Name": "Home Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}, "Away": {"FullGame": [
+        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "OffRebounds": 3, "DefRebounds": 2},
         {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}},
@@ -174,6 +176,13 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                     "Home": {
                         "FullGame": [
                             {
+                                "EntityId": "0",
+                                "Name": "Team",
+                                "Minutes": "00:00",
+                                "OffRebounds": 2,
+                                "DefRebounds": 1,
+                            },
+                            {
                                 "EntityId": "101",
                                 "Name": "Home One",
                                 "Minutes": "20:00",
@@ -222,6 +231,13 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                     },
                     "Away": {
                         "FullGame": [
+                            {
+                                "EntityId": "0",
+                                "Name": "Team",
+                                "Minutes": "00:00",
+                                "OffRebounds": 3,
+                                "DefRebounds": 2,
+                            },
                             {
                                 "EntityId": "201",
                                 "Name": "Away One",
@@ -393,13 +409,12 @@ def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp
             1610612759: (201935,),
         },
     )
-    assert len(game.raw_rows) == 4
+    assert len(game.raw_rows) == 5
     assert [row.row_type for row in game.raw_rows] == [
-        "team", "player", "player", "player",
+        "team", "player", "player", "team", "player",
     ]
     team_rows = {row.side: row for row in game.raw_rows if row.row_type == "team"}
-    assert team_rows.keys() <= {"Home", "Away"}
-    assert team_rows  # the provider sent at least one team-summary row
+    assert team_rows.keys() == {"Home", "Away"}
     home_team_row = team_rows["Home"]
     assert home_team_row.team_id == 1610612747
     assert home_team_row.entity_id is None
@@ -420,10 +435,11 @@ def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp
     repository.replace_game(game)
     with engine.connect() as connection:
         rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
-    assert len(rows) == 4
-    assert [row["row_type"] for row in rows] == ["team", "player", "player", "player"]
+    assert len(rows) == 5
+    assert [row["row_type"] for row in rows] == ["team", "player", "player", "team", "player"]
     assert all(row["schema_version"] == 1 for row in rows)
     assert {row["side"] for row in rows} == {"Home", "Away"}
+    assert sum(row["row_type"] == "team" for row in rows) == 2
     assert any(
         row["entity_id"] == 2544 and json.loads(row["payload"]).get("UnknownAdditiveField") == "future-proof"
         for row in rows
@@ -465,7 +481,7 @@ def test_raw_evidence_canonicalization_is_replay_stable(tmp_path):
     repeated = repository.replace_game(game_two)
     assert not repeated.inserted and not repeated.replaced
     with engine.connect() as connection:
-        assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 4
+        assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 5
 
 
 def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
@@ -539,7 +555,7 @@ def test_correction_atomically_replaces_raw_and_typed_evidence(tmp_path):
         raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
     assert game_row["checksum"] == corrected.checksum
     assert game_row["raw_checksum"] == corrected.raw_checksum
-    assert len(raw_rows) == 4
+    assert len(raw_rows) == 5
     by_entity = {row["entity_id"]: row for row in raw_rows}
     assert json.loads(by_entity[2544]["payload"])["Points"] == 26
 
@@ -581,7 +597,7 @@ def test_raw_only_correction_still_replaces_evidence(tmp_path):
     assert game_row["checksum"] == corrected.checksum
 
 
-def test_both_provider_team_summary_rows_are_archived(tmp_path):
+def test_duplicate_team_summary_row_rejects_the_complete_game(tmp_path):
     payload = _raw_observation_with_unknown_fields()
     payload["stats"]["Away"]["FullGame"].insert(
         0,
@@ -593,6 +609,41 @@ def test_both_provider_team_summary_rows_are_archived(tmp_path):
             "DefRebounds": 1,
         },
     )
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "team-summary" in str(error)
+    else:
+        raise AssertionError("duplicate team-summary evidence unexpectedly passed")
+
+
+def test_missing_away_team_summary_row_rejects_the_complete_game():
+    payload = _raw_observation_with_unknown_fields()
+    payload["stats"]["Away"]["FullGame"] = payload["stats"]["Away"]["FullGame"][1:]
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "team-summary" in str(error)
+    else:
+        raise AssertionError("accepted evidence missing an Away team-summary row")
+
+
+def test_both_provider_team_summary_rows_are_archived(tmp_path):
+    payload = _raw_observation_with_unknown_fields()
     game = canonical_game_from_pbp(
         payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -681,3 +732,74 @@ def test_schema_drift_is_observed_in_field_set_metadata(tmp_path):
         )).mappings().one()
     assert "ProviderAddedField" in json.loads(row["observed_fields"])
     assert json.loads(row["payload"])["ProviderAddedField"] == 7
+
+
+def test_missing_required_count_evidence_rejects_the_complete_game_atomically(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'missing_count.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _raw_observation_with_unknown_fields()
+    leon_row = next(
+        row for row in payload["stats"]["Home"]["FullGame"]
+        if row.get("EntityId") == "2544"
+    )
+    leon_row.pop("Points", None)
+    try:
+        repository.replace_game(canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        ))
+    except LedgerValidationError as error:
+        assert "required" in str(error) and "Points" in str(error)
+    else:
+        raise AssertionError("missing required count evidence unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_explicit_zero_required_count_remains_valid(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _raw_observation_with_unknown_fields()
+    payload["stats"]["Home"]["FullGame"][1]["Fouls"] = 0
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+    leon = next(fact for fact in game.player_facts if fact.player_id == 2544)
+    assert leon.personal_fouls == 0
+    assert repository.replace_game(game).inserted
+
+
+def test_accepted_game_requires_raw_evidence(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty_raw.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _raw_observation_with_unknown_fields()
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+    stripped = replace(game, raw_rows=(), raw_checksum=None).with_checksum()
+    try:
+        repository.replace_game(stripped)
+    except LedgerValidationError as error:
+        assert "raw evidence" in str(error)
+    else:
+        raise AssertionError("empty raw evidence unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
