@@ -880,8 +880,8 @@ production backfill consumes the complete raw
 (`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
 DataFrame, so team-summary rows and unknown additive keys always reach the
 archive. An accepted raw observation must contain exactly one team-summary row
-for each governed Home/Away side; the team-summary row is mandatory team-fact
-authority and may never fall back to player sums.
+for each governed Home/Away side; the team row is the sparse residual authority
+and is never a fallback.
 
 Raw JSON canonicalization is deterministic and lossless: each payload is
 serialized with sorted keys and compact separators, and the game-level
@@ -907,36 +907,33 @@ the raw checksum is independent of
 the typed `checksum`, a raw-only correction (a provider field that does not
 change any typed primitive) is still recognized as a replacement rather than an
 idempotent replay, and the complete raw and typed evidence is replaced
-atomically. Missing core identity, participants, minutes, or required count
-evidence rejects the whole candidate game before anything is written; an
-explicit numeric zero for a required count remains valid. The required counts
-are the non-derivable core box-score fields on each player row
-(`REQUIRED_PLAYER_COUNT_FIELDS`: points, two- and three-point makes/attempts,
-free-throw points/attempts, offensive and defensive rebounds, assists,
-turnovers, steals, blocks, and fouls); `FGM`/`FGA`/`Rebounds` are derived from
-those components and are not separately required. Missing optional expanded
+atomically. The PBP `FullGame` wire is sparse: the provider omits observed-zero
+additive counters on both player rows and the team-summary row, so an omitted or
+null count primitive is a governed zero rather than missing evidence. Identity,
+minutes, row presence, and malformed values stay strict and always reject the
+candidate atomically. Every count primitive is such an additive counter (points,
+two- and three-point makes/attempts, free-throw points/attempts, offensive and
+defensive rebounds, assists, turnovers, steals, blocks, and fouls);
+`FGM`/`FGA`/`Rebounds` are derived from the two- and three-point components and
+from offensive plus defensive rebounds when absent. Missing optional expanded
 fields preserve the game and leave only the dependent typed facts (such as
 assist locations) null/unavailable.
 
 The declared typed authority is per row type. Player-game typed facts come from
-the provider player rows; team-game typed facts come from the provider
-team-summary row. The team-summary row carries the same required non-derivable
-core count vocabulary (`REQUIRED_TEAM_COUNT_FIELDS`), and a missing or null
-required team-summary count rejects the whole candidate atomically rather than
-falling back to player sums. `FGM`/`FGA`/`Rebounds` are derived from the
-required team components and are not separately required. Additive-equivalence
-checks apply only to the documented `ADDITIVE_EQUIVALENT_COUNT_FIELDS` set
-(every count primitive except rebounds): a team-summary value that disagrees
-with the participating-player sum rejects the complete game. Rebound fields
-are deliberately excluded because team rebounds (and their offensive/defensive
-partition) are a provider team-only concept no single player is credited with,
-so the team-summary rebound totals are authoritative and never compared against
-player sums. The same holds for other optional team-summary fields such as
-possessions: only `ADDITIVE_EQUIVALENT_COUNT_FIELDS` may compare a team value
-against participating-player totals, so a team-summary possessions value is
-authoritative even when it differs from summed player possessions. The legacy
-`team_results` envelope remains diagnostic only and must agree rather than
-overwrite the declared authority.
+the provider player rows; the real provider team-summary row (`EntityId == 0`)
+is itself sparse and carries only the team-only residuals (such as team
+rebounds) that no participating player row carries, not a complete traditional
+box score. Each complete team count is therefore the sum of the authoritative
+participating-player rows plus the corresponding sparse team-row residual, where
+an omitted team-row counter is a zero residual; `FGM`/`FGA`/`Rebounds` derive
+from the same components and are not separately required. Because both the
+player rows and the team row are sparse, the repository re-proves that
+equivalence for every count primitive — rebounds included — so a team value
+cannot disagree with its player primitives and team-only evidence. Optional
+team-summary fields such as possessions remain team authority and are never
+compared against summed player possessions. The `team_results` envelope remains
+diagnostic/parity only: where it publishes a comparable field it must reconcile
+with the declared authority, and it never populates persisted facts.
 
 The repository boundary repeats these invariants for direct callers.
 `validate_complete_game` re-checks the required player/team count and minutes
@@ -945,8 +942,9 @@ present and in the accepted format (`00:00` and other valid `MM:SS` values)
 but is never treated as a player-additive fact — and then proves the stored
 typed version equals extraction from its authoritative raw rows: each typed
 player fact must equal extraction from its archived player row and each typed
-team fact must equal extraction from its team-summary row (with only the
-documented additive-equivalence as additional validation). A game whose typed
+team fact must equal extraction from its team-summary row (player sums plus
+the sparse team-only residual, with the same reconcile-on-every-primitive
+equivalence re-proven for every count field). A game whose typed
 facts disagree with its raw evidence, or whose raw rows are incomplete, is
 rejected atomically with no write, so a direct `replace_game` caller can never
 persist a mixed or incomplete raw/typed version. The game identity row carries

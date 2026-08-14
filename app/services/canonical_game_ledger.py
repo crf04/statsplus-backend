@@ -69,37 +69,15 @@ ASSIST_LOCATION_FIELDS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
-#: Required per-player count evidence on the raw FullGame wire.  These core
-#: box-score counts cannot be derived from other columns, so a missing or null
-#: value rejects the whole candidate game atomically instead of being asserted
-#: as zero; an explicit numeric zero remains valid.  ``FGM``/``FGA``/``Rebounds``
-#: are deliberately excluded because they are derived from the two-pointer and
-#: three-pointer components and from offensive plus defensive rebounds.
-REQUIRED_PLAYER_COUNT_FIELDS = {
-    "two_pointers_made": ("FG2M", "two_pointers_made"),
-    "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
-    "three_pointers_made": ("FG3M", "three_pointers_made"),
-    "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
-    "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
-    "free_throws_attempted": ("FTA", "free_throws_attempted"),
-    "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
-    "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
-    "assists": ("Assists", "AST", "assists"),
-    "turnovers": ("Turnovers", "TOV", "turnovers"),
-    "steals": ("Steals", "STL", "steals"),
-    "blocks": ("Blocks", "BLK", "blocks"),
-    "personal_fouls": ("Fouls", "PF", "personal_fouls"),
-    "points": ("Points", "PTS", "points"),
-}
-#: Count primitives with a documented additive-equivalence relationship between
-#: the provider team-summary row and the sum of participating player rows.
-#: Rebound fields are deliberately excluded: team-summary totals may
-#: legitimately include team rebounds (and their offensive/defensive
-#: partition) that no single player is credited with.
-ADDITIVE_EQUIVALENT_COUNT_FIELDS = tuple(
-    field_name for field_name in COUNT_FIELDS
-    if field_name not in {"rebounds", "offensive_rebounds", "defensive_rebounds"}
-)
+#: The PBP FullGame wire is sparse: the provider omits observed-zero additive
+#: box-score counters on both player rows and the team-summary row.  Every
+#: count primitive in ``COUNT_FIELDS`` is such an additive counter, so a missing
+#: or null value is a governed zero (``_integer`` collapses it) rather than
+#: missing evidence.  Identity, minutes, row presence, and malformed values
+#: stay strict: they are never zero-filled and always reject the candidate game
+#: atomically.  ``FGM``/``FGA``/``Rebounds`` are derived from the two-pointer
+#: and three-pointer components and from offensive plus defensive rebounds.
+
 #: The typed extractor version that produced canonical facts and raw row
 #: schema evidence.  Bump it only when the extraction vocabulary changes.
 LEDGER_SCHEMA_VERSION = 1
@@ -595,7 +573,8 @@ def _ledger_raw_rows(
     Provider keys and values are preserved verbatim.  Only canonical identity
     (game, side, team, entity) is recorded as metadata beside the payload; a
     ``team`` row is the provider's aggregate (``EntityId == 0`` or ``Team``)
-    and is the declared authority for team-game facts.
+    and carries the team-only residuals (such as team rebounds) that
+    participating player rows never carry.
     """
 
     stats = observation.get("stats")
@@ -821,12 +800,27 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
     }
     for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
         team_fact = team_facts_by_id[team_id]
+        side_players = players_by_side[side]
         payload: dict[str, Any] = {
             "EntityId": "0",
             "Name": "Team",
             "Minutes": "00:00",
-            **_fact_count_payload(team_fact),
         }
+        # The archived team-summary row carries only the team-only residual for
+        # each count primitive (the portion no player is credited with, such as
+        # team rebounds), matching the sparse provider row.  Extraction re-adds
+        # the participating-player sum, so the residual reproduces the typed
+        # team fact exactly.
+        player_sums = {
+            field_name: sum(getattr(player, field_name) for player in side_players)
+            for field_name in COUNT_FIELDS
+            if field_name != "rebounds"
+        }
+        player_sums["rebounds"] = sum(player.rebounds for player in side_players)
+        for field_name, names in _TEAM_ROW_ALIASES.items():
+            residual = getattr(team_fact, field_name) - player_sums[field_name]
+            if residual:
+                payload[names[0]] = residual
         if team_fact.possessions is not None:
             payload["Possessions"] = team_fact.possessions
         rows.append(LedgerGameRow(
@@ -944,23 +938,16 @@ def _player_fact_from_row(
     *,
     team_id: int,
     team_tricode: str,
-    wire: Mapping[str, Any] | None = None,
 ) -> PlayerGameFact:
-    """Map a PBP row while retaining the stable primitive superset.
+    """Map a PBP player row while retaining the stable primitive superset.
 
-    Required count evidence is judged against the raw provider row (``wire``),
-    which preserves sparse omissions.  The normalized frame zero-fills those
-    columns, so a missing or null required count must reject the whole
-    candidate here rather than being asserted as zero; an explicit numeric
-    zero remains valid.
+    The PBP FullGame wire is sparse: observed-zero additive box-score counters
+    are omitted from player rows, so a missing or null count is a governed zero
+    and the game still ingests.  Identity and minutes remain strict -- a row
+    missing ``EntityId``/``Name``/``Minutes`` evidence, or carrying a malformed
+    value, rejects the whole candidate atomically.
     """
 
-    source = row if wire is None else wire
-    for field_name, names in REQUIRED_PLAYER_COUNT_FIELDS.items():
-        if _raw_value(source, *names) is None:
-            raise LedgerValidationError(
-                f"player row is missing required {names[0]} count evidence"
-            )
     two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
     two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A")
     three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
@@ -1029,17 +1016,6 @@ _TEAM_ROW_ALIASES = {
     "blocks": ("Blocks", "BLK", "blocks"),
     "personal_fouls": ("Fouls", "PF", "personal_fouls"),
 }
-#: Required team-summary count evidence on the raw FullGame wire.  The
-#: team-summary row is the mandatory authority for every typed team-game fact,
-#: so the same non-derivable core box-score vocabulary a player row must carry
-#: is also required here.  A missing or null value rejects the whole candidate
-#: game atomically; an explicit numeric zero remains valid.  ``FGM``/``FGA``/
-#: ``Rebounds`` are derived from the required components and are not separately
-#: required, matching the player-row vocabulary.
-REQUIRED_TEAM_COUNT_FIELDS = {
-    field_name: _TEAM_ROW_ALIASES[field_name]
-    for field_name in REQUIRED_PLAYER_COUNT_FIELDS
-}
 
 
 def _sum_team_facts(
@@ -1054,19 +1030,20 @@ def _sum_team_facts(
     *,
     require_team_row: bool = False,
 ) -> TeamGameFact:
-    """Build the team-game fact set from its declared row authority.
+    """Build the team-game fact set from player rows plus team-only evidence.
 
-    The provider team-summary row (``EntityId == 0``) is the authority for
-    every typed team-game fact: values are read from that row and never fall
-    back to player sums.  Player sums are used only as the documented
-    additive-equivalence validation on ``ADDITIVE_EQUIVALENT_COUNT_FIELDS``.
-    Rebounds are a documented team-only concept: the team-summary row may
-    include team rebounds no single player is credited with, so no additive
-    equality is required there.  ``provider_total`` (the ``team_results``
-    envelope) is diagnostic only and must agree rather than overwrite the
-    declared authority.  ``require_team_row`` is set for accepted raw
-    observations: a complete game may never fall back to player sums for a
-    side that lacks its team-summary row authority.
+    The real PBP ``/get-game-stats`` team-summary row (``EntityId == 0``) is
+    sparse: it does **not** carry the complete traditional box score.  It
+    carries the team-only residuals -- the rebound credits (and the occasional
+    dead-ball/team turnover) that no player is credited with.  The complete
+    team count for every primitive is therefore the sum of the participating
+    player rows (the player rows are their own authority) plus that
+    team-summary residual; both are sparse, so an omitted additive counter is
+    an observed zero.  ``provider_total`` (the ``team_results`` envelope) is
+    diagnostic only and must equal that complete total where it carries a
+    field, rather than overwriting the declared authority.  ``require_team_row``
+    is set for accepted raw observations: a complete game may never omit a
+    side's team-summary row.
     """
 
     if require_team_row and team_row is None:
@@ -1087,33 +1064,11 @@ def _sum_team_facts(
         values = {}
         for field_name, names in _TEAM_ROW_ALIASES.items():
             raw = _raw_value(team_row, *names)
-            if field_name in REQUIRED_TEAM_COUNT_FIELDS and raw is None:
-                raise LedgerValidationError(
-                    f"team-summary row is missing required {names[0]} count evidence"
-                )
-            if raw is None:
-                continue
-            authoritative = _integer(raw, field_name)
-            if field_name in ADDITIVE_EQUIVALENT_COUNT_FIELDS:
-                if authoritative != player_sums[field_name]:
-                    raise LedgerValidationError(
-                        f"PBP team-summary {field_name} does not reconcile with player facts"
-                    )
-                values[field_name] = authoritative
-            else:
-                # Rebound fields are the declared team-only authority and are
-                # never compared against player sums.
-                values[field_name] = authoritative
-        # Documented composites are derived from the required components when
-        # the team-summary row does not publish them explicitly.
-        for derived, left, right in (
-            ("field_goals_made", "two_pointers_made", "three_pointers_made"),
-            ("field_goals_attempted", "two_pointers_attempted", "three_pointers_attempted"),
-            ("rebounds", "offensive_rebounds", "defensive_rebounds"),
-        ):
-            if derived not in values:
-                values[derived] = values[left] + values[right]
-    # Team-results payloads are diagnostic only.  Canonical facts come from
+            # A sparse team-summary omission is an observed zero residual, so
+            # the complete team value is the participating-player sum.
+            residual = 0 if raw is None else _integer(raw, field_name)
+            values[field_name] = player_sums[field_name] + residual
+    # Team-results payloads are diagnostic only.  The complete team total is
     # the declared authority; an explicitly published provider total must
     # agree rather than overwriting it.
     for field_name, names in _TEAM_ROW_ALIASES.items():
@@ -1285,11 +1240,14 @@ def canonical_game_from_pbp(
         player_id = int(row["PLAYER_ID"])
         team_code = str(row["TEAM_ABBREVIATION"])
         wire = raw_by_player.get((player_id, team_code), {})
+        # The raw provider row preserves the sparse wire omissions (and any
+        # retained optional fields such as assist locations); the normalized
+        # row zero-fills the additive counting columns.  Both spellings agree
+        # on a governed zero, so the merged row drives typed extraction.
         raw = {**wire, **row}
         players.append(
             _player_fact_from_row(
                 raw,
-                wire=wire,
                 team_id=int(row["TEAM_ID"]),
                 team_tricode=str(row["TEAM_ABBREVIATION"]),
             )
@@ -1471,10 +1429,10 @@ def _reconcile_raw_and_typed_evidence(
 
     The archived raw rows are the single source of truth: each typed player
     fact must equal extraction from its archived player row and each typed
-    team fact must equal extraction from its team-summary row (with only the
-    documented additive-equivalence against participating-player sums as
-    additional validation).  This also enforces the required player/team count
-    and minutes evidence at the repository boundary, so a direct
+    team fact must equal extraction from its team-summary row combined with
+    the participating-player sums (the team-summary row supplies the team-only
+    residual).  This also enforces the player/team identity, minutes, and
+    presence evidence at the repository boundary, so a direct
     ``replace_game`` caller can never persist an incomplete or mixed raw/typed
     version.
     """
@@ -1744,17 +1702,29 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         for team_id in observed_by_team
     }
     _reconcile_raw_and_typed_evidence(game, players_by_team)
+    team_row_payload = {
+        team_id: next(
+            row.payload for row in game.raw_rows
+            if row.row_type == "team" and row.team_id == team_id
+        )
+        for team_id in observed_by_team
+    }
     for team_fact in game.team_facts:
         team_players = players_by_team[team_fact.team_id]
-        # Rebounds are excluded: the provider team-summary row may legitimately
-        # include team rebounds no player is credited with, so only the
-        # documented additive-equivalent primitives must reconcile.
-        for field_name in ADDITIVE_EQUIVALENT_COUNT_FIELDS:
-            if getattr(team_fact, field_name) != sum(
+        # Every complete team count is the participating-player sum plus the
+        # team-summary row's team-only residual (rebounds and the occasional
+        # dead-ball/team turnover no player is credited with).  Both are
+        # sparse: an omitted additive counter is an observed zero, so the raw
+        # archived team row is the residual authority and never a fallback.
+        for field_name in COUNT_FIELDS:
+            raw = _raw_value(team_row_payload[team_fact.team_id], *_TEAM_ROW_ALIASES[field_name])
+            residual = 0 if raw is None else _integer(raw, field_name)
+            expected = sum(
                 getattr(player, field_name) for player in team_players
-            ):
+            ) + residual
+            if getattr(team_fact, field_name) != expected:
                 raise LedgerValidationError(
-                    f"team_fact.{field_name} must reconcile with player primitives"
+                    f"team_fact.{field_name} must reconcile with player primitives and team-only evidence"
                 )
         expected_minutes = sum(player.minutes for player in team_players) / 5.0
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
@@ -2461,12 +2431,9 @@ def _game_from_rows(
 
 __all__ = [
     "ASSIST_LOCATION_FIELDS",
-    "ADDITIVE_EQUIVALENT_COUNT_FIELDS",
     "COUNT_FIELDS",
     "LEDGER_GOVERNED_FULLGAME_FIELDS",
     "LEDGER_SCHEMA_VERSION",
-    "REQUIRED_PLAYER_COUNT_FIELDS",
-    "REQUIRED_TEAM_COUNT_FIELDS",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",
     "LedgerBackfillProgress",

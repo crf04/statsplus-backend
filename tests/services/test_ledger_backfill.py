@@ -787,17 +787,56 @@ def test_production_adapter_backfill_archives_complete_raw_evidence(tmp_path):
     assert raw_checksum(reconstructed) == stored.raw_checksum
 
 
-def test_missing_required_count_rejects_through_the_production_backfill_seam(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'backfill_missing_count.sqlite3'}")
+def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_seam(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'backfill_null_count.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     payload = _payload()
+    # The provider wire is sparse: a null or omitted additive counter is an
+    # observed zero, so the game ingests atomically through the production
+    # adapter seam rather than being rejected as missing evidence.
     next(
         row for row in payload["stats"]["Away"]["FullGame"]
         if row.get("EntityId") == "201935"
     )["Assists"] = None
+    adapter, _session = _production_adapter(payload)
+    recorder = CollectionObservationLedgerRecorder(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+
+    result = LedgerBackfillService(
+        provider=adapter,
+        athlete_catalog=_Athletes(),
+        participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
+        reconciliation_sink=lambda game_id, details: None,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    ).refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.complete
+    stored = repository.get_game("0022400001")
+    assert stored is not None
+    wemby = next(fact for fact in stored.player_facts if fact.player_id == 201935)
+    assert wemby.assists == 0
+
+
+def test_missing_minutes_rejects_through_the_production_backfill_seam(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'backfill_missing_minutes.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    _install_manifest(engine, cutoff)
+    _seed_participant_event(engine, cutoff)
+    payload = _payload()
+    # Minutes is genuinely required identity evidence: it is never zero-filled,
+    # so a player row missing it fails the whole candidate through the
+    # production backfill seam and nothing is written.
+    next(
+        row for row in payload["stats"]["Away"]["FullGame"]
+        if row.get("EntityId") == "201935"
+    ).pop("Minutes", None)
     adapter, _session = _production_adapter(payload)
     recorder = CollectionObservationLedgerRecorder(engine)
     repository = CanonicalGameLedgerRepository(engine)
