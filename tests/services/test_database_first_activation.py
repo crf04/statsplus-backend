@@ -11,6 +11,7 @@ from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
 from app.services.collection_control import PublicationService
 from app.services.database_first_activation import (
+    DatabaseFirstActivationService,
     DatabaseFirstPublicationReader,
     DatabaseOnlyProviderGuard,
     LegacyWriteFence,
@@ -34,6 +35,21 @@ def _db(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'activation.sqlite3'}")
     run_migrations(engine)
     return engine
+
+
+def test_activation_facade_uses_default_clock_when_none_is_supplied(tmp_path):
+    engine = _db(tmp_path)
+    facade = DatabaseFirstActivationService(engine)
+
+    stream = facade.publications.register_stream(
+        "default_clock_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+    )
+
+    assert stream.created_at is not None
 
 
 def test_reader_serves_active_last_good_and_marks_it_stale(tmp_path):

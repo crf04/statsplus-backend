@@ -943,7 +943,8 @@ class DatabaseFirstActivationService:
     """Convenience facade used by rehearsal and operator tooling."""
 
     def __init__(self, engine: Engine, *, clock: Callable[[], datetime] | None = None) -> None:
-        self.publications = PublicationService(engine, clock=clock)
+        publication_options = {} if clock is None else {"clock": clock}
+        self.publications = PublicationService(engine, **publication_options)
         self.reader = DatabaseFirstPublicationReader(engine, clock=clock)
         self.fence = LegacyWriteFence(engine)
 
