@@ -17,6 +17,10 @@ from app.services.ledger_runtime import (
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
 from app.services.ledger_materialization import LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+)
 from tests.services.test_ledger_derivations import _league_games
 
 
@@ -191,6 +195,80 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+
+
+def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
+    tmp_path,
+):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'matchup-compose.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in team_ids
+    }
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="matchup", stream_key="traditional_opponent_season",
+            manifest_id=None, season="2025-26", cutoff=cutoff, status="queued",
+            attempts=0, created_at=cutoff, updated_at=cutoff,
+        ))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, expected, team_ids, expected_l15
+            )
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    matchup_materialization = LedgerMatchupMaterializationService(
+        repository,
+        TeamMatchupRepository(engine),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        matchup_materialization=matchup_materialization,
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+
+    season = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    )
+    assert {item.surface for item in season.observations} == {
+        "traditional",
+        "assist_locations",
+    }
+    assert {fact.base for fact in season.facts} == {
+        "traditional",
+        "assist_locations",
+    }
+    assert all(fact.ledger_checksum for fact in season.facts)
+    assert all(fact.game_ids for fact in season.facts)
 
 
 def test_refresh_fails_governance_before_any_backfill_or_provider_work():

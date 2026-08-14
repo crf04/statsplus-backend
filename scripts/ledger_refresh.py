@@ -46,6 +46,7 @@ def main() -> int:
         repository=dependencies.canonical_game_ledger_repository,
         materialization=dependencies.ledger_materialization_service,
         governance=ActiveManifestLedgerGovernanceReader(dependencies.engine),
+        matchup_materialization=dependencies.ledger_matchup_materialization_service,
     )
     if args.compose_only:
         composed = runtime.compose_queued(args.season)

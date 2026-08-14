@@ -188,12 +188,14 @@ class LedgerRuntime:
         repository: CanonicalGameLedgerRepository,
         materialization: LedgerMaterializationService,
         governance: LedgerGovernanceReader,
+        matchup_materialization=None,
         clock=None,
     ) -> None:
         self.backfill = backfill
         self.repository = repository
         self.materialization = materialization
         self.governance = governance
+        self.matchup_materialization = matchup_materialization
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def refresh(
@@ -239,6 +241,15 @@ class LedgerRuntime:
                 cutoff,
                 manifest_id,
             )
+            if self.matchup_materialization is not None:
+                # Publish the disposable ledger-owned matchup read model at the
+                # exact composition cutoff before composing publication streams,
+                # so an incomplete Season/L15 publishes explicit unavailable
+                # observations instead of approximating a league window.
+                self.matchup_materialization.materialize(
+                    season,
+                    as_of=cutoff.date(),
+                )
             games = tuple(
                 game
                 for summary in self.repository.list_games(season, through=cutoff.date())

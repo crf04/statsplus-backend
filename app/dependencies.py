@@ -58,6 +58,7 @@ class ApplicationDependencies:
     canonical_game_ledger_repository: Any | None = None
     ledger_materialization_service: Any | None = None
     ledger_backfill_service: Any | None = None
+    ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
 
 
@@ -137,6 +138,7 @@ def build_dependencies(
     publication_reader = None
     write_fence = None
     canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
+    ledger_matchup_materialization_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -300,8 +302,11 @@ def build_dependencies(
             write_fence=write_fence,
             publication_reader=publication_reader,
         )
+        team_matchup_repository = TeamMatchupRepository(
+            engine, write_fence=write_fence
+        )
         team_matchup_query_service = TeamMatchupQueryService(
-            TeamMatchupRepository(engine, write_fence=write_fence),
+            team_matchup_repository,
             publication_reader=publication_reader,
         )
         from app.services.canonical_game_ledger import (
@@ -321,6 +326,9 @@ def build_dependencies(
         from app.services.ledger_parity import (
             LedgerParityArtifactRepository,
             LegacyParityDiagnosticReader,
+        )
+        from app.services.ledger_matchup_materialization import (
+            LedgerMatchupMaterializationService,
         )
 
         try:
@@ -342,6 +350,12 @@ def build_dependencies(
                 parity_repository=LedgerParityArtifactRepository(engine),
                 parity_reader=LegacyParityDiagnosticReader(engine),
                 publication_service=publication_service,
+            )
+            ledger_matchup_materialization_service = (
+                LedgerMatchupMaterializationService(
+                    canonical_game_ledger_repository,
+                    team_matchup_repository,
+                )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
@@ -511,6 +525,7 @@ def build_dependencies(
         canonical_game_ledger_repository=canonical_game_ledger_repository,
         ledger_materialization_service=ledger_materialization_service,
         ledger_backfill_service=ledger_backfill_service,
+        ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
     )
 

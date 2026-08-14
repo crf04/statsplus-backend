@@ -237,6 +237,31 @@ def _create_team_matchup_fact_tables(connection: Connection) -> None:
     TeamMatchupSurfaceObservationRow.__table__.create(connection, checkfirst=True)
 
 
+def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
+    """Add ledger checksum and source-lineage columns to matchup read models.
+
+    Migration 034 is reserved for issue #114.  Ledger-owned facts and surface
+    observations record the exact governed game IDs they aggregated plus the
+    deterministic ledger checksum of that selected game set.  Existing
+    provider-collected rows keep ``NULL`` for both columns.
+    """
+    preparer = connection.dialect.identifier_preparer
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        table = preparer.quote(table_name)
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        if "game_ids" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN game_ids TEXT")
+            )
+        if "ledger_checksum" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)")
+            )
+
+
 def _create_player_diet_fact_tables(connection: Connection) -> None:
     """Create Season player Diet facts and per-Base observations."""
     from app.models.player_diet import (
@@ -850,6 +875,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
     Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
     Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
+    Migration(34, "034_team_matchup_ledger_lineage", _add_team_matchup_ledger_lineage),
 )
 
 
