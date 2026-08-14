@@ -674,6 +674,32 @@ def test_discovery_is_environment_and_scope_bound(control_db):
         )
 
 
+def test_discovery_orders_event_bootstrap_before_dependent_athlete_bootstrap(control_db):
+    now = [datetime(2026, 8, 12, tzinfo=UTC)]
+    control = CollectionControlService(
+        control_db, environment="testing", clock=lambda: now[0]
+    )
+    control.activate_season("2025-26", actor="operator")
+    event = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
+    )
+    now[0] += timedelta(seconds=1)
+    athlete = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
+    )
+
+    discovered = control.discover(
+        environment="testing", scopes=["poll"], collector_id="collector",
+        owner="residential_collector", providers=["nba"],
+        surfaces=["event_catalog", "athlete_catalog"],
+    )
+
+    assert [item["request_id"] for item in discovered["bootstrap_requests"]] == [
+        event.request_id,
+        athlete.request_id,
+    ]
+
+
 def test_surface_authorization_denies_cross_collector_and_cross_provider_ingest(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)

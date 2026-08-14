@@ -450,6 +450,15 @@ the live PBP and stored read paths can never disagree.  The stored source
 rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
 makes the Stage 3 parity seam a real equivalence check.
 
+`players_on[]` and `players_off[]` are game-level appearance filters, not PBP
+lineup-stint filters. For every named player, the same game-log source supplies
+season rows. `players_on[]` intersects `(game_id, team)` pairs across the
+primary player and every named teammate; `players_off[]` removes the union of
+same-team pairs where any named teammate has a row. A player appearing for the
+opponent in the same game is therefore never treated as the primary player's
+teammate. The algorithm is provider-independent: before durable activation it
+uses cached PBP season rows and after activation it uses stored game-log facts.
+
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract.  `PLUS_MINUS` is not a supported `self_filters[STAT]`, the averages
 carry no `PLUS_MINUS` cell, response rows carry no `+/-` value, and the

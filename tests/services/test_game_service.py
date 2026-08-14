@@ -284,6 +284,18 @@ def test_players_off_excludes_games_the_other_player_appeared_in(
     assert result["GAME_ID"].tolist() == ["0001", "0004"]
 
 
+def test_players_off_does_not_exclude_an_opponents_appearance(
+    service, game_logs, monkeypatch
+):
+    opponent = game_logs[game_logs["GAME_ID"] == "0002"].copy()
+    opponent["TEAM_ABBREVIATION"] = "OPP"
+    _stub_game_logs(service, monkeypatch, {"Opponent": opponent})
+
+    result = run(service.filter_players_on_off(game_logs, [], ["Opponent"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == game_logs["GAME_ID"].tolist()
+
+
 def test_common_games_requires_every_named_player(service, game_logs, monkeypatch):
     _stub_game_logs(
         service,

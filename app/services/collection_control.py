@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -1407,6 +1407,8 @@ class CollectionControlService(_SessionService):
                 BootstrapRequest.status == "pending",
                 BootstrapRequest.expires_at > current,
             ).order_by(
+                BootstrapRequest.cutoff.desc(),
+                case((BootstrapRequest.catalog_type == "event", 0), else_=1),
                 BootstrapRequest.created_at.desc(),
                 BootstrapRequest.request_id.asc(),
             )

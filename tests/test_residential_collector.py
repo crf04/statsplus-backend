@@ -112,6 +112,58 @@ def test_schedule_roster_require_identity_and_exact_season():
         normalize_roster_response(_roster(), season="2024-25", cutoff=NOW)
 
 
+def test_live_schedule_shape_selects_regular_season_by_canonical_game_id():
+    live_rows = [
+        {
+            "gameId": "0012500001",
+            "homeTeam_teamId": 1610612737,
+            "awayTeam_teamId": 1610612738,
+            "gameDateTimeUTC": "2025-10-05T00:00:00Z",
+            "gameStatus": 3,
+            "gameLabel": "Preseason",
+        },
+        {
+            "gameId": "0022500001",
+            "homeTeam_teamId": 1610612737,
+            "awayTeam_teamId": 1610612738,
+            "gameDateTimeUTC": "2025-10-23T00:00:00Z",
+            "gameStatus": 3,
+            # ScheduleLeagueV2 commonly leaves this optional display field null.
+            "gameLabel": None,
+        },
+    ]
+
+    result = normalize_schedule_response(live_rows, season="2025-26", cutoff=NOW)
+
+    assert [row["nba_game_id"] for row in result.payload["records"]] == ["0022500001"]
+    assert result.payload["records"][0]["phase"] == "Regular Season"
+
+
+def test_live_roster_shape_skips_inactive_unaffiliated_players_before_team_validation():
+    rows = [
+        {
+            "PERSON_ID": 1,
+            "DISPLAY_FIRST_LAST": "Active Player",
+            "ROSTERSTATUS": 1,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2025",
+            "TEAM_ID": 1610612737,
+        },
+        {
+            "PERSON_ID": 2,
+            "DISPLAY_FIRST_LAST": "Inactive Free Agent",
+            "ROSTERSTATUS": 0,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2025",
+            "TEAM_ID": 0,
+        },
+    ]
+
+    result = normalize_roster_response(rows, season="2025-26", cutoff=NOW)
+
+    assert [row["player_id"] for row in result.payload["records"]] == [1]
+
+
 def test_sanitized_recorded_nba_json_is_normalized_without_network():
     fixture_root = Path(__file__).parent / "fixtures"
     schedule = json.loads((fixture_root / "nba_stats" / "schedule.valid.json").read_text())
