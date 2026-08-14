@@ -915,7 +915,13 @@ candidate atomically. Every count primitive is such an additive counter (points,
 two- and three-point makes/attempts, free-throw points/attempts, offensive and
 defensive rebounds, assists, turnovers, steals, blocks, and fouls);
 `FGM`/`FGA`/`Rebounds` are derived from the two- and three-point components and
-from offensive plus defensive rebounds when absent. Missing optional expanded
+from offensive plus defensive rebounds when absent. A governed zero is only
+accepted when independently proven: a `Points` omission must reconcile
+arithmetically with the retained scoring components (`Points` equals
+`2*FG2M + 3*FG3M + FtPoints`), and every other omitted player or team count must
+stay consistent with the complete `team_results` diagnostic reconciliation, so a
+missing nonzero count rejects the candidate atomically rather than fabricating a
+zero while a proven zero passes. Missing optional expanded
 fields preserve the game and leave only the dependent typed facts (such as
 assist locations) null/unavailable.
 
@@ -936,15 +942,19 @@ diagnostic/parity only: where it publishes a comparable field it must reconcile
 with the declared authority, and it never populates persisted facts.
 
 The repository boundary repeats these invariants for direct callers.
-`validate_complete_game` re-checks the required player/team count and minutes
-evidence on every archived row — including team-summary minutes, which must be
-present and in the accepted format (`00:00` and other valid `MM:SS` values)
-but is never treated as a player-additive fact — and then proves the stored
+`validate_complete_game` re-checks the strict evidence on every archived row —
+identity, minutes (including team-summary minutes, which must be present and in
+the accepted format (`00:00` and other valid `MM:SS` values) but is never
+treated as a player-additive fact), row presence, and malformed values — while
+sparse count primitives are not required per row: each omitted count is
+re-extracted and reconciled, so a missing count that independent arithmetic or
+the complete `team_results` diagnostic proves nonzero rejects the candidate
+atomically and a proven zero passes. It then proves the stored
 typed version equals extraction from its authoritative raw rows: each typed
 player fact must equal extraction from its archived player row and each typed
-team fact must equal extraction from its team-summary row (player sums plus
-the sparse team-only residual, with the same reconcile-on-every-primitive
-equivalence re-proven for every count field). A game whose typed
+team fact must equal the participating-player sums plus the sparse team-summary
+row's team-only residual, with the same reconcile-on-every-primitive
+equivalence re-proven for every count field. A game whose typed
 facts disagree with its raw evidence, or whose raw rows are incomplete, is
 rejected atomically with no write, so a direct `replace_game` caller can never
 persist a mixed or incomplete raw/typed version. The game identity row carries

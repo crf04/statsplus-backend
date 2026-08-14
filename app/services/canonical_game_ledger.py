@@ -73,10 +73,15 @@ ASSIST_LOCATION_FIELDS = (
 #: box-score counters on both player rows and the team-summary row.  Every
 #: count primitive in ``COUNT_FIELDS`` is such an additive counter, so a missing
 #: or null value is a governed zero (``_integer`` collapses it) rather than
-#: missing evidence.  Identity, minutes, row presence, and malformed values
-#: stay strict: they are never zero-filled and always reject the candidate game
-#: atomically.  ``FGM``/``FGA``/``Rebounds`` are derived from the two-pointer
-#: and three-pointer components and from offensive plus defensive rebounds.
+#: missing evidence.  A governed zero is only accepted when independently
+#: proven: an omitted ``Points`` must reconcile arithmetically with the retained
+#: scoring components and every other omitted count must stay consistent with
+#: the complete ``team_results`` diagnostic reconciliation, so a missing nonzero
+#: count rejects the candidate atomically.  Identity, minutes, row presence, and
+#: malformed values stay strict: they are never zero-filled and always reject
+#: the candidate game atomically.  ``FGM``/``FGA``/``Rebounds`` are derived from
+#: the two-pointer and three-pointer components and from offensive plus
+#: defensive rebounds.
 
 #: The typed extractor version that produced canonical facts and raw row
 #: schema evidence.  Bump it only when the extraction vocabulary changes.
@@ -933,6 +938,32 @@ def _validate_wire_game_identity(
         raise LedgerValidationError("PBP game is outside the governed Regular Season phase")
 
 
+def _assert_missing_points_is_a_governed_zero(row: Mapping[str, Any]) -> None:
+    """Reject a sparse Points omission that retained scoring evidence proves nonzero.
+
+    The PBP FullGame wire omits observed-zero additive counters, so a player
+    row that omits ``Points`` is normally a governed zero.  That is only valid
+    when the retained scoring components (``FG2M``/``FG3M``/``FtPoints``)
+    independently prove the total is zero: points must equal
+    ``2 * FG2M + 3 * FG3M + FtPoints``.  A row that omits ``Points`` while its
+    makes prove a nonzero total is corrupted evidence, not a sparse zero, and
+    rejects the whole candidate atomically.  A counter that is independently
+    proven to be zero stays accepted as a governed zero.
+    """
+
+    if _raw_value(row, "Points", "PTS", "points") is not None:
+        return
+    derived_points = (
+        2 * _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
+        + 3 * _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
+        + _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM")
+    )
+    if derived_points != 0:
+        raise LedgerValidationError(
+            "player row missing nonzero points evidence contradicted by scoring components"
+        )
+
+
 def _player_fact_from_row(
     row: Mapping[str, Any],
     *,
@@ -945,9 +976,14 @@ def _player_fact_from_row(
     are omitted from player rows, so a missing or null count is a governed zero
     and the game still ingests.  Identity and minutes remain strict -- a row
     missing ``EntityId``/``Name``/``Minutes`` evidence, or carrying a malformed
-    value, rejects the whole candidate atomically.
+    value, rejects the whole candidate atomically.  A missing count is only a
+    governed zero when independent arithmetic (``Points`` against its scoring
+    components) or the complete diagnostic ``team_results`` reconciliation
+    proves it can be zero; a missing count that retained evidence proves is
+    nonzero is corrupted evidence and rejects the candidate atomically.
     """
 
+    _assert_missing_points_is_a_governed_zero(row)
     two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
     two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A")
     three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
@@ -1243,7 +1279,12 @@ def canonical_game_from_pbp(
         # The raw provider row preserves the sparse wire omissions (and any
         # retained optional fields such as assist locations); the normalized
         # row zero-fills the additive counting columns.  Both spellings agree
-        # on a governed zero, so the merged row drives typed extraction.
+        # on a governed zero, so the merged row drives typed extraction.  The
+        # sparse wire itself is checked first so a row omitting a count that
+        # its retained components prove nonzero fails at intake rather than
+        # being masked by the normalized zero-fill.
+        if wire:
+            _assert_missing_points_is_a_governed_zero(wire)
         raw = {**wire, **row}
         players.append(
             _player_fact_from_row(

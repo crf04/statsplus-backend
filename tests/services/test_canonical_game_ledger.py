@@ -1534,21 +1534,25 @@ def test_pre_migration_games_without_raw_evidence_are_detected(tmp_path):
     ) == frozenset()
 
 
-def test_sparse_player_row_with_missing_counts_is_a_governed_zero(tmp_path):
+def test_sparse_player_row_with_missing_zero_counts_is_a_governed_zero(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'sparse_player.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    payload = _raw_observation_with_unknown_fields()
-    leon_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "2544"
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
+        .read_text(encoding="utf-8")
     )
-    # The provider omits observed-zero additive counters, so dropping several
-    # count keys must not reject the game: each is a governed zero.
-    leon_row.pop("Points", None)
-    leon_row.pop("Blocks", None)
-    leon_row.pop("Steals", None)
-    leon_row.pop("Turnovers", None)
+    reaves_row = next(
+        row for row in payload["stats"]["Home"]["FullGame"]
+        if row.get("EntityId") == "203507"
+    )
+    # The provider omits observed-zero additive counters, so dropping counters
+    # that are independently proven to be zero must not reject the game: Reaves
+    # finished with no blocks and no offensive rebounds, and the complete
+    # team_results diagnostic reconciliation (blocks and offensive rebounds
+    # included) confirms both stay consistent as governed zeroes.
+    reaves_row.pop("Blocks", None)
+    reaves_row.pop("OffRebounds", None)
     game = canonical_game_from_pbp(
         payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -1557,17 +1561,96 @@ def test_sparse_player_row_with_missing_counts_is_a_governed_zero(tmp_path):
             1610612759: (201935,),
         },
     )
-    leon = next(fact for fact in game.player_facts if fact.player_id == 2544)
-    assert leon.points == 0
-    assert leon.blocks == 0
-    assert leon.steals == 0
-    assert leon.turnovers == 0
+    reaves = next(fact for fact in game.player_facts if fact.player_id == 203507)
+    assert reaves.blocks == 0
+    assert reaves.offensive_rebounds == 0
+    assert reaves.points == 15
     assert repository.replace_game(game).inserted
     stored = repository.get_game(game.game_id)
     assert stored is not None
     assert stored.player_facts == game.player_facts
     with engine.connect() as connection:
         assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 5
+
+
+def test_missing_provably_nonzero_points_rejects_atomically():
+    payload = _raw_observation_with_unknown_fields()
+    leon_row = next(
+        row for row in payload["stats"]["Home"]["FullGame"]
+        if row.get("EntityId") == "2544"
+    )
+    # Dropping Points is only a governed zero when retained evidence proves it
+    # can be zero.  LeBron's retained makes and free-throw points prove his
+    # total is 25, so the omission is corrupted evidence: missing nonzero
+    # counts fail through independent arithmetic and reject atomically.
+    leon_row.pop("Points", None)
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "missing nonzero points" in str(error)
+    else:
+        raise AssertionError("player row missing provably nonzero points unexpectedly published")
+
+
+def test_missing_nonzero_count_rejects_through_team_results_reconciliation():
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
+        .read_text(encoding="utf-8")
+    )
+    leon_row = next(
+        row for row in payload["stats"]["Home"]["FullGame"]
+        if row.get("EntityId") == "2544"
+    )
+    # Blocks/Steals/Turnovers have no in-row arithmetic identity, so a missing
+    # value is a governed zero only when the complete team_results diagnostic
+    # reconciliation stays consistent.  LeBron finished with nonzero counts and
+    # the team_results totals prove it, so the omission is corrupted evidence
+    # and must reject atomically rather than persisting a fabricated zero.
+    leon_row.pop("Blocks", None)
+    leon_row.pop("Steals", None)
+    leon_row.pop("Turnovers", None)
+    try:
+        canonical_game_from_pbp(
+            payload,
+            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+            participant_ids_by_team={
+                1610612747: (2544, 203507),
+                1610612759: (201935,),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "does not reconcile" in str(error)
+    else:
+        raise AssertionError("player row missing diagnostic-proven nonzero counts unexpectedly published")
+
+
+def test_archived_player_row_missing_provably_nonzero_points_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'raw_missing_points.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _mutate_raw_field(
+        game,
+        lambda row: row.row_type == "player" and row.entity_id == 101,
+        "Points",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "missing nonzero points" in str(error)
+    else:
+        raise AssertionError("archived raw row missing provably nonzero points unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
 
 
 def test_missing_player_identity_evidence_rejects_the_complete_game_atomically(tmp_path):
@@ -1745,13 +1828,14 @@ def test_raw_player_row_count_contradiction_rejects_at_repository_boundary(tmp_p
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    # A sparse omission on an archived player row is a governed zero, so a raw
-    # row that loses a count while the typed fact retains a value contradicts
-    # the retained evidence and must reject atomically.
+    # Assists has no independent arithmetic identity, so a sparse omission on
+    # the archived row is a governed zero; a raw row that loses the count while
+    # the typed fact retains a value therefore contradicts the retained
+    # evidence and must reject atomically.
     incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "player" and row.entity_id == 101,
-        "Points",
+        "Assists",
     )
 
     try:
