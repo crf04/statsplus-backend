@@ -131,8 +131,6 @@ class ActiveManifestLedgerGovernanceReader:
             )
             for team_id in team_ids
         }
-        if require_l15 and any(len(game_ids) < 15 for game_ids in by_team.values()):
-            raise ValueError("governed L15 requires 15 games for every team")
         return LedgerGovernance(
             season=season,
             cutoff=cutoff,
@@ -141,7 +139,6 @@ class ActiveManifestLedgerGovernanceReader:
             expected_l15_game_ids={
                 team_id: frozenset(game_ids[:15])
                 for team_id, game_ids in by_team.items()
-                if len(game_ids) >= 15
             },
             events=events,
             manifest_id=str(manifest["manifest_id"]),
