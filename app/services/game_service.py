@@ -347,17 +347,23 @@ class GameService:
         return set(common_game_ids)
 
     def get_games_to_exclude(self, player_logs, players_off_names, season=None):
-        """Find games to exclude due to filtering"""
+        """Find same-team games where any named player appeared."""
         season = season or self.settings.nba.current_season
         exclude_game_ids = set()
+        primary_game_team_pairs = set(zip(
+            player_logs['GAME_ID'], player_logs['TEAM_ABBREVIATION']
+        ))
 
-        # Loop through players_off and union game IDs
+        # Union same-team appearances for every player named as "off".
         for player_name in players_off_names:
             player_gamelogs, _ = self._get_game_logs(player_name, season)
-            player_game_ids = set(player_gamelogs['GAME_ID'])
-
-            # Union with exclude_game_ids to accumulate games where any player_off played
-            exclude_game_ids |= player_game_ids
+            player_game_team_pairs = set(zip(
+                player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']
+            ))
+            exclude_game_ids |= {
+                game_id for game_id, _ in
+                primary_game_team_pairs.intersection(player_game_team_pairs)
+            }
 
         return exclude_game_ids
 

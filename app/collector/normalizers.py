@@ -13,6 +13,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from app.domain.nba_events import REGULAR_SEASON_TYPE, canonical_event_kind
+
 from .contracts import NormalizedObservation, ProviderContractError
 
 try:  # pandas is an application dependency, but keep the package seam loose.
@@ -209,6 +211,23 @@ def normalize_schedule_response(
     seen: set[str] = set()
     for row in rows:
         game_id = _text(_value(row, "nba_game_id", "game_id", "GAME_ID", "gameId"), reason="identity_unresolved")
+        classification_value = _value(
+            row, "classification", "season_type", "SEASON_TYPE", "game_label", "gameLabel"
+        )
+        classification = (
+            str(classification_value).strip()
+            if classification_value is not None and str(classification_value).strip()
+            else REGULAR_SEASON_TYPE
+        )
+        event_kind = canonical_event_kind(game_id, classification)
+        if event_kind.casefold() != REGULAR_SEASON_TYPE.casefold():
+            # ScheduleLeagueV2 is a mixed-phase season feed. A canonical NBA
+            # game ID safely identifies rows outside this catalog's governed
+            # phase; an unknown identity with an explicit foreign phase is a
+            # contract violation rather than something we can classify.
+            if len(game_id) == 10 and game_id.isdigit():
+                continue
+            raise ProviderContractError("cross_phase_observation")
         if game_id in seen:
             raise ProviderContractError("duplicate_identity")
         seen.add(game_id)
@@ -216,9 +235,6 @@ def normalize_schedule_response(
         away = _positive_id(_value(row, "away_team_id", "AWAY_TEAM_ID", "awayTeam_teamId"))
         if home == away:
             raise ProviderContractError("value_invariant_failed")
-        classification = _text(_value(row, "classification", "season_type", "SEASON_TYPE", "game_label", "gameLabel", default="Regular Season"))
-        if classification.casefold() != "regular season":
-            raise ProviderContractError("cross_phase_observation")
         scheduled = _timestamp(_required(row, "scheduled_at", "game_date", "GAME_DATE", "GAME_DATE_EST", "gameDateTimeUTC"))
         raw_status = _value(row, "status_code", "gameStatus", "status_text", "status", "GAME_STATUS_TEXT", "gameStatusText", default="scheduled")
         status = _text(raw_status)
@@ -276,6 +292,15 @@ def normalize_roster_response(
                 continue
         except (TypeError, ValueError, OverflowError) as error:
             raise ProviderContractError("provider_schema_changed") from error
+        raw_status = _value(row, "roster_status", "status", "ROSTERSTATUS", default="active")
+        if isinstance(raw_status, (int, float)) and not isinstance(raw_status, bool):
+            status = "active" if raw_status else "inactive"
+        else:
+            status = str(raw_status).strip().casefold()
+        if status in {"historical", "retired", "inactive"}:
+            continue
+        if status not in {"active", "current"}:
+            raise ProviderContractError("identity_unresolved")
         player_id = _positive_id(_value(row, "player_id", "PERSON_ID", "PLAYER_ID"))
         if player_id in seen:
             raise ProviderContractError("duplicate_identity")
@@ -285,15 +310,6 @@ def normalize_roster_response(
         covered_season = _text(_value(row, "season", "season_coverage", default=season))
         if covered_season != season:
             raise ProviderContractError("manifest_scope_mismatch")
-        raw_status = _value(row, "roster_status", "status", "ROSTERSTATUS", default="active")
-        if isinstance(raw_status, (int, float)) and not isinstance(raw_status, bool):
-            status = "active" if raw_status else "inactive"
-        else:
-            status = str(raw_status).strip().casefold()
-        if status in {"historical", "retired"}:
-            continue
-        if status not in {"active", "inactive", "current"}:
-            raise ProviderContractError("identity_unresolved")
         coverage_ids = _value(row, "event_ids", "game_ids", "games")
         if isinstance(coverage_ids, (str, bytes, bytearray)) or not isinstance(coverage_ids, Sequence):
             # CommonAllPlayers has season coverage but no player-game ledger.
@@ -305,8 +321,8 @@ def normalize_roster_response(
             "display_name": name,
             "team_id": team_id,
             "team_abbreviation": _value(row, "team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
-            "roster_status": "active" if status in {"active", "current"} else "inactive",
-            "status": "active" if status in {"active", "current"} else "inactive",
+            "roster_status": "active",
+            "status": "active",
             "season_coverage": season,
             "event_ids": [str(item) for item in coverage_ids if str(item).strip()],
         })

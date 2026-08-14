@@ -45,6 +45,12 @@ executes every ready NBA scope, spools each normalized response atomically, and
 uploads only after the local durable write. An item is deleted only after a
 Railway receipt whose checksum matches the outbox item.
 
+Bootstrap discovery preserves catalog dependencies within a cutoff: the Event
+Catalog is offered before the Athlete Catalog, because athlete publication is
+validated against completed governed event evidence. The schedule collector
+selects canonical Regular Season (`002`) game IDs from ScheduleLeagueV2's
+mixed-phase response; optional display labels do not override that identity.
+
 The process uses these stable outcomes:
 
 | Code | Meaning | Scheduler action |
