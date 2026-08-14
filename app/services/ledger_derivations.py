@@ -173,6 +173,10 @@ ASSIST_METRICS = (
 #: the opponent typed team fact, which includes the team-only residual (an
 #: assist credited to no player) that the player rows cannot carry.
 ASSIST_TOTAL_METRIC = "assists"
+#: The full per-team derived surface: every location counter plus the
+#: residual-inclusive opponent total that carries into per48, league averages,
+#: sigma, and competition ranks.
+ASSIST_DERIVED_METRICS = (*ASSIST_METRICS, ASSIST_TOTAL_METRIC)
 #: The four contracted NBA-traditional opponent surfaces and the ledger team
 #: metric that supplies each count.  ``materialize_team_window`` aggregates the
 #: opposing team fact's metric; the Matchups surface stores the same raw count.
@@ -609,25 +613,25 @@ def materialize_assist_location_window(
         minutes_by_team[team.team_id] = denominator
         values_by_team[team.team_id] = {
             metric: counts[metric] * 48.0 / denominator
-            for metric in ASSIST_METRICS
+            for metric in ASSIST_DERIVED_METRICS
         }
     averages = {
         metric: sum(values[metric] for values in values_by_team.values()) / len(values_by_team)
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     sigma = {
         metric: math.sqrt(
             sum((values[metric] - averages[metric]) ** 2 for values in values_by_team.values())
             / len(values_by_team)
         )
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     ranks = {
         metric: competition_ranks(
             {team_id: values[metric] for team_id, values in values_by_team.items()},
             descending=False,
         )
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     base_by_team = {team.team_id: team for team in base.teams}
     teams = tuple(
@@ -640,7 +644,7 @@ def materialize_assist_location_window(
             per48=values_by_team[team_id],
             league_average=averages,
             population_sigma=sigma,
-            competition_rank={metric: ranks[metric][team_id] for metric in ASSIST_METRICS},
+            competition_rank={metric: ranks[metric][team_id] for metric in ASSIST_DERIVED_METRICS},
             team_minutes=minutes_by_team[team_id],
         )
         for team_id in sorted(values_by_team)
@@ -658,6 +662,7 @@ def materialize_assist_location_window(
 
 
 __all__ = [
+    "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",
     "MATCHUP_ASSIST_KEYS",

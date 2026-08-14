@@ -275,6 +275,34 @@ def test_assist_total_includes_team_only_residual_assists():
         assert team_total == player_total + faced_residual
 
 
+def test_assist_total_is_carried_into_derived_window_metrics():
+    games = _league_games()
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    for team in window.teams:
+        assert "assists" in team.per48
+        assert "assists" in team.league_average
+        assert "assists" in team.population_sigma
+        assert "assists" in team.competition_rank
+        assert team.per48["assists"] == team.counts["assists"] * 48.0 / team.team_minutes
+    league_average = sum(team.per48["assists"] for team in window.teams) / len(window.teams)
+    assert window.teams[0].league_average["assists"] == league_average
+
+
 def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'materialization.sqlite3'}")
     run_migrations(engine)
