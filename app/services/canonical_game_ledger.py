@@ -20,7 +20,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import delete, insert, inspect, select, update
+from sqlalchemy import case, delete, insert, inspect, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -458,10 +458,27 @@ def _ledger_raw_rows(
     return tuple(output)
 
 
-def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
-    """Hash the complete archived raw evidence set for one game."""
+#: Explicit canonical raw-row side order shared by hashing, persistence, and
+#: reload.  Home rows always precede Away rows regardless of lexicographic
+#: ordering; within each side rows keep their provider array index order.
+_RAW_ROW_SIDE_ORDER = {"Home": 0, "Away": 1}
 
-    rows = tuple(raw_rows)
+
+def _raw_row_order(row: LedgerGameRow) -> tuple[int, int]:
+    """Canonical raw-row sort key (side order first, then within-side index)."""
+
+    return (_RAW_ROW_SIDE_ORDER.get(row.side, 2), row.row_index)
+
+
+def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
+    """Hash the complete archived raw evidence set for one game.
+
+    Rows are hashed in the canonical order (Home side, then Away side, each by
+    provider row index), so the checksum is stable across persistence, reload,
+    and any provider re-fetch replay regardless of the order rows arrive in.
+    """
+
+    rows = sorted(tuple(raw_rows), key=_raw_row_order)
     if not rows:
         return None
     payload = [
@@ -1645,7 +1662,10 @@ class CanonicalGameLedgerRepository:
                 return None
             team_rows = connection.execute(select(tables["team"]).where(tables["team"].c.game_id == game_id).order_by(tables["team"].c.team_id)).mappings().all()
             player_rows = connection.execute(select(tables["player"]).where(tables["player"].c.game_id == game_id).order_by(tables["player"].c.team_id, tables["player"].c.player_id)).mappings().all()
-            raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(tables["raw"].c.side, tables["raw"].c.row_index)).mappings().all()
+            raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(
+                case((tables["raw"].c.side == "Home", 0), else_=1),
+                tables["raw"].c.row_index,
+            )).mappings().all()
         return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
 
     def list_games(self, season: str, *, through: date | datetime | None = None) -> tuple[LedgerGameSummary, ...]:
@@ -1870,21 +1890,28 @@ def _game_from_rows(
 ) -> CanonicalGame:
     teams = tuple(TeamGameFact(**{key: row[key] for key in TeamGameFact.__dataclass_fields__}) for row in team_rows)
     players = tuple(PlayerGameFact(**{key: row[key] for key in PlayerGameFact.__dataclass_fields__}) for row in player_rows)
+    # Reload rows in the same canonical order used for hashing and
+    # persistence, so an unchanged replace of a loaded game is idempotent.
     archived = tuple(
-        LedgerGameRow(
-            game_id=row["game_id"],
-            row_type=row["row_type"],
-            side=row["side"],
-            row_index=row["row_index"],
-            entity_id=row["entity_id"],
-            entity_name=row["entity_name"],
-            team_id=row["team_id"],
-            payload=json.loads(row["payload"]),
-            checksum=row["checksum"],
-            observed_fields=tuple(json.loads(row["observed_fields"] or "[]")),
-            schema_version=row["schema_version"],
+        sorted(
+            (
+                LedgerGameRow(
+                    game_id=row["game_id"],
+                    row_type=row["row_type"],
+                    side=row["side"],
+                    row_index=row["row_index"],
+                    entity_id=row["entity_id"],
+                    entity_name=row["entity_name"],
+                    team_id=row["team_id"],
+                    payload=json.loads(row["payload"]),
+                    checksum=row["checksum"],
+                    observed_fields=tuple(json.loads(row["observed_fields"] or "[]")),
+                    schema_version=row["schema_version"],
+                )
+                for row in raw_rows
+            ),
+            key=_raw_row_order,
         )
-        for row in raw_rows
     )
     return CanonicalGame(
         game_id=game_row["game_id"],

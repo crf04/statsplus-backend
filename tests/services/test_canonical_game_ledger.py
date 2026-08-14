@@ -519,6 +519,33 @@ def test_raw_evidence_canonicalization_is_replay_stable(tmp_path):
         assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 5
 
 
+def test_reload_then_replace_unchanged_is_idempotent_and_changes_no_evidence(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'reload_idempotent.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    repository.replace_game(game)
+
+    stored = repository.get_game(game.game_id)
+    assert stored is not None
+    # Reloaded raw rows come back in the same canonical Home-then-Away order
+    # used at ingestion, so raw_checksum stays stable across reload.
+    assert [row.side for row in stored.raw_rows] == [row.side for row in game.raw_rows]
+    assert stored.raw_checksum == game.raw_checksum
+
+    result = repository.replace_game(stored)
+    assert not result.inserted and not result.replaced
+    with engine.connect() as connection:
+        game_row = connection.execute(select(CanonicalGameLedgerGame).where(
+            CanonicalGameLedgerGame.game_id == game.game_id
+        )).mappings().one()
+        raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
+    assert game_row["checksum"] == game.checksum
+    assert game_row["raw_checksum"] == game.raw_checksum
+    assert len(raw_rows) == len(game.raw_rows)
+    assert {row["checksum"] for row in raw_rows} == {row.checksum for row in game.raw_rows}
+
+
 def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
     payload = _raw_observation_with_unknown_fields()
     game = canonical_game_from_pbp(
@@ -823,29 +850,24 @@ def test_explicit_zero_required_count_remains_valid(tmp_path):
     assert repository.replace_game(game).inserted
 
 
-def _without_raw_field(game, predicate, field_name):
-    """Remove one provider field from matching archived rows and rechecksum."""
+_REMOVE_RAW_FIELD = object()
+
+
+def _mutate_raw_field(game, predicate, field_name, value=_REMOVE_RAW_FIELD):
+    """Remove or rewrite one provider field on matching archived rows.
+
+    Omitting ``value`` drops the field from the row; passing a value (including
+    ``None``) sets it.  Each touched row is rechecksummed and the game's
+    raw evidence is rebuilt coherently.
+    """
     rows = []
     for row in game.raw_rows:
         if predicate(row):
-            payload = {key: value for key, value in row.payload.items() if key != field_name}
-            row = replace(
-                row,
-                payload=payload,
-                checksum=canonical_row_checksum(payload),
-                observed_fields=tuple(sorted(payload)),
-            )
-        rows.append(row)
-    return replace(game, raw_rows=tuple(rows)).with_checksum()
-
-
-def _replace_raw_field(game, predicate, field_name, value):
-    """Rewrite one provider field on matching archived rows and rechecksum."""
-    rows = []
-    for row in game.raw_rows:
-        if predicate(row):
-            payload = dict(row.payload)
-            payload[field_name] = value
+            payload = {
+                key: item for key, item in row.payload.items() if key != field_name
+            }
+            if value is not _REMOVE_RAW_FIELD:
+                payload[field_name] = value
             row = replace(
                 row,
                 payload=payload,
@@ -927,7 +949,7 @@ def test_raw_player_row_missing_required_count_rejects_at_repository_boundary(tm
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _without_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "player" and row.entity_id == 101,
         "Points",
@@ -949,7 +971,7 @@ def test_raw_team_row_missing_required_count_rejects_at_repository_boundary(tmp_
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _without_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "team" and row.side == "Home",
         "Points",
@@ -971,7 +993,7 @@ def test_raw_player_row_missing_minutes_rejects_at_repository_boundary(tmp_path)
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _without_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "player" and row.entity_id == 101,
         "Minutes",
@@ -1026,7 +1048,7 @@ def test_team_summary_missing_minutes_rejects_at_repository_boundary(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _without_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "team" and row.side == "Home",
         "Minutes",
@@ -1048,7 +1070,7 @@ def test_team_summary_null_minutes_rejects_at_repository_boundary(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _replace_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "team" and row.side == "Home",
         "Minutes",
@@ -1071,7 +1093,7 @@ def test_team_summary_malformed_minutes_rejects_at_repository_boundary(tmp_path)
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    incomplete = _replace_raw_field(
+    incomplete = _mutate_raw_field(
         game,
         lambda row: row.row_type == "team" and row.side == "Home",
         "Minutes",
@@ -1094,7 +1116,7 @@ def test_team_summary_zero_minutes_remains_valid(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
-    game = _replace_raw_field(
+    game = _mutate_raw_field(
         game,
         lambda row: row.row_type == "team" and row.side == "Home",
         "Minutes",

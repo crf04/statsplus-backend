@@ -831,10 +831,14 @@ authority and may never fall back to player sums.
 
 Raw JSON canonicalization is deterministic and lossless: each payload is
 serialized with sorted keys and compact separators, and the game-level
-`raw_checksum` hashes the complete ordered row set together with its identity,
-row type, observed fields, and payloads. Semantically identical replays
-produce identical checksums, so replaying an accepted observation is idempotent
-and changes no persisted evidence. Because the raw checksum is independent of
+`raw_checksum` hashes the complete row set together with its identity, row
+type, observed fields, and payloads in one explicit canonical order — Home
+side rows first, then Away side rows, each in provider row-index order. That
+order is used consistently for hashing, persistence, and reload, so a game
+loaded from storage and replaced unchanged is an idempotent replay that
+changes no persisted evidence. Semantically identical replays produce
+identical checksums, so replaying an accepted observation is idempotent and
+changes no persisted evidence. Because the raw checksum is independent of
 the typed `checksum`, a raw-only correction (a provider field that does not
 change any typed primitive) is still recognized as a replacement rather than an
 idempotent replay, and the complete raw and typed evidence is replaced
