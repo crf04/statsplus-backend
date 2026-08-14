@@ -324,6 +324,26 @@ def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_der
     assert facts[0].corner3_assists == 0
 
 
+def test_game_date_uses_nba_calendar_day_for_after_midnight_utc_tipoff():
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
+        .read_text(encoding="utf-8")
+    )
+    payload.pop("team_results", None)
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+
+    game = canonical_game_from_pbp(
+        payload,
+        event=event,
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+
+    assert game.game_date == date(2024, 11, 15)
+
+
 def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)

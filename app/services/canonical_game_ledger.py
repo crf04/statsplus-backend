@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import delete, insert, inspect, select, update
@@ -65,6 +66,7 @@ ASSIST_LOCATION_FIELDS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
+NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class LedgerValidationError(ValueError):
@@ -206,6 +208,24 @@ def _canonical_date(value: date | datetime | str) -> date:
         return date.fromisoformat(str(value)[:10])
     except (TypeError, ValueError) as error:
         raise LedgerValidationError("game_date must be an ISO date") from error
+
+
+def _governed_event_dates(value: date | datetime | str) -> frozenset[date]:
+    """Return the UTC and NBA-calendar dates represented by a tipoff."""
+
+    parsed: date | datetime
+    if isinstance(value, (date, datetime)):
+        parsed = value
+    else:
+        raw = str(value).strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            parsed = _canonical_date(value)
+    if not isinstance(parsed, datetime):
+        return frozenset((parsed,))
+    instant = assume_utc(parsed)
+    return frozenset((instant.date(), instant.astimezone(NBA_CALENDAR_TIMEZONE).date()))
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -553,10 +573,16 @@ def canonical_game_from_pbp(
         raise LedgerValidationError("PBP game observation failed canonical normalization") from error
     if normalized.empty:
         raise LedgerValidationError("a completed game must contain player facts")
-    expected_game_date = _canonical_date(event.get("scheduled_at") or (raw_observation or {}).get("date"))
-    for normalized_row in normalized.to_dict(orient="records"):
-        if _canonical_date(normalized_row.get("GAME_DATE")) != expected_game_date:
-            raise LedgerValidationError("PBP player date contradicts the governed event")
+    governed_dates = _governed_event_dates(
+        event.get("scheduled_at") or (raw_observation or {}).get("date")
+    )
+    observed_dates = {
+        _canonical_date(normalized_row.get("GAME_DATE"))
+        for normalized_row in normalized.to_dict(orient="records")
+    }
+    if len(observed_dates) != 1 or not observed_dates.issubset(governed_dates):
+        raise LedgerValidationError("PBP player date contradicts the governed event")
+    expected_game_date = next(iter(observed_dates))
 
     raw_by_player: dict[tuple[int, str], Mapping[str, Any]] = {}
     for row in normalized_frame.to_dict(orient="records"):
