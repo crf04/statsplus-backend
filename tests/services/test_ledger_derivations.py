@@ -221,7 +221,7 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     publications.register_default_streams()
     games = _league_games()
     repository.replace_games_atomic(games)
-    candidate_cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     with engine.begin() as connection:
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="ledger-manifest", season="2025-26",
@@ -273,6 +273,7 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         games,
         season="2025-26",
         as_of=date(2025, 10, 15),
+        cutoff=candidate_cutoff,
         expected_game_ids=expected,
         expected_l15_game_ids=expected_by_team,
         team_ids=frozenset(range(1, 31)),
@@ -291,6 +292,10 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     assert len(ledger_payloads) == 8
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
     assert len(candidates) == 6
+    assert all(
+        row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff
+        for row in candidates
+    )
     assert len(parity) == 4
     assert {row["stream_key"] for row in parity} == {
         "player_game_logs",

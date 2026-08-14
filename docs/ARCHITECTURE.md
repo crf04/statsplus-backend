@@ -875,7 +875,9 @@ composed later from their immutable manifest/cutoff even after that manifest
 is expired or superseded (`scripts/ledger_refresh.py --compose-only` performs
 that operation without entering collection). Every ledger observation stores that manifest ID,
 the canonical ledger surface scope, schema version, and manifest cutoff, and a
-candidate refuses mixed-manifest or mismatched-cutoff provenance. Provider
+candidate retains that exact timestamp and refuses mixed-manifest or
+mismatched-cutoff provenance; composition never rounds the cutoff to the
+calendar day. Provider
 documents live only in an exact-ID staging cache during validation: successful
 entries are consumed after the atomic ledger commit, while every rejected or
 failed entry is discarded without affecting concurrent IDs. Validation and
