@@ -13,8 +13,6 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from app.domain.nba_events import REGULAR_SEASON_TYPE, canonical_event_kind
-
 from .contracts import NormalizedObservation, ProviderContractError
 
 try:  # pandas is an application dependency, but keep the package seam loose.
@@ -32,6 +30,24 @@ SHOT_ZONES = (
     "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3",
     "Above the Break 3",
 )
+REGULAR_SEASON_TYPE = "Regular Season"
+_GAME_TYPE_BY_ID_PREFIX = {
+    "001": "Preseason",
+    "002": REGULAR_SEASON_TYPE,
+    "003": "All-Star",
+    "004": "Playoffs",
+    "005": "Play-In",
+}
+
+
+def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
+    """Classify an NBA game without importing the host application package."""
+
+    if len(game_id) == 10 and game_id.isdigit():
+        known = _GAME_TYPE_BY_ID_PREFIX.get(game_id[:3])
+        if known is not None:
+            return known
+    return provider_classification
 
 
 def _records(response: Any) -> list[dict[str, Any]]:
@@ -219,7 +235,7 @@ def normalize_schedule_response(
             if classification_value is not None and str(classification_value).strip()
             else REGULAR_SEASON_TYPE
         )
-        event_kind = canonical_event_kind(game_id, classification)
+        event_kind = _canonical_event_kind(game_id, classification)
         if event_kind.casefold() != REGULAR_SEASON_TYPE.casefold():
             # ScheduleLeagueV2 is a mixed-phase season feed. A canonical NBA
             # game ID safely identifies rows outside this catalog's governed
