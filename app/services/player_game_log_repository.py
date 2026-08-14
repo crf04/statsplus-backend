@@ -608,6 +608,12 @@ class PlayerGameLogRepository:
         """
         canonical_season = validate_canonical_season(season)
         try:
+            if self._publication_reader is not None:
+                publication = self._publication_reader.read(
+                    "player_game_logs", season=canonical_season
+                )
+                if not publication.legacy_fallback_allowed:
+                    return bool(publication.available)
             freshness = self.get_freshness(canonical_season)
             if (
                 freshness.retrieved_at is None

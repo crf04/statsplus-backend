@@ -88,6 +88,7 @@ def _repository(
     stats_surface_season: str = SEASON,
     clock=lambda: RETRIEVED_AT,
     stats_surface_max_age: timedelta = timedelta(hours=30),
+    publication_reader=None,
 ) -> PlayerGameLogRepository:
     engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
     run_migrations(engine)
@@ -97,7 +98,29 @@ def _repository(
         stats_surface_season=stats_surface_season,
         clock=clock,
         stats_surface_max_age=stats_surface_max_age,
+        publication_reader=publication_reader,
     )
+
+
+def test_active_immutable_publication_owns_completeness_without_legacy_sidecar(
+    tmp_path,
+):
+    class ActivePublicationReader:
+        def read(self, stream_key, *, season):
+            assert stream_key == "player_game_logs"
+            assert season == SEASON
+            return type(
+                "Read",
+                (),
+                {"legacy_fallback_allowed": False, "available": True},
+            )()
+
+    repository = _repository(
+        tmp_path,
+        publication_reader=ActivePublicationReader(),
+    )
+
+    assert repository.has_complete_publication(SEASON) is True
 
 
 def test_repository_requires_an_explicit_stats_surface_season(tmp_path):
