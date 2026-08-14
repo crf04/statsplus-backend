@@ -570,6 +570,10 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
 
     rows: list[LedgerGameRow] = []
     team_facts_by_id = {fact.team_id: fact for fact in game.team_facts}
+    players_by_side = {
+        "Home": tuple(player for player in game.player_facts if player.team_id == game.home_team_id),
+        "Away": tuple(player for player in game.player_facts if player.team_id == game.away_team_id),
+    }
     for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
         team_fact = team_facts_by_id[team_id]
         payload: dict[str, Any] = {
@@ -584,7 +588,7 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
             game_id=game.game_id,
             row_type="team",
             side=side,
-            row_index=len(rows),
+            row_index=0,
             entity_id=None,
             entity_name=None,
             team_id=team_id,
@@ -592,32 +596,31 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
             checksum=canonical_row_checksum(payload),
             observed_fields=tuple(sorted(payload)),
         ))
-    for player in game.player_facts:
-        side = "Home" if player.team_id == game.home_team_id else "Away"
-        payload = {
-            "EntityId": str(player.player_id),
-            "Name": player.player_name,
-            "Minutes": _minutes_string(player.minutes),
-            **_fact_count_payload(player),
-        }
-        if player.possessions is not None:
-            payload["Possessions"] = player.possessions
-        for field_name, key in _PLAYER_ASSIST_ROW_KEYS:
-            value = getattr(player, field_name)
-            if value is not None:
-                payload[key] = value
-        rows.append(LedgerGameRow(
-            game_id=game.game_id,
-            row_type="player",
-            side=side,
-            row_index=len(rows),
-            entity_id=player.player_id,
-            entity_name=player.player_name,
-            team_id=player.team_id,
-            payload=payload,
-            checksum=canonical_row_checksum(payload),
-            observed_fields=tuple(sorted(payload)),
-        ))
+        for index, player in enumerate(players_by_side[side], start=1):
+            payload = {
+                "EntityId": str(player.player_id),
+                "Name": player.player_name,
+                "Minutes": _minutes_string(player.minutes),
+                **_fact_count_payload(player),
+            }
+            if player.possessions is not None:
+                payload["Possessions"] = player.possessions
+            for field_name, key in _PLAYER_ASSIST_ROW_KEYS:
+                value = getattr(player, field_name)
+                if value is not None:
+                    payload[key] = value
+            rows.append(LedgerGameRow(
+                game_id=game.game_id,
+                row_type="player",
+                side=side,
+                row_index=index,
+                entity_id=player.player_id,
+                entity_name=player.player_name,
+                team_id=player.team_id,
+                payload=payload,
+                checksum=canonical_row_checksum(payload),
+                observed_fields=tuple(sorted(payload)),
+            ))
     return tuple(rows)
 
 
@@ -1393,9 +1396,16 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     seen_raw_rows: set[tuple[object, ...]] = set()
     raw_player_rows: dict[int, int] = {}
     team_rows_by_side: dict[str, int] = {"Home": 0, "Away": 0}
+    row_indices_by_side: dict[str, list[int]] = {"Home": [], "Away": []}
     for row in game.raw_rows:
         if not isinstance(row, LedgerGameRow):
             raise LedgerValidationError("raw evidence contains an invalid archived row")
+        if (
+            isinstance(row.row_index, bool)
+            or not isinstance(row.row_index, int)
+            or row.row_index < 0
+        ):
+            raise LedgerValidationError("raw evidence row_index must be a non-negative integer")
         # Provider FullGame array positions are unique per side regardless of
         # row type.  Enforcing one archived row per (side, row_index) keeps the
         # canonical raw-row order and raw_checksum deterministic.
@@ -1409,6 +1419,7 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             raise LedgerValidationError("raw evidence game identity contradicts the game")
         if row.row_type not in {"team", "player"} or row.side not in {"Home", "Away"}:
             raise LedgerValidationError("raw evidence has an invalid row type or side")
+        row_indices_by_side[row.side].append(row.row_index)
         if row.team_id not in {game.home_team_id, game.away_team_id}:
             raise LedgerValidationError("raw evidence team is outside the game identity")
         expected_side = "Home" if row.team_id == game.home_team_id else "Away"
@@ -1434,6 +1445,11 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         raise LedgerValidationError(
             "raw evidence must contain exactly one team-summary row per side"
         )
+    for side, indices in row_indices_by_side.items():
+        if set(indices) != set(range(len(indices))):
+            raise LedgerValidationError(
+                f"raw evidence {side} rows must occupy contiguous provider indices 0..{len(indices) - 1}"
+            )
     observed_raw_players = {
         team_id: {entity_id for entity_id, team in raw_player_rows.items() if team == team_id}
         for team_id in observed_by_team

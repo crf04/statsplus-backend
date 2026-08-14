@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, select
 
 from app.migrations import run_migrations
@@ -591,6 +592,33 @@ def test_duplicate_side_index_raw_rows_reject_at_repository_boundary(tmp_path):
         assert "one archived row per side and provider index" in str(error)
     else:
         raise AssertionError("raw evidence with duplicate side/provider index unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+@pytest.mark.parametrize("bad_index", [-1, True, 1.5, 99])
+def test_invalid_raw_row_index_rejects_at_repository_boundary(tmp_path, bad_index):
+    engine = create_engine(f"sqlite:///{tmp_path / 'invalid_index.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    invalid = replace(
+        game,
+        raw_rows=tuple(
+            replace(row, row_index=bad_index) if row.entity_id == 101 else row
+            for row in game.raw_rows
+        ),
+        checksum=None,
+    ).with_checksum()
+
+    try:
+        repository.replace_game(invalid)
+    except LedgerValidationError as error:
+        message = str(error)
+        assert "row_index must be a non-negative integer" in message or "contiguous" in message
+    else:
+        raise AssertionError("raw evidence with invalid row_index unexpectedly published")
     with engine.connect() as connection:
         assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
         assert connection.execute(select(LedgerGameRowEvidence)).all() == []

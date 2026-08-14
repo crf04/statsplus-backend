@@ -837,7 +837,11 @@ side rows first, then Away side rows, each in provider row-index order.
 Provider `FullGame` array positions are unique per side, so an accepted game
 stores exactly one archived row per `(side, row_index)` regardless of row
 type; that uniqueness makes the canonical order and checksum deterministic
-rather than dependent on arrival order. The order is used consistently for
+rather than dependent on arrival order. Each `row_index` must be a
+non-boolean non-negative integer and each side's positions must be the exact
+contiguous range `0..n-1`, mirroring the complete provider `FullGame` arrays
+(negative, boolean, non-integer, or gapped positions are rejected at the
+repository boundary). The order is used consistently for
 hashing, persistence, and reload, so a game loaded from storage and replaced
 unchanged is an idempotent replay that changes no persisted evidence.
 Semantically identical replays produce identical checksums, so replaying an
