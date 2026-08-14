@@ -531,6 +531,39 @@ def _create_ledger_raw_row_evidence(connection: Connection) -> None:
         ))
 
 
+def _create_ledger_observation_evidence(connection: Connection) -> None:
+    """Persist a durable reference for every accepted ledger observation (#113).
+
+    A corrected game atomically replaces its typed facts and its archived raw
+    rows, so the game row's current ``source_observation_id`` no longer names
+    superseded observations.  This reference table keeps the observation ID of
+    every observation that ever supplied an accepted game durable and
+    queryable, so canonical-ledger evidence is exempt from the generic
+    observation retention window and stays replayable and auditable
+    indefinitely.  Existing accepted games are backfilled so historical
+    evidence is protected immediately; only observations that still exist in
+    ``collection_observations`` are referenced (the repair seam writes
+    candidates without a staged observation).
+    """
+
+    from app.models.canonical_game_ledger import LedgerObservationEvidence
+
+    LedgerObservationEvidence.__table__.create(connection, checkfirst=True)
+    connection.execute(text(
+        "INSERT INTO canonical_game_ledger_observation_evidence "
+        "(observation_id, game_id, created_at) "
+        "SELECT DISTINCT source_observation_id, game_id, CURRENT_TIMESTAMP "
+        "FROM canonical_game_ledger_games "
+        "WHERE source_observation_id IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM collection_observations "
+        "  WHERE collection_observations.observation_id = "
+        "    canonical_game_ledger_games.source_observation_id"
+        ") "
+        "ON CONFLICT (observation_id) DO NOTHING"
+    ))
+
+
 def _upgrade_collector_release_status(connection: Connection) -> None:
     """Persist bounded machine release evidence for operator diagnostics."""
 
@@ -816,6 +849,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
     Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
     Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
+    Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
 )
 
 

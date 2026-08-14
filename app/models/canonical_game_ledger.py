@@ -221,6 +221,35 @@ class LedgerGameRowEvidence(Base):
     )
 
 
+class LedgerObservationEvidence(Base):
+    """Durable reference from one accepted ledger game to its observation.
+
+    A corrected game atomically replaces its typed facts and its archived raw
+    rows, so the game row's current ``source_observation_id`` alone would
+    forget every superseded observation.  This table retains the observation
+    ID of every observation that has ever supplied an accepted game, so
+    canonical-ledger evidence is exempt from the generic observation retention
+    window and a superseded accepted observation stays replayable and
+    auditable indefinitely (#25).  The ``observation_id`` column is a real
+    foreign key -- never a JSON substring -- so the reference is queryable and
+    referentially durable.
+    """
+
+    __tablename__ = "canonical_game_ledger_observation_evidence"
+
+    observation_id = Column(
+        String(36),
+        ForeignKey("collection_observations.observation_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    game_id = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_ledger_observation_evidence_game", "game_id"),
+    )
+
+
 class LedgerParityArtifact(Base):
     """Durable activation evidence for one derived semantic rehearsal."""
 
@@ -266,5 +295,6 @@ __all__ = [
     "LedgerBackfillState",
     "LedgerGameRowEvidence",
     "LedgerPublication",
+    "LedgerObservationEvidence",
     "LedgerParityArtifact",
 ]

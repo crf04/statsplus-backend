@@ -21,7 +21,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import case, delete, exists, insert, inspect, or_, select, update
+from sqlalchemy import case, delete, exists, insert, inspect, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -32,6 +32,7 @@ from app.models.canonical_game_ledger import (
     CanonicalGameLedgerTeamFact,
     LedgerBackfillState,
     LedgerGameRowEvidence,
+    LedgerObservationEvidence,
     LedgerPublication,
 )
 from app.models.collection_control import CollectionManifest, CollectionObservation
@@ -102,48 +103,194 @@ ADDITIVE_EQUIVALENT_COUNT_FIELDS = tuple(
 #: The typed extractor version that produced canonical facts and raw row
 #: schema evidence.  Bump it only when the extraction vocabulary changes.
 LEDGER_SCHEMA_VERSION = 1
+#: The complete flat ``BoxscoreItem`` vocabulary documented by the PBP Stats
+#: OpenAPI for ``/get-game-stats`` (``stats.Home/Away.FullGame``).  Every
+#: provider row -- including the team-summary row -- is one flat BoxscoreItem,
+#: so this is the authoritative accepted provider schema rather than just the
+#: narrow typed aliases the extractor projects.  It covers shot context,
+#: assisted scoring, rebound opportunities, turnover and foul types, blocks,
+#: second-chance and penalty facts, pace and efficiency inputs, and derived
+#: rates.  Keep it and ``LEDGER_SCHEMA_VERSION`` in lockstep: bump both
+#: together whenever the provider vocabulary changes.
+PBP_BOXSCORE_ITEM_FIELDS = frozenset({
+    # identity / minutes
+    "EntityId", "TeamId", "Name", "ShortName", "Season", "RowId",
+    "TeamAbbreviation", "SecondsPlayed", "GamesPlayed", "Minutes",
+    "MinutesMMSS",
+    # possession context
+    "PlusMinus", "OffPoss", "DefPoss", "PenaltyOffPoss", "PenaltyDefPoss",
+    "SecondChanceOffPoss", "TotalPoss",
+    # shot context (rim / short mid / long mid / corner / arc, opponent,
+    # second-chance, penalty, blocked, heaves)
+    "AtRimFGM", "AtRimFGA", "OpponentAtRimFGM", "OpponentAtRimFGA",
+    "SecondChanceAtRimFGM", "SecondChanceAtRimFGA",
+    "PenaltyAtRimFGM", "PenaltyAtRimFGA",
+    "ShortMidRangeFGM", "ShortMidRangeFGA",
+    "OpponentShortMidRangeFGM", "OpponentShortMidRangeFGA",
+    "SecondChanceShortMidRangeFGM", "SecondChanceShortMidRangeFGA",
+    "PenaltyShortMidRangeFGM", "PenaltyShortMidRangeFGA",
+    "LongMidRangeFGM", "LongMidRangeFGA",
+    "OpponentLongMidRangeFGM", "OpponentLongMidRangeFGA",
+    "SecondChanceLongMidRangeFGM", "SecondChanceLongMidRangeFGA",
+    "PenaltyLongMidRangeFGM", "PenaltyLongMidRangeFGA",
+    "Corner3FGM", "Corner3FGA", "OpponentCorner3FGM", "OpponentCorner3FGA",
+    "SecondChanceCorner3FGM", "SecondChanceCorner3FGA",
+    "PenaltyCorner3FGM", "PenaltyCorner3FGA",
+    "Arc3FGM", "Arc3FGA", "OpponentArc3FGM", "OpponentArc3FGA",
+    "SecondChanceArc3FGM", "SecondChanceArc3FGA",
+    "PenaltyArc3FGM", "PenaltyArc3FGA",
+    # core shooting / points
+    "FG2M", "FG2A", "FG3M", "FG3A", "FGM", "FGA",
+    "OpponentFG2M", "OpponentFG2A", "OpponentFG3M", "OpponentFG3A",
+    "OpponentFGM", "OpponentFGA", "FtPoints", "Points", "OpponentPoints",
+    "SecondChanceFG2M", "SecondChanceFG2A", "SecondChanceFG3M",
+    "SecondChanceFG3A", "SecondChanceFtPoints", "SecondChancePoints",
+    "PenaltyFG2M", "PenaltyFG2A", "PenaltyFG3M", "PenaltyFG3A",
+    "PenaltyFtPoints", "PenaltyPoints",
+    # assisted scoring and shot types
+    "PtsAssisted2s", "PtsUnassisted2s", "PtsAssisted3s", "PtsUnassisted3s",
+    "PtsPutbacks", "HeaveMakes", "HeaveAttempts", "NonHeaveFg3a",
+    "NonHeaveFg3m", "NonHeaveArc3FGA", "NonHeaveArc3FGM",
+    "Fg2aBlocked", "Fg3aBlocked",
+    # assists
+    "TwoPtAssists", "ThreePtAssists", "Assists", "Arc3Assists",
+    "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists",
+    "LongMidRangeAssists", "AssistPoints",
+    # rebounding detail and opportunities
+    "OffThreePtRebounds", "OffTwoPtRebounds", "FTOffRebounds",
+    "DefThreePtRebounds", "DefTwoPtRebounds", "FTDefRebounds",
+    "DefRebounds", "OffRebounds", "Rebounds",
+    "OffThreePtReboundOpportunities", "OffTwoPtReboundOpportunities",
+    "DefThreePtReboundOpportunities", "DefTwoPtReboundOpportunities",
+    "DefReboundOpportunities", "OffReboundOpportunities", "SelfOReb",
+    # steals, turnover types, and second-chance/penalty turnover context
+    "Steals", "BadPassSteals", "LostBallSteals",
+    "LiveBallTurnovers", "BadPassOutOfBoundsTurnovers", "BadPassTurnovers",
+    "DeadBallTurnovers", "LostBallOutOfBoundsTurnovers", "LostBallTurnovers",
+    "StepOutOfBoundsTurnovers", "Travels",
+    "OpponentLiveBallTurnovers", "SecondChanceLiveBallTurnovers",
+    "PenaltyLiveBallTurnovers", "Turnovers", "OpponentTurnovers",
+    "SecondChanceTurnovers", "PenaltyTurnovers",
+    # foul types, free-throw trips, and drawn fouls
+    "ShootingFouls", "BlockingFouls", "Fouls", "Charge Fouls",
+    "Clear Path Fouls", "Loose Ball Fouls", "Offensive Fouls",
+    "Transition Take Fouls", "FoulsDrawn", "Charge Fouls Drawn",
+    "Loose Ball Fouls Drawn", "Offensive Fouls Drawn",
+    "Transition Take Fouls Drawn", "BlockingFoulsDrawn",
+    "FTA", "2pt And 1 Free Throw Trips", "3pt And 1 Free Throw Trips",
+    "Technical Free Throw Trips", "OpponentFTA", "TwoPtShootingFoulsDrawn",
+    "ThreePtShootingFoulsDrawn", "NonShootingFoulsDrawn",
+    # blocks and violations
+    "Blocked2s", "Blocked3s", "BlockedArc3", "BlockedAtRim",
+    "BlockedCorner3", "BlockedLongMidRange", "BlockedShortMidRange",
+    "Blocks", "RecoveredBlocks", "DefensiveGoaltends", "OffensiveGoaltends",
+    "3SecondViolations", "Defensive 3 Seconds Violations",
+    # first-chance / penalty excluding take fouls
+    "FirstChancePoints", "PenaltyPointsExcludingTakeFouls",
+    "PenaltyOffPossExcludingTakeFouls", "NonShootingPenaltyNonTakeFouls",
+    "NonShootingPenaltyNonTakeFoulsDrawn",
+    # minutes by foul situation
+    "Period1Fouls0Minutes", "Period1Fouls1Minutes", "Period1Fouls2Minutes",
+    "Period1Fouls3Minutes", "Period1Fouls4Minutes", "Period1Fouls5Minutes",
+    "Period2Fouls0Minutes", "Period2Fouls1Minutes", "Period2Fouls2Minutes",
+    "Period2Fouls3Minutes", "Period2Fouls4Minutes", "Period2Fouls5Minutes",
+    "Period3Fouls0Minutes", "Period3Fouls1Minutes", "Period3Fouls2Minutes",
+    "Period3Fouls3Minutes", "Period3Fouls4Minutes", "Period3Fouls5Minutes",
+    "Period4Fouls0Minutes", "Period4Fouls1Minutes", "Period4Fouls2Minutes",
+    "Period4Fouls3Minutes", "Period4Fouls4Minutes", "Period4Fouls5Minutes",
+    "PeriodOTFouls0Minutes", "PeriodOTFouls1Minutes", "PeriodOTFouls2Minutes",
+    "PeriodOTFouls3Minutes", "PeriodOTFouls4Minutes", "PeriodOTFouls5Minutes",
+    # efficiency and pace inputs
+    "TrueShotAttempts", "PtsPer100Poss", "PtsPer100PossOpponent",
+    "SecondsPerPoss", "FirstChancePtsPer100Poss", "SecondChancePtsPer100Poss",
+    "PenaltyPtsPer100Poss", "PenaltyPtsPer100PossPenalty",
+    "PenaltyOffPossPer100Poss", "AssistPointsPer100Poss", "FTAPer100Poss",
+    "TurnoversPer100Poss", "AssistsPer100Poss", "OnOffRtg", "OnDefRtg",
+    "OnNetRtg", "Assisted2sPct", "NonPutbacksAssisted2sPct", "Assisted3sPct",
+    "Fg3Pct", "FTPct", "Fg3PctOpponent", "SecondChanceFg3Pct",
+    "PenaltyFg3Pct", "NonHeaveFg3Pct", "Fg2Pct", "Fg2PctOpponent",
+    "SecondChanceFg2Pct", "PenaltyFg2Pct", "EfgPct", "EfgPctOpponent",
+    "SecondChanceEfgPct", "PenaltyEfgPct", "TsPct", "SecondChanceTsPct",
+    "PenaltyTsPct", "FG3APct", "FG3APctOpponent", "FG3APctBlocked",
+    "FG2APctBlocked", "AtRimPctBlocked", "ShortMidRangePctBlocked",
+    "LongMidRangePctBlocked", "Corner3PctBlocked", "Arc3PctBlocked",
+    "Usage", "LiveBallTurnoverPct", "OffReboundPct", "DefReboundPct",
+    "DefFTReboundPct", "OffFTReboundPct", "DefTwoPtReboundPct",
+    "OffTwoPtReboundPct", "DefThreePtReboundPct", "OffThreePtReboundPct",
+    "DefFGReboundPct", "OffFGReboundPct", "OffAtRimReboundPct",
+    "OffShortMidRangeReboundPct", "OffLongMidRangeReboundPct",
+    "OffArc3ReboundPct", "OffCorner3ReboundPct", "DefAtRimReboundPct",
+    "DefShortMidRangeReboundPct", "DefLongMidRangeReboundPct",
+    "DefArc3ReboundPct", "DefCorner3ReboundPct", "SelfORebPct", "Pace",
+    "BlocksRecoveredPct", "SecondsPerPossOff", "SecondsPerPossDef",
+    "SecondsExcludingORebsPerPossOff", "SecondsExcludingORebsPerPossDef",
+    "AtRimFrequency", "AtRimAccuracy", "UnblockedAtRimAccuracy",
+    "AtRimPctAssisted", "ShortMidRangeFrequency", "ShortMidRangeAccuracy",
+    "UnblockedShortMidRangeAccuracy", "ShortMidRangePctAssisted",
+    "LongMidRangeFrequency", "LongMidRangeAccuracy",
+    "UnblockedLongMidRangeAccuracy", "LongMidRangePctAssisted",
+    "Corner3Frequency", "Corner3Accuracy", "UnblockedCorner3Accuracy",
+    "Corner3PctAssisted", "Arc3Frequency", "Arc3Accuracy",
+    "UnblockedArc3Accuracy", "Arc3PctAssisted", "AtRimFrequencyOpponent",
+    "AtRimAccuracyOpponent", "ShortMidRangeFrequencyOpponent",
+    "ShortMidRangeAccuracyOpponent", "LongMidRangeFrequencyOpponent",
+    "LongMidRangeAccuracyOpponent", "Corner3FrequencyOpponent",
+    "Corner3AccuracyOpponent", "Arc3FrequencyOpponent", "Arc3AccuracyOpponent",
+    "SecondChanceAtRimFrequency", "SecondChanceAtRimAccuracy",
+    "SecondChanceAtRimPctAssisted", "SecondChanceShortMidRangeFrequency",
+    "SecondChanceShortMidRangeAccuracy", "SecondChanceShortMidRangePctAssisted",
+    "SecondChanceLongMidRangeFrequency", "SecondChanceLongMidRangeAccuracy",
+    "SecondChanceLongMidRangePctAssisted", "SecondChanceCorner3Frequency",
+    "SecondChanceCorner3Accuracy", "SecondChanceCorner3PctAssisted",
+    "SecondChanceArc3Frequency", "SecondChanceArc3Accuracy",
+    "SecondChanceArc3PctAssisted", "PenaltyAtRimFrequency",
+    "PenaltyAtRimAccuracy", "PenaltyShortMidRangeFrequency",
+    "PenaltyShortMidRangeAccuracy", "PenaltyLongMidRangeFrequency",
+    "PenaltyLongMidRangeAccuracy", "PenaltyCorner3Frequency",
+    "PenaltyCorner3Accuracy", "PenaltyArc3Frequency", "PenaltyArc3Accuracy",
+    "AtRimFG3AFrequency", "NonHeaveArc3Accuracy", "ShotQualityAvg",
+    "OpponentShotQualityAvg", "SecondChanceShotQualityAvg",
+    "PenaltyShotQualityAvg", "ShootingFoulsDrawnPct",
+    "TwoPtShootingFoulsDrawnPct", "ThreePtShootingFoulsDrawnPct",
+    "SecondChancePointsPct", "SecondChancePtsPer100PossSecondChance",
+    "SecondChanceOffPossPer100Poss",
+    "SecondChancePointsPer100PossSecondChance", "PenaltyPointsPct",
+    "PenaltyPossessionsPct", "Avg2ptShotDistance", "Avg3ptShotDistance",
+    "AtRimOffReboundedPct", "ShortMidRangeOffReboundedPct",
+    "LongMidRangeOffReboundedPct", "ThreePtOffReboundedPct",
+    "PenaltyEfficiencyExcludingTakeFouls", "PenaltyOffPossPct",
+})
 #: The governed FullGame wire-field baseline for ``LEDGER_SCHEMA_VERSION``:
 #: every provider key the extractor understands and tolerates on an archived
 #: raw row.  A first raw archive (a brand-new game, or a pre-032 game
 #: receiving its row evidence for the first time) is judged against this
 #: baseline: a field outside it is additive schema drift that must be recorded
 #: and alerted, while a normal first observation inside the baseline stays
-#: silent.  Keep this set and the schema version in lockstep: bump both
-#: together whenever the extraction vocabulary changes.
-LEDGER_GOVERNED_FULLGAME_FIELDS = frozenset({
+#: silent.  The baseline is the complete documented BoxscoreItem vocabulary
+#: plus the normalized aliases the extractor tolerates, so a normal provider
+#: row never alerts.  Keep this set and the schema version in lockstep: bump
+#: both together whenever the extraction vocabulary changes.
+LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset({
     # identity
-    "EntityId", "PLAYER_ID", "player_id",
-    "Name", "PLAYER_NAME", "player_name",
+    "PLAYER_ID", "player_id",
+    "PLAYER_NAME", "player_name",
     # minutes
-    "Minutes", "MIN", "minutes",
+    "MIN", "minutes",
     # envelope/tolerated identity columns
     "GameId", "Date", "Team", "Opponent", "TeamId", "TEAM_ID",
-    # counting primitives and their extractor aliases
-    "Points", "PTS", "points",
-    "FGM", "field_goals_made",
-    "FGA", "field_goals_attempted",
-    "FG2M", "two_pointers_made",
-    "FG2A", "two_pointers_attempted",
-    "FG3M", "three_pointers_made",
-    "FG3A", "three_pointers_attempted",
-    "FtPoints", "FTM", "free_throws_made",
-    "FTA", "free_throws_attempted",
-    "OffRebounds", "OREB", "offensive_rebounds",
-    "DefRebounds", "DREB", "defensive_rebounds",
-    "Rebounds", "REB", "rebounds",
-    "Assists", "AST", "assists",
-    "Turnovers", "TOV", "turnovers",
-    "Steals", "STL", "steals",
-    "Blocks", "BLK", "blocks",
-    "Fouls", "PF", "personal_fouls",
-    # optional expanded evidence
-    "TwoPtAssists", "two_point_assists",
-    "ThreePtAssists", "three_point_assists",
-    "Arc3Assists", "arc3_assists",
-    "Corner3Assists", "corner3_assists",
-    "AtRimAssists", "at_rim_assists",
-    "ShortMidRangeAssists", "short_mid_range_assists",
-    "LongMidRangeAssists", "long_mid_range_assists",
+    # NBA-style counting aliases the extractor tolerates
+    "PTS", "FTM", "OREB", "DREB", "REB", "AST", "TOV", "STL", "BLK", "PF",
+    # normalized count-primitive aliases
+    "field_goals_made", "field_goals_attempted",
+    "two_pointers_made", "two_pointers_attempted",
+    "three_pointers_made", "three_pointers_attempted",
+    "free_throws_made", "free_throws_attempted",
+    "offensive_rebounds", "defensive_rebounds", "rebounds",
+    "assists", "turnovers", "steals", "blocks", "personal_fouls", "points",
+    # normalized expanded evidence
+    "two_point_assists", "three_point_assists",
+    "arc3_assists", "corner3_assists",
+    "at_rim_assists", "short_mid_range_assists", "long_mid_range_assists",
     "Possessions", "possessions",
 })
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
@@ -516,13 +663,20 @@ def _verify_observation_binding(
     replaying an observation envelope over a different raw document would
     defeat the ledger's replay auditability.  The envelope's own checksum is
     verified against its payload as well, so a tampered checksum field cannot
-    survive acceptance.
+    survive acceptance.  The retrieval time recorded on the candidate must
+    also be exactly the retrieval time the observation declares, after UTC
+    normalization, so a governed caller cannot stamp a correct payload while
+    recording a false retrieval time.
     """
 
     payload_text = str(observation.get("payload") or "")
     if hashlib.sha256(payload_text.encode()).hexdigest() != str(observation.get("checksum") or ""):
         raise LedgerValidationError(
             "accepted ledger observation checksum does not match its payload"
+        )
+    if assume_utc(candidate.retrieved_at) != assume_utc(observation["retrieved_at"]):
+        raise LedgerValidationError(
+            "accepted ledger observation retrieval time does not match the candidate"
         )
     try:
         document = json.loads(payload_text)
@@ -1631,6 +1785,9 @@ def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> 
     from app.models.collection_control import ReconciliationItem
 
     details = dict(drift.get("details") or {})
+    game_id = str(drift.get("game_id") or "").strip()
+    if game_id:
+        details["game_id"] = game_id
     connection.execute(ReconciliationItem.__table__.insert().values(
         item_id=str(uuid.uuid4()),
         season=str(drift.get("season") or "")[:7],
@@ -1664,12 +1821,14 @@ class CanonicalGameLedgerRepository:
             LedgerGameRowEvidence.__tablename__,
             LedgerBackfillState.__tablename__,
             LedgerPublication.__tablename__,
+            LedgerObservationEvidence.__tablename__,
         }
         missing = sorted(required - set(inspect(engine).get_table_names()))
         if missing:
             raise LedgerSchemaUnavailable(
                 "Canonical Game Ledger schema is unavailable; apply migration 032 "
-                "and the latest migrations before constructing the repository "
+                "and the latest migrations (including 033) before constructing the "
+                "repository "
                 f"(missing: {', '.join(missing)})"
             )
 
@@ -1954,6 +2113,28 @@ class CanonicalGameLedgerRepository:
             )
         if self.correction_sink is not None:
             self.correction_sink(connection, candidate)
+        # Durable reference for indefinite retention (#25): every observation
+        # that supplies an accepted game, including superseded corrections, is
+        # referenced here so generic observation GC never prunes it.  Only real
+        # observations are referenced; the repair seam writes candidates
+        # without a staged collection observation.
+        connection.execute(
+            insert(tables["observation_evidence"]).from_select(
+                [
+                    tables["observation_evidence"].c.observation_id,
+                    tables["observation_evidence"].c.game_id,
+                    tables["observation_evidence"].c.created_at,
+                ],
+                select(
+                    CollectionObservation.__table__.c.observation_id,
+                    literal(candidate.game_id),
+                    literal(datetime.now(timezone.utc)),
+                ).where(
+                    CollectionObservation.__table__.c.observation_id
+                    == candidate.source_observation_id,
+                ),
+            )
+        )
         if drift is not None and self.schema_drift_sink is not None:
             self.schema_drift_sink(connection, drift)
         return LedgerWriteResult(
@@ -2130,6 +2311,7 @@ class CanonicalGameLedgerRepository:
             "team": CanonicalGameLedgerTeamFact.__table__,
             "player": CanonicalGameLedgerPlayerFact.__table__,
             "raw": LedgerGameRowEvidence.__table__,
+            "observation_evidence": LedgerObservationEvidence.__table__,
         }
 
     @staticmethod

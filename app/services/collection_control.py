@@ -60,7 +60,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
-from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
 
 
 UTC = timezone.utc
@@ -3444,6 +3444,15 @@ class CollectionOperationsService(_SessionService):
             protected = set(session.scalars(select(
                 PublicationObservation.observation_id
             ).where(PublicationObservation.publication_id.in_(protected_publication_ids))))
+            # Canonical-ledger evidence is governed and retained indefinitely
+            # (#25): every observation that has ever supplied an accepted game
+            # -- including superseded correction observations -- is referenced
+            # durably by the ledger observation-evidence table and is exempt
+            # from the generic retention window regardless of age.  The join is
+            # on the exact durable reference, never on rendered JSON.
+            protected |= set(session.scalars(select(
+                LedgerObservationEvidence.observation_id
+            )))
             rows = session.scalars(select(CollectionObservation).where(CollectionObservation.accepted_at < cutoff)).all()
             rows = [row for row in rows if row.observation_id not in protected]
             count = len(rows)

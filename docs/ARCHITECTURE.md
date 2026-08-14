@@ -797,10 +797,11 @@ and player facts in one transaction. A failed or incomplete candidate leaves
 the prior correction and its checksum untouched. Provider participant evidence
 must exactly equal the retained player set (including zero-minute participants).
 Migration `024_canonical_game_ledger` remains the schema owner for the typed
-ledger tables and migration `032_ledger_raw_row_evidence` owns the raw archive;
-repository construction fails clearly naming migration 032 (the latest ledger
-migration) when any owned table is missing, and the read-only demo fixture is
-never eligible.
+ledger tables, migration `032_ledger_raw_row_evidence` owns the raw archive,
+and migration `033_ledger_observation_evidence` owns the durable observation
+reference for indefinite retention; repository construction fails clearly
+naming migration 032 (and the latest ledger migrations) when any owned table is
+missing, and the read-only demo fixture is never eligible.
 
 #### Complete PBP row evidence archive (#113)
 
@@ -828,6 +829,19 @@ can always be audited and an identical replay is provably a no-op. `schema_drift
 reconciliation items accumulate beside that evidence and are never pruned
 either.
 
+Indefinite observation retention is enforced by a durable, queryable reference
+rather than by searching rendered JSON. Migration `033_ledger_observation_evidence`
+creates `canonical_game_ledger_observation_evidence`, one row per
+`collection_observations.observation_id` (a real foreign key) plus the game it
+supplied. Every acceptance and every correction records the observation ID in
+the same transaction as the game, so a superseded correction observation stays
+referenced even after its raw rows are replaced. The generic observation
+retention job (`gc_observations`) joins exactly that reference table and exempts
+every referenced observation from its window regardless of age, so canonical
+ledger evidence is never pruned; unrelated old observations still expire. The
+migration backfills existing accepted games so historical evidence is protected
+immediately.
+
 `canonical_game_from_pbp` archives both the provider team-summary rows
 (`EntityId == 0` / `Name == Team`) and every participating player row from each
 side, preserving every provider key and value verbatim. Unknown additive fields
@@ -845,13 +859,17 @@ a bounded `schema_drift` reconciliation item (`record_schema_drift`) inside the
 same correction transaction, so drift is recorded and alerted while the valid
 correction still lands. A first raw archive is judged against the governed
 baseline field set (`LEDGER_GOVERNED_FULLGAME_FIELDS`, versioned in lockstep
-with `LEDGER_SCHEMA_VERSION`) instead of an empty prior evidence set: a
-brand-new game, or a pre-032 game receiving its row evidence for the first
-time, that carries a provider field outside the baseline records an
-`unknown_field` alert, while a normal first observation inside the baseline
-stays silent. This is what makes schema growth on brand-new games — the normal
-way a provider field first appears — recorded and alerted rather than only
-ever detected later when an older game is corrected. At the repository boundary each archived row's row type
+with `LEDGER_SCHEMA_VERSION`) instead of an empty prior evidence set: the
+baseline is the complete documented PBP Stats `BoxscoreItem` vocabulary (`PBP_BOXSCORE_ITEM_FIELDS`)
+plus the normalized aliases the extractor tolerates, so a normal provider row
+carrying shot context, rebound opportunities, turnover/foul types,
+second-chance, penalty, or pace inputs never alerts. A brand-new game, or a
+pre-032 game receiving its row evidence for the first time, that carries a
+provider field outside that baseline records an `unknown_field` alert, while a
+normal first observation inside the baseline stays silent. This is what makes
+schema growth on brand-new games — the normal way a provider field first
+appears — recorded and alerted rather than only ever detected later when an
+older game is corrected. At the repository boundary each archived row's row type
 and entity metadata must agree with its payload identity: a team-summary row
 must be payload-identified as a team aggregate (`EntityId` `0`/`None` or
 `Name` `Team`) and carry no player entity metadata, and a player row's metadata
@@ -1039,6 +1057,12 @@ including active status, server environment, season, cutoff, canonical scope,
 schema version, and deadline. Manifest supersession/expiry therefore
 serializes with acceptance: a provider response that returns after authority
 changes is discarded with no observation, ledger facts, or composition jobs.
+Every accepted observation is also cryptographically bound to the candidate
+game it supplies: the stored payload's checksum must match its payload, the
+payload must reproduce the exact raw evidence being persisted, and the
+observation's retrieval time must equal the candidate's retrieval time exactly
+after UTC normalization, so a governed caller cannot stamp a correct document
+while recording a false retrieval time.
 
 ### Database-first game-log reads
 
