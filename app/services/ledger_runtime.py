@@ -14,7 +14,7 @@ from app.models.event_catalog import EventCatalogEntry
 from app.domain.nba_events import is_final_event, is_postponed_event
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
-from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +61,6 @@ class ActiveManifestLedgerGovernanceReader:
         return self._read(
             season,
             cutoff,
-            require_l15=True,
             require_collection_authorization=False,
             manifest_id=manifest_id,
         )
@@ -71,7 +70,6 @@ class ActiveManifestLedgerGovernanceReader:
         season: str,
         cutoff: datetime,
         *,
-        require_l15: bool,
         require_collection_authorization: bool,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
@@ -120,8 +118,6 @@ class ActiveManifestLedgerGovernanceReader:
             for event in events
             for team_id in (event["home_team_id"], event["away_team_id"])
         )
-        if require_l15 and len(team_ids) != 30:
-            raise ValueError("governed Event Catalog must contain exactly 30 teams")
         expected = frozenset(str(event["nba_game_id"]) for event in events)
         by_team = {
             team_id: tuple(
@@ -165,7 +161,6 @@ class ActiveManifestLedgerGovernanceReader:
         return self._read(
             season,
             cutoff,
-            require_l15=False,
             require_collection_authorization=True,
             manifest_id=None,
         )
@@ -173,6 +168,39 @@ class ActiveManifestLedgerGovernanceReader:
     # Compatibility alias for internal callers written before collection and
     # composition authorization became distinct operations.
     read_active = read_for_collection
+
+
+_SEASON_STREAMS = frozenset({
+    "player_game_logs",
+    "traditional_opponent_season",
+    "player_per36",
+    "assist_locations_season",
+})
+
+
+def _composition_failure_reason(
+    stream_key: str,
+    materialization: LedgerMaterialization,
+) -> str:
+    season_reason = materialization.season_window.reason or ""
+    if "governed team roster" in season_reason or "League Complete" in season_reason:
+        return "governed_team_roster_incomplete"
+    if stream_key in {"assist_locations_season", "assist_locations_l15"} and (
+        materialization.assist_location_season is None
+        or materialization.assist_location_l15 is None
+    ):
+        return "assist_location_evidence_incomplete"
+    window = (
+        materialization.season_window
+        if stream_key in _SEASON_STREAMS
+        else materialization.l15_window
+    )
+    reason = window.reason or "ledger_window_incomplete"
+    if "15 eligible games" in reason:
+        return "insufficient_governed_games"
+    if "governed team roster" in reason or "League Complete" in reason:
+        return "governed_team_roster_incomplete"
+    return reason
 
 
 class LedgerRuntime:
@@ -264,17 +292,23 @@ class LedgerRuntime:
                 expected_l15_game_ids=governance.expected_l15_game_ids,
                 team_ids=governance.team_ids,
             )
-            succeeded = {
-                "player_game_logs",
-                "traditional_opponent_season",
-                "traditional_opponent_l15",
-                "player_per36",
-            }
+            succeeded = set()
+            if materialized.season_window.complete:
+                succeeded |= {
+                    "player_game_logs",
+                    "traditional_opponent_season",
+                    "player_per36",
+                }
+            if materialized.l15_window.complete:
+                succeeded |= {"traditional_opponent_l15"}
             if (
                 materialized.assist_location_season is not None
                 and materialized.assist_location_l15 is not None
             ):
-                succeeded |= {"assist_locations_season", "assist_locations_l15"}
+                if materialized.season_window.complete:
+                    succeeded |= {"assist_locations_season"}
+                if materialized.l15_window.complete:
+                    succeeded |= {"assist_locations_l15"}
             with self.repository.engine.begin() as connection:
                 for job in (
                     row for row in jobs
@@ -287,7 +321,10 @@ class LedgerRuntime:
                     ).values(
                         status="succeeded" if success else "failed",
                         updated_at=self.clock(),
-                        last_error=None if success else "assist_location_evidence_incomplete",
+                        last_error=(
+                            None if success
+                            else _composition_failure_reason(job["stream_key"], materialized)
+                        ),
                     ))
                     completed += int(success)
         return completed
