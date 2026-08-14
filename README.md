@@ -123,7 +123,15 @@ a read-only demo database. Status output preserves the non-secret parts of a
 URL while masking its password.
 
 Running the command again is safe; applied versions are recorded in the
-`schema_migrations` table. Keep migration databases disposable in tests.
+`schema_migrations` table. PostgreSQL runs take a transaction-scoped advisory
+lock, so overlapping deploy jobs cannot apply the schema concurrently. Keep
+migration databases disposable in tests.
+
+Production application workers do not run migrations during Flask startup.
+Railway runs `python scripts/migrate.py` once as its pre-deploy command and
+only starts the new deployment after that command succeeds. Migration 031
+repairs databases where migration 024 was recorded but its five Canonical Game
+Ledger tables were lost during a concurrent startup race.
 
 Refresh one or more explicit seasons into the writable canonical event catalog
 with (repeat `--season` as needed):
@@ -531,6 +539,8 @@ gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 100
 For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
+- Run schema migrations before application workers start; Railway uses the
+  checked-in `railway.json` pre-deploy command for this.
 - Set Firebase credentials so protected and admin routes enforce real tokens and claims.
 - Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.
