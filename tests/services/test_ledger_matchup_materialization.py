@@ -16,8 +16,14 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from app.services.ledger_derivations import window_ledger_checksum
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    raw_rows_from_facts,
+)
+from app.services.ledger_derivations import (
+    LedgerDerivationUnavailable,
+    window_ledger_checksum,
+)
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
@@ -41,7 +47,7 @@ def _engine(tmp_path, name: str):
     return engine
 
 
-def _materialize(engine, games, *, as_of=AS_OF):
+def _materialize(engine, games, *, as_of=AS_OF, season="2025-26", governance=None):
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_games_atomic(games)
     matchup_repository = TeamMatchupRepository(engine)
@@ -50,7 +56,44 @@ def _materialize(engine, games, *, as_of=AS_OF):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
-    return service, matchup_repository, service.materialize("2025-26", as_of=as_of)
+    if governance is None:
+        governance = _governance(games)
+    expected_game_ids, expected_l15_game_ids, team_ids = governance
+    result = service.materialize(
+        season,
+        as_of=as_of,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+    return service, matchup_repository, result
+
+
+def _governance(games, *, team_ids=None, expected_game_ids=None, expected_l15_game_ids=None):
+    """Resolve the authoritative governed window from an external contract.
+
+    Expected IDs are always supplied explicitly rather than derived from the
+    ledger, so a test can hand a governed expectation that the stored ledger
+    fails to detect missing, extra, or mismatched game state.
+    """
+
+    if team_ids is None:
+        team_ids = frozenset(
+            fact.team_id for game in games for fact in game.team_facts
+        )
+    if expected_game_ids is None:
+        expected_game_ids = frozenset(game.game_id for game in games)
+    if expected_l15_game_ids is None:
+        expected_l15_game_ids = {
+            team_id: frozenset(game_ids)
+            for team_id, game_ids in _expected_l15_by_team(games).items()
+            if len(game_ids) == 15
+        }
+    return (
+        frozenset(expected_game_ids),
+        dict(expected_l15_game_ids),
+        frozenset(team_ids),
+    )
 
 
 def _season_scope():
@@ -107,7 +150,14 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
-    service.materialize("2025-26", as_of=AS_OF)
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
 
     checksums = repository.game_checksums("2025-26", through=AS_OF)
     all_game_ids = tuple(sorted(game.game_id for game in games))
@@ -236,8 +286,15 @@ def test_ledger_surfaces_require_no_provider_collaborators(tmp_path):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
-    service.materialize("2025-26", as_of=AS_OF)
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
 
     assert matchup_repository.snapshot_calls == 1
 
@@ -250,6 +307,12 @@ def test_pre_15_league_l15_is_explicitly_unavailable_not_approximated(tmp_path):
     season = matchup_repository.get_snapshot(_season_scope())
     assert any(fact.base == "traditional" for fact in season.facts)
 
+    checksums = CanonicalGameLedgerRepository(engine).game_checksums(
+        "2025-26", through=AS_OF
+    )
+    governed_game_ids = tuple(sorted(game.game_id for game in games))
+    governed_checksum = window_ledger_checksum(governed_game_ids, checksums)
+
     l15 = matchup_repository.get_snapshot(_l15_scope())
     assert l15.facts == ()
     assert {
@@ -259,6 +322,10 @@ def test_pre_15_league_l15_is_explicitly_unavailable_not_approximated(tmp_path):
         ("assist_locations", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
+    assert all(item.game_ids == governed_game_ids for item in l15.observations)
+    assert all(
+        item.ledger_checksum == governed_checksum for item in l15.observations
+    )
     assert not result.l15_selection.complete
 
 
@@ -275,8 +342,18 @@ def test_incomplete_governed_roster_publishes_missing_observations(tmp_path):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance((game,))
+    expected_checksum = window_ledger_checksum(
+        (game.game_id,), repository.game_checksums(game.season, through=game.game_date)
+    )
 
-    result = service.materialize(game.season, as_of=game.game_date)
+    result = service.materialize(
+        game.season,
+        as_of=game.game_date,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
 
     for window_games in (None, 15):
         snapshot = matchup_repository.get_snapshot(
@@ -286,6 +363,11 @@ def test_incomplete_governed_roster_publishes_missing_observations(tmp_path):
         assert {
             (item.status, item.unavailable_reason) for item in snapshot.observations
         } == {("missing", "governed_team_roster_incomplete")}
+        assert all(item.game_ids == (game.game_id,) for item in snapshot.observations)
+        assert all(
+            item.ledger_checksum == expected_checksum
+            for item in snapshot.observations
+        )
     assert not result.season_selection.complete
 
 
@@ -368,8 +450,15 @@ def test_nba_owned_surface_failure_does_not_prevent_ledger_surfaces(tmp_path):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
-    service.materialize("2025-26", as_of=AS_OF)
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
 
     snapshot = matchup_repository.get_snapshot(_l15_scope())
     assert {fact.base for fact in snapshot.facts} == {
@@ -463,9 +552,16 @@ def test_future_as_of_is_rejected_before_any_write(tmp_path):
         matchup_repository,
         clock=lambda: RETRIEVED_AT,
     )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
     with pytest.raises(ValueError, match="future as_of"):
-        service.materialize("2025-26", as_of=date(2025, 10, 17))
+        service.materialize(
+            "2025-26",
+            as_of=date(2025, 10, 17),
+            expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids,
+            team_ids=team_ids,
+        )
 
     assert matchup_repository.get_latest_scope("2025-26") is None
 
@@ -486,3 +582,61 @@ def test_stored_facts_are_sqlite_persisted_with_lineage_columns(tmp_path):
     }
     assert {"game_ids", "ledger_checksum"} <= fact_columns
     assert {"game_ids", "ledger_checksum"} <= observation_columns
+
+
+def test_materialize_rejects_governed_games_missing_from_the_ledger(tmp_path):
+    engine = _engine(tmp_path, "governed-missing.sqlite3")
+    games = _league_games()
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    governed_with_more = expected_game_ids | frozenset(
+        {"governed-extra-1", "governed-extra-2"}
+    )
+
+    with pytest.raises(LedgerDerivationUnavailable, match="missing governed"):
+        _materialize(
+            engine,
+            games,
+            governance=(governed_with_more, expected_l15_game_ids, team_ids),
+        )
+
+
+def test_materialize_rejects_extra_ungoverned_ledger_games(tmp_path):
+    engine = _engine(tmp_path, "governed-extra.sqlite3")
+    games = _league_games()
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    extra = replace(
+        games[0], game_id="extra-game", source_observation_id="extra-obs", checksum=None
+    )
+    extra = replace(extra, raw_rows=raw_rows_from_facts(extra)).with_checksum()
+
+    with pytest.raises(LedgerDerivationUnavailable, match="extra ungoverned"):
+        _materialize(
+            engine,
+            (*games, extra),
+            governance=(expected_game_ids, expected_l15_game_ids, team_ids),
+        )
+
+
+def test_materialize_rejects_ledger_l15_that_mismatches_governance(tmp_path):
+    engine = _engine(tmp_path, "l15-mismatch.sqlite3")
+    games = _league_games()
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    played_by_team = {}
+    for game in games:
+        for fact in game.team_facts:
+            played_by_team.setdefault(fact.team_id, set()).add(game.game_id)
+    foreign = next(
+        game_id for game_id in expected_game_ids if game_id not in played_by_team[1]
+    )
+    governed_team_ids = frozenset(expected_l15_game_ids[1])
+    mismatched = {
+        **expected_l15_game_ids,
+        1: frozenset({*governed_team_ids, foreign} - {next(iter(governed_team_ids))}),
+    }
+
+    with pytest.raises(LedgerDerivationUnavailable, match="L15 game IDs"):
+        _materialize(
+            engine,
+            games,
+            governance=(expected_game_ids, mismatched, team_ids),
+        )

@@ -249,6 +249,9 @@ class LedgerRuntime:
                 self.matchup_materialization.materialize(
                     season,
                     as_of=cutoff.date(),
+                    expected_game_ids=governance.expected_game_ids,
+                    expected_l15_game_ids=governance.expected_l15_game_ids,
+                    team_ids=governance.team_ids,
                 )
             games = tuple(
                 game

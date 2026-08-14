@@ -169,7 +169,9 @@ ASSIST_METRICS = (
     "long_mid_range_assists",
 )
 #: The opponent total-assist primitive that feeds the Matchups ``Assists``
-#: surface stat on top of the location counters in ``ASSIST_METRICS``.
+#: surface stat on top of the location counters in ``ASSIST_METRICS``.  It is
+#: the opponent typed team fact, which includes the team-only residual (an
+#: assist credited to no player) that the player rows cannot carry.
 ASSIST_TOTAL_METRIC = "assists"
 #: The four contracted NBA-traditional opponent surfaces and the ledger team
 #: metric that supplies each count.  ``materialize_team_window`` aggregates the
@@ -580,10 +582,18 @@ def materialize_assist_location_window(
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
             denominator += defense.team_minutes
             opponent_id = defense.opponent_team_id
+            opponent = next(
+                fact for fact in game.team_facts if fact.team_id == opponent_id
+            )
+            # The opponent total is the typed team fact: it includes the
+            # team-only residual (e.g. a dead-ball assist credited to no
+            # player) that the player rows cannot carry.  The location
+            # breakdown below stays player-sourced, so a location observation
+            # never has to explain the residual.
+            counts[ASSIST_TOTAL_METRIC] += opponent.assists
             for player in game.player_facts:
                 if player.team_id != opponent_id:
                     continue
-                counts[ASSIST_TOTAL_METRIC] += player.assists
                 for metric in ASSIST_METRICS:
                     value = getattr(player, metric)
                     if value is None:

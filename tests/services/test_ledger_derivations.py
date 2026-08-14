@@ -218,6 +218,63 @@ def test_exact_l15_is_league_complete_and_defensive_ranks_are_ascending():
     assert all(team.game_count == 15 for team in assist.teams)
 
 
+def test_assist_total_includes_team_only_residual_assists():
+    games = tuple(
+        replace(
+            game,
+            team_facts=tuple(
+                replace(fact, assists=fact.assists + 1)
+                if fact.team_id == 1
+                else fact
+                for fact in game.team_facts
+            ),
+        )
+        for game in _league_games()
+    )
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert len(window.teams) == 30
+    for team in window.teams:
+        player_total = 0
+        team_total = 0
+        faced_residual = 0
+        for game in games:
+            if team.team_id not in {game.home_team_id, game.away_team_id}:
+                continue
+            defense = next(
+                fact for fact in game.team_facts if fact.team_id == team.team_id
+            )
+            opponent = next(
+                fact
+                for fact in game.team_facts
+                if fact.team_id == defense.opponent_team_id
+            )
+            team_total += opponent.assists
+            player_total += sum(
+                player.assists
+                for player in game.player_facts
+                if player.team_id == opponent.team_id
+            )
+            if opponent.team_id == 1:
+                faced_residual += 1
+        assert team.counts["assists"] == team_total
+        assert team_total == player_total + faced_residual
+
+
 def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'materialization.sqlite3'}")
     run_migrations(engine)

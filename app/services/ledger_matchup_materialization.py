@@ -2,11 +2,12 @@
 
 This module owns the seam that turns stored Canonical Game Ledger evidence into
 the disposable ``team_matchup_facts`` read model without any provider call.
-One interface accepts a season and a shared cutoff, selects the full governed
-Regular Season and each team's exact 15 most recent governed games, records the
-exact selected game IDs and the deterministic ledger checksum, and aggregates
-every contracted PBP-owned non-shot opponent fact (the traditional opponent
-counts and assist locations) exclusively from typed ledger counts and
+One interface accepts a season, a shared cutoff, and the runtime's
+authoritative governed window -- the expected game IDs, expected L15 game IDs,
+and team IDs resolved from the active manifest and Event Catalog.  It records
+the exact governed game IDs and the deterministic ledger checksum, and
+aggregates every contracted PBP-owned non-shot opponent fact (the traditional
+opponent counts and assist locations) exclusively from typed ledger counts and
 denominators.  NBA-owned shot and play surfaces are deliberately outside this
 service: their independent refresh writes the same disposable read model and
 can fail without preventing ledger-owned surfaces from materializing.
@@ -108,13 +109,21 @@ class LedgerMatchupMaterializationService:
         season: str,
         *,
         as_of: date,
+        expected_game_ids: frozenset[str],
+        expected_l15_game_ids: Mapping[int, frozenset[str]],
+        team_ids: frozenset[int],
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
-        The same ``as_of`` is the shared cutoff for both windows.  Before every
-        governed team has 15 eligible games the league L15 is published
-        explicitly unavailable rather than approximated, and a Season that is
-        not league complete publishes no facts.
+        The expected window is never derived from the ledger being validated:
+        ``expected_game_ids``, ``expected_l15_game_ids``, and ``team_ids`` are
+        the authoritative active-manifest and Event-Catalog governance resolved
+        by the runtime.  A stored ledger that does not exactly equal the
+        governed game set, or a team whose ledger L15 does not match its
+        governed exact 15, rejects the materialization.  Before every governed
+        team has 15 eligible games the league L15 is published explicitly
+        unavailable rather than approximated, and a Season that is not league
+        complete publishes no facts.
         """
 
         canonical_season = validate_canonical_season(season)
@@ -123,11 +132,11 @@ class LedgerMatchupMaterializationService:
         if as_of > current_date:
             raise ValueError("future as_of dates cannot be published")
         games, checksums = self._load_games(canonical_season, as_of)
-        team_ids = frozenset(
-            fact.team_id for game in games for fact in game.team_facts
+        self._reject_governance_mismatch(
+            games,
+            expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids,
         )
-        expected_game_ids = frozenset(game.game_id for game in games)
-        expected_l15_game_ids = self._expected_l15_game_ids(games)
         season_scope = TeamMatchupSnapshotScope(canonical_season, as_of)
         l15_scope = TeamMatchupSnapshotScope(canonical_season, as_of, 15)
         season_window = materialize_team_window(
@@ -213,15 +222,50 @@ class LedgerMatchupMaterializationService:
         }
         return games, checksums
 
+    def _reject_governance_mismatch(
+        self,
+        games: tuple[CanonicalGame, ...],
+        *,
+        expected_game_ids: frozenset[str],
+        expected_l15_game_ids: Mapping[int, frozenset[str]],
+    ) -> None:
+        """Reject a stored ledger that diverges from the governed window."""
+
+        ledger_game_ids = frozenset(game.game_id for game in games)
+        expected_ids = frozenset(expected_game_ids)
+        if ledger_game_ids != expected_ids:
+            missing = sorted(expected_ids - ledger_game_ids)
+            extra = sorted(ledger_game_ids - expected_ids)
+            message = "ledger games must exactly equal governed game IDs"
+            if missing:
+                message += f"; missing governed: {missing}"
+            if extra:
+                message += f"; extra ungoverned: {extra}"
+            raise LedgerDerivationUnavailable(message)
+        if not expected_l15_game_ids:
+            return
+        actual = self._actual_l15_game_ids(games)
+        mismatched = {
+            team_id
+            for team_id, governed_ids in expected_l15_game_ids.items()
+            if actual.get(team_id) != frozenset(governed_ids)
+        }
+        if mismatched:
+            raise LedgerDerivationUnavailable(
+                "ledger L15 game IDs do not match governed expectations "
+                f"for teams {sorted(mismatched)}"
+            )
+
     @staticmethod
-    def _expected_l15_game_ids(
+    def _actual_l15_game_ids(
         games: tuple[CanonicalGame, ...],
     ) -> dict[int, frozenset[str]]:
-        """Return each team's exact 15 most recent governed game IDs.
+        """Return each team's ledger exact 15 most recent game IDs.
 
         The derivation mirrors the completeness gate in
-        ``materialize_team_window`` so the expected window and the selected
+        ``materialize_team_window`` so the actual window and the governed
         window can never drift: games sort by date then game ID, newest first.
+        Teams with fewer than 15 games yield the shorter set they have.
         """
 
         per_team: dict[int, list[CanonicalGame]] = defaultdict(list)
@@ -275,13 +319,28 @@ class LedgerMatchupMaterializationService:
         games_by_id: Mapping[str, CanonicalGame],
         roster_incomplete: bool,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
-        """Build disposable facts and observations for one window."""
+        """Build disposable facts and observations for one window.
 
+        The observations always persist the truthful surface availability plus
+        the ledger-owned lineage (the governed/selected game IDs and their
+        deterministic ledger checksum), even when roster or window completeness
+        blocks facts and ranks.
+        """
+
+        governed_game_ids = window.governed_game_ids
+        ledger_checksum = window_ledger_checksum(governed_game_ids, checksums)
         if roster_incomplete:
-            return (), self._missing_observations(ROSTER_INCOMPLETE_REASON)
+            return (), self._missing_observations(
+                ROSTER_INCOMPLETE_REASON,
+                game_ids=governed_game_ids,
+                ledger_checksum=ledger_checksum,
+            )
         if not window.complete:
-            return (), self._missing_observations(window.reason)
-        ledger_checksum = window_ledger_checksum(window.governed_game_ids, checksums)
+            return (), self._missing_observations(
+                window.reason,
+                game_ids=governed_game_ids,
+                ledger_checksum=ledger_checksum,
+            )
         start_dates = {
             team.team_id: min(
                 (games_by_id[game_id].game_date for game_id in team.game_ids),
@@ -293,7 +352,7 @@ class LedgerMatchupMaterializationService:
             TeamMatchupObservation(
                 surface="traditional",
                 status="available",
-                game_ids=window.governed_game_ids,
+                game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
             )
         ]
@@ -314,7 +373,7 @@ class LedgerMatchupMaterializationService:
                 TeamMatchupObservation(
                     surface="assist_locations",
                     status="available",
-                    game_ids=window.governed_game_ids,
+                    game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
                 )
             )
@@ -324,7 +383,7 @@ class LedgerMatchupMaterializationService:
                     surface="assist_locations",
                     status="unavailable",
                     unavailable_reason=ASSIST_INCOMPLETE_REASON,
-                    game_ids=window.governed_game_ids,
+                    game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
                 )
             )
@@ -333,6 +392,9 @@ class LedgerMatchupMaterializationService:
     @staticmethod
     def _missing_observations(
         reason: str | None,
+        *,
+        game_ids: tuple[str, ...],
+        ledger_checksum: str,
     ) -> tuple[TeamMatchupObservation, ...]:
         status, mapped_reason = (
             ("missing", INSUFFICIENT_GAMES_REASON)
@@ -342,8 +404,20 @@ class LedgerMatchupMaterializationService:
             else ("missing", reason or "ledger_window_incomplete")
         )
         return (
-            TeamMatchupObservation("traditional", status, mapped_reason),
-            TeamMatchupObservation("assist_locations", status, mapped_reason),
+            TeamMatchupObservation(
+                "traditional",
+                status,
+                mapped_reason,
+                game_ids=game_ids,
+                ledger_checksum=ledger_checksum,
+            ),
+            TeamMatchupObservation(
+                "assist_locations",
+                status,
+                mapped_reason,
+                game_ids=game_ids,
+                ledger_checksum=ledger_checksum,
+            ),
         )
 
     @staticmethod
