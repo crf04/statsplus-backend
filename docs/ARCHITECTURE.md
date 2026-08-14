@@ -821,7 +821,13 @@ retrieval time, a deterministic row checksum, the exact observed field set
 `observed_fields` is stored separately from the payload so additive schema drift
 is visible and non-destructive: a corrected observation that adds a provider
 field changes the field-set metadata and the raw checksum without touching the
-typed primitive set. The production backfill consumes the complete raw
+typed primitive set. At the repository boundary each archived row's row type
+and entity metadata must agree with its payload identity: a team-summary row
+must be payload-identified as a team aggregate (`EntityId` `0`/`None` or
+`Name` `Team`) and carry no player entity metadata, and a player row's metadata
+identity and name must equal the payload's provider identity and name (the
+typed-fact reconciliation then proves the retained player fact matches). The
+production backfill consumes the complete raw
 `/get-game-stats` document through a dedicated adapter seam
 (`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
 DataFrame, so team-summary rows and unknown additive keys always reach the

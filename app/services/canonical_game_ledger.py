@@ -1291,6 +1291,39 @@ def _validate_team_summary_minutes(payload: Mapping[str, Any]) -> None:
     _minutes_value(raw, "team minutes")
 
 
+def _validate_raw_row_identity(row: LedgerGameRow) -> None:
+    """Reconcile archived row metadata against the provider payload identity.
+
+    The provider's identity rules are the same ones ``_ledger_raw_rows`` uses:
+    a row is a team summary when its payload ``EntityId`` is ``0``/``None`` or
+    its ``Name`` is exactly ``Team``.  A team-summary row must therefore carry a
+    team-identified payload and no player identity metadata, and a player row
+    must carry a player-identified payload whose provider identity and name
+    equal its archived metadata (the typed fact reconciliation then proves the
+    retained player fact matches).
+    """
+
+    payload_id = _raw_value(row.payload, "EntityId", "PLAYER_ID", "player_id")
+    payload_name = _raw_value(row.payload, "Name", "PLAYER_NAME", "player_name")
+    is_team_payload = payload_id in (None, "0", 0) or str(payload_name or "") == "Team"
+    if row.row_type == "team":
+        if not is_team_payload or row.entity_id is not None or row.entity_name is not None:
+            raise LedgerValidationError(
+                "team-summary row metadata contradicts the provider payload identity"
+            )
+        return
+    if is_team_payload:
+        raise LedgerValidationError(
+            "player row metadata contradicts the provider payload identity"
+        )
+    canonical_id = _integer(payload_id, "entity_id")
+    canonical_name = _required_text(payload_name, "entity_name")
+    if row.entity_id != canonical_id or row.entity_name != canonical_name:
+        raise LedgerValidationError(
+            "player row metadata must match the provider payload identity"
+        )
+
+
 def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     """Validate the complete-game invariant at the domain boundary."""
 
@@ -1434,6 +1467,7 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             raise LedgerValidationError("raw evidence observed fields must match the payload")
         if row.checksum != canonical_row_checksum(row.payload):
             raise LedgerValidationError("raw evidence checksum does not match the payload")
+        _validate_raw_row_identity(row)
         if row.row_type == "team":
             team_rows_by_side[row.side] += 1
             _validate_team_summary_minutes(row.payload)

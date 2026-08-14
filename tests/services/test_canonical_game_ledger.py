@@ -624,6 +624,92 @@ def test_invalid_raw_row_index_rejects_at_repository_boundary(tmp_path, bad_inde
         assert connection.execute(select(LedgerGameRowEvidence)).all() == []
 
 
+def test_team_row_metadata_contradicts_player_payload_rejects(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_label_player.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    player_payload = next(
+        row.payload for row in game.raw_rows
+        if row.row_type == "player" and row.entity_id == 101
+    )
+    mislabeled = replace(
+        game,
+        raw_rows=tuple(
+            replace(
+                row,
+                payload=player_payload,
+                checksum=canonical_row_checksum(player_payload),
+                observed_fields=tuple(sorted(player_payload)),
+            )
+            if row.row_type == "team" and row.side == "Home"
+            else row
+            for row in game.raw_rows
+        ),
+        checksum=None,
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mislabeled)
+    except LedgerValidationError as error:
+        assert "team-summary row metadata contradicts the provider payload identity" in str(error)
+    else:
+        raise AssertionError("team row labeled with a player payload unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_player_row_entity_id_mismatch_rejects(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'player_id_mismatch.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    mismatched = replace(
+        game,
+        raw_rows=tuple(
+            replace(row, entity_id=999) if row.entity_id == 101 else row
+            for row in game.raw_rows
+        ),
+        checksum=None,
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mismatched)
+    except LedgerValidationError as error:
+        assert "player row metadata must match the provider payload identity" in str(error)
+    else:
+        raise AssertionError("player row entity metadata that contradicts the payload unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_player_row_entity_name_mismatch_rejects(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'player_name_mismatch.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    mismatched = replace(
+        game,
+        raw_rows=tuple(
+            replace(row, entity_name="Bogus") if row.entity_id == 101 else row
+            for row in game.raw_rows
+        ),
+        checksum=None,
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mismatched)
+    except LedgerValidationError as error:
+        assert "player row metadata must match the provider payload identity" in str(error)
+    else:
+        raise AssertionError("player row name metadata that contradicts the payload unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
 def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
     payload = _raw_observation_with_unknown_fields()
     game = canonical_game_from_pbp(
