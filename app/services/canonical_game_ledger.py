@@ -102,6 +102,50 @@ ADDITIVE_EQUIVALENT_COUNT_FIELDS = tuple(
 #: The typed extractor version that produced canonical facts and raw row
 #: schema evidence.  Bump it only when the extraction vocabulary changes.
 LEDGER_SCHEMA_VERSION = 1
+#: The governed FullGame wire-field baseline for ``LEDGER_SCHEMA_VERSION``:
+#: every provider key the extractor understands and tolerates on an archived
+#: raw row.  A first raw archive (a brand-new game, or a pre-032 game
+#: receiving its row evidence for the first time) is judged against this
+#: baseline: a field outside it is additive schema drift that must be recorded
+#: and alerted, while a normal first observation inside the baseline stays
+#: silent.  Keep this set and the schema version in lockstep: bump both
+#: together whenever the extraction vocabulary changes.
+LEDGER_GOVERNED_FULLGAME_FIELDS = frozenset({
+    # identity
+    "EntityId", "PLAYER_ID", "player_id",
+    "Name", "PLAYER_NAME", "player_name",
+    # minutes
+    "Minutes", "MIN", "minutes",
+    # envelope/tolerated identity columns
+    "GameId", "Date", "Team", "Opponent", "TeamId", "TEAM_ID",
+    # counting primitives and their extractor aliases
+    "Points", "PTS", "points",
+    "FGM", "field_goals_made",
+    "FGA", "field_goals_attempted",
+    "FG2M", "two_pointers_made",
+    "FG2A", "two_pointers_attempted",
+    "FG3M", "three_pointers_made",
+    "FG3A", "three_pointers_attempted",
+    "FtPoints", "FTM", "free_throws_made",
+    "FTA", "free_throws_attempted",
+    "OffRebounds", "OREB", "offensive_rebounds",
+    "DefRebounds", "DREB", "defensive_rebounds",
+    "Rebounds", "REB", "rebounds",
+    "Assists", "AST", "assists",
+    "Turnovers", "TOV", "turnovers",
+    "Steals", "STL", "steals",
+    "Blocks", "BLK", "blocks",
+    "Fouls", "PF", "personal_fouls",
+    # optional expanded evidence
+    "TwoPtAssists", "two_point_assists",
+    "ThreePtAssists", "three_point_assists",
+    "Arc3Assists", "arc3_assists",
+    "Corner3Assists", "corner3_assists",
+    "AtRimAssists", "at_rim_assists",
+    "ShortMidRangeAssists", "short_mid_range_assists",
+    "LongMidRangeAssists", "long_mid_range_assists",
+    "Possessions", "possessions",
+})
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
 
@@ -457,6 +501,52 @@ def _ledger_raw_rows(
                 f"PBP FullGame requires exactly one team-summary row for {side} evidence"
             )
     return tuple(output)
+
+
+def _verify_observation_binding(
+    candidate: CanonicalGame,
+    observation: Mapping[str, Any],
+) -> None:
+    """Cryptographically bind one accepted observation to its candidate game.
+
+    The observation's stored payload is the complete raw provider document,
+    and the candidate's archived raw rows are derived deterministically from
+    that document.  A caller must therefore prove that the exact payload being
+    stamped as provenance reproduces the exact raw evidence being persisted:
+    replaying an observation envelope over a different raw document would
+    defeat the ledger's replay auditability.  The envelope's own checksum is
+    verified against its payload as well, so a tampered checksum field cannot
+    survive acceptance.
+    """
+
+    payload_text = str(observation.get("payload") or "")
+    if hashlib.sha256(payload_text.encode()).hexdigest() != str(observation.get("checksum") or ""):
+        raise LedgerValidationError(
+            "accepted ledger observation checksum does not match its payload"
+        )
+    try:
+        document = json.loads(payload_text)
+    except (TypeError, ValueError) as error:
+        raise LedgerValidationError("accepted ledger observation payload is malformed") from error
+    if not isinstance(document, Mapping):
+        raise LedgerValidationError(
+            "accepted ledger observation payload is not a raw game document"
+        )
+    try:
+        recomputed = _ledger_raw_rows(
+            document,
+            game_id=candidate.game_id,
+            home_team_id=candidate.home_team_id,
+            away_team_id=candidate.away_team_id,
+        )
+    except LedgerValidationError as error:
+        raise LedgerValidationError(
+            "accepted ledger observation payload cannot reproduce the candidate evidence"
+        ) from error
+    if raw_checksum(recomputed) != candidate.raw_checksum:
+        raise LedgerValidationError(
+            "accepted ledger observation is not bound to the candidate raw evidence"
+        )
 
 
 #: Explicit canonical raw-row side order shared by hashing, persistence, and
@@ -1731,6 +1821,9 @@ class CanonicalGameLedgerRepository:
                 or assume_utc(row["retrieved_at"]) >= assume_utc(manifest["collect_before"])
             ):
                 raise LedgerValidationError("accepted ledger evidence is not manifest authorized")
+            # Bind the observation's payload to the exact candidate evidence
+            # being persisted so an envelope cannot stamp a foreign document.
+            _verify_observation_binding(candidate, row)
 
     @staticmethod
     def _is_idempotent_replay(
@@ -1756,13 +1849,17 @@ class CanonicalGameLedgerRepository:
         existing: Mapping[str, Any] | None,
         tables: Mapping[str, Any],
     ) -> Mapping[str, object] | None:
-        """Compare a replacement's observed field sets with the prior evidence.
+        """Compare a candidate's observed field sets against governed evidence.
 
-        A correction whose corresponding archived rows gain or lose provider
-        fields is additive schema drift: it must be recorded and alerted to
-        operators without rejecting the otherwise valid replacement.
+        A first raw archive (a brand-new game, or a pre-032 game receiving its
+        row evidence for the first time) is judged against the governed
+        baseline field set: an unknown additive field is schema drift that must
+        be recorded and alerted, while a normal first observation inside the
+        baseline stays silent.  A correction whose corresponding archived rows
+        gain or lose provider fields is drift for the same reason.  Either
+        alert is recorded without rejecting the otherwise valid replacement.
         """
-        if existing is None or not candidate.raw_rows:
+        if not candidate.raw_rows:
             return None
         raw_rows = connection.execute(select(
             tables["raw"].c.side,
@@ -1770,8 +1867,27 @@ class CanonicalGameLedgerRepository:
             tables["raw"].c.row_index,
             tables["raw"].c.observed_fields,
         ).where(tables["raw"].c.game_id == candidate.game_id)).mappings().all()
-        if not raw_rows:
-            return None
+        candidate_fields = {
+            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
+            for row in candidate.raw_rows
+        }
+        if existing is None or not raw_rows:
+            added: set[str] = set()
+            for fields in candidate_fields.values():
+                added |= set(fields) - LEDGER_GOVERNED_FULLGAME_FIELDS
+            if not added:
+                return None
+            return {
+                "season": candidate.season,
+                "game_id": candidate.game_id,
+                "kind": "schema_drift",
+                "reason": "unknown_field",
+                "details": {
+                    "added_fields": tuple(sorted(added))[:25],
+                    "removed_fields": (),
+                    "schema_version": LEDGER_SCHEMA_VERSION,
+                },
+            }
 
         def row_key(row: Any) -> tuple[Any, Any, Any]:
             return (row["side"], row["row_type"], row["row_index"])
@@ -1779,10 +1895,6 @@ class CanonicalGameLedgerRepository:
         existing_fields = {
             row_key(row): frozenset(json.loads(row["observed_fields"] or "[]"))
             for row in raw_rows
-        }
-        candidate_fields = {
-            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
-            for row in candidate.raw_rows
         }
         added: set[str] = set()
         removed: set[str] = set()
@@ -2169,6 +2281,7 @@ __all__ = [
     "ASSIST_LOCATION_FIELDS",
     "ADDITIVE_EQUIVALENT_COUNT_FIELDS",
     "COUNT_FIELDS",
+    "LEDGER_GOVERNED_FULLGAME_FIELDS",
     "LEDGER_SCHEMA_VERSION",
     "REQUIRED_PLAYER_COUNT_FIELDS",
     "REQUIRED_TEAM_COUNT_FIELDS",

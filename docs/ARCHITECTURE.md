@@ -816,6 +816,18 @@ treats those games as incomplete (`game_ids_without_raw_evidence`) and re-fetche
 them regardless of age, and the season never reports complete until every
 governed game retains both team-summary and every player-row evidence.
 
+Retention is governed and indefinite (#25): raw evidence is never pruned, so
+the complete archived row set for every accepted game remains recoverable. A
+correction replaces the typed facts and the archived raw rows for that game
+atomically, and the game row reflects only the latest accepted observation;
+nothing is versioned per game inside the ledger tables. What survives every
+correction is the observation store: each accepted `CollectionObservation`
+payload, checksum, retrieval time, and its cryptographically bound raw evidence
+remain in `collection_observations` indefinitely, so a superseded observation
+can always be audited and an identical replay is provably a no-op. `schema_drift`
+reconciliation items accumulate beside that evidence and are never pruned
+either.
+
 `canonical_game_from_pbp` archives both the provider team-summary rows
 (`EntityId == 0` / `Name == Team`) and every participating player row from each
 side, preserving every provider key and value verbatim. Unknown additive fields
@@ -831,7 +843,15 @@ typed primitive set. A replacement whose corresponding archived rows change
 their observed field sets also records an operator alert: the repository emits
 a bounded `schema_drift` reconciliation item (`record_schema_drift`) inside the
 same correction transaction, so drift is recorded and alerted while the valid
-correction still lands. At the repository boundary each archived row's row type
+correction still lands. A first raw archive is judged against the governed
+baseline field set (`LEDGER_GOVERNED_FULLGAME_FIELDS`, versioned in lockstep
+with `LEDGER_SCHEMA_VERSION`) instead of an empty prior evidence set: a
+brand-new game, or a pre-032 game receiving its row evidence for the first
+time, that carries a provider field outside the baseline records an
+`unknown_field` alert, while a normal first observation inside the baseline
+stays silent. This is what makes schema growth on brand-new games — the normal
+way a provider field first appears — recorded and alerted rather than only
+ever detected later when an older game is corrected. At the repository boundary each archived row's row type
 and entity metadata must agree with its payload identity: a team-summary row
 must be payload-identified as a team aggregate (`EntityId` `0`/`None` or
 `Name` `Team`) and carry no player entity metadata, and a player row's metadata
@@ -914,6 +934,14 @@ rejected atomically with no write, so a direct `replace_game` caller can never
 persist a mixed or incomplete raw/typed version. The game identity row carries
 both the typed and raw checksums, so an operator can always prove that a stored
 typed game and its archived raw evidence came from the same observation.
+Acceptance through the governed seam is cryptographically bound as well: inside
+the manifest-authorized transaction, the repository recomputes the candidate's
+archived rows from the `CollectionObservation` payload being stamped and
+requires that recomputed set to reproduce the candidate's exact `raw_checksum`,
+and it verifies the observation's own checksum against its payload. A caller
+can therefore never persist one observation's envelope while archiving or
+typing another raw document, so every raw row's source observation is provably
+the document that produced it.
 
 `app.services.ledger_backfill.LedgerBackfillService` discovers final,
 non-postponed Regular Season Event Catalog games through an explicit cutoff,

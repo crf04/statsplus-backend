@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -77,6 +78,9 @@ class _Recorder:
         self, observation, *, season, game_id, retrieved_at,
         manifest_id, manifest_scope, manifest_cutoff, schema_version,
     ):
+        payload = json.dumps(
+            observation, sort_keys=True, separators=(",", ":"), default=str
+        )
         with self.lock:
             self.count += 1
             observation_id = f"accepted:{game_id}:{self.count}"
@@ -94,9 +98,9 @@ class _Recorder:
             "season": season,
             "cutoff": manifest_cutoff,
             "schema_version": schema_version,
-            "checksum": observation_id,
-            "payload": "{}",
-            "payload_bytes": 2,
+            "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+            "payload": payload,
+            "payload_bytes": len(payload.encode()),
             "retrieved_at": retrieved_at,
             "accepted_at": retrieved_at,
         }

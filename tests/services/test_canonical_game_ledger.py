@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,12 @@ from app.models.canonical_game_ledger import (
     LedgerGameRowEvidence,
     LedgerPublication,
 )
-from app.models.collection_control import CompositionJob, ReconciliationItem
+from app.models.collection_control import (
+    CollectionManifest,
+    CollectionObservation,
+    CompositionJob,
+    ReconciliationItem,
+)
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerValidationError,
@@ -424,15 +430,59 @@ def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path
         assert len(connection.execute(select(LedgerPublication)).all()) == 2
 
 
-def _raw_observation_with_unknown_fields() -> dict[str, object]:
+def _clean_observation() -> dict[str, object]:
     payload = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
         .read_text(encoding="utf-8")
     )
     payload.pop("team_results", None)
+    return payload
+
+
+def _raw_observation_with_unknown_fields() -> dict[str, object]:
+    payload = _clean_observation()
     payload["stats"]["Home"]["FullGame"][0]["Possessions"] = 95.5
     payload["stats"]["Home"]["FullGame"][1]["UnknownAdditiveField"] = "future-proof"
     return payload
+
+
+def _install_ledger_manifest(engine, *, cutoff=None, collect_before=None):
+    cutoff = cutoff or datetime(2024, 11, 16, tzinfo=timezone.utc)
+    collect_before = collect_before or cutoff + timedelta(days=45)
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2024-25", cutoff=cutoff,
+            collect_before=collect_before, accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=f"manifest:{cutoff.isoformat()}",
+            status="active", created_at=cutoff,
+        ))
+
+
+def _observation_values(payload, *, observation_id, game_id, accepted_at=None):
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    accepted_at = accepted_at or datetime(2024, 11, 16, tzinfo=timezone.utc)
+    return {
+        "observation_id": observation_id,
+        "client_observation_id": f"ledger:{game_id}:{observation_id}",
+        "collector_id": "railway-ledger",
+        "manifest_id": "ledger-manifest",
+        "environment": "server",
+        "provider": "pbp",
+        "observation_type": "canonical_game_ledger",
+        "scope": json.dumps(
+            {"game_id": game_id, "surface": "canonical_game_ledger"},
+            sort_keys=True,
+        ),
+        "season": "2024-25",
+        "cutoff": datetime(2024, 11, 16, tzinfo=timezone.utc),
+        "schema_version": 1,
+        "checksum": hashlib.sha256(text.encode()).hexdigest(),
+        "payload": text,
+        "payload_bytes": len(text.encode()),
+        "retrieved_at": datetime(2024, 11, 16, tzinfo=timezone.utc),
+        "accepted_at": accepted_at,
+    }
 
 
 def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp_path):
@@ -934,7 +984,7 @@ def test_schema_drift_is_recorded_and_alerted_when_field_sets_change(tmp_path):
         engine,
         schema_drift_sink=record_schema_drift,
     )
-    payload = _raw_observation_with_unknown_fields()
+    payload = _clean_observation()
     game = canonical_game_from_pbp(
         payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -986,7 +1036,7 @@ def test_unchanged_replacement_emits_no_schema_drift_alert(tmp_path):
         schema_drift_sink=record_schema_drift,
     )
     game = canonical_game_from_pbp(
-        _raw_observation_with_unknown_fields(),
+        _clean_observation(),
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
         participant_ids_by_team={
             1610612747: (2544, 203507),
@@ -998,6 +1048,230 @@ def test_unchanged_replacement_emits_no_schema_drift_alert(tmp_path):
     assert repository.replace_game(game).replaced is False
     with engine.connect() as connection:
         assert connection.execute(select(ReconciliationItem)).all() == []
+
+
+def test_first_seen_game_with_unknown_additive_field_alerts_schema_drift(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'first-seen-drift.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        schema_drift_sink=record_schema_drift,
+    )
+    game = canonical_game_from_pbp(
+        _raw_observation_with_unknown_fields(),
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+
+    assert repository.replace_game(game).inserted
+    with engine.connect() as connection:
+        row = connection.execute(select(ReconciliationItem).where(
+            ReconciliationItem.kind == "schema_drift"
+        )).mappings().one()
+    assert row["reason"] == "unknown_field"
+    assert row["status"] == "open"
+    assert json.loads(row["details"])["added_fields"] == ["UnknownAdditiveField"]
+    assert json.loads(row["details"])["removed_fields"] == []
+
+
+def test_first_seen_game_inside_the_governed_baseline_emits_no_alert(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'first-seen-clean.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        schema_drift_sink=record_schema_drift,
+    )
+    game = canonical_game_from_pbp(
+        _clean_observation(),
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+
+    assert repository.replace_game(game).inserted
+    with engine.connect() as connection:
+        assert connection.execute(select(ReconciliationItem)).all() == []
+
+
+def test_pre_migration_first_raw_archive_with_unknown_field_alerts(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'pre032-drift.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        schema_drift_sink=record_schema_drift,
+    )
+    with engine.begin() as connection:
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id="0022400001", season="2024-25", season_type="Regular Season",
+            game_date=date(2024, 11, 15),
+            home_team_id=1610612747, home_team_tricode="LAL",
+            away_team_id=1610612759, away_team_tricode="SAS",
+            status="final", source_observation_id="legacy:0022400001",
+            checksum="legacy-typed-checksum", raw_checksum=None,
+            retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ))
+    replacement = canonical_game_from_pbp(
+        _raw_observation_with_unknown_fields(),
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+    )
+
+    assert repository.replace_game(replacement).replaced
+    with engine.connect() as connection:
+        row = connection.execute(select(ReconciliationItem).where(
+            ReconciliationItem.kind == "schema_drift"
+        )).mappings().one()
+    assert row["reason"] == "unknown_field"
+
+
+def test_accepted_observation_is_cryptographically_bound_to_the_candidate(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _clean_observation()
+    observation_id = "obs-bound-000000000001"
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id=observation_id,
+    )
+
+    result = repository.replace_games_atomic(
+        (game,),
+        accepted_observations={
+            observation_id: _observation_values(
+                payload, observation_id=observation_id, game_id=game.game_id,
+            ),
+        },
+    )
+
+    assert result[0].inserted
+    stored = repository.get_game(game.game_id)
+    assert stored is not None
+    assert stored.source_observation_id == observation_id
+    with engine.connect() as connection:
+        assert connection.execute(select(CollectionObservation).where(
+            CollectionObservation.observation_id == observation_id
+        )).one()
+
+
+def test_observation_for_a_different_document_is_rejected_without_any_write(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding-mismatch.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _clean_observation()
+    foreign = json.loads(json.dumps(payload))
+    foreign["stats"]["Home"]["FullGame"][1]["Points"] = 99
+    observation_id = "obs-mismatch-0000000001"
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id=observation_id,
+    )
+
+    try:
+        repository.replace_games_atomic(
+            (game,),
+            accepted_observations={
+                observation_id: _observation_values(
+                    foreign, observation_id=observation_id, game_id=game.game_id,
+                ),
+            },
+        )
+    except LedgerValidationError as error:
+        assert "not bound to the candidate raw evidence" in str(error)
+    else:
+        raise AssertionError("observation with a foreign payload unexpectedly accepted")
+    assert repository.get_game(game.game_id) is None
+    with engine.connect() as connection:
+        assert connection.execute(select(CollectionObservation)).all() == []
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_observation_with_tampered_checksum_is_rejected(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding-tamper.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _clean_observation()
+    observation_id = "obs-tampered-0000000001"
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id=observation_id,
+    )
+    values = _observation_values(
+        payload, observation_id=observation_id, game_id=game.game_id,
+    )
+    values["checksum"] = "deadbeef"
+
+    try:
+        repository.replace_games_atomic(
+            (game,),
+            accepted_observations={observation_id: values},
+        )
+    except LedgerValidationError as error:
+        assert "checksum does not match its payload" in str(error)
+    else:
+        raise AssertionError("observation with a tampered checksum unexpectedly accepted")
+    assert repository.get_game(game.game_id) is None
+
+
+def test_idempotent_replay_with_bound_observation_persists_no_new_observation(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding-replay.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _clean_observation()
+    observation_id = "obs-replay-000000000001"
+    game = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id=observation_id,
+    )
+    values = _observation_values(
+        payload, observation_id=observation_id, game_id=game.game_id,
+    )
+
+    assert repository.replace_games_atomic(
+        (game,), accepted_observations={observation_id: values},
+    )[0].inserted
+    replayed = repository.replace_games_atomic(
+        (game,), accepted_observations={observation_id: values},
+    )[0]
+
+    assert not replayed.inserted and not replayed.replaced
+    with engine.connect() as connection:
+        assert len(connection.execute(select(CollectionObservation)).all()) == 1
+        assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 5
 
 
 def test_pre_migration_games_without_raw_evidence_are_detected(tmp_path):
