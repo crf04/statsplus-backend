@@ -46,6 +46,32 @@ def test_app_factory_constructs_one_dependency_container(monkeypatch):
     assert application.extensions["dependencies"] is dependencies
 
 
+def test_production_app_factory_does_not_run_migrations_in_gunicorn_workers(monkeypatch):
+    from app import create_app
+
+    settings = RuntimeSettings(
+        environment="production",
+        database={"url": "postgresql://statsplus@example.invalid/statsplus"},
+        auth={
+            "firebase_admin_disabled": False,
+            "collector_signing_secret": "test-only-signing-secret",
+        },
+    )
+    dependencies = _fake_dependencies(settings)
+    migrate = Mock()
+    monkeypatch.setattr("app.models.create_all_tables", migrate)
+
+    create_app(
+        {
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": dependencies,
+            "SKIP_FIREBASE_INIT": True,
+        }
+    )
+
+    migrate.assert_not_called()
+
+
 def test_routes_use_injected_dependencies_without_global_patching():
     from app import create_app
 

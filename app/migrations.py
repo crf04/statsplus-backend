@@ -27,6 +27,7 @@ from sqlalchemy.sql import func
 
 
 MIGRATION_TABLE_NAME: Final[str] = "schema_migrations"
+MIGRATION_ADVISORY_LOCK_ID: Final[int] = 0x5354415453504C55
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,6 +499,11 @@ def _create_canonical_game_ledger_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _repair_canonical_game_ledger_tables(connection: Connection) -> None:
+    """Recreate ledger tables missing from databases that recorded migration 024."""
+    _create_canonical_game_ledger_tables(connection)
+
+
 def _upgrade_collector_release_status(connection: Connection) -> None:
     """Persist bounded machine release evidence for operator diagnostics."""
 
@@ -781,7 +787,17 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(28, "028_collector_status_transitions", _create_collector_status_transitions),
     Migration(29, "029_publication_activations", _create_publication_activations),
     Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
+    Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
 )
+
+
+def _acquire_migration_lock(connection: Connection) -> None:
+    """Serialize PostgreSQL migrations for the duration of their transaction."""
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
+        )
 
 
 def run_migrations(engine: Engine) -> MigrationResult:
@@ -802,6 +818,7 @@ def run_migrations(engine: Engine) -> MigrationResult:
     _validate_migration_order()
 
     with engine.begin() as connection:
+        _acquire_migration_lock(connection)
         _migration_metadata.create_all(connection)
         applied_versions = {
             row.version

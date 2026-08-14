@@ -2328,7 +2328,17 @@ application database can
 be created or upgraded with an explicit `--database-url` argument or
 `DATABASE_URL`; the CLI has no database-file fallback and fails if neither is
 provided. Rerunning the command is idempotent because applied versions are
-recorded in `schema_migrations`. Status output masks database passwords.
+recorded in `schema_migrations`. PostgreSQL migration runs acquire one
+transaction-scoped advisory lock before inspecting or changing the migration
+table. Status output masks database passwords.
+
+Production Gunicorn workers never run migrations from `create_app()`. Railway
+owns the deployment boundary: `railway.json` runs `python scripts/migrate.py`
+as a pre-deploy command, and a nonzero result prevents the new application
+workers from starting. Local and test app factories retain automatic schema
+initialization for their disposable databases. Migration 031 idempotently
+recreates the five Canonical Game Ledger tables from migration 024, repairing
+the production drift caused by the former concurrent worker-startup path.
 
 Migration 005 creates the writable `event_catalog` and
 `event_catalog_refreshes` tables. Migrations are applied in order. Event

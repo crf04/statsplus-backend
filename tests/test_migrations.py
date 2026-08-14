@@ -69,6 +69,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -344,7 +345,45 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (28, "028_collector_status_transitions"),
             (29, "029_publication_activations"),
             (30, "030_bind_publication_activation_candidates"),
+            (31, "031_repair_canonical_game_ledger_tables"),
         ]
+
+
+def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger-drift.sqlite3'}")
+    ledger_tables = (
+        "canonical_game_ledger_team_facts",
+        "canonical_game_ledger_player_facts",
+        "canonical_game_ledger_games",
+        "canonical_game_ledger_backfill",
+        "canonical_game_ledger_publications",
+    )
+
+    run_migrations(engine)
+    with engine.begin() as connection:
+        for table in ledger_tables:
+            connection.execute(text(f"DROP TABLE {table}"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 31"))
+
+    repaired = run_migrations(engine)
+
+    assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
+    assert repaired.current_version == 31
+    assert all(inspect(engine).has_table(table) for table in ledger_tables)
+
+
+def test_postgres_migrations_take_one_transaction_advisory_lock():
+    from unittest.mock import Mock
+
+    from app.migrations import _acquire_migration_lock
+
+    connection = Mock()
+    connection.dialect.name = "postgresql"
+
+    _acquire_migration_lock(connection)
+
+    statement = connection.execute.call_args.args[0]
+    assert "pg_advisory_xact_lock" in str(statement)
 
 
 def test_run_migrations_upgrades_existing_app_database(tmp_path):
@@ -388,6 +427,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -433,8 +473,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
-    assert upgraded.current_version == 30
+    assert upgraded.current_version == 31
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -498,6 +539,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
 
 
@@ -540,7 +582,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 30
+    assert result.current_version == 31
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -805,6 +847,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -856,10 +899,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
-    assert upgraded.current_version == 30
+    assert upgraded.current_version == 31
     assert repeated.applied == ()
-    assert repeated.current_version == 30
+    assert repeated.current_version == 31
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -920,6 +964,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "028_collector_status_transitions",
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
+        "031_repair_canonical_game_ledger_tables",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

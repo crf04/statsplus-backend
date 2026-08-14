@@ -116,7 +116,11 @@ def _expose_legacy_service_aliases(app: "Flask", dependencies: Any) -> None:
 
 def _initialize_dependencies(app: "Flask") -> None:
     """Initialize optional runtime dependencies without making imports fail."""
-    if not app.config.get("SKIP_TABLE_CREATE", False):
+    settings = app.extensions["runtime_settings"]
+    if (
+        settings.environment != "production"
+        and not app.config.get("SKIP_TABLE_CREATE", False)
+    ):
         try:
             from app.models import create_all_tables
 
