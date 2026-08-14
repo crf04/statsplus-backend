@@ -827,9 +827,12 @@ inactive control-plane candidate versions with normalized game-observation
 provenance; corrections enqueue each affected derived slice in the same
 transaction. Historical rehearsal can read an immutable candidate payload but
 never enables public Matchups routes. `ledger_parity` records symmetric
-ledger-only and legacy-only identities plus traditional-opponent and per-36
-semantic evidence for adjudication; zero or unequal identity sets are never
-reported exact.
+ledger-only and legacy-only player-game identities plus traditional-opponent
+and per-36 semantic evidence for adjudication; zero or unequal identity sets
+are never reported exact. Player-game-log activation is bound to that exact
+candidate and parity artifact just like the other ledger-derived streams; an
+empty legacy game-log table produces pending evidence that requires an
+explicit audited adjudication rather than bypassing parity.
 
 The executable `scripts/ledger_refresh.py` assembles the injected PBP, Event
 Catalog, Athlete Catalog, accepted-observation participant, reconciliation,

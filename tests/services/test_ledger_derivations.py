@@ -291,7 +291,13 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     assert len(ledger_payloads) == 8
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
     assert len(candidates) == 6
-    assert len(parity) == 3
+    assert len(parity) == 4
+    assert {row["stream_key"] for row in parity} == {
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "player_per36",
+    }
     assert all(row["status"] == "pending_adjudication" for row in parity)
     assert all(
         row["publication_id"] and len(row["payload_checksum"]) == 64
