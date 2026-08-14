@@ -1287,7 +1287,7 @@ class CollectionControlService(_SessionService):
                         raise ValueError("event evidence required")
                     required_ids = _required_athlete_ids(event.payload)
                     catalog_ids = _catalog_identity_ids(payload)
-                    if not required_ids or not required_ids <= catalog_ids:
+                    if not required_ids <= catalog_ids:
                         self.record_identity_unresolved(
                             season=request.season, kind="athlete_catalog",
                             details={"catalog_type": request.catalog_type,
@@ -1611,7 +1611,7 @@ class CollectionControlService(_SessionService):
         except (TypeError, json.JSONDecodeError, ValueError) as error:
             raise ControlPlaneError("catalog_incomplete") from error
         catalog_ids = _catalog_identity_ids(athlete_document)
-        if not required_ids or not required_ids <= catalog_ids:
+        if not required_ids <= catalog_ids:
             self.record_identity_unresolved(
                 season=season, kind="manifest", details={
                     "manifest_cutoff": cutoff.isoformat(),

@@ -794,6 +794,34 @@ def test_catalog_bounds_are_configurable_and_manifest_ignores_optional_identity_
     assert manifest.status == "active"
 
 
+def test_initial_bootstrap_accepts_roster_when_event_catalog_has_no_athlete_evidence(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    event_payload = _catalog_payload("event")
+    for event in event_payload["events"]:
+        event.pop("athlete_ids")
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    control.publish_catalog(event_request.request_id, event_payload, version="event-v1")
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+
+    athlete = control.publish_catalog(
+        athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1"
+    )
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["canonical_game_ledger"],
+        collect_before=now + timedelta(hours=1),
+    )
+
+    assert athlete.complete is True
+    assert manifest.status == "active"
+
+
 def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db):
     clock = [datetime(2026, 8, 12, tzinfo=UTC)]
     control = CollectionControlService(control_db, clock=lambda: clock[0])
