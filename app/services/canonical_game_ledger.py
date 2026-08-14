@@ -492,6 +492,35 @@ _PLAYER_ASSIST_ROW_KEYS = (
 )
 
 
+def _fact_count_payload(fact: Any) -> dict[str, Any]:
+    """Map typed count primitives onto their provider FullGame wire spellings.
+
+    Team-summary and player typed facts carry the same count vocabulary, so one
+    helper owns the count-to-wire spelling; the row-type authority (which row
+    drives which typed fact) stays in the callers.
+    """
+
+    return {
+        "Points": fact.points,
+        "FGM": fact.field_goals_made,
+        "FGA": fact.field_goals_attempted,
+        "FG2M": fact.two_pointers_made,
+        "FG2A": fact.two_pointers_attempted,
+        "FG3M": fact.three_pointers_made,
+        "FG3A": fact.three_pointers_attempted,
+        "FtPoints": fact.free_throws_made,
+        "FTA": fact.free_throws_attempted,
+        "OffRebounds": fact.offensive_rebounds,
+        "DefRebounds": fact.defensive_rebounds,
+        "Rebounds": fact.rebounds,
+        "Assists": fact.assists,
+        "Turnovers": fact.turnovers,
+        "Steals": fact.steals,
+        "Blocks": fact.blocks,
+        "Fouls": fact.personal_fouls,
+    }
+
+
 def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
     """Build coherent raw FullGame evidence from retained typed facts.
 
@@ -510,23 +539,7 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
             "EntityId": "0",
             "Name": "Team",
             "Minutes": "00:00",
-            "Points": team_fact.points,
-            "FGM": team_fact.field_goals_made,
-            "FGA": team_fact.field_goals_attempted,
-            "FG2M": team_fact.two_pointers_made,
-            "FG2A": team_fact.two_pointers_attempted,
-            "FG3M": team_fact.three_pointers_made,
-            "FG3A": team_fact.three_pointers_attempted,
-            "FtPoints": team_fact.free_throws_made,
-            "FTA": team_fact.free_throws_attempted,
-            "OffRebounds": team_fact.offensive_rebounds,
-            "DefRebounds": team_fact.defensive_rebounds,
-            "Rebounds": team_fact.rebounds,
-            "Assists": team_fact.assists,
-            "Turnovers": team_fact.turnovers,
-            "Steals": team_fact.steals,
-            "Blocks": team_fact.blocks,
-            "Fouls": team_fact.personal_fouls,
+            **_fact_count_payload(team_fact),
         }
         if team_fact.possessions is not None:
             payload["Possessions"] = team_fact.possessions
@@ -548,23 +561,7 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
             "EntityId": str(player.player_id),
             "Name": player.player_name,
             "Minutes": _minutes_string(player.minutes),
-            "Points": player.points,
-            "FGM": player.field_goals_made,
-            "FGA": player.field_goals_attempted,
-            "FG2M": player.two_pointers_made,
-            "FG2A": player.two_pointers_attempted,
-            "FG3M": player.three_pointers_made,
-            "FG3A": player.three_pointers_attempted,
-            "FtPoints": player.free_throws_made,
-            "FTA": player.free_throws_attempted,
-            "OffRebounds": player.offensive_rebounds,
-            "DefRebounds": player.defensive_rebounds,
-            "Rebounds": player.rebounds,
-            "Assists": player.assists,
-            "Turnovers": player.turnovers,
-            "Steals": player.steals,
-            "Blocks": player.blocks,
-            "Fouls": player.personal_fouls,
+            **_fact_count_payload(player),
         }
         if player.possessions is not None:
             payload["Possessions"] = player.possessions
@@ -1239,6 +1236,21 @@ def _reconcile_raw_and_typed_evidence(
             )
 
 
+def _validate_team_summary_minutes(payload: Mapping[str, Any]) -> None:
+    """Validate team-summary minutes evidence without treating it as additive.
+
+    Minutes presence and accepted format are required on every archived row at
+    the repository boundary, including the team-summary rows.  Team minutes are
+    a provider team-summary field and are never compared against player
+    minutes or player totals.
+    """
+
+    raw = _raw_value(payload, "Minutes", "MIN", "minutes")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise LedgerValidationError("team-summary row is missing minutes evidence")
+    _minutes_value(raw, "team minutes")
+
+
 def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     """Validate the complete-game invariant at the domain boundary."""
 
@@ -1371,6 +1383,7 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             raise LedgerValidationError("raw evidence checksum does not match the payload")
         if row.row_type == "team":
             team_rows_by_side[row.side] += 1
+            _validate_team_summary_minutes(row.payload)
         else:
             if row.entity_id is None or row.entity_id in raw_player_rows:
                 raise LedgerValidationError("raw player evidence has an invalid entity identity")
@@ -1410,24 +1423,6 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
             raise LedgerValidationError(
                 "team_fact.team_minutes must reconcile with player minutes"
-            )
-        player_possessions = tuple(player.possessions for player in team_players)
-        expected_possessions = (
-            sum(value for value in player_possessions if value is not None)
-            if player_possessions and all(value is not None for value in player_possessions)
-            else None
-        )
-        # Team possessions may come from the provider team-summary row, which is
-        # the declared authority for team-game facts and may legitimately expose
-        # a value players do not carry.  Reconciliation applies only when the
-        # value was derived from the participating player set.
-        if (
-            team_fact.possessions is not None
-            and expected_possessions is not None
-            and team_fact.possessions != expected_possessions
-        ):
-            raise LedgerValidationError(
-                "team_fact.possessions must reconcile with player primitives"
             )
     if not isinstance(game.source_observation_id, str) or not game.source_observation_id.strip():
         raise LedgerValidationError("source_observation_id is required")

@@ -839,6 +839,23 @@ def _without_raw_field(game, predicate, field_name):
     return replace(game, raw_rows=tuple(rows)).with_checksum()
 
 
+def _replace_raw_field(game, predicate, field_name, value):
+    """Rewrite one provider field on matching archived rows and rechecksum."""
+    rows = []
+    for row in game.raw_rows:
+        if predicate(row):
+            payload = dict(row.payload)
+            payload[field_name] = value
+            row = replace(
+                row,
+                payload=payload,
+                checksum=canonical_row_checksum(payload),
+                observed_fields=tuple(sorted(payload)),
+            )
+        rows.append(row)
+    return replace(game, raw_rows=tuple(rows)).with_checksum()
+
+
 def test_typed_player_mismatch_rejects_at_repository_boundary(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'player_mismatch.sqlite3'}")
     run_migrations(engine)
@@ -969,6 +986,122 @@ def test_raw_player_row_missing_minutes_rejects_at_repository_boundary(tmp_path)
     with engine.connect() as connection:
         assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
         assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_team_possessions_are_authority_and_not_player_additive(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_possessions.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    game = replace(
+        game,
+        team_facts=(
+            replace(game.team_facts[0], possessions=97.5),
+            replace(game.team_facts[1], possessions=50.0),
+        ),
+        player_facts=tuple(
+            replace(player, possessions=30.0 if player.team_id == game.home_team_id else 24.0)
+            for player in game.player_facts
+        ),
+    )
+    game = replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum()
+
+    # Team possessions (97.5 Home / 50.0 Away) are team-summary authority and
+    # are deliberately NOT in ADDITIVE_EQUIVALENT_COUNT_FIELDS, so they may
+    # legitimately differ from summed player possessions (60.0 / 48.0).
+    result = repository.replace_game(game)
+    assert result.inserted
+    stored = repository.get_game(game.game_id)
+    home = next(fact for fact in stored.team_facts if fact.team_id == game.home_team_id)
+    assert home.possessions == 97.5
+    assert sum(
+        player.possessions or 0
+        for player in stored.player_facts
+        if player.team_id == game.home_team_id
+    ) == 60.0
+
+
+def test_team_summary_missing_minutes_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_missing_minutes.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _without_raw_field(
+        game,
+        lambda row: row.row_type == "team" and row.side == "Home",
+        "Minutes",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "team-summary row is missing minutes evidence" in str(error)
+    else:
+        raise AssertionError("team-summary evidence missing minutes unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_team_summary_null_minutes_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_null_minutes.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _replace_raw_field(
+        game,
+        lambda row: row.row_type == "team" and row.side == "Home",
+        "Minutes",
+        None,
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "team-summary row is missing minutes evidence" in str(error)
+    else:
+        raise AssertionError("team-summary evidence with null minutes unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_team_summary_malformed_minutes_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_malformed_minutes.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _replace_raw_field(
+        game,
+        lambda row: row.row_type == "team" and row.side == "Home",
+        "Minutes",
+        "not-a-time",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "minutes" in str(error)
+    else:
+        raise AssertionError("team-summary evidence with malformed minutes unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_team_summary_zero_minutes_remains_valid(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_zero_minutes.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    game = _replace_raw_field(
+        game,
+        lambda row: row.row_type == "team" and row.side == "Home",
+        "Minutes",
+        "00:00",
+    )
+
+    assert repository.replace_game(game).inserted
 
 
 def test_accepted_game_requires_raw_evidence(tmp_path):

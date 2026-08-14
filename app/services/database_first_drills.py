@@ -30,7 +30,7 @@ from app.models.collection_control import (
     PublicationPointer,
 )
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame
-from app.services.canonical_game_ledger import LedgerGameRow, raw_rows_from_facts
+from app.services.canonical_game_ledger import raw_rows_from_facts
 from app.services.collection_control import (
     CollectorClaims,
     CollectorTokenService,
@@ -66,18 +66,6 @@ DOMAIN_TABLES = frozenset({
     "player_diets",
     "team_matchups",
 })
-
-
-def _repair_raw_rows(game) -> tuple[LedgerGameRow, ...]:
-    """Build the raw FullGame evidence for a synthetic repair game.
-
-    A restored-and-repaired game is accepted like any other complete game, so
-    it carries the same immutable provider evidence: one team-summary row per
-    side plus every participating player row, each carrying the complete
-    required count vocabulary so the repository boundary accepts the repair.
-    """
-
-    return raw_rows_from_facts(game)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1304,9 +1292,8 @@ class FailureDrillRunner:
                 retrieved_at=now,
                 participant_ids_by_team=((1, (101,)), (2, (202,))),
             )
-            repair_raw_rows = _repair_raw_rows(repair_game)
             repair_game = replace(
-                repair_game, raw_rows=repair_raw_rows
+                repair_game, raw_rows=raw_rows_from_facts(repair_game)
             ).with_checksum()
             repair_checksum = game_checksum(repair_game)
 
