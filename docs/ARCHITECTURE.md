@@ -851,17 +851,32 @@ assist locations) null/unavailable.
 
 The declared typed authority is per row type. Player-game typed facts come from
 the provider player rows; team-game typed facts come from the provider
-team-summary row. Additive-equivalence checks apply only to the documented
-`ADDITIVE_EQUIVALENT_COUNT_FIELDS` set (every count primitive except rebounds):
-a team-summary value that disagrees with the participating-player sum rejects
-the complete game. Rebound fields are deliberately excluded because team
-rebounds (and their offensive/defensive partition) are a provider team-only
-concept no single player is credited with, so the team-summary rebound totals
-are authoritative and never compared against player sums. The legacy
-`team_results` envelope remains diagnostic only and must agree rather than
-overwrite the declared authority. The game identity row carries both the typed
-and raw checksums, so an operator can always prove that a stored typed game and
-its archived raw evidence came from the same observation.
+team-summary row. The team-summary row carries the same required non-derivable
+core count vocabulary (`REQUIRED_TEAM_COUNT_FIELDS`), and a missing or null
+required team-summary count rejects the whole candidate atomically rather than
+falling back to player sums. `FGM`/`FGA`/`Rebounds` are derived from the
+required team components and are not separately required. Additive-equivalence
+checks apply only to the documented `ADDITIVE_EQUIVALENT_COUNT_FIELDS` set
+(every count primitive except rebounds): a team-summary value that disagrees
+with the participating-player sum rejects the complete game. Rebound fields
+are deliberately excluded because team rebounds (and their offensive/defensive
+partition) are a provider team-only concept no single player is credited with,
+so the team-summary rebound totals are authoritative and never compared against
+player sums. The legacy `team_results` envelope remains diagnostic only and
+must agree rather than overwrite the declared authority.
+
+The repository boundary repeats these invariants for direct callers.
+`validate_complete_game` re-checks the required player/team count and minutes
+evidence on every archived row and then proves the stored typed version equals
+extraction from its authoritative raw rows: each typed player fact must equal
+extraction from its archived player row and each typed team fact must equal
+extraction from its team-summary row (with only the documented
+additive-equivalence as additional validation). A game whose typed facts
+disagree with its raw evidence, or whose raw rows are incomplete, is rejected
+atomically with no write, so a direct `replace_game` caller can never persist a
+mixed or incomplete raw/typed version. The game identity row carries both the
+typed and raw checksums, so an operator can always prove that a stored typed
+game and its archived raw evidence came from the same observation.
 
 `app.services.ledger_backfill.LedgerBackfillService` discovers final,
 non-postponed Regular Season Event Catalog games through an explicit cutoff,

@@ -21,10 +21,9 @@ from app.services.collection_control import PublicationService
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
-    LedgerGameRow,
     PlayerGameFact,
     TeamGameFact,
-    canonical_row_checksum,
+    raw_rows_from_facts,
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
@@ -38,29 +37,7 @@ from tests.services.test_canonical_game_ledger import _game
 
 
 def _raw_rows_for_game(game):
-    rows = []
-    for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
-        team_fact = next(fact for fact in game.team_facts if fact.team_id == team_id)
-        payload = {"EntityId": "0", "Name": "Team", "Points": team_fact.points}
-        rows.append(LedgerGameRow(
-            game_id=game.game_id, row_type="team", side=side, row_index=len(rows),
-            entity_id=None, entity_name=None, team_id=team_id, payload=payload,
-            checksum=canonical_row_checksum(payload), observed_fields=tuple(sorted(payload)),
-        ))
-    for player in game.player_facts:
-        side = "Home" if player.team_id == game.home_team_id else "Away"
-        payload = {
-            "EntityId": str(player.player_id),
-            "Name": player.player_name,
-            "Points": player.points,
-        }
-        rows.append(LedgerGameRow(
-            game_id=game.game_id, row_type="player", side=side, row_index=len(rows),
-            entity_id=player.player_id, entity_name=player.player_name,
-            team_id=player.team_id, payload=payload,
-            checksum=canonical_row_checksum(payload), observed_fields=tuple(sorted(payload)),
-        ))
-    return tuple(rows)
+    return raw_rows_from_facts(game)
 
 
 class _ParityReader:
@@ -356,8 +333,9 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'independent.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        replace(
+    games = []
+    for game in _league_games():
+        without_locations = replace(
             game,
             player_facts=tuple(
                 replace(
@@ -373,9 +351,11 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
                 for player in game.player_facts
             ),
             checksum=None,
-        ).with_checksum()
-        for game in _league_games()
-    )
+        )
+        games.append(
+            replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+        )
+    games = tuple(games)
     repository.replace_games_atomic(games)
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {

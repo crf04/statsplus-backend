@@ -14,7 +14,7 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
 from app.services.ledger_materialization import LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from tests.services.test_ledger_derivations import _league_games
@@ -114,8 +114,9 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     engine = create_engine(f"sqlite:///{tmp_path / 'jobs.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        replace(
+    games = []
+    for game in _league_games():
+        without_locations = replace(
             game,
             player_facts=tuple(replace(
                 player,
@@ -124,9 +125,11 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
                 short_mid_range_assists=None, long_mid_range_assists=None,
             ) for player in game.player_facts),
             checksum=None,
-        ).with_checksum()
-        for game in _league_games()
-    )
+        )
+        games.append(
+            replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+        )
+    games = tuple(games)
     repository.replace_games_atomic(games)
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     team_ids = frozenset(range(1, 31))

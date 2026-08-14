@@ -24,6 +24,8 @@ from app.services.canonical_game_ledger import (
     LedgerPublicationRecord,
     LedgerSchemaUnavailable,
     canonical_game_from_pbp,
+    canonical_row_checksum,
+    raw_rows_from_facts,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_derivations import derive_assist_location_facts
@@ -48,11 +50,11 @@ def _event() -> dict[str, object]:
 def _game():
     payload = json.loads("""{
       "stats": {"Home": {"FullGame": [
-        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "OffRebounds": 2, "DefRebounds": 1},
+        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "Points": 16, "FGM": 6, "FGA": 12, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 1, "Rebounds": 3, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2},
         {"EntityId": "101", "Name": "Home One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "102", "Name": "Home Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}, "Away": {"FullGame": [
-        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "OffRebounds": 3, "DefRebounds": 2},
+        {"EntityId": "0", "Name": "Team", "Minutes": "00:00", "Points": 16, "FGM": 6, "FGA": 12, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 3, "DefRebounds": 2, "Rebounds": 5, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2},
         {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
         {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}},
@@ -88,7 +90,8 @@ def test_complete_game_is_inserted_idempotently_and_correction_replaces_all_fact
         game,
         team_facts=(replace(game.team_facts[0], points=17), game.team_facts[1]),
         player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
-    ).with_checksum()
+    )
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
     correction = repository.replace_game(corrected)
 
     assert first.inserted and not first.replaced
@@ -126,7 +129,8 @@ def test_failed_batch_keeps_prior_game_and_does_not_leak_staged_correction(tmp_p
         game,
         team_facts=(replace(game.team_facts[0], points=18), game.team_facts[1]),
         player_facts=(replace(game.player_facts[0], points=10), *game.player_facts[1:]),
-    ).with_checksum()
+    )
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
     bad = replace(game, game_id="0022400002", player_facts=game.player_facts[:-1]).with_checksum()
 
     try:
@@ -159,7 +163,8 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
         game,
         team_facts=(replace(game.team_facts[0], points=17), game.team_facts[1]),
         player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
-    ).with_checksum()
+    )
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
 
     repository.replace_game(corrected)
 
@@ -179,8 +184,23 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "EntityId": "0",
                                 "Name": "Team",
                                 "Minutes": "00:00",
+                                "Points": 16,
+                                "FGM": 6,
+                                "FGA": 12,
+                                "FG2M": 4,
+                                "FG2A": 8,
+                                "FG3M": 2,
+                                "FG3A": 4,
+                                "FtPoints": 2,
+                                "FTA": 4,
                                 "OffRebounds": 2,
                                 "DefRebounds": 1,
+                                "Rebounds": 3,
+                                "Assists": 6,
+                                "Turnovers": 2,
+                                "Steals": 2,
+                                "Blocks": 0,
+                                "Fouls": 2,
                             },
                             {
                                 "EntityId": "101",
@@ -235,8 +255,23 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "EntityId": "0",
                                 "Name": "Team",
                                 "Minutes": "00:00",
+                                "Points": 16,
+                                "FGM": 6,
+                                "FGA": 12,
+                                "FG2M": 4,
+                                "FG2A": 8,
+                                "FG3M": 2,
+                                "FG3A": 4,
+                                "FtPoints": 2,
+                                "FTA": 4,
                                 "OffRebounds": 3,
                                 "DefRebounds": 2,
+                                "Rebounds": 5,
+                                "Assists": 6,
+                                "Turnovers": 2,
+                                "Steals": 2,
+                                "Blocks": 0,
+                                "Fouls": 2,
                             },
                             {
                                 "EntityId": "201",
@@ -495,11 +530,16 @@ def test_team_summary_row_is_team_fact_authority_with_team_rebounds(tmp_path):
         },
     )
     home_team_fact = next(fact for fact in game.team_facts if fact.team_id == 1610612747)
-    # The team-summary row's rebound partition (2 OREB / 0 DREB) is the
-    # declared authority; player sums include no team rebounds and may differ.
+    # Every typed team fact comes from the team-summary row: the rebound
+    # partition (2 OREB / 13 DREB) is the declared authority and includes team
+    # rebounds no player is credited with (player sums are 1 OREB / 11 DREB),
+    # while additive-equivalent facts (points, assists, ...) must equal player
+    # sums.  Possessions is read from the team-summary row.
     assert home_team_fact.offensive_rebounds == 2
-    assert home_team_fact.defensive_rebounds == 0
-    assert home_team_fact.rebounds == 2
+    assert home_team_fact.defensive_rebounds == 13
+    assert home_team_fact.rebounds == 15
+    assert home_team_fact.points == 40
+    assert home_team_fact.assists == 13
     assert home_team_fact.possessions == 95.5
 
 
@@ -538,6 +578,7 @@ def test_correction_atomically_replaces_raw_and_typed_evidence(tmp_path):
 
     corrected_payload = json.loads(json.dumps(payload))
     corrected_payload["stats"]["Home"]["FullGame"][1]["Points"] = 26
+    corrected_payload["stats"]["Home"]["FullGame"][0]["Points"] = 41
     corrected = canonical_game_from_pbp(
         corrected_payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -768,6 +809,7 @@ def test_explicit_zero_required_count_remains_valid(tmp_path):
     repository = CanonicalGameLedgerRepository(engine)
     payload = _raw_observation_with_unknown_fields()
     payload["stats"]["Home"]["FullGame"][1]["Fouls"] = 0
+    payload["stats"]["Home"]["FullGame"][0]["Fouls"] = 1
     game = canonical_game_from_pbp(
         payload,
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -779,6 +821,154 @@ def test_explicit_zero_required_count_remains_valid(tmp_path):
     leon = next(fact for fact in game.player_facts if fact.player_id == 2544)
     assert leon.personal_fouls == 0
     assert repository.replace_game(game).inserted
+
+
+def _without_raw_field(game, predicate, field_name):
+    """Remove one provider field from matching archived rows and rechecksum."""
+    rows = []
+    for row in game.raw_rows:
+        if predicate(row):
+            payload = {key: value for key, value in row.payload.items() if key != field_name}
+            row = replace(
+                row,
+                payload=payload,
+                checksum=canonical_row_checksum(payload),
+                observed_fields=tuple(sorted(payload)),
+            )
+        rows.append(row)
+    return replace(game, raw_rows=tuple(rows)).with_checksum()
+
+
+def test_typed_player_mismatch_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'player_mismatch.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    mismatch = replace(
+        game,
+        player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mismatch)
+    except LedgerValidationError as error:
+        assert "raw player evidence" in str(error)
+    else:
+        raise AssertionError("mixed raw/typed player evidence unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_typed_team_mismatch_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'team_mismatch.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    mismatch = replace(
+        game,
+        team_facts=(replace(game.team_facts[0], points=17), game.team_facts[1]),
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mismatch)
+    except LedgerValidationError as error:
+        assert "raw team-summary evidence" in str(error)
+    else:
+        raise AssertionError("mixed raw/typed team evidence unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_mismatched_correction_preserves_prior_raw_and_typed_version(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mixed_correction.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    repository.replace_game(game)
+    mismatch = replace(
+        game,
+        player_facts=(replace(game.player_facts[0], points=9), *game.player_facts[1:]),
+    ).with_checksum()
+
+    try:
+        repository.replace_game(mismatch)
+    except LedgerValidationError:
+        pass
+    else:
+        raise AssertionError("mixed raw/typed correction unexpectedly replaced the game")
+    stored = repository.get_game(game.game_id)
+    assert stored is not None
+    assert stored.player_facts[0].points == game.player_facts[0].points
+    assert stored.checksum == game.checksum
+    assert stored.raw_checksum == game.raw_checksum
+
+
+def test_raw_player_row_missing_required_count_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'raw_missing_player_count.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _without_raw_field(
+        game,
+        lambda row: row.row_type == "player" and row.entity_id == 101,
+        "Points",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "missing required Points count evidence" in str(error)
+    else:
+        raise AssertionError("raw player evidence missing a required count unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_raw_team_row_missing_required_count_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'raw_missing_team_count.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _without_raw_field(
+        game,
+        lambda row: row.row_type == "team" and row.side == "Home",
+        "Points",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "team-summary row is missing required Points count evidence" in str(error)
+    else:
+        raise AssertionError("raw team-summary evidence missing a required count unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
+
+
+def test_raw_player_row_missing_minutes_rejects_at_repository_boundary(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'raw_missing_minutes.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game = _game()
+    incomplete = _without_raw_field(
+        game,
+        lambda row: row.row_type == "player" and row.entity_id == 101,
+        "Minutes",
+    )
+
+    try:
+        repository.replace_game(incomplete)
+    except LedgerValidationError as error:
+        assert "minutes" in str(error)
+    else:
+        raise AssertionError("raw player evidence missing minutes unexpectedly published")
+    with engine.connect() as connection:
+        assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all() == []
 
 
 def test_accepted_game_requires_raw_evidence(tmp_path):

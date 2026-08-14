@@ -217,20 +217,10 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         season_type: str = "Regular Season",
     ) -> pd.DataFrame:
         """Fetch and validate one game's participating player observations."""
-        del season, season_type
-        params = {
-            "GameId": str(game_id),
-            "Type": "Player",
-        }
-        with self._request_game_logs(
-            "game_player_stats",
-            self.game_stats_url,
-            params,
-        ) as response:
-            return type(self).parse_game_stats(
-                _json_payload(response),
-                game_id=str(game_id),
-            )
+        return type(self).parse_game_stats(
+            self._request_game_stats(game_id, season, season_type),
+            game_id=str(game_id),
+        )
 
     def fetch_game_stats(
         self,
@@ -245,6 +235,20 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         and every participating player row, preserving unknown additive keys),
         so this seam returns the unprojected JSON payload instead of the
         game-log DataFrame that ``fetch_game_player_logs`` normalizes.
+        """
+        return self._request_game_stats(game_id, season, season_type)
+
+    def _request_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        season_type: str,
+    ) -> Any:
+        """Execute one instrumented ``/get-game-stats`` request.
+
+        Both game-stats public seams share this raw transport: the DataFrame
+        API parses the returned JSON document, while the ledger seam archives
+        it verbatim.
         """
         del season, season_type
         params = {

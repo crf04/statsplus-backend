@@ -30,7 +30,7 @@ from app.models.collection_control import (
     PublicationPointer,
 )
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame
-from app.services.canonical_game_ledger import LedgerGameRow, canonical_row_checksum
+from app.services.canonical_game_ledger import LedgerGameRow, raw_rows_from_facts
 from app.services.collection_control import (
     CollectorClaims,
     CollectorTokenService,
@@ -73,41 +73,11 @@ def _repair_raw_rows(game) -> tuple[LedgerGameRow, ...]:
 
     A restored-and-repaired game is accepted like any other complete game, so
     it carries the same immutable provider evidence: one team-summary row per
-    side plus every participating player row.
+    side plus every participating player row, each carrying the complete
+    required count vocabulary so the repository boundary accepts the repair.
     """
 
-    rows = []
-    for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
-        team_fact = next(fact for fact in game.team_facts if fact.team_id == team_id)
-        payload = {
-            "EntityId": "0",
-            "Name": "Team",
-            "Points": team_fact.points,
-            "OffRebounds": team_fact.offensive_rebounds,
-            "DefRebounds": team_fact.defensive_rebounds,
-            "Rebounds": team_fact.rebounds,
-        }
-        rows.append(LedgerGameRow(
-            game_id=game.game_id, row_type="team", side=side, row_index=len(rows),
-            entity_id=None, entity_name=None, team_id=team_id, payload=payload,
-            checksum=canonical_row_checksum(payload),
-            observed_fields=tuple(sorted(payload)),
-        ))
-    for player in game.player_facts:
-        side = "Home" if player.team_id == game.home_team_id else "Away"
-        payload = {
-            "EntityId": str(player.player_id),
-            "Name": player.player_name,
-            "Points": player.points,
-        }
-        rows.append(LedgerGameRow(
-            game_id=game.game_id, row_type="player", side=side, row_index=len(rows),
-            entity_id=player.player_id, entity_name=player.player_name,
-            team_id=player.team_id, payload=payload,
-            checksum=canonical_row_checksum(payload),
-            observed_fields=tuple(sorted(payload)),
-        ))
-    return tuple(rows)
+    return raw_rows_from_facts(game)
 
 
 @dataclass(frozen=True, slots=True)

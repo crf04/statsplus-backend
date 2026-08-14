@@ -36,7 +36,7 @@ from app.models.canonical_game_ledger import (
 from app.models.collection_control import CollectionManifest, CollectionObservation
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
 from app.services.nba_stats_adapter import validate_canonical_season
-from app.services.pbp_game_log_normalization import normalize_pbp_game_logs
+from app.services.pbp_game_log_normalization import normalize_pbp_game_logs, parse_pbp_minutes
 from app.utils.db import is_demo_database_url
 
 COUNT_FIELDS = (
@@ -314,6 +314,20 @@ def _integer(value: Any, field_name: str, *, nullable: bool = False) -> int | No
     return int(number)
 
 
+def _count_or_none(row: Mapping[str, Any], *names: str) -> int | None:
+    """Read an optional count, distinguishing an absent field from a zero.
+
+    The derived composites (``FGM``/``FGA``/``Rebounds``) are not required
+    evidence, so their absence must stay absent to let the documented
+    derivation apply; ``_integer`` collapses a missing value to zero.
+    """
+
+    raw = _raw_value(row, *names)
+    if raw is None:
+        return None
+    return _integer(raw, names[0])
+
+
 def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | None:
     if (value is None or (nullable and isinstance(value, float) and math.isnan(value))) and nullable:
         return None
@@ -326,6 +340,30 @@ def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | N
     if not math.isfinite(number) or number < 0:
         raise LedgerValidationError(f"{field_name} must be a finite non-negative number")
     return number
+
+
+def _minutes_value(value: Any, field_name: str) -> float:
+    """Read minutes evidence that the provider writes as ``MM:SS`` or numeric.
+
+    Minutes are never zero-filled: missing or malformed evidence is a
+    complete-game failure rather than an observed zero.
+    """
+
+    if isinstance(value, str):
+        try:
+            return parse_pbp_minutes(value)
+        except Exception as error:
+            raise LedgerValidationError(
+                f"{field_name} must be valid MM:SS minutes evidence"
+            ) from error
+    return _number(value, field_name)
+
+
+def _minutes_string(value: float) -> str:
+    """Format numeric minutes into the provider's ``MM:SS`` wire spelling."""
+
+    total_seconds = int(round(float(value) * 60))
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
 
 def _raw_value(row: Mapping[str, Any], *names: str) -> Any:
@@ -443,6 +481,112 @@ def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
     return _canonical_json_hash(payload)
 
 
+_PLAYER_ASSIST_ROW_KEYS = (
+    ("two_point_assists", "TwoPtAssists"),
+    ("three_point_assists", "ThreePtAssists"),
+    ("arc3_assists", "Arc3Assists"),
+    ("corner3_assists", "Corner3Assists"),
+    ("at_rim_assists", "AtRimAssists"),
+    ("short_mid_range_assists", "ShortMidRangeAssists"),
+    ("long_mid_range_assists", "LongMidRangeAssists"),
+)
+
+
+def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
+    """Build coherent raw FullGame evidence from retained typed facts.
+
+    Synthetic repaired games and test corrections reuse this helper so the
+    archived raw rows always extract back to exactly the typed facts they
+    describe; the repository boundary then accepts them like any accepted
+    observation.  Optional fields are emitted only when the typed fact carries
+    a value, so an absent assist-location observation stays absent.
+    """
+
+    rows: list[LedgerGameRow] = []
+    team_facts_by_id = {fact.team_id: fact for fact in game.team_facts}
+    for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
+        team_fact = team_facts_by_id[team_id]
+        payload: dict[str, Any] = {
+            "EntityId": "0",
+            "Name": "Team",
+            "Minutes": "00:00",
+            "Points": team_fact.points,
+            "FGM": team_fact.field_goals_made,
+            "FGA": team_fact.field_goals_attempted,
+            "FG2M": team_fact.two_pointers_made,
+            "FG2A": team_fact.two_pointers_attempted,
+            "FG3M": team_fact.three_pointers_made,
+            "FG3A": team_fact.three_pointers_attempted,
+            "FtPoints": team_fact.free_throws_made,
+            "FTA": team_fact.free_throws_attempted,
+            "OffRebounds": team_fact.offensive_rebounds,
+            "DefRebounds": team_fact.defensive_rebounds,
+            "Rebounds": team_fact.rebounds,
+            "Assists": team_fact.assists,
+            "Turnovers": team_fact.turnovers,
+            "Steals": team_fact.steals,
+            "Blocks": team_fact.blocks,
+            "Fouls": team_fact.personal_fouls,
+        }
+        if team_fact.possessions is not None:
+            payload["Possessions"] = team_fact.possessions
+        rows.append(LedgerGameRow(
+            game_id=game.game_id,
+            row_type="team",
+            side=side,
+            row_index=len(rows),
+            entity_id=None,
+            entity_name=None,
+            team_id=team_id,
+            payload=payload,
+            checksum=canonical_row_checksum(payload),
+            observed_fields=tuple(sorted(payload)),
+        ))
+    for player in game.player_facts:
+        side = "Home" if player.team_id == game.home_team_id else "Away"
+        payload = {
+            "EntityId": str(player.player_id),
+            "Name": player.player_name,
+            "Minutes": _minutes_string(player.minutes),
+            "Points": player.points,
+            "FGM": player.field_goals_made,
+            "FGA": player.field_goals_attempted,
+            "FG2M": player.two_pointers_made,
+            "FG2A": player.two_pointers_attempted,
+            "FG3M": player.three_pointers_made,
+            "FG3A": player.three_pointers_attempted,
+            "FtPoints": player.free_throws_made,
+            "FTA": player.free_throws_attempted,
+            "OffRebounds": player.offensive_rebounds,
+            "DefRebounds": player.defensive_rebounds,
+            "Rebounds": player.rebounds,
+            "Assists": player.assists,
+            "Turnovers": player.turnovers,
+            "Steals": player.steals,
+            "Blocks": player.blocks,
+            "Fouls": player.personal_fouls,
+        }
+        if player.possessions is not None:
+            payload["Possessions"] = player.possessions
+        for field_name, key in _PLAYER_ASSIST_ROW_KEYS:
+            value = getattr(player, field_name)
+            if value is not None:
+                payload[key] = value
+        rows.append(LedgerGameRow(
+            game_id=game.game_id,
+            row_type="player",
+            side=side,
+            row_index=len(rows),
+            entity_id=player.player_id,
+            entity_name=player.player_name,
+            team_id=player.team_id,
+            payload=payload,
+            checksum=canonical_row_checksum(payload),
+            observed_fields=tuple(sorted(payload)),
+        ))
+    return tuple(rows)
+
+
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
     """Retain provider fields that the legacy adapter intentionally projects away.
 
@@ -539,15 +683,15 @@ def _player_fact_from_row(
     two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A")
     three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
     three_att = _integer(_raw_value(row, "FG3A", "three_pointers_attempted"), "FG3A")
-    fgm = _integer(_raw_value(row, "FGM", "field_goals_made"), "FGM")
-    fga = _integer(_raw_value(row, "FGA", "field_goals_attempted"), "FGA")
+    fgm = _count_or_none(row, "FGM", "field_goals_made")
+    fga = _count_or_none(row, "FGA", "field_goals_attempted")
     fgm = two_made + three_made if fgm is None else fgm
     fga = two_att + three_att if fga is None else fga
     ftm = _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM")
     fta = _integer(_raw_value(row, "FTA", "free_throws_attempted"), "FTA")
     oreb = _integer(_raw_value(row, "OffRebounds", "OREB", "offensive_rebounds"), "OREB")
     dreb = _integer(_raw_value(row, "DefRebounds", "DREB", "defensive_rebounds"), "DREB")
-    reb = _integer(_raw_value(row, "Rebounds", "REB", "rebounds"), "REB")
+    reb = _count_or_none(row, "Rebounds", "REB", "rebounds")
     if reb is None:
         reb = oreb + dreb
     return PlayerGameFact(
@@ -555,7 +699,7 @@ def _player_fact_from_row(
         player_name=_required_text(_raw_value(row, "Name", "PLAYER_NAME", "player_name"), "player_name"),
         team_id=team_id,
         team_tricode=team_tricode,
-        minutes=_number(_raw_value(row, "MIN", "Minutes", "minutes"), "minutes") or 0.0,
+        minutes=_minutes_value(_raw_value(row, "MIN", "Minutes", "minutes"), "minutes") or 0.0,
         points=_integer(_raw_value(row, "Points", "PTS", "points"), "points"),
         field_goals_made=fgm,
         field_goals_attempted=fga,
@@ -603,7 +747,17 @@ _TEAM_ROW_ALIASES = {
     "blocks": ("Blocks", "BLK", "blocks"),
     "personal_fouls": ("Fouls", "PF", "personal_fouls"),
 }
-_TEAM_ROW_REBOUND_FIELDS = ("offensive_rebounds", "defensive_rebounds", "rebounds")
+#: Required team-summary count evidence on the raw FullGame wire.  The
+#: team-summary row is the mandatory authority for every typed team-game fact,
+#: so the same non-derivable core box-score vocabulary a player row must carry
+#: is also required here.  A missing or null value rejects the whole candidate
+#: game atomically; an explicit numeric zero remains valid.  ``FGM``/``FGA``/
+#: ``Rebounds`` are derived from the required components and are not separately
+#: required, matching the player-row vocabulary.
+REQUIRED_TEAM_COUNT_FIELDS = {
+    field_name: _TEAM_ROW_ALIASES[field_name]
+    for field_name in REQUIRED_PLAYER_COUNT_FIELDS
+}
 
 
 def _sum_team_facts(
@@ -621,15 +775,16 @@ def _sum_team_facts(
     """Build the team-game fact set from its declared row authority.
 
     The provider team-summary row (``EntityId == 0``) is the authority for
-    team-game facts; player rows are the authority for player-game facts.
-    Additive-equivalence checks apply only where semantic equality is valid.
+    every typed team-game fact: values are read from that row and never fall
+    back to player sums.  Player sums are used only as the documented
+    additive-equivalence validation on ``ADDITIVE_EQUIVALENT_COUNT_FIELDS``.
     Rebounds are a documented team-only concept: the team-summary row may
     include team rebounds no single player is credited with, so no additive
     equality is required there.  ``provider_total`` (the ``team_results``
-    envelope) is diagnostic only and never overwrites the declared authority.
-    ``require_team_row`` is set for accepted raw observations: a complete game
-    may never fall back to player sums for a side that lacks its team-summary
-    row authority.
+    envelope) is diagnostic only and must agree rather than overwrite the
+    declared authority.  ``require_team_row`` is set for accepted raw
+    observations: a complete game may never fall back to player sums for a
+    side that lacks its team-summary row authority.
     """
 
     if require_team_row and team_row is None:
@@ -637,36 +792,45 @@ def _sum_team_facts(
             "accepted PBP evidence requires a team-summary row for every governed side"
         )
     total = provider_total or {}
-    values = {
+    player_sums = {
         field_name: sum(getattr(player, field_name) for player in players)
         for field_name in COUNT_FIELDS
         if field_name != "rebounds"
     }
-    values["rebounds"] = sum(player.rebounds for player in players)
-    if team_row is not None:
-        rebound_evidence = any(
-            _raw_value(team_row, *_TEAM_ROW_ALIASES[field_name]) is not None
-            for field_name in _TEAM_ROW_REBOUND_FIELDS
-        )
+    player_sums["rebounds"] = sum(player.rebounds for player in players)
+    if team_row is None:
+        # Legacy projected-data seam (no team-summary row is available).
+        values: dict[str, int] = dict(player_sums)
+    else:
+        values = {}
         for field_name, names in _TEAM_ROW_ALIASES.items():
             raw = _raw_value(team_row, *names)
+            if field_name in REQUIRED_TEAM_COUNT_FIELDS and raw is None:
+                raise LedgerValidationError(
+                    f"team-summary row is missing required {names[0]} count evidence"
+                )
             if raw is None:
                 continue
-            authoritative = _integer(raw, field_name) or 0
+            authoritative = _integer(raw, field_name)
             if field_name in ADDITIVE_EQUIVALENT_COUNT_FIELDS:
-                if authoritative != values[field_name]:
+                if authoritative != player_sums[field_name]:
                     raise LedgerValidationError(
                         f"PBP team-summary {field_name} does not reconcile with player facts"
                     )
                 values[field_name] = authoritative
-            elif rebound_evidence:
+            else:
+                # Rebound fields are the declared team-only authority and are
+                # never compared against player sums.
                 values[field_name] = authoritative
-        if rebound_evidence:
-            values["rebounds"] = (
-                values["offensive_rebounds"] + values["defensive_rebounds"]
-                if _raw_value(team_row, *_TEAM_ROW_ALIASES["rebounds"]) is None
-                else values["rebounds"]
-            )
+        # Documented composites are derived from the required components when
+        # the team-summary row does not publish them explicitly.
+        for derived, left, right in (
+            ("field_goals_made", "two_pointers_made", "three_pointers_made"),
+            ("field_goals_attempted", "two_pointers_attempted", "three_pointers_attempted"),
+            ("rebounds", "offensive_rebounds", "defensive_rebounds"),
+        ):
+            if derived not in values:
+                values[derived] = values[left] + values[right]
     # Team-results payloads are diagnostic only.  Canonical facts come from
     # the declared authority; an explicitly published provider total must
     # agree rather than overwriting it.
@@ -676,15 +840,16 @@ def _sum_team_facts(
             diagnostic = _integer(raw, field_name) or 0
             if diagnostic != values[field_name]:
                 raise LedgerValidationError(
-                    f"PBP team aggregate {field_name} does not reconcile with player facts"
+                    f"PBP team aggregate {field_name} does not reconcile with the declared authority"
                 )
+    # Possessions is an optional team-summary row value like any other typed
+    # team fact: it is never sourced from the diagnostic team_results envelope,
+    # so the persisted fact always equals extraction from the raw row.
     possession_value = (
         _raw_value(team_row, "Possessions", "possessions")
         if team_row is not None
         else None
     )
-    if possession_value is None:
-        possession_value = _raw_value(total, "Possessions", "possessions")
     return TeamGameFact(
         team_id=team_id,
         team_tricode=team_tricode,
@@ -1016,6 +1181,64 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             raise LedgerValidationError(f"{label}.possessions must be finite and non-negative")
 
 
+def _reconcile_raw_and_typed_evidence(
+    game: CanonicalGame,
+    players_by_team: Mapping[int, Sequence[PlayerGameFact]],
+) -> None:
+    """Prove every stored typed fact equals extraction from its raw authority.
+
+    The archived raw rows are the single source of truth: each typed player
+    fact must equal extraction from its archived player row and each typed
+    team fact must equal extraction from its team-summary row (with only the
+    documented additive-equivalence against participating-player sums as
+    additional validation).  This also enforces the required player/team count
+    and minutes evidence at the repository boundary, so a direct
+    ``replace_game`` caller can never persist an incomplete or mixed raw/typed
+    version.
+    """
+
+    tricode_by_team = {
+        game.home_team_id: game.home_team_tricode,
+        game.away_team_id: game.away_team_tricode,
+    }
+    raw_player_facts: dict[tuple[int, int], PlayerGameFact] = {}
+    raw_team_rows: dict[int, LedgerGameRow] = {}
+    for row in game.raw_rows:
+        if row.row_type == "team":
+            raw_team_rows[row.team_id] = row
+            continue
+        raw_player_facts[(row.team_id, row.entity_id or 0)] = _player_fact_from_row(
+            row.payload,
+            team_id=row.team_id,
+            team_tricode=tricode_by_team[row.team_id],
+        )
+    typed_player_facts = {
+        (fact.team_id, fact.player_id): fact for fact in game.player_facts
+    }
+    if set(raw_player_facts) != set(typed_player_facts):
+        raise LedgerValidationError("typed player facts must match raw player evidence")
+    for key, extracted in raw_player_facts.items():
+        if extracted != typed_player_facts[key]:
+            raise LedgerValidationError("typed player facts must match raw player evidence")
+    team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+    for team_id, row in raw_team_rows.items():
+        team_fact = team_facts_by_team[team_id]
+        extracted = _sum_team_facts(
+            team_id,
+            team_fact.team_tricode,
+            team_fact.opponent_team_id,
+            team_fact.opponent_team_tricode,
+            team_fact.is_home,
+            players_by_team[team_id],
+            row.payload,
+            require_team_row=True,
+        )
+        if extracted != team_fact:
+            raise LedgerValidationError(
+                "typed team facts must match raw team-summary evidence"
+            )
+
+
 def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     """Validate the complete-game invariant at the domain boundary."""
 
@@ -1170,6 +1393,7 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
     }
+    _reconcile_raw_and_typed_evidence(game, players_by_team)
     for team_fact in game.team_facts:
         team_players = players_by_team[team_fact.team_id]
         # Rebounds are excluded: the provider team-summary row may legitimately
@@ -1697,6 +1921,7 @@ __all__ = [
     "COUNT_FIELDS",
     "LEDGER_SCHEMA_VERSION",
     "REQUIRED_PLAYER_COUNT_FIELDS",
+    "REQUIRED_TEAM_COUNT_FIELDS",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",
     "LedgerBackfillProgress",
@@ -1712,5 +1937,6 @@ __all__ = [
     "canonical_row_checksum",
     "game_checksum",
     "raw_checksum",
+    "raw_rows_from_facts",
     "validate_complete_game",
 ]

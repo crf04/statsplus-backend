@@ -6,8 +6,23 @@
           "EntityId": "0",
           "Name": "Team",
           "Minutes": "00:00",
+          "Points": 40,
+          "FGM": 15,
+          "FGA": 32,
+          "FG2M": 10,
+          "FG2A": 20,
+          "FG3M": 5,
+          "FG3A": 12,
+          "FtPoints": 5,
+          "FTA": 6,
           "OffRebounds": 2,
-          "DefRebounds": 0
+          "DefRebounds": 13,
+          "Rebounds": 15,
+          "Assists": 13,
+          "Turnovers": 4,
+          "Steals": 3,
+          "Blocks": 1,
+          "Fouls": 3
         },
         {
           "EntityId": "2544",
@@ -75,8 +90,23 @@
           "EntityId": "0",
           "Name": "Team",
           "Minutes": "00:00",
+          "Points": 25,
+          "FGM": 9,
+          "FGA": 19,
+          "FG2M": 7,
+          "FG2A": 13,
+          "FG3M": 2,
+          "FG3A": 6,
+          "FtPoints": 5,
+          "FTA": 6,
           "OffRebounds": 4,
-          "DefRebounds": 1
+          "DefRebounds": 10,
+          "Rebounds": 14,
+          "Assists": 3,
+          "Turnovers": 4,
+          "Steals": 1,
+          "Blocks": 3,
+          "Fouls": 2
         },
         {
           "EntityId": "201935",
@@ -115,14 +145,14 @@
       "FullGame": {
         "TeamId": "1610612747",
         "Name": "LAL",
-        "Points": 112
+        "Points": 40
       }
     },
     "Away": {
       "FullGame": {
         "TeamId": "1610612759",
         "Name": "SAS",
-        "Points": 105
+        "Points": 25
       }
     }
   },
