@@ -228,7 +228,12 @@ class LedgerRuntime:
             for row in jobs
         }, key=lambda item: (item[0], item[1] or ""))
         completed = 0
-        for cutoff, manifest_id in slices:
+        for stored_cutoff, manifest_id in slices:
+            cutoff = (
+                stored_cutoff.replace(tzinfo=timezone.utc)
+                if stored_cutoff.tzinfo is None
+                else stored_cutoff
+            )
             governance = self.governance.read_for_composition(
                 season,
                 cutoff,
@@ -243,6 +248,7 @@ class LedgerRuntime:
                 games,
                 season=season,
                 as_of=cutoff.date(),
+                cutoff=cutoff,
                 expected_game_ids=governance.expected_game_ids,
                 expected_l15_game_ids=governance.expected_l15_game_ids,
                 team_ids=governance.team_ids,
@@ -261,7 +267,8 @@ class LedgerRuntime:
             with self.repository.engine.begin() as connection:
                 for job in (
                     row for row in jobs
-                    if row["cutoff"] == cutoff and row["manifest_id"] == manifest_id
+                    if row["cutoff"] == stored_cutoff
+                    and row["manifest_id"] == manifest_id
                 ):
                     success = job["stream_key"] in succeeded
                     connection.execute(update(table).where(

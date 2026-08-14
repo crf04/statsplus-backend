@@ -81,6 +81,7 @@ class LedgerMaterializationService:
         *,
         season: str,
         as_of: date,
+        cutoff: datetime | None = None,
         expected_game_ids: frozenset[str] | None = None,
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None = None,
         team_ids: frozenset[int] | None = None,
@@ -224,7 +225,13 @@ class LedgerMaterializationService:
             for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
         self.repository.publish_metadata_batch(publications)
-        cutoff = datetime.combine(as_of, datetime.min.time(), timezone.utc)
+        publication_cutoff = cutoff or datetime.combine(
+            as_of, datetime.min.time(), timezone.utc
+        )
+        if publication_cutoff.tzinfo is None or publication_cutoff.date() != as_of:
+            raise LedgerMaterializationUnavailable(
+                "publication cutoff must be aware and match the materialization date"
+            )
         if self.publication_service is not None:
             provenance = {
                 game.source_observation_id: game.game_id
@@ -246,7 +253,7 @@ class LedgerMaterializationService:
                 candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                     stream_key,
                     season=canonical_season,
-                    cutoff=cutoff,
+                    cutoff=publication_cutoff,
                     payload=json.loads(_payload_json(payload)),
                     provenance=provenance,
                 )
@@ -304,7 +311,7 @@ class LedgerMaterializationService:
                         )
                 self.parity_repository.record(
                     candidate_key,
-                    cutoff=cutoff,
+                    cutoff=publication_cutoff,
                     report=report,
                     publication_id=candidate.publication_id,
                     payload_checksum=candidate.checksum,

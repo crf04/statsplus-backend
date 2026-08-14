@@ -128,7 +128,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
         for game in _league_games()
     )
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -157,19 +157,29 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
         def read(self, stream_key):
             return ()
 
+    materialization = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=Parity(),
+    )
+    captured = {}
+    real_compose = materialization.compose
+
+    def capture_compose(*args, **kwargs):
+        captured.update(kwargs)
+        return real_compose(*args, **kwargs)
+
+    materialization.compose = capture_compose
     runtime = LedgerRuntime(
         backfill=None,
         repository=repository,
-        materialization=LedgerMaterializationService(
-            repository,
-            parity_repository=LedgerParityArtifactRepository(engine),
-            parity_reader=Parity(),
-        ),
+        materialization=materialization,
         governance=Governance(),
         clock=lambda: cutoff,
     )
 
     assert runtime.compose_queued("2025-26") == 4
+    assert captured["cutoff"] == cutoff
     with engine.connect() as connection:
         jobs = {
             row["stream_key"]: row
