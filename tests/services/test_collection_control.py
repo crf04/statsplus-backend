@@ -24,9 +24,9 @@ from app.models.collection_control import (
     PublicationStream,
     ReconciliationItem,
 )
-from app.models.event_catalog import EventCatalogEntry
-from app.models.athlete_catalog import AthleteCatalog
-from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
+from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -1285,6 +1285,54 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
         assert removed == "Tombstone"
 
 
+def test_complete_governed_catalogs_advance_canonical_freshness_sidecars(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        event_request.request_id,
+        _catalog_payload("event"),
+        version="event",
+    ).complete
+
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete",
+    ).complete
+
+    with control_db.connect() as connection:
+        event = connection.execute(
+            select(
+                EventCatalogRefresh.last_success_at,
+                EventCatalogRefresh.event_count,
+            ).where(
+                EventCatalogRefresh.season == "2025-26"
+            )
+        ).one()
+        athlete = connection.execute(
+            select(
+                AthleteCatalogFreshness.last_success_at,
+                AthleteCatalogFreshness.last_success_row_count,
+            ).where(
+                AthleteCatalogFreshness.season == "2025-26"
+            )
+        ).one()
+
+    assert event.last_success_at.replace(tzinfo=UTC) == now
+    assert event.event_count == 15
+    assert athlete.last_success_at.replace(tzinfo=UTC) == now
+    assert athlete.last_success_row_count == 1
+
+
 def test_catalog_reconciliation_is_idempotent_for_roster_changes(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
@@ -1415,6 +1463,37 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     # The same accepted evidence backs every retained slice, so it remains
     # protected even after the oldest rendered publication is pruned.
     assert operations.gc_observations(now=now, retention_days=30) == 0
+
+
+def test_gc_exempts_durable_ledger_observation_evidence_and_prunes_unrelated(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    old = now - timedelta(days=60)
+    with control_db.begin() as connection:
+        for observation_id in ("ledger-protected-1", "ledger-protected-2", "unrelated-1"):
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=f"client:{observation_id}",
+                collector_id="collector", manifest_id="manifest", environment="server",
+                provider="pbp", observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": "0022400001", "surface": "canonical_game_ledger"}),
+                season="2024-25", cutoff=now, schema_version=1, checksum="c" * 64,
+                payload=json.dumps({"rows": []}), payload_bytes=2,
+                retrieved_at=now, accepted_at=old,
+            ))
+        connection.execute(LedgerObservationEvidence.__table__.insert().values(
+            observation_id="ledger-protected-1", game_id="0022400001", created_at=old,
+        ))
+        connection.execute(LedgerObservationEvidence.__table__.insert().values(
+            observation_id="ledger-protected-2", game_id="0022400001", created_at=old,
+        ))
+    operations = CollectionOperationsService(control_db, clock=lambda: now)
+
+    assert operations.gc_observations(now=now, retention_days=30) == 1
+    with control_db.connect() as connection:
+        remaining = set(
+            connection.execute(select(CollectionObservation.observation_id)).scalars()
+        )
+    assert remaining == {"ledger-protected-1", "ledger-protected-2"}
 
 
 def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_history(control_db):

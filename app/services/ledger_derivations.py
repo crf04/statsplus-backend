@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -99,6 +101,8 @@ class TeamWindowMetric:
     league_average: Mapping[str, float]
     population_sigma: Mapping[str, float]
     competition_rank: Mapping[str, int]
+    counts: Mapping[str, float] = ()
+    team_minutes: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +128,7 @@ class AssistLocationWindowMetric:
     league_average: Mapping[str, float]
     population_sigma: Mapping[str, float]
     competition_rank: Mapping[str, int]
+    team_minutes: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +168,55 @@ ASSIST_METRICS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
+#: The opponent total-assist primitive that feeds the Matchups ``Assists``
+#: surface stat on top of the location counters in ``ASSIST_METRICS``.  It is
+#: the opponent typed team fact, which includes the team-only residual (an
+#: assist credited to no player) that the player rows cannot carry.
+ASSIST_TOTAL_METRIC = "assists"
+#: The full per-team derived surface: every location counter plus the
+#: residual-inclusive opponent total that carries into per48, league averages,
+#: sigma, and competition ranks.
+ASSIST_DERIVED_METRICS = (*ASSIST_METRICS, ASSIST_TOTAL_METRIC)
+#: The four contracted NBA-traditional opponent surfaces and the ledger team
+#: metric that supplies each count.  ``materialize_team_window`` aggregates the
+#: opposing team fact's metric; the Matchups surface stores the same raw count.
+MATCHUP_TRADITIONAL_KEYS = {
+    "OPP_REB": "rebounds",
+    "OPP_TOV": "turnovers",
+    "OPP_STL": "steals",
+    "OPP_BLK": "blocks",
+}
+#: The contracted PBP assist surfaces and the ledger player count that supplies
+#: each.  ``Assists`` is the opponent total; every location key is one of the
+#: governed location counters.
+MATCHUP_ASSIST_KEYS = {
+    "Assists": ASSIST_TOTAL_METRIC,
+    "Arc3Assists": "arc3_assists",
+    "Corner3Assists": "corner3_assists",
+    "AtRimAssists": "at_rim_assists",
+    "ShortMidRangeAssists": "short_mid_range_assists",
+    "LongMidRangeAssists": "long_mid_range_assists",
+}
+
+
+def window_ledger_checksum(
+    game_ids: Iterable[str],
+    game_checksums: Mapping[str, str],
+) -> str:
+    """Return a deterministic SHA-256 over an exact governed game selection.
+
+    The checksum covers only the selected game IDs with each game's stored
+    ledger checksum, so two windows with the same games and facts are stable
+    across replays while any selected-game change alters the checksum.
+    """
+
+    ordered = tuple(
+        (str(game_id), str(game_checksums[game_id]))
+        for game_id in sorted(set(game_ids))
+    )
+    return hashlib.sha256(
+        json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _regular_games(games: Iterable[CanonicalGame], *, cutoff: date | None = None) -> tuple[CanonicalGame, ...]:
@@ -412,6 +466,8 @@ def materialize_team_window(
         )
     game_by_id = {game.game_id: game for game in supplied}
     raw_by_team: dict[int, dict[str, float]] = {}
+    counts_by_team: dict[int, dict[str, float]] = {}
+    minutes_by_team: dict[int, float] = {}
     team_codes: dict[int, str] = {}
     for team_id, game_ids in ids_by_team.items():
         totals = {metric: 0.0 for metric in TEAM_METRICS}
@@ -427,6 +483,8 @@ def materialize_team_window(
             team_minutes += defense.team_minutes
             for metric in TEAM_METRICS:
                 totals[metric] += float(getattr(opponent, metric))
+        counts_by_team[team_id] = totals
+        minutes_by_team[team_id] = team_minutes
         # FullGame stores the effective team-game minute denominator (the
         # player-minute total divided by five).  A regulation game is 48
         # minutes; overtime is normalized by its actual retained denominator.
@@ -465,6 +523,8 @@ def materialize_team_window(
             league_average=averages,
             population_sigma=sigma,
             competition_rank={metric: ranks[metric][team_id] for metric in TEAM_METRICS},
+            counts=counts_by_team[team_id],
+            team_minutes=minutes_by_team[team_id],
         )
         for team_id in sorted(raw_by_team)
     )
@@ -516,14 +576,25 @@ def materialize_assist_location_window(
     game_by_id = {game.game_id: game for game in supplied}
     counts_by_team: dict[int, dict[str, int]] = {}
     values_by_team: dict[int, dict[str, float]] = {}
+    minutes_by_team: dict[int, float] = {}
     for team in base.teams:
         counts = {metric: 0 for metric in ASSIST_METRICS}
+        counts[ASSIST_TOTAL_METRIC] = 0
         denominator = 0.0
         for game_id in team.game_ids:
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
             denominator += defense.team_minutes
             opponent_id = defense.opponent_team_id
+            opponent = next(
+                fact for fact in game.team_facts if fact.team_id == opponent_id
+            )
+            # The opponent total is the typed team fact: it includes the
+            # team-only residual (e.g. a dead-ball assist credited to no
+            # player) that the player rows cannot carry.  The location
+            # breakdown below stays player-sourced, so a location observation
+            # never has to explain the residual.
+            counts[ASSIST_TOTAL_METRIC] += opponent.assists
             for player in game.player_facts:
                 if player.team_id != opponent_id:
                     continue
@@ -539,27 +610,28 @@ def materialize_assist_location_window(
                 "assist-location materialization requires positive team minutes"
             )
         counts_by_team[team.team_id] = counts
+        minutes_by_team[team.team_id] = denominator
         values_by_team[team.team_id] = {
             metric: counts[metric] * 48.0 / denominator
-            for metric in ASSIST_METRICS
+            for metric in ASSIST_DERIVED_METRICS
         }
     averages = {
         metric: sum(values[metric] for values in values_by_team.values()) / len(values_by_team)
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     sigma = {
         metric: math.sqrt(
             sum((values[metric] - averages[metric]) ** 2 for values in values_by_team.values())
             / len(values_by_team)
         )
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     ranks = {
         metric: competition_ranks(
             {team_id: values[metric] for team_id, values in values_by_team.items()},
             descending=False,
         )
-        for metric in ASSIST_METRICS
+        for metric in ASSIST_DERIVED_METRICS
     }
     base_by_team = {team.team_id: team for team in base.teams}
     teams = tuple(
@@ -572,7 +644,8 @@ def materialize_assist_location_window(
             per48=values_by_team[team_id],
             league_average=averages,
             population_sigma=sigma,
-            competition_rank={metric: ranks[metric][team_id] for metric in ASSIST_METRICS},
+            competition_rank={metric: ranks[metric][team_id] for metric in ASSIST_DERIVED_METRICS},
+            team_minutes=minutes_by_team[team_id],
         )
         for team_id in sorted(values_by_team)
     )
@@ -589,6 +662,11 @@ def materialize_assist_location_window(
 
 
 __all__ = [
+    "ASSIST_DERIVED_METRICS",
+    "ASSIST_METRICS",
+    "ASSIST_TOTAL_METRIC",
+    "MATCHUP_ASSIST_KEYS",
+    "MATCHUP_TRADITIONAL_KEYS",
     "TEAM_METRICS",
     "AssistLocationFact",
     "AssistLocationWindowMaterialization",
@@ -602,6 +680,7 @@ __all__ = [
     "derive_assist_location_facts",
     "derive_player_per36_facts",
     "derive_traditional_opponent_facts",
-    "materialize_team_window",
     "materialize_assist_location_window",
+    "materialize_team_window",
+    "window_ledger_checksum",
 ]

@@ -243,8 +243,9 @@ def test_recorded_pbp_game_stats_parse_exclude_team_summary_and_attach_identity(
     assert frame.loc[2, "Team"] == "SAS"
     assert frame.loc[2, "Opponent"] == "LAL"
     assert frame.loc[2, "Points"] == 25
-    assert frame.loc[0, "TwoPtAssists"] == 2
-    assert frame.loc[0, "LongMidRangeAssists"] == 0
+    assert frame.loc[0, "TwoPtAssists"] == 5
+    assert frame.loc[0, "LongMidRangeAssists"] == 1
+    assert pd.isna(frame.loc[1, "LongMidRangeAssists"])
     assert "FullGame" not in frame.columns
 
 

@@ -9,6 +9,90 @@ from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
 
 
+def test_hosted_refresh_never_constructs_or_calls_nba_stats(monkeypatch):
+    calls = []
+    settings = SimpleNamespace(
+        nba=SimpleNamespace(current_season="2025-26"),
+        catalog=SimpleNamespace(
+            player_game_log_max_age_hours=30,
+            player_game_log_min_active_players_per_team_game=5,
+            player_game_log_reconciliation_days=3,
+        ),
+    )
+
+    class FakeEngine:
+        def dispose(self):
+            calls.append("dispose")
+
+    engine = FakeEngine()
+    player_log_repository = object()
+    event_service = object()
+    athlete_service = object()
+    pbp_log_provider = object()
+
+    monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(nightly_refresh, "create_engine", lambda url: engine)
+    monkeypatch.setattr(nightly_refresh, "_normalize_database_url", lambda url: url)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "run_migrations",
+        lambda actual_engine: calls.append("migrations"),
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "NBAStatsAdapter",
+        lambda **kwargs: pytest.fail("hosted refresh constructed NBA Stats"),
+    )
+    monkeypatch.setattr(
+        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "EventCatalogService",
+        lambda actual_engine, **kwargs: event_service,
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "AthleteCatalogService",
+        lambda actual_engine, **kwargs: athlete_service,
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "PlayerGameLogRepository",
+        lambda actual_engine, **kwargs: player_log_repository,
+    )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatisticCatalog",
+        SimpleNamespace(load_default=lambda: object()),
+    )
+
+    def build_ingest_service(**kwargs):
+        assert kwargs == {
+            "pbp_provider": pbp_log_provider,
+            "repository": player_log_repository,
+            "athlete_catalog": athlete_service,
+            "event_catalog": event_service,
+            "minimum_active_players_per_team_game": 5,
+            "reconciliation_days": 3,
+        }
+        return SimpleNamespace(
+            refresh=lambda season: calls.append(("player_game_logs", season))
+            or object()
+        )
+
+    monkeypatch.setattr(
+        nightly_refresh, "PlayerGameLogIngestService", build_ingest_service
+    )
+
+    assert nightly_refresh._run("sqlite:///nightly.sqlite3", hosted_only=True) == 0
+    assert calls == [
+        "migrations",
+        ("player_game_logs", "2025-26"),
+        "dispose",
+    ]
+
+
 def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     calls = []
     provider = object()
@@ -440,6 +524,27 @@ def test_main_reports_success_without_live_calls(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(nightly_refresh, "_run", lambda value: 0)
 
     assert nightly_refresh.main(["--database-url", database_url]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "succeeded"}
+
+
+def test_main_selects_hosted_only_refresh_without_live_calls(
+    tmp_path, monkeypatch, capsys
+):
+    database_url = f"sqlite:///{tmp_path / 'nightly.sqlite3'}"
+    calls = []
+    monkeypatch.setattr(
+        nightly_refresh,
+        "_run",
+        lambda value, *, hosted_only: calls.append((value, hosted_only)) or 0,
+    )
+
+    assert (
+        nightly_refresh.main(
+            ["--database-url", database_url, "--hosted-only"]
+        )
+        == 0
+    )
+    assert calls == [(database_url, True)]
     assert json.loads(capsys.readouterr().out) == {"status": "succeeded"}
 
 

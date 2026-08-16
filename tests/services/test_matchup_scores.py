@@ -235,10 +235,10 @@ def _window(metrics, *, last_15=False, unsupported=(), metric_trackers=None):
     available = {base for base, *_rest in metrics}
     observations = tuple(
         StoredTeamMatchupObservation(
-            base,
-            "unavailable" if base in unsupported or base not in available else "available",
-            "provider_window_unsupported" if base in unsupported or base not in available else None,
-            RETRIEVED_AT,
+            surface=base,
+            status="unavailable" if base in unsupported or base not in available else "available",
+            unavailable_reason="provider_window_unsupported" if base in unsupported or base not in available else None,
+            retrieved_at=RETRIEVED_AT,
         )
         for base in DEFENSE_BASES
     )

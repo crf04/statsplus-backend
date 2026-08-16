@@ -94,6 +94,9 @@ def _required_text(row: Mapping[str, Any], field: str) -> str:
 
 
 def _counting_value(row: Mapping[str, Any], field: str) -> int:
+    value = row.get(field)
+    if value is None or bool(pd.isna(value)):
+        return 0
     return _integer_value(row, field, minimum=0)
 
 

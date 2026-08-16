@@ -14,10 +14,37 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
+from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+)
 from tests.services.test_ledger_derivations import _league_games
+
+
+def _catalog_events(games, cutoff):
+    return [{
+        "nba_game_id": game.game_id,
+        "season": game.season,
+        "home_team_id": game.home_team_id,
+        "home_team_name": f"Team {game.home_team_id}",
+        "home_team_tricode": game.home_team_tricode,
+        "away_team_id": game.away_team_id,
+        "away_team_name": f"Team {game.away_team_id}",
+        "away_team_tricode": game.away_team_tricode,
+        "scheduled_at": datetime.combine(
+            game.game_date, datetime.min.time(), timezone.utc
+        ),
+        "status_text": "Final",
+        "status_code": 3,
+        "classification": "Regular Season",
+        "first_seen_at": datetime.combine(
+            game.game_date, datetime.min.time(), timezone.utc
+        ),
+        "last_seen_at": cutoff,
+    } for game in games]
 
 
 def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
@@ -104,18 +131,22 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
         connection.execute(update(EventCatalogEntry).where(
             EventCatalogEntry.nba_game_id == events[0]["nba_game_id"],
         ).values(postponed_status="postponed"))
-    with pytest.raises(ValueError, match="L15"):
-        ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: cutoff - timedelta(hours=1)
-        ).read("2025-26", cutoff)
+    incomplete = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: cutoff - timedelta(hours=1)
+    ).read("2025-26", cutoff)
+    assert len(incomplete.expected_l15_game_ids) == 30
+    assert sorted(
+        len(game_ids) for game_ids in incomplete.expected_l15_game_ids.values()
+    ) == [14, 14, *([15] * 28)]
 
 
 def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'jobs.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        replace(
+    games = []
+    for game in _league_games():
+        without_locations = replace(
             game,
             player_facts=tuple(replace(
                 player,
@@ -124,9 +155,11 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
                 short_mid_range_assists=None, long_mid_range_assists=None,
             ) for player in game.player_facts),
             checksum=None,
-        ).with_checksum()
-        for game in _league_games()
-    )
+        )
+        games.append(
+            replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+        )
+    games = tuple(games)
     repository.replace_games_atomic(games)
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     team_ids = frozenset(range(1, 31))
@@ -188,6 +221,334 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+
+
+def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
+    tmp_path,
+):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'matchup-compose.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in team_ids
+    }
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="matchup", stream_key="traditional_opponent_season",
+            manifest_id=None, season="2025-26", cutoff=cutoff, status="queued",
+            attempts=0, created_at=cutoff, updated_at=cutoff,
+        ))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, expected, team_ids, expected_l15
+            )
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    matchup_materialization = LedgerMatchupMaterializationService(
+        repository,
+        TeamMatchupRepository(engine),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        matchup_materialization=matchup_materialization,
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+
+    season = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    )
+    assert {item.surface for item in season.observations} == {
+        "traditional",
+        "assist_locations",
+    }
+    assert {fact.base for fact in season.facts} == {
+        "traditional",
+        "assist_locations",
+    }
+    assert all(fact.ledger_checksum for fact in season.facts)
+    assert all(fact.game_ids for fact in season.facts)
+
+
+def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'incomplete-l15.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    governed = games[:-1]
+    repository.replace_games_atomic(governed)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    events = _catalog_events(governed, cutoff)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="matchup", stream_key="traditional_opponent_season",
+            manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
+            attempts=0, created_at=cutoff, updated_at=cutoff,
+        ))
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    materialization = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=Parity(),
+    )
+    captured = {}
+    real_compose = materialization.compose
+
+    def capture_compose(*args, **kwargs):
+        captured.update(kwargs)
+        return real_compose(*args, **kwargs)
+
+    materialization.compose = capture_compose
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=materialization,
+        governance=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: cutoff + timedelta(hours=1)
+        ),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            TeamMatchupRepository(engine),
+            clock=lambda: cutoff + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    runtime.compose_queued("2025-26")
+
+    l15 = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+    )
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in l15.observations
+    } == {
+        ("assist_locations", "missing", "insufficient_governed_games"),
+        ("traditional", "missing", "insufficient_governed_games"),
+    }
+    assert len(captured["expected_l15_game_ids"]) == 30
+    assert {
+        len(game_ids)
+        for game_ids in captured["expected_l15_game_ids"].values()
+    } == {14, 15}
+
+
+def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_path):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'roster-compose.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()[:2]
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    events = _catalog_events(games, cutoff)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
+            "season": "2025-26", "cutoff": cutoff, "status": "queued",
+            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
+        } for stream in LedgerCorrectionQueue.STREAMS])
+
+    governance = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: cutoff + timedelta(hours=1)
+    ).read("2025-26", cutoff)
+    assert len(governance.team_ids) < 30
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: cutoff + timedelta(hours=1)
+        ),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            TeamMatchupRepository(engine),
+            clock=lambda: cutoff + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 0
+
+    for window_games in (None, 15):
+        snapshot = TeamMatchupRepository(engine).get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", cutoff.date(), window_games)
+        )
+        assert snapshot.facts == ()
+        assert {
+            (item.surface, item.status, item.unavailable_reason)
+            for item in snapshot.observations
+        } == {
+            ("assist_locations", "missing", "governed_team_roster_incomplete"),
+            ("traditional", "missing", "governed_team_roster_incomplete"),
+        }
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+        }
+    assert all(job["status"] == "failed" for job in jobs.values())
+    assert {
+        job["last_error"] for job in jobs.values()
+    } == {"governed_team_roster_incomplete"}
+
+
+def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'l15-compose.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()[:150]
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    events = _catalog_events(games, cutoff)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
+            "season": "2025-26", "cutoff": cutoff, "status": "queued",
+            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
+        } for stream in LedgerCorrectionQueue.STREAMS])
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: cutoff + timedelta(hours=1)
+        ),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            TeamMatchupRepository(engine),
+            clock=lambda: cutoff + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 4
+
+    season = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    )
+    assert {item.surface for item in season.observations} == {
+        "traditional",
+        "assist_locations",
+    }
+    assert all(item.status == "available" for item in season.observations)
+    l15 = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+    )
+    assert l15.facts == ()
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in l15.observations
+    } == {
+        ("assist_locations", "missing", "insufficient_governed_games"),
+        ("traditional", "missing", "insufficient_governed_games"),
+    }
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+        }
+    assert jobs["player_game_logs"]["status"] == "succeeded"
+    assert jobs["traditional_opponent_season"]["status"] == "succeeded"
+    assert jobs["player_per36"]["status"] == "succeeded"
+    assert jobs["assist_locations_season"]["status"] == "succeeded"
+    assert jobs["traditional_opponent_l15"]["status"] == "failed"
+    assert jobs["traditional_opponent_l15"]["last_error"] == "insufficient_governed_games"
+    assert jobs["assist_locations_l15"]["status"] == "failed"
+    assert jobs["assist_locations_l15"]["last_error"] == "insufficient_governed_games"
 
 
 def test_refresh_fails_governance_before_any_backfill_or_provider_work():

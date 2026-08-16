@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
@@ -20,7 +21,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import delete, insert, inspect, select, update
+from sqlalchemy import case, delete, exists, insert, inspect, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -30,12 +31,14 @@ from app.models.canonical_game_ledger import (
     CanonicalGameLedgerPlayerFact,
     CanonicalGameLedgerTeamFact,
     LedgerBackfillState,
+    LedgerGameRowEvidence,
+    LedgerObservationEvidence,
     LedgerPublication,
 )
 from app.models.collection_control import CollectionManifest, CollectionObservation
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
 from app.services.nba_stats_adapter import validate_canonical_season
-from app.services.pbp_game_log_normalization import normalize_pbp_game_logs
+from app.services.pbp_game_log_normalization import normalize_pbp_game_logs, parse_pbp_minutes
 from app.utils.db import is_demo_database_url
 
 COUNT_FIELDS = (
@@ -57,6 +60,23 @@ COUNT_FIELDS = (
     "blocks",
     "personal_fouls",
 )
+#: The ``team_results`` ``FullGame`` diagnostic count vocabulary an accepted raw
+#: observation must carry completely.  These are the provider wire spellings of
+#: the governed count primitives (``COUNT_FIELDS`` without the derived
+#: ``FGM``/``FGA`` composites).  ``Points`` is independently provable from
+#: retained scoring components, but every other primitive has no in-row
+#: arithmetic identity, so a sparse player omission is only a governed zero
+#: when the complete team total proves it can be zero.  A raw acceptance
+#: missing any of these fields -- or carrying a null or malformed value --
+#: cannot prove a sparse omission and rejects the candidate atomically.
+LEDGER_GOVERNED_DIAGNOSTIC_COUNTS = (
+    "Points",
+    "FG2M", "FG2A",
+    "FG3M", "FG3A",
+    "FtPoints", "FTA",
+    "OffRebounds", "DefRebounds", "Rebounds",
+    "Assists", "Turnovers", "Steals", "Blocks", "Fouls",
+)
 ASSIST_LOCATION_FIELDS = (
     "two_point_assists",
     "three_point_assists",
@@ -66,6 +86,218 @@ ASSIST_LOCATION_FIELDS = (
     "short_mid_range_assists",
     "long_mid_range_assists",
 )
+#: The PBP FullGame wire is sparse: the provider omits observed-zero additive
+#: box-score counters on both player rows and the team-summary row.  Every
+#: count primitive in ``COUNT_FIELDS`` is such an additive counter, so a missing
+#: or null value is a governed zero (``_integer`` collapses it) rather than
+#: missing evidence.  A governed zero is only accepted when independently
+#: proven: an omitted ``Points`` must reconcile arithmetically with the retained
+#: scoring components and every other omitted count must stay consistent with
+#: the complete ``team_results`` diagnostic reconciliation, so a missing nonzero
+#: count rejects the candidate atomically.  Because that proof depends on the
+#: diagnostics, an accepted raw observation must carry the ``team_results``
+#: Home and Away ``FullGame`` envelopes with every governed diagnostic count
+#: (``LEDGER_GOVERNED_DIAGNOSTIC_COUNTS``) present, well-formed, and reconciling
+#: with the declared team authority; a missing envelope, a missing/null/malformed
+#: diagnostic field, or a reconciliation failure rejects the candidate atomically.
+#: Identity, minutes, row presence, and malformed values stay strict: they are
+#: never zero-filled and always reject the candidate game atomically.
+#: ``FGM``/``FGA``/``Rebounds`` are derived from the two-pointer and three-pointer
+#: components and from offensive plus defensive rebounds.
+
+#: The typed extractor version that produced canonical facts and raw row
+#: schema evidence.  Bump it only when the extraction vocabulary changes.
+LEDGER_SCHEMA_VERSION = 1
+#: The complete flat ``BoxscoreItem`` vocabulary documented by the PBP Stats
+#: OpenAPI for ``/get-game-stats`` (``stats.Home/Away.FullGame``).  Every
+#: provider row -- including the team-summary row -- is one flat BoxscoreItem,
+#: so this is the authoritative accepted provider schema rather than just the
+#: narrow typed aliases the extractor projects.  It covers shot context,
+#: assisted scoring, rebound opportunities, turnover and foul types, blocks,
+#: second-chance and penalty facts, pace and efficiency inputs, and derived
+#: rates.  Keep it and ``LEDGER_SCHEMA_VERSION`` in lockstep: bump both
+#: together whenever the provider vocabulary changes.
+PBP_BOXSCORE_ITEM_FIELDS = frozenset({
+    # identity / minutes
+    "EntityId", "TeamId", "Name", "ShortName", "Season", "RowId",
+    "TeamAbbreviation", "SecondsPlayed", "GamesPlayed", "Minutes",
+    "MinutesMMSS",
+    # possession context
+    "PlusMinus", "OffPoss", "DefPoss", "PenaltyOffPoss", "PenaltyDefPoss",
+    "SecondChanceOffPoss", "TotalPoss",
+    # shot context (rim / short mid / long mid / corner / arc, opponent,
+    # second-chance, penalty, blocked, heaves)
+    "AtRimFGM", "AtRimFGA", "OpponentAtRimFGM", "OpponentAtRimFGA",
+    "SecondChanceAtRimFGM", "SecondChanceAtRimFGA",
+    "PenaltyAtRimFGM", "PenaltyAtRimFGA",
+    "ShortMidRangeFGM", "ShortMidRangeFGA",
+    "OpponentShortMidRangeFGM", "OpponentShortMidRangeFGA",
+    "SecondChanceShortMidRangeFGM", "SecondChanceShortMidRangeFGA",
+    "PenaltyShortMidRangeFGM", "PenaltyShortMidRangeFGA",
+    "LongMidRangeFGM", "LongMidRangeFGA",
+    "OpponentLongMidRangeFGM", "OpponentLongMidRangeFGA",
+    "SecondChanceLongMidRangeFGM", "SecondChanceLongMidRangeFGA",
+    "PenaltyLongMidRangeFGM", "PenaltyLongMidRangeFGA",
+    "Corner3FGM", "Corner3FGA", "OpponentCorner3FGM", "OpponentCorner3FGA",
+    "SecondChanceCorner3FGM", "SecondChanceCorner3FGA",
+    "PenaltyCorner3FGM", "PenaltyCorner3FGA",
+    "Arc3FGM", "Arc3FGA", "OpponentArc3FGM", "OpponentArc3FGA",
+    "SecondChanceArc3FGM", "SecondChanceArc3FGA",
+    "PenaltyArc3FGM", "PenaltyArc3FGA",
+    # core shooting / points
+    "FG2M", "FG2A", "FG3M", "FG3A", "FGM", "FGA",
+    "OpponentFG2M", "OpponentFG2A", "OpponentFG3M", "OpponentFG3A",
+    "OpponentFGM", "OpponentFGA", "FtPoints", "Points", "OpponentPoints",
+    "SecondChanceFG2M", "SecondChanceFG2A", "SecondChanceFG3M",
+    "SecondChanceFG3A", "SecondChanceFtPoints", "SecondChancePoints",
+    "PenaltyFG2M", "PenaltyFG2A", "PenaltyFG3M", "PenaltyFG3A",
+    "PenaltyFtPoints", "PenaltyPoints",
+    # assisted scoring and shot types
+    "PtsAssisted2s", "PtsUnassisted2s", "PtsAssisted3s", "PtsUnassisted3s",
+    "PtsPutbacks", "HeaveMakes", "HeaveAttempts", "NonHeaveFg3a",
+    "NonHeaveFg3m", "NonHeaveArc3FGA", "NonHeaveArc3FGM",
+    "Fg2aBlocked", "Fg3aBlocked",
+    # assists
+    "TwoPtAssists", "ThreePtAssists", "Assists", "Arc3Assists",
+    "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists",
+    "LongMidRangeAssists", "AssistPoints",
+    # rebounding detail and opportunities
+    "OffThreePtRebounds", "OffTwoPtRebounds", "FTOffRebounds",
+    "DefThreePtRebounds", "DefTwoPtRebounds", "FTDefRebounds",
+    "DefRebounds", "OffRebounds", "Rebounds",
+    "OffThreePtReboundOpportunities", "OffTwoPtReboundOpportunities",
+    "DefThreePtReboundOpportunities", "DefTwoPtReboundOpportunities",
+    "DefReboundOpportunities", "OffReboundOpportunities", "SelfOReb",
+    # steals, turnover types, and second-chance/penalty turnover context
+    "Steals", "BadPassSteals", "LostBallSteals",
+    "LiveBallTurnovers", "BadPassOutOfBoundsTurnovers", "BadPassTurnovers",
+    "DeadBallTurnovers", "LostBallOutOfBoundsTurnovers", "LostBallTurnovers",
+    "StepOutOfBoundsTurnovers", "Travels",
+    "OpponentLiveBallTurnovers", "SecondChanceLiveBallTurnovers",
+    "PenaltyLiveBallTurnovers", "Turnovers", "OpponentTurnovers",
+    "SecondChanceTurnovers", "PenaltyTurnovers",
+    # foul types, free-throw trips, and drawn fouls
+    "ShootingFouls", "BlockingFouls", "Fouls", "Charge Fouls",
+    "Clear Path Fouls", "Loose Ball Fouls", "Offensive Fouls",
+    "Transition Take Fouls", "FoulsDrawn", "Charge Fouls Drawn",
+    "Loose Ball Fouls Drawn", "Offensive Fouls Drawn",
+    "Transition Take Fouls Drawn", "BlockingFoulsDrawn",
+    "FTA", "2pt And 1 Free Throw Trips", "3pt And 1 Free Throw Trips",
+    "Technical Free Throw Trips", "OpponentFTA", "TwoPtShootingFoulsDrawn",
+    "ThreePtShootingFoulsDrawn", "NonShootingFoulsDrawn",
+    # blocks and violations
+    "Blocked2s", "Blocked3s", "BlockedArc3", "BlockedAtRim",
+    "BlockedCorner3", "BlockedLongMidRange", "BlockedShortMidRange",
+    "Blocks", "RecoveredBlocks", "DefensiveGoaltends", "OffensiveGoaltends",
+    "3SecondViolations", "Defensive 3 Seconds Violations",
+    # first-chance / penalty excluding take fouls
+    "FirstChancePoints", "PenaltyPointsExcludingTakeFouls",
+    "PenaltyOffPossExcludingTakeFouls", "NonShootingPenaltyNonTakeFouls",
+    "NonShootingPenaltyNonTakeFoulsDrawn",
+    # minutes by foul situation
+    "Period1Fouls0Minutes", "Period1Fouls1Minutes", "Period1Fouls2Minutes",
+    "Period1Fouls3Minutes", "Period1Fouls4Minutes", "Period1Fouls5Minutes",
+    "Period2Fouls0Minutes", "Period2Fouls1Minutes", "Period2Fouls2Minutes",
+    "Period2Fouls3Minutes", "Period2Fouls4Minutes", "Period2Fouls5Minutes",
+    "Period3Fouls0Minutes", "Period3Fouls1Minutes", "Period3Fouls2Minutes",
+    "Period3Fouls3Minutes", "Period3Fouls4Minutes", "Period3Fouls5Minutes",
+    "Period4Fouls0Minutes", "Period4Fouls1Minutes", "Period4Fouls2Minutes",
+    "Period4Fouls3Minutes", "Period4Fouls4Minutes", "Period4Fouls5Minutes",
+    "PeriodOTFouls0Minutes", "PeriodOTFouls1Minutes", "PeriodOTFouls2Minutes",
+    "PeriodOTFouls3Minutes", "PeriodOTFouls4Minutes", "PeriodOTFouls5Minutes",
+    # efficiency and pace inputs
+    "TrueShotAttempts", "PtsPer100Poss", "PtsPer100PossOpponent",
+    "SecondsPerPoss", "FirstChancePtsPer100Poss", "SecondChancePtsPer100Poss",
+    "PenaltyPtsPer100Poss", "PenaltyPtsPer100PossPenalty",
+    "PenaltyOffPossPer100Poss", "AssistPointsPer100Poss", "FTAPer100Poss",
+    "TurnoversPer100Poss", "AssistsPer100Poss", "OnOffRtg", "OnDefRtg",
+    "OnNetRtg", "Assisted2sPct", "NonPutbacksAssisted2sPct", "Assisted3sPct",
+    "Fg3Pct", "FTPct", "Fg3PctOpponent", "SecondChanceFg3Pct",
+    "PenaltyFg3Pct", "NonHeaveFg3Pct", "Fg2Pct", "Fg2PctOpponent",
+    "SecondChanceFg2Pct", "PenaltyFg2Pct", "EfgPct", "EfgPctOpponent",
+    "SecondChanceEfgPct", "PenaltyEfgPct", "TsPct", "SecondChanceTsPct",
+    "PenaltyTsPct", "FG3APct", "FG3APctOpponent", "FG3APctBlocked",
+    "FG2APctBlocked", "AtRimPctBlocked", "ShortMidRangePctBlocked",
+    "LongMidRangePctBlocked", "Corner3PctBlocked", "Arc3PctBlocked",
+    "Usage", "LiveBallTurnoverPct", "OffReboundPct", "DefReboundPct",
+    "DefFTReboundPct", "OffFTReboundPct", "DefTwoPtReboundPct",
+    "OffTwoPtReboundPct", "DefThreePtReboundPct", "OffThreePtReboundPct",
+    "DefFGReboundPct", "OffFGReboundPct", "OffAtRimReboundPct",
+    "OffShortMidRangeReboundPct", "OffLongMidRangeReboundPct",
+    "OffArc3ReboundPct", "OffCorner3ReboundPct", "DefAtRimReboundPct",
+    "DefShortMidRangeReboundPct", "DefLongMidRangeReboundPct",
+    "DefArc3ReboundPct", "DefCorner3ReboundPct", "SelfORebPct", "Pace",
+    "BlocksRecoveredPct", "SecondsPerPossOff", "SecondsPerPossDef",
+    "SecondsExcludingORebsPerPossOff", "SecondsExcludingORebsPerPossDef",
+    "AtRimFrequency", "AtRimAccuracy", "UnblockedAtRimAccuracy",
+    "AtRimPctAssisted", "ShortMidRangeFrequency", "ShortMidRangeAccuracy",
+    "UnblockedShortMidRangeAccuracy", "ShortMidRangePctAssisted",
+    "LongMidRangeFrequency", "LongMidRangeAccuracy",
+    "UnblockedLongMidRangeAccuracy", "LongMidRangePctAssisted",
+    "Corner3Frequency", "Corner3Accuracy", "UnblockedCorner3Accuracy",
+    "Corner3PctAssisted", "Arc3Frequency", "Arc3Accuracy",
+    "UnblockedArc3Accuracy", "Arc3PctAssisted", "AtRimFrequencyOpponent",
+    "AtRimAccuracyOpponent", "ShortMidRangeFrequencyOpponent",
+    "ShortMidRangeAccuracyOpponent", "LongMidRangeFrequencyOpponent",
+    "LongMidRangeAccuracyOpponent", "Corner3FrequencyOpponent",
+    "Corner3AccuracyOpponent", "Arc3FrequencyOpponent", "Arc3AccuracyOpponent",
+    "SecondChanceAtRimFrequency", "SecondChanceAtRimAccuracy",
+    "SecondChanceAtRimPctAssisted", "SecondChanceShortMidRangeFrequency",
+    "SecondChanceShortMidRangeAccuracy", "SecondChanceShortMidRangePctAssisted",
+    "SecondChanceLongMidRangeFrequency", "SecondChanceLongMidRangeAccuracy",
+    "SecondChanceLongMidRangePctAssisted", "SecondChanceCorner3Frequency",
+    "SecondChanceCorner3Accuracy", "SecondChanceCorner3PctAssisted",
+    "SecondChanceArc3Frequency", "SecondChanceArc3Accuracy",
+    "SecondChanceArc3PctAssisted", "PenaltyAtRimFrequency",
+    "PenaltyAtRimAccuracy", "PenaltyShortMidRangeFrequency",
+    "PenaltyShortMidRangeAccuracy", "PenaltyLongMidRangeFrequency",
+    "PenaltyLongMidRangeAccuracy", "PenaltyCorner3Frequency",
+    "PenaltyCorner3Accuracy", "PenaltyArc3Frequency", "PenaltyArc3Accuracy",
+    "AtRimFG3AFrequency", "NonHeaveArc3Accuracy", "ShotQualityAvg",
+    "OpponentShotQualityAvg", "SecondChanceShotQualityAvg",
+    "PenaltyShotQualityAvg", "ShootingFoulsDrawnPct",
+    "TwoPtShootingFoulsDrawnPct", "ThreePtShootingFoulsDrawnPct",
+    "SecondChancePointsPct", "SecondChancePtsPer100PossSecondChance",
+    "SecondChanceOffPossPer100Poss",
+    "SecondChancePointsPer100PossSecondChance", "PenaltyPointsPct",
+    "PenaltyPossessionsPct", "Avg2ptShotDistance", "Avg3ptShotDistance",
+    "AtRimOffReboundedPct", "ShortMidRangeOffReboundedPct",
+    "LongMidRangeOffReboundedPct", "ThreePtOffReboundedPct",
+    "PenaltyEfficiencyExcludingTakeFouls", "PenaltyOffPossPct",
+})
+#: The governed FullGame wire-field baseline for ``LEDGER_SCHEMA_VERSION``:
+#: every provider key the extractor understands and tolerates on an archived
+#: raw row.  A first raw archive (a brand-new game, or a pre-032 game
+#: receiving its row evidence for the first time) is judged against this
+#: baseline: a field outside it is additive schema drift that must be recorded
+#: and alerted, while a normal first observation inside the baseline stays
+#: silent.  The baseline is the complete documented BoxscoreItem vocabulary
+#: plus the normalized aliases the extractor tolerates, so a normal provider
+#: row never alerts.  Keep this set and the schema version in lockstep: bump
+#: both together whenever the extraction vocabulary changes.
+LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset({
+    # identity
+    "PLAYER_ID", "player_id",
+    "PLAYER_NAME", "player_name",
+    # minutes
+    "MIN", "minutes",
+    # envelope/tolerated identity columns
+    "GameId", "Date", "Team", "Opponent", "TeamId", "TEAM_ID",
+    # NBA-style counting aliases the extractor tolerates
+    "PTS", "FTM", "OREB", "DREB", "REB", "AST", "TOV", "STL", "BLK", "PF",
+    # normalized count-primitive aliases
+    "field_goals_made", "field_goals_attempted",
+    "two_pointers_made", "two_pointers_attempted",
+    "three_pointers_made", "three_pointers_attempted",
+    "free_throws_made", "free_throws_attempted",
+    "offensive_rebounds", "defensive_rebounds", "rebounds",
+    "assists", "turnovers", "steals", "blocks", "personal_fouls", "points",
+    # normalized expanded evidence
+    "two_point_assists", "three_point_assists",
+    "arc3_assists", "corner3_assists",
+    "at_rim_assists", "short_mid_range_assists", "long_mid_range_assists",
+    "Possessions", "possessions",
+})
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
 
@@ -74,7 +306,7 @@ class LedgerValidationError(ValueError):
 
 
 class LedgerSchemaUnavailable(RuntimeError):
-    """Migration 024 has not provisioned the Canonical Game Ledger schema."""
+    """Migration 032 has not provisioned the Canonical Game Ledger schema."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +376,23 @@ class TeamGameFact:
 
 
 @dataclass(frozen=True, slots=True)
+class LedgerGameRow:
+    """One complete archived PBP boxscore row (team summary or player)."""
+
+    game_id: str
+    row_type: str
+    side: str
+    row_index: int
+    entity_id: int | None
+    entity_name: str | None
+    team_id: int
+    payload: Mapping[str, Any]
+    checksum: str
+    observed_fields: tuple[str, ...]
+    schema_version: int = LEDGER_SCHEMA_VERSION
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalGame:
     """One complete, replacement-safe Regular Season game observation."""
 
@@ -162,9 +411,15 @@ class CanonicalGame:
     season_type: str = REGULAR_SEASON_TYPE
     status: str = "final"
     checksum: str | None = None
+    raw_rows: tuple[LedgerGameRow, ...] = ()
+    raw_checksum: str | None = None
 
     def with_checksum(self) -> CanonicalGame:
-        return replace(self, checksum=game_checksum(self))
+        return replace(
+            self,
+            checksum=game_checksum(self),
+            raw_checksum=raw_checksum(self.raw_rows),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +511,20 @@ def _integer(value: Any, field_name: str, *, nullable: bool = False) -> int | No
     return int(number)
 
 
+def _count_or_none(row: Mapping[str, Any], *names: str) -> int | None:
+    """Read an optional count, distinguishing an absent field from a zero.
+
+    The derived composites (``FGM``/``FGA``/``Rebounds``) are not required
+    evidence, so their absence must stay absent to let the documented
+    derivation apply; ``_integer`` collapses a missing value to zero.
+    """
+
+    raw = _raw_value(row, *names)
+    if raw is None:
+        return None
+    return _integer(raw, names[0])
+
+
 def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | None:
     if (value is None or (nullable and isinstance(value, float) and math.isnan(value))) and nullable:
         return None
@@ -270,11 +539,355 @@ def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | N
     return number
 
 
+def _minutes_value(value: Any, field_name: str) -> float:
+    """Read minutes evidence that the provider writes as ``MM:SS`` or numeric.
+
+    Minutes are never zero-filled: missing or malformed evidence is a
+    complete-game failure rather than an observed zero.
+    """
+
+    if isinstance(value, str):
+        try:
+            return parse_pbp_minutes(value)
+        except Exception as error:
+            raise LedgerValidationError(
+                f"{field_name} must be valid MM:SS minutes evidence"
+            ) from error
+    return _number(value, field_name)
+
+
+def _minutes_string(value: float) -> str:
+    """Format numeric minutes into the provider's ``MM:SS`` wire spelling."""
+
+    total_seconds = int(round(float(value) * 60))
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
+
+
 def _raw_value(row: Mapping[str, Any], *names: str) -> Any:
     for name in names:
         if name in row:
             return row[name]
     return None
+
+
+def _canonical_json(payload: Any) -> str:
+    """Serialize arbitrary evidence deterministically for stable checksums."""
+
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _canonical_json_hash(payload: Any) -> str:
+    """SHA-256 over canonical JSON evidence, stable across identical replays."""
+
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+
+
+def canonical_row_checksum(payload: Mapping[str, Any]) -> str:
+    """Deterministic per-row SHA-256 over canonical JSON provider evidence."""
+
+    return _canonical_json_hash(payload)
+
+
+def _ledger_raw_rows(
+    observation: Mapping[str, Any],
+    *,
+    game_id: str,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[LedgerGameRow, ...]:
+    """Archive every Home/Away FullGame row, including the team summaries.
+
+    Provider keys and values are preserved verbatim.  Only canonical identity
+    (game, side, team, entity) is recorded as metadata beside the payload; a
+    ``team`` row is the provider's aggregate (``EntityId == 0`` or ``Team``)
+    and carries the team-only residuals (such as team rebounds) that
+    participating player rows never carry.
+    """
+
+    stats = observation.get("stats")
+    if not isinstance(stats, Mapping):
+        raise LedgerValidationError("PBP game observation is missing a stats envelope")
+    team_by_side = {"Home": home_team_id, "Away": away_team_id}
+    output: list[LedgerGameRow] = []
+    for side in ("Home", "Away"):
+        period = stats.get(side)
+        period_rows = period.get("FullGame") if isinstance(period, Mapping) else None
+        if not isinstance(period_rows, Sequence) or isinstance(period_rows, (str, bytes, bytearray)):
+            raise LedgerValidationError(f"PBP FullGame rows are required for {side} evidence")
+        for index, row in enumerate(period_rows):
+            if not isinstance(row, Mapping):
+                raise LedgerValidationError("PBP FullGame contains a malformed raw row")
+            raw_id = _raw_value(row, "EntityId", "PLAYER_ID", "player_id")
+            raw_name = _raw_value(row, "Name", "PLAYER_NAME", "player_name")
+            if raw_id in (None, "0", 0) or str(raw_name or "") == "Team":
+                row_type = "team"
+                entity_id = None
+                entity_name = None
+            else:
+                row_type = "player"
+                entity_id = _integer(raw_id, "entity_id") or 0
+                entity_name = _required_text(raw_name, "entity_name")
+            payload = dict(row)
+            output.append(
+                LedgerGameRow(
+                    game_id=game_id,
+                    row_type=row_type,
+                    side=side,
+                    row_index=index,
+                    entity_id=entity_id,
+                    entity_name=entity_name,
+                    team_id=team_by_side[side],
+                    payload=payload,
+                    checksum=canonical_row_checksum(payload),
+                    observed_fields=tuple(sorted(payload)),
+                )
+            )
+    if not output:
+        raise LedgerValidationError("PBP game observation contains no FullGame rows")
+    team_rows_by_side = {"Home": 0, "Away": 0}
+    for row in output:
+        if row.row_type == "team":
+            team_rows_by_side[row.side] += 1
+    for side, count in team_rows_by_side.items():
+        if count != 1:
+            raise LedgerValidationError(
+                f"PBP FullGame requires exactly one team-summary row for {side} evidence"
+            )
+    return tuple(output)
+
+
+def _verify_observation_binding(
+    candidate: CanonicalGame,
+    observation: Mapping[str, Any],
+) -> None:
+    """Cryptographically bind one accepted observation to its candidate game.
+
+    The observation's stored payload is the complete raw provider document,
+    and the candidate's archived raw rows are derived deterministically from
+    that document.  A caller must therefore prove that the exact payload being
+    stamped as provenance reproduces the exact raw evidence being persisted:
+    replaying an observation envelope over a different raw document would
+    defeat the ledger's replay auditability.  The envelope's own checksum is
+    verified against its payload as well, so a tampered checksum field cannot
+    survive acceptance.  The retrieval time recorded on the candidate must
+    also be exactly the retrieval time the observation declares, after UTC
+    normalization, so a governed caller cannot stamp a correct payload while
+    recording a false retrieval time.
+    """
+
+    payload_text = str(observation.get("payload") or "")
+    if hashlib.sha256(payload_text.encode()).hexdigest() != str(observation.get("checksum") or ""):
+        raise LedgerValidationError(
+            "accepted ledger observation checksum does not match its payload"
+        )
+    if assume_utc(candidate.retrieved_at) != assume_utc(observation["retrieved_at"]):
+        raise LedgerValidationError(
+            "accepted ledger observation retrieval time does not match the candidate"
+        )
+    try:
+        document = json.loads(payload_text)
+    except (TypeError, ValueError) as error:
+        raise LedgerValidationError("accepted ledger observation payload is malformed") from error
+    if not isinstance(document, Mapping):
+        raise LedgerValidationError(
+            "accepted ledger observation payload is not a raw game document"
+        )
+    try:
+        recomputed = _ledger_raw_rows(
+            document,
+            game_id=candidate.game_id,
+            home_team_id=candidate.home_team_id,
+            away_team_id=candidate.away_team_id,
+        )
+    except LedgerValidationError as error:
+        raise LedgerValidationError(
+            "accepted ledger observation payload cannot reproduce the candidate evidence"
+        ) from error
+    if raw_checksum(recomputed) != candidate.raw_checksum:
+        raise LedgerValidationError(
+            "accepted ledger observation is not bound to the candidate raw evidence"
+        )
+
+
+#: Explicit canonical raw-row side order shared by hashing, persistence, and
+#: reload.  Home rows always precede Away rows regardless of lexicographic
+#: ordering; within each side rows keep their provider array index order.
+_RAW_ROW_SIDE_ORDER = {"Home": 0, "Away": 1}
+
+
+def _raw_row_order(row: LedgerGameRow) -> tuple[int, int]:
+    """Canonical raw-row sort key (side order first, then within-side index)."""
+
+    return (_RAW_ROW_SIDE_ORDER.get(row.side, len(_RAW_ROW_SIDE_ORDER)), row.row_index)
+
+
+def _side_order_expression(column: Any):
+    """SQL expression mapping a raw-row side to its canonical priority.
+
+    Derived from the same ``_RAW_ROW_SIDE_ORDER`` mapping used for hashing and
+    Python-side reload sorting, so the database query and the checksum sort can
+    never drift.  Unknown sides sort after every declared side, matching
+    ``_raw_row_order``.
+    """
+
+    return case(
+        *[
+            (column == side, priority)
+            for side, priority in sorted(
+                _RAW_ROW_SIDE_ORDER.items(), key=lambda item: item[1]
+            )
+        ],
+        else_=len(_RAW_ROW_SIDE_ORDER),
+    )
+
+
+def raw_checksum(raw_rows: Iterable[LedgerGameRow]) -> str | None:
+    """Hash the complete archived raw evidence set for one game.
+
+    Rows are hashed in the canonical order (Home side, then Away side, each by
+    provider row index), so the checksum is stable across persistence, reload,
+    and any provider re-fetch replay regardless of the order rows arrive in.
+    """
+
+    rows = sorted(tuple(raw_rows), key=_raw_row_order)
+    if not rows:
+        return None
+    payload = [
+        {
+            "game_id": row.game_id,
+            "row_type": row.row_type,
+            "side": row.side,
+            "row_index": row.row_index,
+            "entity_id": row.entity_id,
+            "entity_name": row.entity_name,
+            "team_id": row.team_id,
+            "observed_fields": row.observed_fields,
+            "payload": row.payload,
+        }
+        for row in rows
+    ]
+    return _canonical_json_hash(payload)
+
+
+_PLAYER_ASSIST_ROW_KEYS = (
+    ("two_point_assists", "TwoPtAssists"),
+    ("three_point_assists", "ThreePtAssists"),
+    ("arc3_assists", "Arc3Assists"),
+    ("corner3_assists", "Corner3Assists"),
+    ("at_rim_assists", "AtRimAssists"),
+    ("short_mid_range_assists", "ShortMidRangeAssists"),
+    ("long_mid_range_assists", "LongMidRangeAssists"),
+)
+
+
+def _fact_count_payload(fact: Any) -> dict[str, Any]:
+    """Map typed count primitives onto their provider FullGame wire spellings.
+
+    Team-summary and player typed facts carry the same count vocabulary, so one
+    helper owns the count-to-wire spelling; the row-type authority (which row
+    drives which typed fact) stays in the callers.
+    """
+
+    return {
+        "Points": fact.points,
+        "FGM": fact.field_goals_made,
+        "FGA": fact.field_goals_attempted,
+        "FG2M": fact.two_pointers_made,
+        "FG2A": fact.two_pointers_attempted,
+        "FG3M": fact.three_pointers_made,
+        "FG3A": fact.three_pointers_attempted,
+        "FtPoints": fact.free_throws_made,
+        "FTA": fact.free_throws_attempted,
+        "OffRebounds": fact.offensive_rebounds,
+        "DefRebounds": fact.defensive_rebounds,
+        "Rebounds": fact.rebounds,
+        "Assists": fact.assists,
+        "Turnovers": fact.turnovers,
+        "Steals": fact.steals,
+        "Blocks": fact.blocks,
+        "Fouls": fact.personal_fouls,
+    }
+
+
+def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
+    """Build coherent raw FullGame evidence from retained typed facts.
+
+    Synthetic repaired games and test corrections reuse this helper so the
+    archived raw rows always extract back to exactly the typed facts they
+    describe; the repository boundary then accepts them like any accepted
+    observation.  Optional fields are emitted only when the typed fact carries
+    a value, so an absent assist-location observation stays absent.
+    """
+
+    rows: list[LedgerGameRow] = []
+    team_facts_by_id = {fact.team_id: fact for fact in game.team_facts}
+    players_by_side = {
+        "Home": tuple(player for player in game.player_facts if player.team_id == game.home_team_id),
+        "Away": tuple(player for player in game.player_facts if player.team_id == game.away_team_id),
+    }
+    for team_id, side in ((game.home_team_id, "Home"), (game.away_team_id, "Away")):
+        team_fact = team_facts_by_id[team_id]
+        side_players = players_by_side[side]
+        payload: dict[str, Any] = {
+            "EntityId": "0",
+            "Name": "Team",
+            "Minutes": "00:00",
+        }
+        # The archived team-summary row carries only the team-only residual for
+        # each count primitive (the portion no player is credited with, such as
+        # team rebounds), matching the sparse provider row.  Extraction re-adds
+        # the participating-player sum, so the residual reproduces the typed
+        # team fact exactly.
+        player_sums = {
+            field_name: sum(getattr(player, field_name) for player in side_players)
+            for field_name in COUNT_FIELDS
+            if field_name != "rebounds"
+        }
+        player_sums["rebounds"] = sum(player.rebounds for player in side_players)
+        for field_name, names in _TEAM_ROW_ALIASES.items():
+            residual = getattr(team_fact, field_name) - player_sums[field_name]
+            if residual:
+                payload[names[0]] = residual
+        if team_fact.possessions is not None:
+            payload["Possessions"] = team_fact.possessions
+        rows.append(LedgerGameRow(
+            game_id=game.game_id,
+            row_type="team",
+            side=side,
+            row_index=0,
+            entity_id=None,
+            entity_name=None,
+            team_id=team_id,
+            payload=payload,
+            checksum=canonical_row_checksum(payload),
+            observed_fields=tuple(sorted(payload)),
+        ))
+        for index, player in enumerate(players_by_side[side], start=1):
+            payload = {
+                "EntityId": str(player.player_id),
+                "Name": player.player_name,
+                "Minutes": _minutes_string(player.minutes),
+                **_fact_count_payload(player),
+            }
+            if player.possessions is not None:
+                payload["Possessions"] = player.possessions
+            for field_name, key in _PLAYER_ASSIST_ROW_KEYS:
+                value = getattr(player, field_name)
+                if value is not None:
+                    payload[key] = value
+            rows.append(LedgerGameRow(
+                game_id=game.game_id,
+                row_type="player",
+                side=side,
+                row_index=index,
+                entity_id=player.player_id,
+                entity_name=player.player_name,
+                team_id=player.team_id,
+                payload=payload,
+                checksum=canonical_row_checksum(payload),
+                observed_fields=tuple(sorted(payload)),
+            ))
+    return tuple(rows)
 
 
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
@@ -347,22 +960,65 @@ def _validate_wire_game_identity(
         raise LedgerValidationError("PBP game is outside the governed Regular Season phase")
 
 
-def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode: str) -> PlayerGameFact:
-    """Map a PBP row while retaining the stable primitive superset."""
+def _assert_missing_points_is_a_governed_zero(row: Mapping[str, Any]) -> None:
+    """Reject a sparse Points omission that retained scoring evidence proves nonzero.
 
-    two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M") or 0
-    two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A") or 0
-    three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M") or 0
-    three_att = _integer(_raw_value(row, "FG3A", "three_pointers_attempted"), "FG3A") or 0
-    fgm = _integer(_raw_value(row, "FGM", "field_goals_made"), "FGM")
-    fga = _integer(_raw_value(row, "FGA", "field_goals_attempted"), "FGA")
+    The PBP FullGame wire omits observed-zero additive counters, so a player
+    row that omits ``Points`` is normally a governed zero.  That is only valid
+    when the retained scoring components (``FG2M``/``FG3M``/``FtPoints``)
+    independently prove the total is zero: points must equal
+    ``2 * FG2M + 3 * FG3M + FtPoints``.  A row that omits ``Points`` while its
+    makes prove a nonzero total is corrupted evidence, not a sparse zero, and
+    rejects the whole candidate atomically.  A counter that is independently
+    proven to be zero stays accepted as a governed zero.
+    """
+
+    if _raw_value(row, "Points", "PTS", "points") is not None:
+        return
+    derived_points = (
+        2 * _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
+        + 3 * _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
+        + _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM")
+    )
+    if derived_points != 0:
+        raise LedgerValidationError(
+            "player row missing nonzero points evidence contradicted by scoring components"
+        )
+
+
+def _player_fact_from_row(
+    row: Mapping[str, Any],
+    *,
+    team_id: int,
+    team_tricode: str,
+) -> PlayerGameFact:
+    """Map a PBP player row while retaining the stable primitive superset.
+
+    The PBP FullGame wire is sparse: observed-zero additive box-score counters
+    are omitted from player rows, so a missing or null count is a governed zero
+    and the game still ingests.  Identity and minutes remain strict -- a row
+    missing ``EntityId``/``Name``/``Minutes`` evidence, or carrying a malformed
+    value, rejects the whole candidate atomically.  A missing count is only a
+    governed zero when independent arithmetic (``Points`` against its scoring
+    components) or the complete diagnostic ``team_results`` reconciliation
+    proves it can be zero; a missing count that retained evidence proves is
+    nonzero is corrupted evidence and rejects the candidate atomically.
+    """
+
+    _assert_missing_points_is_a_governed_zero(row)
+    two_made = _integer(_raw_value(row, "FG2M", "two_pointers_made"), "FG2M")
+    two_att = _integer(_raw_value(row, "FG2A", "two_pointers_attempted"), "FG2A")
+    three_made = _integer(_raw_value(row, "FG3M", "three_pointers_made"), "FG3M")
+    three_att = _integer(_raw_value(row, "FG3A", "three_pointers_attempted"), "FG3A")
+    fgm = _count_or_none(row, "FGM", "field_goals_made")
+    fga = _count_or_none(row, "FGA", "field_goals_attempted")
     fgm = two_made + three_made if fgm is None else fgm
     fga = two_att + three_att if fga is None else fga
-    ftm = _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM") or 0
-    fta = _integer(_raw_value(row, "FTA", "free_throws_attempted"), "FTA") or 0
-    oreb = _integer(_raw_value(row, "OffRebounds", "OREB", "offensive_rebounds"), "OREB") or 0
-    dreb = _integer(_raw_value(row, "DefRebounds", "DREB", "defensive_rebounds"), "DREB") or 0
-    reb = _integer(_raw_value(row, "Rebounds", "REB", "rebounds"), "REB")
+    ftm = _integer(_raw_value(row, "FtPoints", "FTM", "free_throws_made"), "FTM")
+    fta = _integer(_raw_value(row, "FTA", "free_throws_attempted"), "FTA")
+    oreb = _integer(_raw_value(row, "OffRebounds", "OREB", "offensive_rebounds"), "OREB")
+    dreb = _integer(_raw_value(row, "DefRebounds", "DREB", "defensive_rebounds"), "DREB")
+    reb = _count_or_none(row, "Rebounds", "REB", "rebounds")
     if reb is None:
         reb = oreb + dreb
     return PlayerGameFact(
@@ -370,8 +1026,8 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
         player_name=_required_text(_raw_value(row, "Name", "PLAYER_NAME", "player_name"), "player_name"),
         team_id=team_id,
         team_tricode=team_tricode,
-        minutes=_number(_raw_value(row, "MIN", "Minutes", "minutes"), "minutes") or 0.0,
-        points=_integer(_raw_value(row, "Points", "PTS", "points"), "points") or 0,
+        minutes=_minutes_value(_raw_value(row, "MIN", "Minutes", "minutes"), "minutes") or 0.0,
+        points=_integer(_raw_value(row, "Points", "PTS", "points"), "points"),
         field_goals_made=fgm,
         field_goals_attempted=fga,
         two_pointers_made=two_made,
@@ -383,11 +1039,11 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
         offensive_rebounds=oreb,
         defensive_rebounds=dreb,
         rebounds=reb,
-        assists=_integer(_raw_value(row, "Assists", "AST", "assists"), "assists") or 0,
-        turnovers=_integer(_raw_value(row, "Turnovers", "TOV", "turnovers"), "turnovers") or 0,
-        steals=_integer(_raw_value(row, "Steals", "STL", "steals"), "steals") or 0,
-        blocks=_integer(_raw_value(row, "Blocks", "BLK", "blocks"), "blocks") or 0,
-        personal_fouls=_integer(_raw_value(row, "Fouls", "PF", "personal_fouls"), "personal_fouls") or 0,
+        assists=_integer(_raw_value(row, "Assists", "AST", "assists"), "assists"),
+        turnovers=_integer(_raw_value(row, "Turnovers", "TOV", "turnovers"), "turnovers"),
+        steals=_integer(_raw_value(row, "Steals", "STL", "steals"), "steals"),
+        blocks=_integer(_raw_value(row, "Blocks", "BLK", "blocks"), "blocks"),
+        personal_fouls=_integer(_raw_value(row, "Fouls", "PF", "personal_fouls"), "personal_fouls"),
         two_point_assists=_integer(_raw_value(row, "TwoPtAssists", "two_point_assists"), "two_point_assists", nullable=True),
         three_point_assists=_integer(_raw_value(row, "ThreePtAssists", "three_point_assists"), "three_point_assists", nullable=True),
         arc3_assists=_integer(_raw_value(row, "Arc3Assists", "arc3_assists"), "arc3_assists", nullable=True),
@@ -399,6 +1055,27 @@ def _player_fact_from_row(row: Mapping[str, Any], *, team_id: int, team_tricode:
     )
 
 
+_TEAM_ROW_ALIASES = {
+    "points": ("Points", "PTS", "points"),
+    "field_goals_made": ("FGM", "field_goals_made"),
+    "field_goals_attempted": ("FGA", "field_goals_attempted"),
+    "two_pointers_made": ("FG2M", "two_pointers_made"),
+    "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
+    "three_pointers_made": ("FG3M", "three_pointers_made"),
+    "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
+    "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
+    "free_throws_attempted": ("FTA", "free_throws_attempted"),
+    "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
+    "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
+    "rebounds": ("Rebounds", "REB", "rebounds"),
+    "assists": ("Assists", "AST", "assists"),
+    "turnovers": ("Turnovers", "TOV", "turnovers"),
+    "steals": ("Steals", "STL", "steals"),
+    "blocks": ("Blocks", "BLK", "blocks"),
+    "personal_fouls": ("Fouls", "PF", "personal_fouls"),
+}
+
+
 def _sum_team_facts(
     team_id: int,
     team_tricode: str,
@@ -406,45 +1083,81 @@ def _sum_team_facts(
     opponent_team_tricode: str,
     is_home: bool,
     players: Sequence[PlayerGameFact],
+    team_row: Mapping[str, Any] | None = None,
     provider_total: Mapping[str, Any] | None = None,
+    *,
+    require_team_row: bool = False,
 ) -> TeamGameFact:
+    """Build the team-game fact set from player rows plus team-only evidence.
+
+    The real PBP ``/get-game-stats`` team-summary row (``EntityId == 0``) is
+    sparse: it does **not** carry the complete traditional box score.  It
+    carries the team-only residuals -- the rebound credits (and the occasional
+    dead-ball/team turnover) that no player is credited with.  The complete
+    team count for every primitive is therefore the sum of the participating
+    player rows (the player rows are their own authority) plus that
+    team-summary residual; both are sparse, so an omitted additive counter is
+    an observed zero.  ``provider_total`` (the ``team_results`` envelope) is
+    diagnostic and corruption-evidence only: an accepted raw observation
+    requires the complete governed diagnostic count vocabulary present,
+    well-formed, and reconciling with the declared team authority, and the
+    diagnostics never populate a typed fact.  ``require_team_row`` is set for
+    accepted raw observations: a complete game may never omit a side's
+    team-summary row.
+    """
+
+    if require_team_row and team_row is None:
+        raise LedgerValidationError(
+            "accepted PBP evidence requires a team-summary row for every governed side"
+        )
     total = provider_total or {}
-    values = {
+    player_sums = {
         field_name: sum(getattr(player, field_name) for player in players)
         for field_name in COUNT_FIELDS
         if field_name != "rebounds"
     }
-    values["rebounds"] = sum(player.rebounds for player in players)
-    # Team-results payloads are diagnostic only.  Canonical facts are always
-    # sums of the complete participating-player primitive set; an explicitly
-    # published provider total must agree rather than overwriting those sums.
-    aliases = {
-        "points": ("Points", "PTS", "points"),
-        "field_goals_made": ("FGM", "field_goals_made"),
-        "field_goals_attempted": ("FGA", "field_goals_attempted"),
-        "two_pointers_made": ("FG2M", "two_pointers_made"),
-        "two_pointers_attempted": ("FG2A", "two_pointers_attempted"),
-        "three_pointers_made": ("FG3M", "three_pointers_made"),
-        "three_pointers_attempted": ("FG3A", "three_pointers_attempted"),
-        "free_throws_made": ("FtPoints", "FTM", "free_throws_made"),
-        "free_throws_attempted": ("FTA", "free_throws_attempted"),
-        "offensive_rebounds": ("OffRebounds", "OREB", "offensive_rebounds"),
-        "defensive_rebounds": ("DefRebounds", "DREB", "defensive_rebounds"),
-        "rebounds": ("Rebounds", "REB", "rebounds"),
-        "assists": ("Assists", "AST", "assists"),
-        "turnovers": ("Turnovers", "TOV", "turnovers"),
-        "steals": ("Steals", "STL", "steals"),
-        "blocks": ("Blocks", "BLK", "blocks"),
-        "personal_fouls": ("Fouls", "PF", "personal_fouls"),
-    }
-    for field_name, names in aliases.items():
+    player_sums["rebounds"] = sum(player.rebounds for player in players)
+    if team_row is None:
+        # Legacy projected-data seam (no team-summary row is available).
+        values: dict[str, int] = dict(player_sums)
+    else:
+        values = {}
+        for field_name, names in _TEAM_ROW_ALIASES.items():
+            raw = _raw_value(team_row, *names)
+            # A sparse team-summary omission is an observed zero residual, so
+            # the complete team value is the participating-player sum.
+            residual = 0 if raw is None else _integer(raw, field_name)
+            values[field_name] = player_sums[field_name] + residual
+    # Team-results payloads are diagnostic and corruption-evidence only: they
+    # never populate a typed fact, and the complete team total is the declared
+    # authority.  An accepted raw observation supplies the full diagnostic
+    # envelope, so every governed diagnostic count must be present, well-formed,
+    # and reconcile with that authority; a missing, null, or malformed field
+    # cannot prove a sparse omission and rejects the candidate atomically.
+    if provider_total is not None:
+        for wire_name in LEDGER_GOVERNED_DIAGNOSTIC_COUNTS:
+            if total.get(wire_name) is None:
+                raise LedgerValidationError(
+                    f"team_results diagnostics are missing the {wire_name} count"
+                )
+    # An explicitly published provider total must agree rather than overwriting
+    # the declared authority.
+    for field_name, names in _TEAM_ROW_ALIASES.items():
         raw = _raw_value(total, *names)
         if raw is not None:
             diagnostic = _integer(raw, field_name) or 0
             if diagnostic != values[field_name]:
                 raise LedgerValidationError(
-                    f"PBP team aggregate {field_name} does not reconcile with player facts"
+                    f"PBP team aggregate {field_name} does not reconcile with the declared authority"
                 )
+    # Possessions is an optional team-summary row value like any other typed
+    # team fact: it is never sourced from the diagnostic team_results envelope,
+    # so the persisted fact always equals extraction from the raw row.
+    possession_value = (
+        _raw_value(team_row, "Possessions", "possessions")
+        if team_row is not None
+        else None
+    )
     return TeamGameFact(
         team_id=team_id,
         team_tricode=team_tricode,
@@ -456,7 +1169,7 @@ def _sum_team_facts(
         # 48 for a regulation game and remains correct for overtime when the
         # retained player-minute total grows beyond 240.
         team_minutes=sum(player.minutes for player in players) / 5.0,
-        possessions=_number(_raw_value(total, "Possessions", "possessions"), "possessions", nullable=True),
+        possessions=_number(possession_value, "possessions", nullable=True),
     )
 
 
@@ -597,7 +1310,17 @@ def canonical_game_from_pbp(
     for row in normalized.to_dict(orient="records"):
         player_id = int(row["PLAYER_ID"])
         team_code = str(row["TEAM_ABBREVIATION"])
-        raw = {**raw_by_player.get((player_id, team_code), {}), **row}
+        wire = raw_by_player.get((player_id, team_code), {})
+        # The raw provider row preserves the sparse wire omissions (and any
+        # retained optional fields such as assist locations); the normalized
+        # row zero-fills the additive counting columns.  Both spellings agree
+        # on a governed zero, so the merged row drives typed extraction.  The
+        # sparse wire itself is checked first so a row omitting a count that
+        # its retained components prove nonzero fails at intake rather than
+        # being masked by the normalized zero-fill.
+        if wire:
+            _assert_missing_points_is_a_governed_zero(wire)
+        raw = {**wire, **row}
         players.append(
             _player_fact_from_row(
                 raw,
@@ -614,6 +1337,20 @@ def canonical_game_from_pbp(
     away_players = tuple(player for player in players if player.team_id == away_id)
     if not home_players or not away_players:
         raise LedgerValidationError("a complete game must contain both event teams")
+    raw_rows: tuple[LedgerGameRow, ...] = ()
+    team_row_by_team: dict[int, Mapping[str, Any]] = {}
+    if raw_observation is not None:
+        raw_rows = _ledger_raw_rows(
+            raw_observation,
+            game_id=game_id,
+            home_team_id=home_id,
+            away_team_id=away_id,
+        )
+        team_row_by_team = {
+            row.team_id: row.payload
+            for row in raw_rows
+            if row.row_type == "team"
+        }
     participant_evidence = _participant_evidence(
         raw_observation,
         participant_ids_by_team=participant_ids_by_team,
@@ -630,23 +1367,37 @@ def canonical_game_from_pbp(
         )
 
     team_result_map: dict[int, Mapping[str, Any]] = {}
-    if isinstance(team_results, Mapping):
-        for side, team_id in (("Home", home_id), ("Away", away_id)):
+    for side, team_id in (("Home", home_id), ("Away", away_id)):
+        result = None
+        if isinstance(team_results, Mapping):
             value = team_results.get(side)
             if isinstance(value, Mapping) and isinstance(value.get("FullGame"), Mapping):
                 result = value["FullGame"]
-            elif isinstance(value, Mapping):
-                result = value
-            else:
-                result = None
-            if result is not None:
-                result_team_id = _raw_value(result, "TeamId", "team_id", "TEAM_ID")
-                if result_team_id is not None and _integer(result_team_id, "team_id") != team_id:
-                    raise LedgerValidationError("PBP team totals contradict the governed event")
-                team_result_map[team_id] = result
+        # Sparse zero acceptance depends on the complete diagnostics, so an
+        # accepted raw observation must carry the team_results FullGame
+        # envelope for every governed side.  A missing envelope leaves a sparse
+        # omission unprovable and rejects the candidate atomically.
+        if raw_observation is not None and not isinstance(result, Mapping):
+            raise LedgerValidationError(
+                "accepted PBP evidence requires the team_results diagnostic "
+                f"envelope for {side}"
+            )
+        if result is not None:
+            result_team_id = _raw_value(result, "TeamId", "team_id", "TEAM_ID")
+            if result_team_id is not None and _integer(result_team_id, "team_id") != team_id:
+                raise LedgerValidationError("PBP team totals contradict the governed event")
+            team_result_map[team_id] = result
     teams = (
-        _sum_team_facts(home_id, home_code, away_id, away_code, True, home_players, team_result_map.get(home_id)),
-        _sum_team_facts(away_id, away_code, home_id, home_code, False, away_players, team_result_map.get(away_id)),
+        _sum_team_facts(
+            home_id, home_code, away_id, away_code, True,
+            home_players, team_row_by_team.get(home_id), team_result_map.get(home_id),
+            require_team_row=raw_observation is not None,
+        ),
+        _sum_team_facts(
+            away_id, away_code, home_id, home_code, False,
+            away_players, team_row_by_team.get(away_id), team_result_map.get(away_id),
+            require_team_row=raw_observation is not None,
+        ),
     )
     observation_id = _required_text(source_observation_id or game_id, "source_observation_id")
     retrieved = assume_utc(retrieved_at or datetime.now(timezone.utc))
@@ -670,6 +1421,8 @@ def canonical_game_from_pbp(
             (team_id, tuple(sorted(player_ids)))
             for team_id, player_ids in sorted(participant_evidence.items())
         ),
+        raw_rows=raw_rows,
+        raw_checksum=raw_checksum(raw_rows),
     ).with_checksum()
 
 
@@ -748,6 +1501,112 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             or value.possessions < 0
         ):
             raise LedgerValidationError(f"{label}.possessions must be finite and non-negative")
+
+
+def _reconcile_raw_and_typed_evidence(
+    game: CanonicalGame,
+    players_by_team: Mapping[int, Sequence[PlayerGameFact]],
+) -> None:
+    """Prove every stored typed fact equals extraction from its raw authority.
+
+    The archived raw rows are the single source of truth: each typed player
+    fact must equal extraction from its archived player row and each typed
+    team fact must equal extraction from its team-summary row combined with
+    the participating-player sums (the team-summary row supplies the team-only
+    residual).  This also enforces the player/team identity, minutes, and
+    presence evidence at the repository boundary, so a direct
+    ``replace_game`` caller can never persist an incomplete or mixed raw/typed
+    version.
+    """
+
+    tricode_by_team = {
+        game.home_team_id: game.home_team_tricode,
+        game.away_team_id: game.away_team_tricode,
+    }
+    raw_player_facts: dict[tuple[int, int], PlayerGameFact] = {}
+    raw_team_rows: dict[int, LedgerGameRow] = {}
+    for row in game.raw_rows:
+        if row.row_type == "team":
+            raw_team_rows[row.team_id] = row
+            continue
+        raw_player_facts[(row.team_id, row.entity_id or 0)] = _player_fact_from_row(
+            row.payload,
+            team_id=row.team_id,
+            team_tricode=tricode_by_team[row.team_id],
+        )
+    typed_player_facts = {
+        (fact.team_id, fact.player_id): fact for fact in game.player_facts
+    }
+    if set(raw_player_facts) != set(typed_player_facts):
+        raise LedgerValidationError("typed player facts must match raw player evidence")
+    for key, extracted in raw_player_facts.items():
+        if extracted != typed_player_facts[key]:
+            raise LedgerValidationError("typed player facts must match raw player evidence")
+    team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+    for team_id, row in raw_team_rows.items():
+        team_fact = team_facts_by_team[team_id]
+        extracted = _sum_team_facts(
+            team_id,
+            team_fact.team_tricode,
+            team_fact.opponent_team_id,
+            team_fact.opponent_team_tricode,
+            team_fact.is_home,
+            players_by_team[team_id],
+            row.payload,
+            require_team_row=True,
+        )
+        if extracted != team_fact:
+            raise LedgerValidationError(
+                "typed team facts must match raw team-summary evidence"
+            )
+
+
+def _validate_team_summary_minutes(payload: Mapping[str, Any]) -> None:
+    """Validate team-summary minutes evidence without treating it as additive.
+
+    Minutes presence and accepted format are required on every archived row at
+    the repository boundary, including the team-summary rows.  Team minutes are
+    a provider team-summary field and are never compared against player
+    minutes or player totals.
+    """
+
+    raw = _raw_value(payload, "Minutes", "MIN", "minutes")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise LedgerValidationError("team-summary row is missing minutes evidence")
+    _minutes_value(raw, "team minutes")
+
+
+def _validate_raw_row_identity(row: LedgerGameRow) -> None:
+    """Reconcile archived row metadata against the provider payload identity.
+
+    The provider's identity rules are the same ones ``_ledger_raw_rows`` uses:
+    a row is a team summary when its payload ``EntityId`` is ``0``/``None`` or
+    its ``Name`` is exactly ``Team``.  A team-summary row must therefore carry a
+    team-identified payload and no player identity metadata, and a player row
+    must carry a player-identified payload whose provider identity and name
+    equal its archived metadata (the typed fact reconciliation then proves the
+    retained player fact matches).
+    """
+
+    payload_id = _raw_value(row.payload, "EntityId", "PLAYER_ID", "player_id")
+    payload_name = _raw_value(row.payload, "Name", "PLAYER_NAME", "player_name")
+    is_team_payload = payload_id in (None, "0", 0) or str(payload_name or "") == "Team"
+    if row.row_type == "team":
+        if not is_team_payload or row.entity_id is not None or row.entity_name is not None:
+            raise LedgerValidationError(
+                "team-summary row metadata contradicts the provider payload identity"
+            )
+        return
+    if is_team_payload:
+        raise LedgerValidationError(
+            "player row metadata contradicts the provider payload identity"
+        )
+    canonical_id = _integer(payload_id, "entity_id")
+    canonical_name = _required_text(payload_name, "entity_name")
+    if row.entity_id != canonical_id or row.entity_name != canonical_name:
+        raise LedgerValidationError(
+            "player row metadata must match the provider payload identity"
+        )
 
 
 def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
@@ -845,33 +1704,114 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         raise LedgerValidationError(
             "player facts must exactly match provider participant evidence"
         )
+    if (
+        not isinstance(game.raw_rows, Sequence)
+        or isinstance(game.raw_rows, (str, bytes, bytearray))
+    ):
+        raise LedgerValidationError("raw evidence must be a sequence of archived rows")
+    if not game.raw_rows:
+        raise LedgerValidationError("accepted raw evidence is required for a complete game")
+    seen_raw_rows: set[tuple[object, ...]] = set()
+    raw_player_rows: dict[int, int] = {}
+    team_rows_by_side: dict[str, int] = {"Home": 0, "Away": 0}
+    row_indices_by_side: dict[str, list[int]] = {"Home": [], "Away": []}
+    for row in game.raw_rows:
+        if not isinstance(row, LedgerGameRow):
+            raise LedgerValidationError("raw evidence contains an invalid archived row")
+        if (
+            isinstance(row.row_index, bool)
+            or not isinstance(row.row_index, int)
+            or row.row_index < 0
+        ):
+            raise LedgerValidationError("raw evidence row_index must be a non-negative integer")
+        # Provider FullGame array positions are unique per side regardless of
+        # row type.  Enforcing one archived row per (side, row_index) keeps the
+        # canonical raw-row order and raw_checksum deterministic.
+        row_key = (row.game_id, row.side, row.row_index)
+        if row_key in seen_raw_rows:
+            raise LedgerValidationError(
+                "raw evidence must contain exactly one archived row per side and provider index"
+            )
+        seen_raw_rows.add(row_key)
+        if row.game_id != game.game_id:
+            raise LedgerValidationError("raw evidence game identity contradicts the game")
+        if row.row_type not in {"team", "player"} or row.side not in {"Home", "Away"}:
+            raise LedgerValidationError("raw evidence has an invalid row type or side")
+        row_indices_by_side[row.side].append(row.row_index)
+        if row.team_id not in {game.home_team_id, game.away_team_id}:
+            raise LedgerValidationError("raw evidence team is outside the game identity")
+        expected_side = "Home" if row.team_id == game.home_team_id else "Away"
+        if row.side != expected_side:
+            raise LedgerValidationError("raw evidence side contradicts its team identity")
+        if not isinstance(row.payload, Mapping):
+            raise LedgerValidationError("raw evidence payload must be a mapping")
+        if (
+            not row.observed_fields
+            or tuple(row.observed_fields) != tuple(sorted(row.payload))
+        ):
+            raise LedgerValidationError("raw evidence observed fields must match the payload")
+        if row.checksum != canonical_row_checksum(row.payload):
+            raise LedgerValidationError("raw evidence checksum does not match the payload")
+        _validate_raw_row_identity(row)
+        if row.row_type == "team":
+            team_rows_by_side[row.side] += 1
+            _validate_team_summary_minutes(row.payload)
+        else:
+            if row.entity_id is None or row.entity_id in raw_player_rows:
+                raise LedgerValidationError("raw player evidence has an invalid entity identity")
+            raw_player_rows[row.entity_id] = row.team_id
+    if team_rows_by_side != {"Home": 1, "Away": 1}:
+        raise LedgerValidationError(
+            "raw evidence must contain exactly one team-summary row per side"
+        )
+    for side, indices in row_indices_by_side.items():
+        if set(indices) != set(range(len(indices))):
+            raise LedgerValidationError(
+                f"raw evidence {side} rows must occupy contiguous provider indices 0..{len(indices) - 1}"
+            )
+    observed_raw_players = {
+        team_id: {entity_id for entity_id, team in raw_player_rows.items() if team == team_id}
+        for team_id in observed_by_team
+    }
+    if observed_raw_players != observed_by_team:
+        raise LedgerValidationError(
+            "raw player evidence must exactly match the retained player set"
+        )
+    if not isinstance(game.raw_checksum, str) or game.raw_checksum != raw_checksum(game.raw_rows):
+        raise LedgerValidationError("raw evidence checksum does not match archived rows")
     players_by_team = {
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
     }
+    _reconcile_raw_and_typed_evidence(game, players_by_team)
+    team_row_payload = {
+        team_id: next(
+            row.payload for row in game.raw_rows
+            if row.row_type == "team" and row.team_id == team_id
+        )
+        for team_id in observed_by_team
+    }
     for team_fact in game.team_facts:
         team_players = players_by_team[team_fact.team_id]
+        # Every complete team count is the participating-player sum plus the
+        # team-summary row's team-only residual (rebounds and the occasional
+        # dead-ball/team turnover no player is credited with).  Both are
+        # sparse: an omitted additive counter is an observed zero, so the raw
+        # archived team row is the residual authority and never a fallback.
         for field_name in COUNT_FIELDS:
-            if getattr(team_fact, field_name) != sum(
+            raw = _raw_value(team_row_payload[team_fact.team_id], *_TEAM_ROW_ALIASES[field_name])
+            residual = 0 if raw is None else _integer(raw, field_name)
+            expected = sum(
                 getattr(player, field_name) for player in team_players
-            ):
+            ) + residual
+            if getattr(team_fact, field_name) != expected:
                 raise LedgerValidationError(
-                    f"team_fact.{field_name} must reconcile with player primitives"
+                    f"team_fact.{field_name} must reconcile with player primitives and team-only evidence"
                 )
         expected_minutes = sum(player.minutes for player in team_players) / 5.0
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
             raise LedgerValidationError(
                 "team_fact.team_minutes must reconcile with player minutes"
-            )
-        player_possessions = tuple(player.possessions for player in team_players)
-        expected_possessions = (
-            sum(value for value in player_possessions if value is not None)
-            if player_possessions and all(value is not None for value in player_possessions)
-            else None
-        )
-        if team_fact.possessions != expected_possessions:
-            raise LedgerValidationError(
-                "team_fact.possessions must reconcile with player primitives"
             )
     if not isinstance(game.source_observation_id, str) or not game.source_observation_id.strip():
         raise LedgerValidationError("source_observation_id is required")
@@ -886,6 +1826,31 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     return replace(game, checksum=checksum, retrieved_at=assume_utc(game.retrieved_at))
 
 
+def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> None:
+    """Record one additive schema-drift correction as an operator alert.
+
+    The reconciliation row is written inside the ledger correction transaction,
+    so the drift alert commits atomically with the replacement evidence it
+    describes and is surfaced through the control-plane reconciliation queue.
+    """
+
+    from app.models.collection_control import ReconciliationItem
+
+    details = dict(drift.get("details") or {})
+    game_id = str(drift.get("game_id") or "").strip()
+    if game_id:
+        details["game_id"] = game_id
+    connection.execute(ReconciliationItem.__table__.insert().values(
+        item_id=str(uuid.uuid4()),
+        season=str(drift.get("season") or "")[:7],
+        kind=str(drift.get("kind") or "schema_drift")[:64],
+        reason=str(drift.get("reason") or "field_set_change")[:64],
+        details=json.dumps(details, sort_keys=True, separators=(",", ":")),
+        status="open",
+        created_at=datetime.now(timezone.utc),
+    ))
+
+
 class CanonicalGameLedgerRepository:
     """Temporary-DB friendly atomic repository for complete games and progress."""
 
@@ -894,23 +1859,29 @@ class CanonicalGameLedgerRepository:
         engine: Engine,
         *,
         correction_sink: Callable[[Connection, CanonicalGame], None] | None = None,
+        schema_drift_sink: Callable[[Connection, Mapping[str, object]], None] | None = None,
     ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store ledger facts")
         self.engine = engine
         self.correction_sink = correction_sink
+        self.schema_drift_sink = schema_drift_sink
         required = {
             CanonicalGameLedgerGame.__tablename__,
             CanonicalGameLedgerTeamFact.__tablename__,
             CanonicalGameLedgerPlayerFact.__tablename__,
+            LedgerGameRowEvidence.__tablename__,
             LedgerBackfillState.__tablename__,
             LedgerPublication.__tablename__,
+            LedgerObservationEvidence.__tablename__,
         }
         missing = sorted(required - set(inspect(engine).get_table_names()))
         if missing:
             raise LedgerSchemaUnavailable(
-                "Canonical Game Ledger schema is unavailable; apply migration 024 "
-                f"before constructing the repository (missing: {', '.join(missing)})"
+                "Canonical Game Ledger schema is unavailable; apply migration 032 "
+                "and the latest migrations (including 033) before constructing the "
+                "repository "
+                f"(missing: {', '.join(missing)})"
             )
 
     def replace_game(self, game: CanonicalGame) -> LedgerWriteResult:
@@ -954,10 +1925,37 @@ class CanonicalGameLedgerRepository:
                     candidates,
                     accepted_observations,
                 )
-                connection.execute(
-                    CollectionObservation.__table__.insert(),
-                    [dict(accepted_observations[observation_id]) for observation_id in sorted(expected_observations)],
-                )
+                candidate_by_observation = {
+                    candidate.source_observation_id: candidate
+                    for candidate in candidates
+                }
+                existing_rows = {
+                    row["game_id"]: row
+                    for row in connection.execute(select(
+                        tables["game"].c.game_id,
+                        tables["game"].c.checksum,
+                        tables["game"].c.raw_checksum,
+                    ).where(tables["game"].c.game_id.in_(
+                        [candidate.game_id for candidate in candidates]
+                    ))).mappings()
+                }
+                # An identical replay is an idempotent no-op: persist no new
+                # observation evidence for it.  Inserting the observation before
+                # the checksum no-op would otherwise append evidence on every
+                # replay, and reusing one observation identity would collide.
+                pending_observations = {
+                    observation_id: accepted_observations[observation_id]
+                    for observation_id in expected_observations
+                    if not self._is_idempotent_replay(
+                        existing_rows.get(candidate_by_observation[observation_id].game_id),
+                        candidate_by_observation[observation_id],
+                    )
+                }
+                if pending_observations:
+                    connection.execute(
+                        CollectionObservation.__table__.insert(),
+                        [dict(pending_observations[observation_id]) for observation_id in sorted(pending_observations)],
+                    )
             for candidate in candidates:
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
@@ -1034,6 +2032,99 @@ class CanonicalGameLedgerRepository:
                 or assume_utc(row["retrieved_at"]) >= assume_utc(manifest["collect_before"])
             ):
                 raise LedgerValidationError("accepted ledger evidence is not manifest authorized")
+            # Bind the observation's payload to the exact candidate evidence
+            # being persisted so an envelope cannot stamp a foreign document.
+            _verify_observation_binding(candidate, row)
+
+    @staticmethod
+    def _is_idempotent_replay(
+        existing: Mapping[str, Any] | None,
+        candidate: CanonicalGame,
+    ) -> bool:
+        """True when the stored game already matches this exact candidate.
+
+        The raw checksum is compared separately from the typed checksum so a
+        raw-only correction (a provider field that changes no typed primitive)
+        is still recognized as a replacement rather than an idempotent replay.
+        """
+        return (
+            existing is not None
+            and existing["checksum"] == candidate.checksum
+            and (existing["raw_checksum"] or "") == (candidate.raw_checksum or "")
+        )
+
+    def _schema_drift_payload(
+        self,
+        connection: Connection,
+        candidate: CanonicalGame,
+        existing: Mapping[str, Any] | None,
+        tables: Mapping[str, Any],
+    ) -> Mapping[str, object] | None:
+        """Compare a candidate's observed field sets against governed evidence.
+
+        A first raw archive (a brand-new game, or a pre-032 game receiving its
+        row evidence for the first time) is judged against the governed
+        baseline field set: an unknown additive field is schema drift that must
+        be recorded and alerted, while a normal first observation inside the
+        baseline stays silent.  A correction whose corresponding archived rows
+        gain or lose provider fields is drift for the same reason.  Either
+        alert is recorded without rejecting the otherwise valid replacement.
+        """
+        if not candidate.raw_rows:
+            return None
+        raw_rows = connection.execute(select(
+            tables["raw"].c.side,
+            tables["raw"].c.row_type,
+            tables["raw"].c.row_index,
+            tables["raw"].c.observed_fields,
+        ).where(tables["raw"].c.game_id == candidate.game_id)).mappings().all()
+        candidate_fields = {
+            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
+            for row in candidate.raw_rows
+        }
+        if existing is None or not raw_rows:
+            added: set[str] = set()
+            for fields in candidate_fields.values():
+                added |= set(fields) - LEDGER_GOVERNED_FULLGAME_FIELDS
+            if not added:
+                return None
+            return {
+                "season": candidate.season,
+                "game_id": candidate.game_id,
+                "kind": "schema_drift",
+                "reason": "unknown_field",
+                "details": {
+                    "added_fields": tuple(sorted(added))[:25],
+                    "removed_fields": (),
+                    "schema_version": LEDGER_SCHEMA_VERSION,
+                },
+            }
+
+        def row_key(row: Any) -> tuple[Any, Any, Any]:
+            return (row["side"], row["row_type"], row["row_index"])
+
+        existing_fields = {
+            row_key(row): frozenset(json.loads(row["observed_fields"] or "[]"))
+            for row in raw_rows
+        }
+        added: set[str] = set()
+        removed: set[str] = set()
+        for key in existing_fields.keys() & candidate_fields.keys():
+            added |= candidate_fields[key] - existing_fields[key]
+            removed |= existing_fields[key] - candidate_fields[key]
+        if not added and not removed:
+            return None
+        return {
+            "season": candidate.season,
+            "game_id": candidate.game_id,
+            "kind": "schema_drift",
+            "reason": "field_set_change",
+            "details": {
+                "added_fields": tuple(sorted(added))[:25],
+                "removed_fields": tuple(sorted(removed))[:25],
+                "schema_version": LEDGER_SCHEMA_VERSION,
+            },
+        }
 
     def _replace_candidate(
         self,
@@ -1046,8 +2137,9 @@ class CanonicalGameLedgerRepository:
         ).mappings().one_or_none()
         if existing is not None and self._identity_changed(existing, candidate):
             raise LedgerValidationError("a correction cannot change a game's canonical identity")
-        if existing is not None and existing["checksum"] == candidate.checksum:
+        if self._is_idempotent_replay(existing, candidate):
             return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
+        drift = self._schema_drift_payload(connection, candidate, existing, tables)
         self._delete_game(connection, candidate.game_id, tables)
         connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
         connection.execute(
@@ -1058,8 +2150,45 @@ class CanonicalGameLedgerRepository:
             insert(tables["player"]),
             [self._player_values(candidate.game_id, value) for value in candidate.player_facts],
         )
+        if candidate.raw_rows:
+            connection.execute(
+                insert(tables["raw"]),
+                [
+                    self._raw_row_values(
+                        candidate.game_id,
+                        row,
+                        source_observation_id=candidate.source_observation_id,
+                        retrieved_at=candidate.retrieved_at,
+                    )
+                    for row in candidate.raw_rows
+                ],
+            )
         if self.correction_sink is not None:
             self.correction_sink(connection, candidate)
+        # Durable reference for indefinite retention (#25): every observation
+        # that supplies an accepted game, including superseded corrections, is
+        # referenced here so generic observation GC never prunes it.  Only real
+        # observations are referenced; the repair seam writes candidates
+        # without a staged collection observation.
+        connection.execute(
+            insert(tables["observation_evidence"]).from_select(
+                [
+                    tables["observation_evidence"].c.observation_id,
+                    tables["observation_evidence"].c.game_id,
+                    tables["observation_evidence"].c.created_at,
+                ],
+                select(
+                    CollectionObservation.__table__.c.observation_id,
+                    literal(candidate.game_id),
+                    literal(datetime.now(timezone.utc)),
+                ).where(
+                    CollectionObservation.__table__.c.observation_id
+                    == candidate.source_observation_id,
+                ),
+            )
+        )
+        if drift is not None and self.schema_drift_sink is not None:
+            self.schema_drift_sink(connection, drift)
         return LedgerWriteResult(
             candidate.game_id,
             candidate.checksum or "",
@@ -1076,7 +2205,11 @@ class CanonicalGameLedgerRepository:
                 return None
             team_rows = connection.execute(select(tables["team"]).where(tables["team"].c.game_id == game_id).order_by(tables["team"].c.team_id)).mappings().all()
             player_rows = connection.execute(select(tables["player"]).where(tables["player"].c.game_id == game_id).order_by(tables["player"].c.team_id, tables["player"].c.player_id)).mappings().all()
-        return _game_from_rows(game_row, team_rows, player_rows)
+            raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(
+                _side_order_expression(tables["raw"].c.side),
+                tables["raw"].c.row_index,
+            )).mappings().all()
+        return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
 
     def list_games(self, season: str, *, through: date | datetime | None = None) -> tuple[LedgerGameSummary, ...]:
         canonical_season = validate_canonical_season(season)
@@ -1109,6 +2242,36 @@ class CanonicalGameLedgerRepository:
         with self.engine.connect() as connection:
             rows = connection.execute(statement).all()
         return {str(game_id): str(checksum) for game_id, checksum in rows}
+
+    def game_ids_without_raw_evidence(
+        self,
+        season: str,
+        *,
+        through: date | datetime | None = None,
+    ) -> frozenset[str]:
+        """Return stored game rows that lack the complete raw PBP row archive.
+
+        Migration 032 creates the raw archive after earlier ledger games were
+        already accepted, so those games carry ``raw_checksum`` NULL and no
+        ``canonical_game_ledger_raw_rows``.  The backfill must re-fetch them and
+        the season must not report complete until every governed game retains
+        both team-summary and every player-row evidence.
+        """
+        canonical_season = validate_canonical_season(season)
+        game_table = CanonicalGameLedgerGame.__table__
+        raw_table = LedgerGameRowEvidence.__table__
+        statement = (
+            select(game_table.c.game_id)
+            .where(game_table.c.season == canonical_season)
+            .where(or_(
+                game_table.c.raw_checksum.is_(None),
+                ~exists(select(1).where(raw_table.c.game_id == game_table.c.game_id)),
+            ))
+        )
+        if through is not None:
+            statement = statement.where(game_table.c.game_date <= _canonical_date(through))
+        with self.engine.connect() as connection:
+            return frozenset(str(row[0]) for row in connection.execute(statement).all())
 
     def save_progress(self, progress: LedgerBackfillProgress) -> None:
         table = LedgerBackfillState.__table__
@@ -1199,6 +2362,8 @@ class CanonicalGameLedgerRepository:
             "game": CanonicalGameLedgerGame.__table__,
             "team": CanonicalGameLedgerTeamFact.__table__,
             "player": CanonicalGameLedgerPlayerFact.__table__,
+            "raw": LedgerGameRowEvidence.__table__,
+            "observation_evidence": LedgerObservationEvidence.__table__,
         }
 
     @staticmethod
@@ -1220,6 +2385,7 @@ class CanonicalGameLedgerRepository:
     def _delete_game(connection: Connection, game_id: str, tables: Mapping[str, Any]) -> None:
         connection.execute(delete(tables["player"]).where(tables["player"].c.game_id == game_id))
         connection.execute(delete(tables["team"]).where(tables["team"].c.game_id == game_id))
+        connection.execute(delete(tables["raw"]).where(tables["raw"].c.game_id == game_id))
         connection.execute(delete(tables["game"]).where(tables["game"].c.game_id == game_id))
 
     @staticmethod
@@ -1236,6 +2402,7 @@ class CanonicalGameLedgerRepository:
             "status": game.status,
             "source_observation_id": game.source_observation_id,
             "checksum": game.checksum or game_checksum(game),
+            "raw_checksum": game.raw_checksum or raw_checksum(game.raw_rows),
             "retrieved_at": assume_utc(game.retrieved_at),
             "updated_at": assume_utc(game.retrieved_at),
         }
@@ -1247,6 +2414,30 @@ class CanonicalGameLedgerRepository:
     @staticmethod
     def _player_values(game_id: str, fact: PlayerGameFact) -> dict[str, Any]:
         return {"game_id": game_id, **asdict(fact)}
+
+    @staticmethod
+    def _raw_row_values(
+        game_id: str,
+        row: LedgerGameRow,
+        *,
+        source_observation_id: str,
+        retrieved_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "game_id": game_id,
+            "row_type": row.row_type,
+            "side": row.side,
+            "row_index": row.row_index,
+            "entity_id": row.entity_id,
+            "entity_name": row.entity_name,
+            "team_id": row.team_id,
+            "source_observation_id": source_observation_id,
+            "retrieved_at": assume_utc(retrieved_at),
+            "checksum": row.checksum,
+            "schema_version": row.schema_version,
+            "observed_fields": json.dumps(row.observed_fields, sort_keys=True, separators=(",", ":")),
+            "payload": _canonical_json(row.payload),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1265,9 +2456,37 @@ class LedgerPublicationRecord:
     payload: str = "{}"
 
 
-def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str, Any]], player_rows: Sequence[Mapping[str, Any]]) -> CanonicalGame:
+def _game_from_rows(
+    game_row: Mapping[str, Any],
+    team_rows: Sequence[Mapping[str, Any]],
+    player_rows: Sequence[Mapping[str, Any]],
+    raw_rows: Sequence[Mapping[str, Any]] = (),
+) -> CanonicalGame:
     teams = tuple(TeamGameFact(**{key: row[key] for key in TeamGameFact.__dataclass_fields__}) for row in team_rows)
     players = tuple(PlayerGameFact(**{key: row[key] for key in PlayerGameFact.__dataclass_fields__}) for row in player_rows)
+    # Reload rows in the same canonical order used for hashing and
+    # persistence, so an unchanged replace of a loaded game is idempotent.
+    archived = tuple(
+        sorted(
+            (
+                LedgerGameRow(
+                    game_id=row["game_id"],
+                    row_type=row["row_type"],
+                    side=row["side"],
+                    row_index=row["row_index"],
+                    entity_id=row["entity_id"],
+                    entity_name=row["entity_name"],
+                    team_id=row["team_id"],
+                    payload=json.loads(row["payload"]),
+                    checksum=row["checksum"],
+                    observed_fields=tuple(json.loads(row["observed_fields"] or "[]")),
+                    schema_version=row["schema_version"],
+                )
+                for row in raw_rows
+            ),
+            key=_raw_row_order,
+        )
+    )
     return CanonicalGame(
         game_id=game_row["game_id"],
         season=game_row["season"],
@@ -1287,15 +2506,21 @@ def _game_from_rows(game_row: Mapping[str, Any], team_rows: Sequence[Mapping[str
         season_type=game_row["season_type"],
         status=game_row["status"],
         checksum=game_row["checksum"],
+        raw_rows=archived,
+        raw_checksum=game_row.get("raw_checksum"),
     )
 
 
 __all__ = [
     "ASSIST_LOCATION_FIELDS",
     "COUNT_FIELDS",
+    "LEDGER_GOVERNED_DIAGNOSTIC_COUNTS",
+    "LEDGER_GOVERNED_FULLGAME_FIELDS",
+    "LEDGER_SCHEMA_VERSION",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",
     "LedgerBackfillProgress",
+    "LedgerGameRow",
     "LedgerGameSummary",
     "LedgerPublicationRecord",
     "LedgerSchemaUnavailable",
@@ -1304,6 +2529,10 @@ __all__ = [
     "PlayerGameFact",
     "TeamGameFact",
     "canonical_game_from_pbp",
+    "canonical_row_checksum",
     "game_checksum",
+    "raw_checksum",
+    "raw_rows_from_facts",
+    "record_schema_drift",
     "validate_complete_game",
 ]

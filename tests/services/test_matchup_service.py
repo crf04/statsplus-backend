@@ -265,10 +265,10 @@ def _window(
     }
     observations = tuple(
         StoredTeamMatchupObservation(
-            base,
-            "unavailable" if last_15 and base == "play_types" else "available",
-            "provider_window_unsupported" if last_15 and base == "play_types" else None,
-            RETRIEVED_AT,
+            surface=base,
+            status="unavailable" if last_15 and base == "play_types" else "available",
+            unavailable_reason="provider_window_unsupported" if last_15 and base == "play_types" else None,
+            retrieved_at=RETRIEVED_AT,
         )
         for base in BASES
     )

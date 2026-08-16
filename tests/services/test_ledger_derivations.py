@@ -23,6 +23,7 @@ from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     PlayerGameFact,
     TeamGameFact,
+    raw_rows_from_facts,
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
@@ -33,6 +34,10 @@ from app.models.collection_control import (
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
+
+
+def _raw_rows_for_game(game):
+    return raw_rows_from_facts(game)
 
 
 class _ParityReader:
@@ -157,7 +162,7 @@ def _league_games():
                     personal_fouls=1,
                     team_minutes=48.0,
                 ))
-            games.append(CanonicalGame(
+            game = CanonicalGame(
                 game_id=game_id,
                 season="2025-26",
                 game_date=date(2025, 10, 1) + timedelta(days=round_index),
@@ -170,7 +175,10 @@ def _league_games():
                 source_observation_id=f"obs:{game_id}",
                 retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
                 participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
-            ).with_checksum())
+            )
+            games.append(
+                replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum()
+            )
         teams = [teams[0], teams[-1], *teams[1:-1]]
     return tuple(games)
 
@@ -208,6 +216,91 @@ def test_exact_l15_is_league_complete_and_defensive_ranks_are_ascending():
     )
     assert assist.complete and len(assist.teams) == 30
     assert all(team.game_count == 15 for team in assist.teams)
+
+
+def test_assist_total_includes_team_only_residual_assists():
+    games = tuple(
+        replace(
+            game,
+            team_facts=tuple(
+                replace(fact, assists=fact.assists + 1)
+                if fact.team_id == 1
+                else fact
+                for fact in game.team_facts
+            ),
+        )
+        for game in _league_games()
+    )
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert len(window.teams) == 30
+    for team in window.teams:
+        player_total = 0
+        team_total = 0
+        faced_residual = 0
+        for game in games:
+            if team.team_id not in {game.home_team_id, game.away_team_id}:
+                continue
+            defense = next(
+                fact for fact in game.team_facts if fact.team_id == team.team_id
+            )
+            opponent = next(
+                fact
+                for fact in game.team_facts
+                if fact.team_id == defense.opponent_team_id
+            )
+            team_total += opponent.assists
+            player_total += sum(
+                player.assists
+                for player in game.player_facts
+                if player.team_id == opponent.team_id
+            )
+            if opponent.team_id == 1:
+                faced_residual += 1
+        assert team.counts["assists"] == team_total
+        assert team_total == player_total + faced_residual
+
+
+def test_assist_total_is_carried_into_derived_window_metrics():
+    games = _league_games()
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    for team in window.teams:
+        assert "assists" in team.per48
+        assert "assists" in team.league_average
+        assert "assists" in team.population_sigma
+        assert "assists" in team.competition_rank
+        assert team.per48["assists"] == team.counts["assists"] * 48.0 / team.team_minutes
+    league_average = sum(team.per48["assists"] for team in window.teams) / len(window.teams)
+    assert window.teams[0].league_average["assists"] == league_average
 
 
 def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
@@ -325,8 +418,9 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'independent.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        replace(
+    games = []
+    for game in _league_games():
+        without_locations = replace(
             game,
             player_facts=tuple(
                 replace(
@@ -342,9 +436,11 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
                 for player in game.player_facts
             ),
             checksum=None,
-        ).with_checksum()
-        for game in _league_games()
-    )
+        )
+        games.append(
+            replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+        )
+    games = tuple(games)
     repository.replace_games_atomic(games)
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
@@ -444,11 +540,15 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()
+    base = games[0]
     later = replace(
-        games[0],
+        base,
         game_id="later-game",
         game_date=date(2025, 10, 16),
         source_observation_id="later-observation",
+        raw_rows=tuple(
+            replace(row, game_id="later-game") for row in base.raw_rows
+        ),
         checksum=None,
     ).with_checksum()
     repository.replace_games_atomic((*games, later))

@@ -54,12 +54,13 @@ def _candidate(engine, *, stream_key="player_per36", checksum="a" * 64):
 
 
 def _traditional_season_rows(game):
+    by_team = {fact.team_id: fact for fact in game.team_facts}
     return tuple({
-        "TEAM_ID": team_id,
-        "OPP_PTS": 96.0,
-        "OPP_REB": 36.0,
-        "OPP_AST": 36.0,
-    } for team_id in (game.home_team_id, game.away_team_id))
+        "TEAM_ID": team_fact.team_id,
+        "OPP_PTS": float(by_team[team_fact.opponent_team_id].points) * 48.0 / team_fact.team_minutes,
+        "OPP_REB": float(by_team[team_fact.opponent_team_id].rebounds) * 48.0 / team_fact.team_minutes,
+        "OPP_AST": float(by_team[team_fact.opponent_team_id].assists) * 48.0 / team_fact.team_minutes,
+    } for team_fact in game.team_facts)
 
 
 def test_identity_set_differences_are_symmetric_and_prevent_exact_parity():

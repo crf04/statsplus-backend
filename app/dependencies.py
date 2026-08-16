@@ -58,6 +58,7 @@ class ApplicationDependencies:
     canonical_game_ledger_repository: Any | None = None
     ledger_materialization_service: Any | None = None
     ledger_backfill_service: Any | None = None
+    ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
 
 
@@ -137,6 +138,7 @@ def build_dependencies(
     publication_reader = None
     write_fence = None
     canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
+    ledger_matchup_materialization_service = None
     if not demo_database:
         # The signing secret is deployment-only.  A process-local key keeps
         # local development credential-free; production should inject one.
@@ -300,13 +302,17 @@ def build_dependencies(
             write_fence=write_fence,
             publication_reader=publication_reader,
         )
+        team_matchup_repository = TeamMatchupRepository(
+            engine, write_fence=write_fence
+        )
         team_matchup_query_service = TeamMatchupQueryService(
-            TeamMatchupRepository(engine, write_fence=write_fence),
+            team_matchup_repository,
             publication_reader=publication_reader,
         )
         from app.services.canonical_game_ledger import (
             CanonicalGameLedgerRepository,
             LedgerSchemaUnavailable,
+            record_schema_drift,
         )
         from app.services.ledger_backfill import (
             AcceptedObservationParticipantCatalog,
@@ -321,17 +327,21 @@ def build_dependencies(
             LedgerParityArtifactRepository,
             LegacyParityDiagnosticReader,
         )
+        from app.services.ledger_matchup_materialization import (
+            LedgerMatchupMaterializationService,
+        )
 
         try:
             canonical_game_ledger_repository = CanonicalGameLedgerRepository(
                 engine,
                 correction_sink=LedgerCorrectionQueue(require_governance=True),
+                schema_drift_sink=record_schema_drift,
             )
         except LedgerSchemaUnavailable:
             # Narrow route tests intentionally bind the app to minimal fixture
             # databases while disabling schema creation.  Ledger workers are
             # not part of those request seams; production/staging must still
-            # fail startup when migration 024 has not been applied.
+            # fail startup when migration 032 has not been applied.
             if settings.environment != "testing":
                 raise
         else:
@@ -340,6 +350,12 @@ def build_dependencies(
                 parity_repository=LedgerParityArtifactRepository(engine),
                 parity_reader=LegacyParityDiagnosticReader(engine),
                 publication_service=publication_service,
+            )
+            ledger_matchup_materialization_service = (
+                LedgerMatchupMaterializationService(
+                    canonical_game_ledger_repository,
+                    team_matchup_repository,
+                )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
@@ -509,6 +525,7 @@ def build_dependencies(
         canonical_game_ledger_repository=canonical_game_ledger_repository,
         ledger_materialization_service=ledger_materialization_service,
         ledger_backfill_service=ledger_backfill_service,
+        ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
     )
 

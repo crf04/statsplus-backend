@@ -131,7 +131,10 @@ Production application workers do not run migrations during Flask startup.
 Railway runs `python scripts/migrate.py` once as its pre-deploy command and
 only starts the new deployment after that command succeeds. Migration 031
 repairs databases where migration 024 was recorded but its five Canonical Game
-Ledger tables were lost during a concurrent startup race.
+Ledger tables were lost during a concurrent startup race. Migration 032 adds
+the immutable complete-PBP-row evidence archive
+(`canonical_game_ledger_raw_rows`) and a `raw_checksum` on the canonical game
+row for every accepted game; existing canonical reads are unchanged.
 
 Refresh one or more explicit seasons into the writable canonical event catalog
 with (repeat `--season` as needed):
@@ -155,7 +158,7 @@ Configure a separate Railway cron service from this repository with the same
 `DATABASE_URL` as the API and this start command:
 
 ```bash
-python scripts/nightly_refresh.py
+python scripts/nightly_refresh.py --hosted-only
 ```
 
 Set its Cron Schedule to `0 10 * * *`. Railway evaluates cron expressions in
@@ -164,18 +167,21 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The process runs six named current-season steps in this exact order: stats
+The Railway command runs only the PBP-backed durable player-game-log refresh.
+It reads the already governed Event and Athlete Catalogs from Postgres and
+never constructs or calls the NBA Stats adapter, because hosted Railway egress
+cannot reliably reach `stats.nba.com`. NBA-owned catalogs and statistical
+surfaces are collected by the residential collector.
+
+Running the command without `--hosted-only` retains the legacy operator mode.
+That mode runs six named current-season steps in this exact order: stats
 tables, Event Catalog schedule, Athlete Catalog, durable player game logs,
 Season player Diet facts, then internal Season/exact-team-Last-15 matchup facts.
 If a step fails, later steps in that attempt do not run and the whole unit
 starts over once. A failed Athlete Catalog therefore never suppresses the
 required schedule refresh that precedes it, while player logs remain untouched.
-The player-log step makes one whole-season NBA Stats request for Regular Season
-and one for Playoffs, then publishes both phases and current freshness
-atomically.
-Recorded Regular Season and Playoffs payloads under
-`tests/fixtures/nba_stats/` exercise both phase calls through the production
-parser without network access.
+The player-log step uses PBP per-game observations and publishes both phases
+and current freshness atomically.
 The player-Diet step makes exactly 16 league-wide Season calls: 11 offensive
 player Synergy play types, three `LeagueDashPlayerPtShot` GeneralRange calls,
 one `LeagueDashPlayerShotLocations` call, and one PBP player-totals call. It

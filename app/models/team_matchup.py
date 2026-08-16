@@ -8,6 +8,7 @@ from sqlalchemy import (
     Float,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 
@@ -41,6 +42,11 @@ class TeamMatchupFactRow(Base):
     window_start_date = Column(Date, nullable=True)
     window_end_date = Column(Date, nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    #: Exact governed game IDs this team's window aggregated (JSON text) and the
+    #: deterministic ledger checksum of the selected game set.  ``NULL`` on
+    #: provider-collected legacy facts; ledger-owned facts always carry both.
+    game_ids = Column(Text, nullable=True)
+    ledger_checksum = Column(String(64), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_facts_window"),
@@ -76,6 +82,11 @@ class TeamMatchupSurfaceObservationRow(Base):
     status = Column(String(16), nullable=False)
     unavailable_reason = Column(String(64), nullable=True)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    #: Exact governed game IDs the window's surface observed (JSON text) plus the
+    #: deterministic ledger checksum of that selected game set; ``NULL`` on
+    #: provider-collected legacy observations.
+    game_ids = Column(Text, nullable=True)
+    ledger_checksum = Column(String(64), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_observations_window"),

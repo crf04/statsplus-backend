@@ -237,6 +237,118 @@ def _create_team_matchup_fact_tables(connection: Connection) -> None:
     TeamMatchupSurfaceObservationRow.__table__.create(connection, checkfirst=True)
 
 
+def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
+    """Add ledger checksum and source-lineage columns to matchup read models.
+
+    Migration 034 is reserved for issue #114.  Ledger-owned facts and surface
+    observations record the exact governed game IDs they aggregated plus the
+    deterministic ledger checksum of that selected game set.  Existing
+    provider-collected rows keep ``NULL`` for both columns.
+    """
+    preparer = connection.dialect.identifier_preparer
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        table = preparer.quote(table_name)
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        if "game_ids" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN game_ids TEXT")
+            )
+        if "ledger_checksum" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)")
+            )
+
+
+def _backfill_governed_catalog_freshness(connection: Connection) -> None:
+    """Expose accepted governed catalogs through canonical freshness reads."""
+
+    metadata = MetaData()
+    publications = Table(
+        "collection_catalog_publications", metadata, autoload_with=connection
+    )
+    events = Table("event_catalog", metadata, autoload_with=connection)
+    event_freshness = Table(
+        "event_catalog_refreshes", metadata, autoload_with=connection
+    )
+    athletes = Table("athlete_catalog", metadata, autoload_with=connection)
+    athlete_freshness = Table(
+        "athlete_catalog_freshness", metadata, autoload_with=connection
+    )
+
+    latest = connection.execute(
+        select(
+            publications.c.catalog_type,
+            publications.c.season,
+            func.max(publications.c.published_at).label("published_at"),
+        )
+        .where(publications.c.complete.is_(True))
+        .group_by(publications.c.catalog_type, publications.c.season)
+    ).mappings()
+    for publication in latest:
+        catalog_type = str(publication["catalog_type"])
+        season = str(publication["season"])
+        published_at = publication["published_at"]
+        if catalog_type == "event":
+            row_count = int(connection.scalar(
+                select(func.count()).select_from(events).where(
+                    events.c.season == season
+                )
+            ) or 0)
+            existing = connection.scalar(
+                select(event_freshness.c.season).where(
+                    event_freshness.c.season == season
+                )
+            )
+            values = {
+                "last_attempt_at": published_at,
+                "last_success_at": published_at,
+                "failure_summary": None,
+                "event_count": row_count,
+            }
+            if existing is None:
+                connection.execute(
+                    insert(event_freshness).values(season=season, **values)
+                )
+            else:
+                connection.execute(
+                    event_freshness.update()
+                    .where(event_freshness.c.season == season)
+                    .values(**values)
+                )
+            continue
+        if catalog_type != "athlete":
+            continue
+        row_count = int(connection.scalar(
+            select(func.count()).select_from(athletes).where(
+                athletes.c.season == season
+            )
+        ) or 0)
+        existing = connection.scalar(
+            select(athlete_freshness.c.season).where(
+                athlete_freshness.c.season == season
+            )
+        )
+        values = {
+            "last_success_at": published_at,
+            "last_success_row_count": row_count,
+            "last_failure_summary": None,
+            "updated_at": published_at,
+        }
+        if existing is None:
+            connection.execute(
+                insert(athlete_freshness).values(season=season, **values)
+            )
+        else:
+            connection.execute(
+                athlete_freshness.update()
+                .where(athlete_freshness.c.season == season)
+                .values(**values)
+            )
+
+
 def _create_player_diet_fact_tables(connection: Connection) -> None:
     """Create Season player Diet facts and per-Base observations."""
     from app.models.player_diet import (
@@ -502,6 +614,66 @@ def _create_canonical_game_ledger_tables(connection: Connection) -> None:
 def _repair_canonical_game_ledger_tables(connection: Connection) -> None:
     """Recreate ledger tables missing from databases that recorded migration 024."""
     _create_canonical_game_ledger_tables(connection)
+
+
+def _create_ledger_raw_row_evidence(connection: Connection) -> None:
+    """Create the immutable complete PBP row archive for accepted games (#112).
+
+    Games accepted before this migration were archived only as typed facts:
+    they carry ``raw_checksum`` NULL and no ``canonical_game_ledger_raw_rows``
+    rows.  The backfill re-fetches and re-archives them
+    (``game_ids_without_raw_evidence``) before a season reports complete, so
+    every accepted governed game eventually retains both team-summary and every
+    player-row evidence.
+    """
+
+    from app.models.canonical_game_ledger import LedgerGameRowEvidence
+
+    LedgerGameRowEvidence.__table__.create(connection, checkfirst=True)
+    # A corrected source observation can change only the raw archived rows
+    # while typed primitives remain identical.  The game identity row carries
+    # a separate raw-evidence checksum so such a correction still atomically
+    # replaces evidence instead of replaying as an idempotent no-op.
+    table = "canonical_game_ledger_games"
+    columns = {column["name"] for column in inspect(connection).get_columns(table)}
+    if "raw_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table)} "
+            "ADD COLUMN raw_checksum VARCHAR(64)"
+        ))
+
+
+def _create_ledger_observation_evidence(connection: Connection) -> None:
+    """Persist a durable reference for every accepted ledger observation (#113).
+
+    A corrected game atomically replaces its typed facts and its archived raw
+    rows, so the game row's current ``source_observation_id`` no longer names
+    superseded observations.  This reference table keeps the observation ID of
+    every observation that ever supplied an accepted game durable and
+    queryable, so canonical-ledger evidence is exempt from the generic
+    observation retention window and stays replayable and auditable
+    indefinitely.  Existing accepted games are backfilled so historical
+    evidence is protected immediately; only observations that still exist in
+    ``collection_observations`` are referenced (the repair seam writes
+    candidates without a staged observation).
+    """
+
+    from app.models.canonical_game_ledger import LedgerObservationEvidence
+
+    LedgerObservationEvidence.__table__.create(connection, checkfirst=True)
+    connection.execute(text(
+        "INSERT INTO canonical_game_ledger_observation_evidence "
+        "(observation_id, game_id, created_at) "
+        "SELECT DISTINCT source_observation_id, game_id, CURRENT_TIMESTAMP "
+        "FROM canonical_game_ledger_games "
+        "WHERE source_observation_id IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM collection_observations "
+        "  WHERE collection_observations.observation_id = "
+        "    canonical_game_ledger_games.source_observation_id"
+        ") "
+        "ON CONFLICT (observation_id) DO NOTHING"
+    ))
 
 
 def _upgrade_collector_release_status(connection: Connection) -> None:
@@ -788,6 +960,10 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(29, "029_publication_activations", _create_publication_activations),
     Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
     Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
+    Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
+    Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
+    Migration(34, "034_team_matchup_ledger_lineage", _add_team_matchup_ledger_lineage),
+    Migration(35, "035_governed_catalog_freshness", _backfill_governed_catalog_freshness),
 )
 
 

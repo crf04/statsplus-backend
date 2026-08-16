@@ -42,6 +42,10 @@ class CanonicalGameLedgerGame(Base):
     status = Column(String(32), nullable=False, default="final")
     source_observation_id = Column(String(128), nullable=False)
     checksum = Column(String(64), nullable=False)
+    #: Deterministic hash of the complete archived raw PBP row set for this
+    #: game.  Independent of the typed ``checksum`` so raw-only corrections are
+    #: still recognized as replacements rather than idempotent replays.
+    raw_checksum = Column(String(64), nullable=True)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
@@ -176,6 +180,76 @@ class LedgerPublication(Base):
     reason = Column(String(128), nullable=True)
 
 
+class LedgerGameRowEvidence(Base):
+    """One immutable complete PBP boxscore row archived as raw JSON evidence.
+
+    The complete-game transaction is the unit of publication: an accepted game
+    retains both provider team-summary rows and every participating player row
+    from the Home and Away FullGame arrays.  Every provider key and value is
+    preserved so unknown additive fields survive schema growth, while
+    ``checksum`` hashes a deterministic canonical serialization and
+    ``observed_fields`` records the exact field set observed at retrieval.
+    """
+
+    __tablename__ = "canonical_game_ledger_raw_rows"
+
+    game_id = Column(String(32), primary_key=True)
+    row_type = Column(String(16), primary_key=True)
+    side = Column(String(8), primary_key=True)
+    row_index = Column(Integer, primary_key=True)
+    entity_id = Column(Integer, nullable=True)
+    entity_name = Column(String(255), nullable=True)
+    team_id = Column(Integer, nullable=True)
+    source_observation_id = Column(String(128), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    checksum = Column(String(64), nullable=False)
+    schema_version = Column(Integer, nullable=False)
+    observed_fields = Column(Text, nullable=False)
+    payload = Column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "row_type IN ('team', 'player')",
+            name="ck_ledger_raw_row_type",
+        ),
+        CheckConstraint(
+            "side IN ('Home', 'Away')",
+            name="ck_ledger_raw_row_side",
+        ),
+        Index("ix_ledger_raw_rows_source_observation", "source_observation_id"),
+        Index("ix_ledger_raw_rows_entity", "entity_id", "team_id"),
+    )
+
+
+class LedgerObservationEvidence(Base):
+    """Durable reference from one accepted ledger game to its observation.
+
+    A corrected game atomically replaces its typed facts and its archived raw
+    rows, so the game row's current ``source_observation_id`` alone would
+    forget every superseded observation.  This table retains the observation
+    ID of every observation that has ever supplied an accepted game, so
+    canonical-ledger evidence is exempt from the generic observation retention
+    window and a superseded accepted observation stays replayable and
+    auditable indefinitely (#25).  The ``observation_id`` column is a real
+    foreign key -- never a JSON substring -- so the reference is queryable and
+    referentially durable.
+    """
+
+    __tablename__ = "canonical_game_ledger_observation_evidence"
+
+    observation_id = Column(
+        String(36),
+        ForeignKey("collection_observations.observation_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    game_id = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_ledger_observation_evidence_game", "game_id"),
+    )
+
+
 class LedgerParityArtifact(Base):
     """Durable activation evidence for one derived semantic rehearsal."""
 
@@ -219,6 +293,8 @@ __all__ = [
     "CanonicalGameLedgerPlayerFact",
     "CanonicalGameLedgerTeamFact",
     "LedgerBackfillState",
+    "LedgerGameRowEvidence",
     "LedgerPublication",
+    "LedgerObservationEvidence",
     "LedgerParityArtifact",
 ]
