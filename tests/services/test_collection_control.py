@@ -24,8 +24,8 @@ from app.models.collection_control import (
     PublicationStream,
     ReconciliationItem,
 )
-from app.models.event_catalog import EventCatalogEntry
-from app.models.athlete_catalog import AthleteCatalog
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
 
 from app.migrations import run_migrations
@@ -1283,6 +1283,54 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
             EventCatalogEntry.nba_game_id == "game-15"
         )).scalar_one()
         assert removed == "Tombstone"
+
+
+def test_complete_governed_catalogs_advance_canonical_freshness_sidecars(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        event_request.request_id,
+        _catalog_payload("event"),
+        version="event",
+    ).complete
+
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete",
+    ).complete
+
+    with control_db.connect() as connection:
+        event = connection.execute(
+            select(
+                EventCatalogRefresh.last_success_at,
+                EventCatalogRefresh.event_count,
+            ).where(
+                EventCatalogRefresh.season == "2025-26"
+            )
+        ).one()
+        athlete = connection.execute(
+            select(
+                AthleteCatalogFreshness.last_success_at,
+                AthleteCatalogFreshness.last_success_row_count,
+            ).where(
+                AthleteCatalogFreshness.season == "2025-26"
+            )
+        ).one()
+
+    assert event.last_success_at.replace(tzinfo=UTC) == now
+    assert event.event_count == 15
+    assert athlete.last_success_at.replace(tzinfo=UTC) == now
+    assert athlete.last_success_row_count == 1
 
 
 def test_catalog_reconciliation_is_idempotent_for_roster_changes(control_db):

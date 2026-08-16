@@ -262,6 +262,93 @@ def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
             )
 
 
+def _backfill_governed_catalog_freshness(connection: Connection) -> None:
+    """Expose accepted governed catalogs through canonical freshness reads."""
+
+    metadata = MetaData()
+    publications = Table(
+        "collection_catalog_publications", metadata, autoload_with=connection
+    )
+    events = Table("event_catalog", metadata, autoload_with=connection)
+    event_freshness = Table(
+        "event_catalog_refreshes", metadata, autoload_with=connection
+    )
+    athletes = Table("athlete_catalog", metadata, autoload_with=connection)
+    athlete_freshness = Table(
+        "athlete_catalog_freshness", metadata, autoload_with=connection
+    )
+
+    latest = connection.execute(
+        select(
+            publications.c.catalog_type,
+            publications.c.season,
+            func.max(publications.c.published_at).label("published_at"),
+        )
+        .where(publications.c.complete.is_(True))
+        .group_by(publications.c.catalog_type, publications.c.season)
+    ).mappings()
+    for publication in latest:
+        catalog_type = str(publication["catalog_type"])
+        season = str(publication["season"])
+        published_at = publication["published_at"]
+        if catalog_type == "event":
+            row_count = int(connection.scalar(
+                select(func.count()).select_from(events).where(
+                    events.c.season == season
+                )
+            ) or 0)
+            existing = connection.scalar(
+                select(event_freshness.c.season).where(
+                    event_freshness.c.season == season
+                )
+            )
+            values = {
+                "last_attempt_at": published_at,
+                "last_success_at": published_at,
+                "failure_summary": None,
+                "event_count": row_count,
+            }
+            if existing is None:
+                connection.execute(
+                    insert(event_freshness).values(season=season, **values)
+                )
+            else:
+                connection.execute(
+                    event_freshness.update()
+                    .where(event_freshness.c.season == season)
+                    .values(**values)
+                )
+            continue
+        if catalog_type != "athlete":
+            continue
+        row_count = int(connection.scalar(
+            select(func.count()).select_from(athletes).where(
+                athletes.c.season == season
+            )
+        ) or 0)
+        existing = connection.scalar(
+            select(athlete_freshness.c.season).where(
+                athlete_freshness.c.season == season
+            )
+        )
+        values = {
+            "last_success_at": published_at,
+            "last_success_row_count": row_count,
+            "last_failure_summary": None,
+            "updated_at": published_at,
+        }
+        if existing is None:
+            connection.execute(
+                insert(athlete_freshness).values(season=season, **values)
+            )
+        else:
+            connection.execute(
+                athlete_freshness.update()
+                .where(athlete_freshness.c.season == season)
+                .values(**values)
+            )
+
+
 def _create_player_diet_fact_tables(connection: Connection) -> None:
     """Create Season player Diet facts and per-Base observations."""
     from app.models.player_diet import (
@@ -876,6 +963,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
     Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
     Migration(34, "034_team_matchup_ledger_lineage", _add_team_matchup_ledger_lineage),
+    Migration(35, "035_governed_catalog_freshness", _backfill_governed_catalog_freshness),
 )
 
 
