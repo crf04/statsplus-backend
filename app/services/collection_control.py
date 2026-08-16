@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, NamedTuple
 
-from sqlalchemy import case, select
+from sqlalchemy import case, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -58,8 +58,8 @@ from app.models.collection_control import (
     OperatorJob,
     GovernedNotApplicable,
 )
-from app.models.event_catalog import EventCatalogEntry
-from app.models.athlete_catalog import AthleteCatalog
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
 
 
@@ -1185,7 +1185,53 @@ class CollectionControlService(_SessionService):
             self._supersede_changed_collection_state(
                 session, season=request.season, cutoff=request.cutoff, now=now,
             )
+        self._advance_catalog_freshness_sidecar(
+            session,
+            season=request.season,
+            catalog_type=catalog_type,
+            now=now,
+        )
         return True
+
+    @staticmethod
+    def _advance_catalog_freshness_sidecar(
+        session: Session,
+        *,
+        season: str,
+        catalog_type: str,
+        now: datetime,
+    ) -> None:
+        """Publish governed catalog success through canonical read metadata."""
+
+        if catalog_type == "event":
+            row_count = int(session.scalar(
+                select(func.count()).select_from(EventCatalogEntry).where(
+                    EventCatalogEntry.season == season
+                )
+            ) or 0)
+            freshness = session.get(EventCatalogRefresh, season)
+            if freshness is None:
+                freshness = EventCatalogRefresh(season=season)
+                session.add(freshness)
+            freshness.last_attempt_at = now
+            freshness.last_success_at = now
+            freshness.failure_summary = None
+            freshness.event_count = row_count
+            return
+
+        row_count = int(session.scalar(
+            select(func.count()).select_from(AthleteCatalog).where(
+                AthleteCatalog.season == season
+            )
+        ) or 0)
+        freshness = session.get(AthleteCatalogFreshness, season)
+        if freshness is None:
+            freshness = AthleteCatalogFreshness(season=season, updated_at=now)
+            session.add(freshness)
+        freshness.last_success_at = now
+        freshness.last_success_row_count = row_count
+        freshness.last_failure_summary = None
+        freshness.updated_at = now
 
     def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
                         session: Session | None = None) -> ActiveSeason:

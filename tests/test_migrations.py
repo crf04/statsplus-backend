@@ -73,6 +73,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -354,7 +355,63 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (32, "032_ledger_raw_row_evidence"),
             (33, "033_ledger_observation_evidence"),
             (34, "034_team_matchup_ledger_lineage"),
+            (35, "035_governed_catalog_freshness"),
         ]
+
+
+def test_governed_catalog_freshness_migration_backfills_complete_publications(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-034.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 34),
+        )
+        assert run_migrations(engine).current_version == 34
+
+    published_at = datetime(2026, 8, 14, 1, 21, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO event_catalog ("
+                "nba_game_id, season, home_team_id, home_team_name, "
+                "home_team_tricode, away_team_id, away_team_name, "
+                "away_team_tricode, scheduled_at, status_text, classification, "
+                "first_seen_at, last_seen_at"
+                ") VALUES ("
+                "'game-1', '2025-26', 1, 'Home', 'HOM', 2, 'Away', 'AWY', "
+                ":published_at, 'Final', 'Regular Season', :published_at, :published_at"
+                ")"
+            ),
+            {"published_at": published_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO collection_catalog_publications ("
+                "publication_id, season, catalog_type, cutoff, version, checksum, "
+                "payload, complete, published_at"
+                ") VALUES ("
+                "'publication-1', '2025-26', 'event', :published_at, 'v1', "
+                ":checksum, '{}', 1, :published_at"
+                ")"
+            ),
+            {"published_at": published_at, "checksum": "a" * 64},
+        )
+
+    result = run_migrations(engine)
+
+    assert result.applied == ("035_governed_catalog_freshness",)
+    with engine.connect() as connection:
+        freshness = connection.execute(
+            text(
+                "SELECT last_attempt_at, last_success_at, event_count, failure_summary "
+                "FROM event_catalog_refreshes WHERE season = '2025-26'"
+            )
+        ).one()
+    assert freshness.event_count == 1
+    assert freshness.failure_summary is None
+    assert freshness.last_attempt_at == freshness.last_success_at
 
 
 def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path):
@@ -376,7 +433,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 34
+    assert repaired.current_version == 35
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -410,8 +467,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
-    assert upgraded.current_version == 34
+    assert upgraded.current_version == 35
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -478,8 +536,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
     assert upgraded.applied == (
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
-    assert upgraded.current_version == 34
+    assert upgraded.current_version == 35
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -547,6 +606,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -596,8 +656,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
-    assert upgraded.current_version == 34
+    assert upgraded.current_version == 35
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -670,6 +731,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
 
 
@@ -712,7 +774,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 34
+    assert result.current_version == 35
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -983,6 +1045,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1038,10 +1101,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
-    assert upgraded.current_version == 34
+    assert upgraded.current_version == 35
     assert repeated.applied == ()
-    assert repeated.current_version == 34
+    assert repeated.current_version == 35
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -1106,6 +1170,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "032_ledger_raw_row_evidence",
         "033_ledger_observation_evidence",
         "034_team_matchup_ledger_lineage",
+        "035_governed_catalog_freshness",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

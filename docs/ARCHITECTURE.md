@@ -2557,6 +2557,14 @@ incomplete attempts. Maintenance runs publication pruning after reconciliation
 and observation GC, while active/previous/rollback provenance remains
 protected.
 
+A successful complete reconciliation also advances the canonical
+`event_catalog_refreshes` or `athlete_catalog_freshness` sidecar in that same
+transaction. This keeps governed publications compatible with downstream
+services that enforce the canonical catalog freshness contract. Migration 035
+backfills those sidecars from the newest complete governed publication for
+each catalog type and season, including catalogs published before this bridge
+was introduced.
+
 Collector release health crosses a separate machine-authenticated status seam.
 It persists only a validated 64-character release identifier/checksum pair and
 the report time on `collector_identities`; arbitrary fields, secrets, payloads,
