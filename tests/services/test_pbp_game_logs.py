@@ -475,6 +475,19 @@ def test_normalize_pbp_game_logs_zero_fills_omitted_counting_fields():
     assert row_out["NBA_FANTASY_PTS"] == 0.0
 
 
+def test_normalize_pbp_game_logs_zero_fills_dataframe_nan_counting_values():
+    observed = _pbp_row(EntityId=202, Name="Player Two")
+    omitted = _pbp_row(EntityId=203, Name="Player Three")
+    del omitted["FtPoints"]
+
+    frame, _ = normalize_pbp_game_logs(
+        _pbp_frame(observed, omitted),
+        _events(),
+    )
+
+    assert frame.loc[frame["PLAYER_ID"] == 203, "FTM"].item() == 0
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
