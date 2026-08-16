@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -57,6 +58,11 @@ class TeamMatchupFact:
     denominator_unit: str | None
     provider: str
     window_start_date: date | None = None
+    #: Exact governed game IDs this team's window aggregated and the
+    #: deterministic ledger checksum of the selected game set.  Provider-
+    #: collected legacy facts leave both empty.
+    game_ids: tuple[str, ...] = ()
+    ledger_checksum: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,11 +70,14 @@ class TeamMatchupObservation:
     surface: str
     status: str
     unavailable_reason: str | None = None
+    game_ids: tuple[str, ...] = ()
+    ledger_checksum: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class StoredTeamMatchupFact(TeamMatchupFact):
     retrieved_at: datetime = datetime.min
+    window_end_date: date = date.min
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +264,8 @@ class TeamMatchupRepository:
                                 "window_start_date": fact.window_start_date,
                                 "window_end_date": scope.as_of,
                                 "retrieved_at": observed_at,
+                                "game_ids": _game_ids_json(fact.game_ids),
+                                "ledger_checksum": fact.ledger_checksum,
                             }
                             for fact in changed_fact_rows
                         ],
@@ -274,6 +285,8 @@ class TeamMatchupRepository:
                                 "status": observation.status,
                                 "unavailable_reason": observation.unavailable_reason,
                                 "retrieved_at": observed_at,
+                                "game_ids": _game_ids_json(observation.game_ids),
+                                "ledger_checksum": observation.ledger_checksum,
                             }
                             for observation in changed_observations
                         ],
@@ -293,6 +306,8 @@ class TeamMatchupRepository:
             row["window_start_date"],
             row["window_end_date"],
             assume_utc(row["retrieved_at"]),
+            _parse_game_ids(row["game_ids"]),
+            row["ledger_checksum"],
         )
 
     @classmethod
@@ -312,6 +327,9 @@ class TeamMatchupRepository:
             or existing_observation["unavailable_reason"]
             != observation.unavailable_reason
             or assume_utc(existing_observation["retrieved_at"]) != observed_at
+            or _parse_game_ids(existing_observation["game_ids"])
+            != observation.game_ids
+            or existing_observation["ledger_checksum"] != observation.ledger_checksum
         ):
             return True
         if observation.status != "available":
@@ -330,6 +348,8 @@ class TeamMatchupRepository:
                     fact.window_start_date,
                     window_end_date,
                     observed_at,
+                    fact.game_ids,
+                    fact.ledger_checksum,
                 )
                 for fact in facts
             )
@@ -466,6 +486,9 @@ class TeamMatchupRepository:
                     provider=row["provider"],
                     window_start_date=row["window_start_date"],
                     retrieved_at=assume_utc(row["retrieved_at"]),
+                    window_end_date=row["window_end_date"],
+                    game_ids=_parse_game_ids(row["game_ids"]),
+                    ledger_checksum=row["ledger_checksum"],
                 )
                 for row in fact_rows
             ),
@@ -475,6 +498,8 @@ class TeamMatchupRepository:
                     status=row["status"],
                     unavailable_reason=row["unavailable_reason"],
                     retrieved_at=assume_utc(row["retrieved_at"]),
+                    game_ids=_parse_game_ids(row["game_ids"]),
+                    ledger_checksum=row["ledger_checksum"],
                 )
                 for row in observation_rows
             ),
@@ -532,6 +557,30 @@ class TeamMatchupRepository:
             )
             for row in rows
         }
+
+
+def _game_ids_json(game_ids: tuple[str, ...]) -> str | None:
+    """Serialize a game-id lineage tuple as deterministic JSON text."""
+
+    if not game_ids:
+        return None
+    return json.dumps(sorted(game_ids), separators=(",", ":"))
+
+
+def _parse_game_ids(value: str | None) -> tuple[str, ...]:
+    """Parse a stored game-id lineage column back to a tuple."""
+
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(parsed, list) or any(
+        not isinstance(game_id, str) for game_id in parsed
+    ):
+        return ()
+    return tuple(parsed)
 
 
 __all__ = [

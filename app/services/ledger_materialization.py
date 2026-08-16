@@ -115,10 +115,16 @@ class LedgerMaterializationService:
             expected_team_game_ids=expected_l15_game_ids,
             team_ids=team_ids,
         )
-        if not season_window.complete:
-            raise LedgerMaterializationUnavailable(season_window.reason or "Season ledger is incomplete")
-        if not l15_window.complete:
-            raise LedgerMaterializationUnavailable(l15_window.reason or "L15 ledger is incomplete")
+        season_status = "complete" if season_window.complete else "unavailable"
+        l15_status = "complete" if l15_window.complete else "unavailable"
+        season_reason = (
+            None if season_window.complete
+            else season_window.reason or "Season ledger is incomplete"
+        )
+        l15_reason = (
+            None if l15_window.complete
+            else l15_window.reason or "L15 ledger is incomplete"
+        )
         traditional = derive_traditional_opponent_facts(eligible)
         assist_status = "complete"
         try:
@@ -195,17 +201,17 @@ class LedgerMaterializationService:
             for player in game.player_facts
         )
         publication_specs = [
-            ("player_game_logs", player_game_logs, "season", 0, "complete", None),
-            ("traditional_opponent_season", season_window.teams, "season", 0, "complete", None),
-            ("traditional_opponent_l15", l15_window.teams, "rolling_games", 15, "complete", None),
-            ("player_per36", per36, "season", 0, "complete", None),
-            ("team_matchups_season", season_window.teams, "season", 0, "complete", None),
-            ("team_matchups_l15", l15_window.teams, "rolling_games", 15, "complete", None),
+            ("player_game_logs", player_game_logs, "season", 0, season_status, season_reason),
+            ("traditional_opponent_season", season_window.teams, "season", 0, season_status, season_reason),
+            ("traditional_opponent_l15", l15_window.teams, "rolling_games", 15, l15_status, l15_reason),
+            ("player_per36", per36, "season", 0, season_status, season_reason),
+            ("team_matchups_season", season_window.teams, "season", 0, season_status, season_reason),
+            ("team_matchups_l15", l15_window.teams, "rolling_games", 15, l15_status, l15_reason),
         ]
         if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
             publication_specs.extend((
-                ("assist_locations_season", assist_season.teams, "season", 0, "complete", None),
-                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, "complete", None),
+                ("assist_locations_season", assist_season.teams, "season", 0, season_status, season_reason),
+                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, l15_status, l15_reason),
             ))
         publications = tuple(
             LedgerPublicationRecord(
@@ -237,17 +243,20 @@ class LedgerMaterializationService:
                 game.source_observation_id: game.game_id
                 for game in eligible
             }
-            candidates = [
-                ("player_game_logs", player_game_logs),
-                ("traditional_opponent_season", season_window.teams),
-                ("traditional_opponent_l15", l15_window.teams),
-                ("player_per36", per36),
-            ]
-            if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
+            candidates = []
+            if season_window.complete:
                 candidates.extend((
-                    ("assist_locations_season", assist_season.teams),
-                    ("assist_locations_l15", assist_l15.teams),
+                    ("player_game_logs", player_game_logs),
+                    ("traditional_opponent_season", season_window.teams),
+                    ("player_per36", per36),
                 ))
+            if l15_window.complete:
+                candidates.append(("traditional_opponent_l15", l15_window.teams))
+            if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
+                if season_window.complete:
+                    candidates.append(("assist_locations_season", assist_season.teams))
+                if l15_window.complete:
+                    candidates.append(("assist_locations_l15", assist_l15.teams))
             candidate_versions = {}
             for stream_key, payload in candidates:
                 candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(

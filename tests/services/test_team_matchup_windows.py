@@ -472,6 +472,8 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "window_start_date",
         "window_end_date",
         "retrieved_at",
+        "game_ids",
+        "ledger_checksum",
     }
 
 

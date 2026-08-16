@@ -1489,6 +1489,54 @@ Nightly Refresh supplies the one whole-unit retry. Adding another concurrency
 layer here would multiply load against rate-sensitive upstreams, so the exact
 request plan is preferred over speculative parallelism.
 
+### Ledger-owned Season and exact L15 matchup materialization (#114)
+
+`LedgerMatchupMaterializationService` is the high-level seam that turns stored
+Canonical Game Ledger evidence into the disposable `team_matchup_facts` read
+model without any provider call. It accepts one season and a shared cutoff
+(`materialize(season, as_of=...)`), loads the governed Regular Season ledger
+games through that cutoff, selects the full governed game set for the Season
+window and each team's exact 15 most recent governed games for the L15 window,
+and records the exact selected game IDs plus a deterministic ledger checksum
+(SHA-256 over the sorted `(game_id, checksum)` pairs of the selected set) on
+both the fact rows and the surface observations. The ledger command path
+(`scripts/ledger_refresh.py --compose` / `--compose-only`, via
+`LedgerRuntime.compose_queued`) publishes this read model at the exact
+composition cutoff before composing the inactive publication streams, so an
+incomplete Season or pre-15 L15 publishes explicit unavailable observations
+instead of approximating a league window.
+
+Every contracted PBP-owned non-shot opponent fact is aggregated exclusively
+from typed ledger counts and denominators: the four traditional opponent
+surfaces (`OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK`) come from the opposing
+team fact's raw counts over the selected window with the retained effective
+team-minute denominator, and the six assist surfaces (`Assists` plus the five
+location counters) come from the opposing players' counts over the same
+denominator. No PBP or NBA traditional/assist aggregate endpoint is called;
+the service has no provider collaborators at all, so it cannot trigger one.
+Player and team authority follow the approved #113 model unchanged: team facts
+from team-summary rows, player facts from player rows. NBA-owned shot and play
+surfaces are deliberately outside this seam — their independent refresh writes
+the same disposable read model, and a failed or unavailable NBA-owned surface
+cannot prevent the valid ledger-owned surfaces from materializing.
+
+The two windows share one cutoff. A Season that is not league complete (fewer
+than 30 governed teams) publishes fact-free
+`missing/governed_team_roster_incomplete` observations for both windows.
+Before every governed team has 15 eligible games the league L15 is explicitly
+`missing/insufficient_governed_games`, never approximated from partial
+evidence. A complete 30-team window carries deterministic competition ranks
+(`1, 1, 3` ties) derived only after the governed window is selected, and an
+incomplete window publishes no league ranking. Missing assist-location
+evidence degrades only the `assist_locations` surface
+(`unavailable/assist_location_evidence_incomplete`) while the traditional
+surface still publishes. Migration 034
+(`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
+`ledger_checksum` columns to `team_matchup_facts` and
+`team_matchup_surface_observations`; provider-collected legacy rows keep both
+columns NULL, and the existing authenticated Matchups and player-game-log HTTP
+contracts are unchanged and remain provider-free at request time.
+
 ### Canonical athlete catalog
 
 `AthleteCatalogService` owns the application tables `athlete_catalog` and
