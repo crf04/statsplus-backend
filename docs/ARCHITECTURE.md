@@ -590,8 +590,15 @@ advance stats freshness. A surface-specific `StatsFreshnessRepository.get()`
 returns the frozen stored fact
 `StatsFreshness(last_successful_completion=...)`; a null completion explicitly
 distinguishes the before-first-run state. A later presentation seam owns its
-translation into API `retrieved_at` and freshness status. The process-level
-`scripts/nightly_refresh.py` command runs that same stats service, the
+translation into API `retrieved_at` and freshness status. Railway runs
+`scripts/nightly_refresh.py --hosted-only`. This mode constructs only the
+PBP-backed player-game-log ingestion path, reads the governed Event and Athlete
+Catalogs from Postgres, and never constructs or calls the NBA Stats adapter.
+A failure is retried once and preserves the prior complete game-log
+publication. NBA-owned catalogs and statistical surfaces remain
+residential-collector work.
+
+The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog
 refresh, the current-season player-game-log refresh, Season player Diets, and
 then team matchup facts. The two catalogs
@@ -604,8 +611,7 @@ Catalog failure skips player logs but cannot suppress the required Event
 Catalog refresh. The prior log publication remains readable, and the command
 reports the named `athlete catalog` failed step. The command retries the
 complete ordered unit exactly once after any step fails and returns a nonzero
-process status when both attempts fail. It is deployment-scheduled and has no
-HTTP/authentication dependency.
+process status when both attempts fail. It is not the Railway cron command.
 
 ### Durable player game logs
 

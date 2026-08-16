@@ -946,11 +946,11 @@ stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
-The deployment-owned `scripts/nightly_refresh.py` command is not an HTTP
-endpoint. It refreshes the stats tables, current-season Event Catalog,
-current-season Athlete Catalog, durable current-season player game logs,
-Season player Diet facts, and then team matchup facts,
-retrying that ordered unit once. The player-log step uses the PBP-based
+The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
+an HTTP endpoint. It refreshes only durable current-season player game logs,
+retrying that PBP-backed unit once. It reads the existing governed catalogs
+from Postgres and makes zero NBA Stats calls; NBA-owned surfaces remain the
+residential collector's responsibility. The player-log step uses the PBP-based
 incremental ingestion: it discovers governed completed `Regular Season` and
 `Playoffs` games and requests one PBP per-game player observation per missing
 game, plus a bounded recent-game reconciliation window
