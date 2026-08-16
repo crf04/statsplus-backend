@@ -48,16 +48,32 @@ def run_nightly_refresh(
 ) -> int:
     """Run the complete unit, retrying from its first step exactly once."""
 
-    for attempt in range(1, 3):
-        succeeded = True
-        for step, refresh in (
+    return _run_refresh_steps(
+        (
             ("stats", refresh_stats),
             ("schedule", refresh_schedule),
             ("athlete catalog", refresh_athlete_catalog),
             ("player game logs", refresh_player_game_logs),
             ("player diets", refresh_player_diets),
             ("team matchups", refresh_team_matchups),
-        ):
+        )
+    )
+
+
+def run_hosted_refresh(*, refresh_player_game_logs: Callable[[], Any]) -> int:
+    """Run only the PBP-backed refresh that is safe from hosted egress."""
+
+    return _run_refresh_steps((("player game logs", refresh_player_game_logs),))
+
+
+def _run_refresh_steps(
+    steps: tuple[tuple[str, Callable[[], Any]], ...],
+) -> int:
+    """Run one ordered refresh unit, retrying from its first step once."""
+
+    for attempt in range(1, 3):
+        succeeded = True
+        for step, refresh in steps:
             failed_step = step
             try:
                 if refresh() is False:
@@ -82,25 +98,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)"
     )
+    parser.add_argument(
+        "--hosted-only",
+        action="store_true",
+        help=(
+            "refresh only PBP-backed player game logs; never contact NBA Stats "
+            "from hosted infrastructure"
+        ),
+    )
     return parser
 
 
-def _run(database_url: str) -> int:
+def _run(database_url: str, *, hosted_only: bool = False) -> int:
     """Assemble and execute the command against one writable database."""
     settings = load_settings(overrides={"DATABASE_URL": database_url})
     engine = create_engine(_normalize_database_url(database_url))
     try:
         run_migrations(engine)
-        provider = NBAStatsAdapter(settings=settings)
-        pbp_provider = PBPStatsAdapter(settings=settings)
-        stats_freshness = StatsFreshnessRepository(engine)
-        data_service = DataService(
-            engine,
-            settings=settings,
-            pbp_provider=pbp_provider,
-            nba_stats_provider=provider,
-            stats_freshness=stats_freshness,
-        )
+        # Hosted Railway egress cannot reliably reach stats.nba.com.  The
+        # hosted-only command therefore injects an inert catalog provider and
+        # uses the catalog services strictly through their database read APIs.
+        # Any accidental refresh call fails at the call site instead of making
+        # an upstream request.
+        provider = object() if hosted_only else NBAStatsAdapter(settings=settings)
         event_service = EventCatalogService(
             engine, settings=settings, nba_stats_provider=provider
         )
@@ -128,6 +148,22 @@ def _run(database_url: str) -> int:
             reconciliation_days=(
                 settings.catalog.player_game_log_reconciliation_days
             ),
+        )
+        if hosted_only:
+            return run_hosted_refresh(
+                refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(
+                    settings.nba.current_season
+                )
+            )
+
+        pbp_provider = PBPStatsAdapter(settings=settings)
+        stats_freshness = StatsFreshnessRepository(engine)
+        data_service = DataService(
+            engine,
+            settings=settings,
+            pbp_provider=pbp_provider,
+            nba_stats_provider=provider,
+            stats_freshness=stats_freshness,
         )
         player_diet_service = PlayerDietService(
             engine,
@@ -175,7 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     if is_demo_database_url(database_url):
         parser.error("the tracked nba_play_types.db is a read-only demo database")
 
-    result = _run(database_url)
+    result = (
+        _run(database_url, hosted_only=True)
+        if args.hosted_only
+        else _run(database_url)
+    )
     print(json.dumps({"status": "succeeded" if result == 0 else "failed"}))
     return result
 
