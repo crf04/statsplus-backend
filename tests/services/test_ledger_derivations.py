@@ -23,6 +23,7 @@ from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     PlayerGameFact,
     TeamGameFact,
+    raw_rows_from_facts,
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
@@ -33,6 +34,10 @@ from app.models.collection_control import (
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from tests.services.test_canonical_game_ledger import _game
+
+
+def _raw_rows_for_game(game):
+    return raw_rows_from_facts(game)
 
 
 class _ParityReader:
@@ -157,7 +162,7 @@ def _league_games():
                     personal_fouls=1,
                     team_minutes=48.0,
                 ))
-            games.append(CanonicalGame(
+            game = CanonicalGame(
                 game_id=game_id,
                 season="2025-26",
                 game_date=date(2025, 10, 1) + timedelta(days=round_index),
@@ -170,7 +175,10 @@ def _league_games():
                 source_observation_id=f"obs:{game_id}",
                 retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
                 participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
-            ).with_checksum())
+            )
+            games.append(
+                replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum()
+            )
         teams = [teams[0], teams[-1], *teams[1:-1]]
     return tuple(games)
 
@@ -325,8 +333,9 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'independent.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        replace(
+    games = []
+    for game in _league_games():
+        without_locations = replace(
             game,
             player_facts=tuple(
                 replace(
@@ -342,9 +351,11 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
                 for player in game.player_facts
             ),
             checksum=None,
-        ).with_checksum()
-        for game in _league_games()
-    )
+        )
+        games.append(
+            replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+        )
+    games = tuple(games)
     repository.replace_games_atomic(games)
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
@@ -444,11 +455,15 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()
+    base = games[0]
     later = replace(
-        games[0],
+        base,
         game_id="later-game",
         game_date=date(2025, 10, 16),
         source_observation_id="later-observation",
+        raw_rows=tuple(
+            replace(row, game_id="later-game") for row in base.raw_rows
+        ),
         checksum=None,
     ).with_checksum()
     repository.replace_games_atomic((*games, later))

@@ -8,7 +8,7 @@ import os
 import gzip
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,6 +30,7 @@ from app.models.collection_control import (
     PublicationPointer,
 )
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame
+from app.services.canonical_game_ledger import raw_rows_from_facts
 from app.services.collection_control import (
     CollectorClaims,
     CollectorTokenService,
@@ -1290,6 +1291,9 @@ class FailureDrillRunner:
                 source_observation_id=self._id("repair-observation"),
                 retrieved_at=now,
                 participant_ids_by_team=((1, (101,)), (2, (202,))),
+            )
+            repair_game = replace(
+                repair_game, raw_rows=raw_rows_from_facts(repair_game)
             ).with_checksum()
             repair_checksum = game_checksum(repair_game)
 

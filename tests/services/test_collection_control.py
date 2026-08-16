@@ -26,7 +26,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.athlete_catalog import AthleteCatalog
-from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -1415,6 +1415,37 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     # The same accepted evidence backs every retained slice, so it remains
     # protected even after the oldest rendered publication is pruned.
     assert operations.gc_observations(now=now, retention_days=30) == 0
+
+
+def test_gc_exempts_durable_ledger_observation_evidence_and_prunes_unrelated(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    old = now - timedelta(days=60)
+    with control_db.begin() as connection:
+        for observation_id in ("ledger-protected-1", "ledger-protected-2", "unrelated-1"):
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=f"client:{observation_id}",
+                collector_id="collector", manifest_id="manifest", environment="server",
+                provider="pbp", observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": "0022400001", "surface": "canonical_game_ledger"}),
+                season="2024-25", cutoff=now, schema_version=1, checksum="c" * 64,
+                payload=json.dumps({"rows": []}), payload_bytes=2,
+                retrieved_at=now, accepted_at=old,
+            ))
+        connection.execute(LedgerObservationEvidence.__table__.insert().values(
+            observation_id="ledger-protected-1", game_id="0022400001", created_at=old,
+        ))
+        connection.execute(LedgerObservationEvidence.__table__.insert().values(
+            observation_id="ledger-protected-2", game_id="0022400001", created_at=old,
+        ))
+    operations = CollectionOperationsService(control_db, clock=lambda: now)
+
+    assert operations.gc_observations(now=now, retention_days=30) == 1
+    with control_db.connect() as connection:
+        remaining = set(
+            connection.execute(select(CollectionObservation.observation_id)).scalars()
+        )
+    assert remaining == {"ledger-protected-1", "ledger-protected-2"}
 
 
 def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_history(control_db):

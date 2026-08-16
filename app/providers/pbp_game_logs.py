@@ -127,6 +127,15 @@ class PBPGameLogProvider(Protocol):
     ) -> pd.DataFrame:
         """Fetch one game's participating player observations."""
 
+    def fetch_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+    ) -> dict[str, Any]:
+        """Fetch one game's complete raw ``/get-game-stats`` evidence."""
+
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a response served without a provider call."""
 
@@ -208,6 +217,39 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         season_type: str = "Regular Season",
     ) -> pd.DataFrame:
         """Fetch and validate one game's participating player observations."""
+        return type(self).parse_game_stats(
+            self._request_game_stats(game_id, season, season_type),
+            game_id=str(game_id),
+        )
+
+    def fetch_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+    ) -> dict[str, Any]:
+        """Fetch one game's complete raw ``/get-game-stats`` evidence.
+
+        The ledger archives the full provider document (both team-summary rows
+        and every participating player row, preserving unknown additive keys),
+        so this seam returns the unprojected JSON payload instead of the
+        game-log DataFrame that ``fetch_game_player_logs`` normalizes.
+        """
+        return self._request_game_stats(game_id, season, season_type)
+
+    def _request_game_stats(
+        self,
+        game_id: str,
+        season: str,
+        season_type: str,
+    ) -> Any:
+        """Execute one instrumented ``/get-game-stats`` request.
+
+        Both game-stats public seams share this raw transport: the DataFrame
+        API parses the returned JSON document, while the ledger seam archives
+        it verbatim.
+        """
         del season, season_type
         params = {
             "GameId": str(game_id),
@@ -218,10 +260,7 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
             self.game_stats_url,
             params,
         ) as response:
-            return type(self).parse_game_stats(
-                _json_payload(response),
-                game_id=str(game_id),
-            )
+            return _json_payload(response)
 
     def record_cache_hit(self, operation: str) -> None:
         """Record a cache-hit event for a PBP game-log operation."""

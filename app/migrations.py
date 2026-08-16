@@ -504,6 +504,66 @@ def _repair_canonical_game_ledger_tables(connection: Connection) -> None:
     _create_canonical_game_ledger_tables(connection)
 
 
+def _create_ledger_raw_row_evidence(connection: Connection) -> None:
+    """Create the immutable complete PBP row archive for accepted games (#112).
+
+    Games accepted before this migration were archived only as typed facts:
+    they carry ``raw_checksum`` NULL and no ``canonical_game_ledger_raw_rows``
+    rows.  The backfill re-fetches and re-archives them
+    (``game_ids_without_raw_evidence``) before a season reports complete, so
+    every accepted governed game eventually retains both team-summary and every
+    player-row evidence.
+    """
+
+    from app.models.canonical_game_ledger import LedgerGameRowEvidence
+
+    LedgerGameRowEvidence.__table__.create(connection, checkfirst=True)
+    # A corrected source observation can change only the raw archived rows
+    # while typed primitives remain identical.  The game identity row carries
+    # a separate raw-evidence checksum so such a correction still atomically
+    # replaces evidence instead of replaying as an idempotent no-op.
+    table = "canonical_game_ledger_games"
+    columns = {column["name"] for column in inspect(connection).get_columns(table)}
+    if "raw_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table)} "
+            "ADD COLUMN raw_checksum VARCHAR(64)"
+        ))
+
+
+def _create_ledger_observation_evidence(connection: Connection) -> None:
+    """Persist a durable reference for every accepted ledger observation (#113).
+
+    A corrected game atomically replaces its typed facts and its archived raw
+    rows, so the game row's current ``source_observation_id`` no longer names
+    superseded observations.  This reference table keeps the observation ID of
+    every observation that ever supplied an accepted game durable and
+    queryable, so canonical-ledger evidence is exempt from the generic
+    observation retention window and stays replayable and auditable
+    indefinitely.  Existing accepted games are backfilled so historical
+    evidence is protected immediately; only observations that still exist in
+    ``collection_observations`` are referenced (the repair seam writes
+    candidates without a staged observation).
+    """
+
+    from app.models.canonical_game_ledger import LedgerObservationEvidence
+
+    LedgerObservationEvidence.__table__.create(connection, checkfirst=True)
+    connection.execute(text(
+        "INSERT INTO canonical_game_ledger_observation_evidence "
+        "(observation_id, game_id, created_at) "
+        "SELECT DISTINCT source_observation_id, game_id, CURRENT_TIMESTAMP "
+        "FROM canonical_game_ledger_games "
+        "WHERE source_observation_id IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM collection_observations "
+        "  WHERE collection_observations.observation_id = "
+        "    canonical_game_ledger_games.source_observation_id"
+        ") "
+        "ON CONFLICT (observation_id) DO NOTHING"
+    ))
+
+
 def _upgrade_collector_release_status(connection: Connection) -> None:
     """Persist bounded machine release evidence for operator diagnostics."""
 
@@ -788,6 +848,8 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(29, "029_publication_activations", _create_publication_activations),
     Migration(30, "030_bind_publication_activation_candidates", _upgrade_publication_activation_constraints),
     Migration(31, "031_repair_canonical_game_ledger_tables", _repair_canonical_game_ledger_tables),
+    Migration(32, "032_ledger_raw_row_evidence", _create_ledger_raw_row_evidence),
+    Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
 )
 
 

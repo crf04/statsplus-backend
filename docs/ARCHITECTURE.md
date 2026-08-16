@@ -795,21 +795,207 @@ invariants before deleting anything. A repeated checksum is idempotent; a
 new observation with the same game identity replaces the game, team facts,
 and player facts in one transaction. A failed or incomplete candidate leaves
 the prior correction and its checksum untouched. Provider participant evidence
-must exactly equal the retained player set (including zero-minute participants),
-and team aggregate rows are diagnostics that must reconcile with player count
-primitives rather than overwrite them. Migration `024_canonical_game_ledger`
-is the only schema owner; repository construction fails clearly when it has not
-run, and the read-only demo fixture is never eligible.
+must exactly equal the retained player set (including zero-minute participants).
+Migration `024_canonical_game_ledger` remains the schema owner for the typed
+ledger tables, migration `032_ledger_raw_row_evidence` owns the raw archive,
+and migration `033_ledger_observation_evidence` owns the durable observation
+reference for indefinite retention; repository construction fails clearly
+naming migration 032 (and the latest ledger migrations) when any owned table is
+missing, and the read-only demo fixture is never eligible.
+
+#### Complete PBP row evidence archive (#113)
+
+Every accepted game also durably archives the complete provider `/get-game-stats`
+Home and Away `FullGame` row sets as immutable raw JSON evidence. Migration
+`032_ledger_raw_row_evidence` creates `canonical_game_ledger_raw_rows` and adds a
+`raw_checksum` column to the canonical game row; the raw archive is written in
+the same transaction as the typed game, team, and player facts, so acceptance,
+replacement, and correction remain one atomic operation and readers never see a
+mixed raw/typed version. Games accepted before migration 032 were archived only
+as typed facts: they carry `raw_checksum` NULL and no raw rows. The backfill
+treats those games as incomplete (`game_ids_without_raw_evidence`) and re-fetches
+them regardless of age, and the season never reports complete until every
+governed game retains both team-summary and every player-row evidence.
+
+Retention is governed and indefinite (#25): raw evidence is never pruned, so
+the complete archived row set for every accepted game remains recoverable. A
+correction replaces the typed facts and the archived raw rows for that game
+atomically, and the game row reflects only the latest accepted observation;
+nothing is versioned per game inside the ledger tables. What survives every
+correction is the observation store: each accepted `CollectionObservation`
+payload, checksum, retrieval time, and its cryptographically bound raw evidence
+remain in `collection_observations` indefinitely, so a superseded observation
+can always be audited and an identical replay is provably a no-op. `schema_drift`
+reconciliation items accumulate beside that evidence and are never pruned
+either.
+
+Indefinite observation retention is enforced by a durable, queryable reference
+rather than by searching rendered JSON. Migration `033_ledger_observation_evidence`
+creates `canonical_game_ledger_observation_evidence`, one row per
+`collection_observations.observation_id` (a real foreign key) plus the game it
+supplied. Every acceptance and every correction records the observation ID in
+the same transaction as the game, so a superseded correction observation stays
+referenced even after its raw rows are replaced. The generic observation
+retention job (`gc_observations`) joins exactly that reference table and exempts
+every referenced observation from its window regardless of age, so canonical
+ledger evidence is never pruned; unrelated old observations still expire. The
+migration backfills existing accepted games so historical evidence is protected
+immediately.
+
+`canonical_game_from_pbp` archives both the provider team-summary rows
+(`EntityId == 0` / `Name == Team`) and every participating player row from each
+side, preserving every provider key and value verbatim. Unknown additive fields
+survive schema growth instead of being projected away. Each archived row records
+the canonical game identity, side, row type, canonical team identity, provider
+entity identity (for player rows), the source observation ID, the timezone-aware
+retrieval time, a deterministic row checksum, the exact observed field set
+(`observed_fields`), and the typed extractor version (`LEDGER_SCHEMA_VERSION`).
+`observed_fields` is stored separately from the payload so additive schema drift
+is visible and non-destructive: a corrected observation that adds a provider
+field changes the field-set metadata and the raw checksum without touching the
+typed primitive set. A replacement whose corresponding archived rows change
+their observed field sets also records an operator alert: the repository emits
+a bounded `schema_drift` reconciliation item (`record_schema_drift`) inside the
+same correction transaction, so drift is recorded and alerted while the valid
+correction still lands. A first raw archive is judged against the governed
+baseline field set (`LEDGER_GOVERNED_FULLGAME_FIELDS`, versioned in lockstep
+with `LEDGER_SCHEMA_VERSION`) instead of an empty prior evidence set: the
+baseline is the complete documented PBP Stats `BoxscoreItem` vocabulary (`PBP_BOXSCORE_ITEM_FIELDS`)
+plus the normalized aliases the extractor tolerates, so a normal provider row
+carrying shot context, rebound opportunities, turnover/foul types,
+second-chance, penalty, or pace inputs never alerts. A brand-new game, or a
+pre-032 game receiving its row evidence for the first time, that carries a
+provider field outside that baseline records an `unknown_field` alert, while a
+normal first observation inside the baseline stays silent. This is what makes
+schema growth on brand-new games — the normal way a provider field first
+appears — recorded and alerted rather than only ever detected later when an
+older game is corrected. At the repository boundary each archived row's row type
+and entity metadata must agree with its payload identity: a team-summary row
+must be payload-identified as a team aggregate (`EntityId` `0`/`None` or
+`Name` `Team`) and carry no player entity metadata, and a player row's metadata
+identity and name must equal the payload's provider identity and name (the
+typed-fact reconciliation then proves the retained player fact matches). The
+production backfill consumes the complete raw
+`/get-game-stats` document through a dedicated adapter seam
+(`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
+DataFrame, so team-summary rows and unknown additive keys always reach the
+archive. An accepted raw observation must contain exactly one team-summary row
+for each governed Home/Away side; the team row is the sparse residual authority
+and is never a fallback.
+
+Raw JSON canonicalization is deterministic and lossless: each payload is
+serialized with sorted keys and compact separators, and the game-level
+`raw_checksum` hashes the complete row set together with its identity, row
+type, observed fields, and payloads in one explicit canonical order — Home
+side rows first, then Away side rows, each in provider row-index order.
+Provider `FullGame` array positions are unique per side, so an accepted game
+stores exactly one archived row per `(side, row_index)` regardless of row
+type; that uniqueness makes the canonical order and checksum deterministic
+rather than dependent on arrival order. Each `row_index` must be a
+non-boolean non-negative integer and each side's positions must be the exact
+contiguous range `0..n-1`, mirroring the complete provider `FullGame` arrays
+(negative, boolean, non-integer, or gapped positions are rejected at the
+repository boundary). The order is used consistently for
+hashing, persistence, and reload, so a game loaded from storage and replaced
+unchanged is an idempotent replay that changes no persisted evidence.
+Semantically identical replays produce identical checksums, so replaying an
+accepted observation is idempotent and changes no persisted evidence: the
+repository detects the checksum no-op before inserting the accepted observation,
+so an identical replay persists no new `CollectionObservation` row and the
+per-attempt observation identity never collides. Because
+the raw checksum is independent of
+the typed `checksum`, a raw-only correction (a provider field that does not
+change any typed primitive) is still recognized as a replacement rather than an
+idempotent replay, and the complete raw and typed evidence is replaced
+atomically. The PBP `FullGame` wire is sparse: the provider omits observed-zero
+additive counters on both player rows and the team-summary row, so an omitted or
+null count primitive is a governed zero rather than missing evidence. Identity,
+minutes, row presence, and malformed values stay strict and always reject the
+candidate atomically. Every count primitive is such an additive counter (points,
+two- and three-point makes/attempts, free-throw points/attempts, offensive and
+defensive rebounds, assists, turnovers, steals, blocks, and fouls);
+`FGM`/`FGA`/`Rebounds` are derived from the two- and three-point components and
+from offensive plus defensive rebounds when absent. A governed zero is only
+accepted when independently proven: a `Points` omission must reconcile
+arithmetically with the retained scoring components (`Points` equals
+`2*FG2M + 3*FG3M + FtPoints`), and every other omitted player or team count must
+stay consistent with the complete `team_results` diagnostic reconciliation, so a
+missing nonzero count rejects the candidate atomically rather than fabricating a
+zero while a proven zero passes. Because that proof depends on the diagnostics,
+an accepted raw observation must carry the `team_results` Home and Away
+`FullGame` envelopes and every governed diagnostic count inside them — `Points`,
+`FG2M`/`FG2A`, `FG3M`/`FG3A`, `FtPoints`/`FTA`, offensive, defensive, and total
+rebounds, `Assists`, `Turnovers`, `Steals`, `Blocks`, and `Fouls`. A missing
+envelope, a missing, null, or malformed diagnostic field, or a diagnostic count
+that does not reconcile with the declared team authority (player sums plus the
+`EntityId == 0` team-summary residual) rejects the candidate atomically rather
+than letting an unprovable omission pass as a zero. Missing optional expanded
+fields preserve the game and leave only the dependent typed facts (such as
+assist locations) null/unavailable.
+
+The declared typed authority is per row type. Player-game typed facts come from
+the provider player rows; the real provider team-summary row (`EntityId == 0`)
+is itself sparse and carries only the team-only residuals (such as team
+rebounds) that no participating player row carries, not a complete traditional
+box score. Each complete team count is therefore the sum of the authoritative
+participating-player rows plus the corresponding sparse team-row residual, where
+an omitted team-row counter is a zero residual; `FGM`/`FGA`/`Rebounds` derive
+from the same components and are not separately required. Because both the
+player rows and the team row are sparse, the repository re-proves that
+equivalence for every count primitive — rebounds included — so a team value
+cannot disagree with its player primitives and team-only evidence. Optional
+team-summary fields such as possessions remain team authority and are never
+compared against summed player possessions. The `team_results` envelope is
+required diagnostic/parity evidence for every accepted raw game, not an
+optional extra: both Home and Away `FullGame` envelopes must exist with every
+governed diagnostic count present and well-formed, each must reconcile with the
+declared authority, and a missing envelope, a missing/null/malformed diagnostic
+field, or a reconciliation failure rejects the candidate atomically. It never
+populates persisted facts.
+
+The repository boundary repeats these invariants for direct callers.
+`validate_complete_game` re-checks the strict evidence on every archived row —
+identity, minutes (including team-summary minutes, which must be present and in
+the accepted format (`00:00` and other valid `MM:SS` values) but is never
+treated as a player-additive fact), row presence, and malformed values — while
+sparse count primitives are not required per row: each omitted count is
+re-extracted and reconciled against the typed authority that intake proved
+against the complete `team_results` diagnostic, so a missing count that the
+typed evidence proves nonzero rejects the candidate
+atomically and a proven zero passes. It then proves the stored
+typed version equals extraction from its authoritative raw rows: each typed
+player fact must equal extraction from its archived player row and each typed
+team fact must equal the participating-player sums plus the sparse team-summary
+row's team-only residual, with the same reconcile-on-every-primitive
+equivalence re-proven for every count field. A game whose typed
+facts disagree with its raw evidence, or whose raw rows are incomplete, is
+rejected atomically with no write, so a direct `replace_game` caller can never
+persist a mixed or incomplete raw/typed version. The game identity row carries
+both the typed and raw checksums, so an operator can always prove that a stored
+typed game and its archived raw evidence came from the same observation.
+Acceptance through the governed seam is cryptographically bound as well: inside
+the manifest-authorized transaction, the repository recomputes the candidate's
+archived rows from the `CollectionObservation` payload being stamped and
+requires that recomputed set to reproduce the candidate's exact `raw_checksum`,
+and it verifies the observation's own checksum against its payload. A caller
+can therefore never persist one observation's envelope while archiving or
+typing another raw document, so every raw row's source observation is provably
+the document that produced it.
 
 `app.services.ledger_backfill.LedgerBackfillService` discovers final,
 non-postponed Regular Season Event Catalog games through an explicit cutoff,
 fetches newest first behind an injected bounded worker pool, and persists
 cursor/completed/failed progress. Missing games have priority, games seven
 days old or newer are rechecked daily, games through day 30 are rechecked
-weekly, and older games require explicit historical repair. Any failed target
-keeps the previous valid publication and reports the season as unavailable;
-unknown player identities can be sent to a bounded reconciliation sink rather
-than dropped.
+weekly, and older games require explicit historical repair; a stored game that
+lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
+priority regardless of age. Each provider response records its own timezone-aware
+retrieval time at the moment it returns, so every staged observation and
+archived row carries that response's retrieval time rather than the batch start.
+Any failed target keeps the previous valid publication and reports the season as
+unavailable; the season reports complete only when every governed game is
+stored with complete raw evidence. Unknown player identities can be sent to a
+bounded reconciliation sink rather than dropped.
 
 `app.services.ledger_derivations` owns all derived semantics: traditional
 opponent facts read the opposing team fact, assist locations require a
@@ -892,6 +1078,12 @@ including active status, server environment, season, cutoff, canonical scope,
 schema version, and deadline. Manifest supersession/expiry therefore
 serializes with acceptance: a provider response that returns after authority
 changes is discarded with no observation, ledger facts, or composition jobs.
+Every accepted observation is also cryptographically bound to the candidate
+game it supplies: the stored payload's checksum must match its payload, the
+payload must reproduce the exact raw evidence being persisted, and the
+observation's retrieval time must equal the candidate's retrieval time exactly
+after UTC normalization, so a governed caller cannot stamp a correct document
+while recording a false retrieval time.
 
 ### Database-first game-log reads
 

@@ -131,7 +131,10 @@ Production application workers do not run migrations during Flask startup.
 Railway runs `python scripts/migrate.py` once as its pre-deploy command and
 only starts the new deployment after that command succeeds. Migration 031
 repairs databases where migration 024 was recorded but its five Canonical Game
-Ledger tables were lost during a concurrent startup race.
+Ledger tables were lost during a concurrent startup race. Migration 032 adds
+the immutable complete-PBP-row evidence archive
+(`canonical_game_ledger_raw_rows`) and a `raw_checksum` on the canonical game
+row for every accepted game; existing canonical reads are unchanged.
 
 Refresh one or more explicit seasons into the writable canonical event catalog
 with (repeat `--season` as needed):

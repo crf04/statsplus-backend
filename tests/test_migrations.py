@@ -70,6 +70,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -134,6 +136,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "canonical_game_ledger_backfill",
             "canonical_game_ledger_publications",
             "canonical_game_ledger_parity_artifacts",
+            "canonical_game_ledger_raw_rows",
+            "canonical_game_ledger_observation_evidence",
         ]
     )
     collector_columns = {
@@ -346,6 +350,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (29, "029_publication_activations"),
             (30, "030_bind_publication_activation_candidates"),
             (31, "031_repair_canonical_game_ledger_tables"),
+            (32, "032_ledger_raw_row_evidence"),
+            (33, "033_ledger_observation_evidence"),
         ]
 
 
@@ -368,8 +374,112 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 31
+    assert repaired.current_version == 33
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
+
+
+def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-031.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 31),
+        )
+        assert run_migrations(engine).current_version == 31
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO canonical_game_ledger_games (
+                game_id, season, season_type, game_date,
+                home_team_id, home_team_tricode, away_team_id, away_team_tricode,
+                status, source_observation_id, checksum, retrieved_at, updated_at
+            ) VALUES (
+                '0022400001', '2024-25', 'Regular Season', '2024-11-15',
+                1610612747, 'LAL', 1610612759, 'SAS',
+                'final', 'legacy:0022400001', 'legacy-checksum',
+                '2024-11-16 00:00:00', '2024-11-16 00:00:00'
+            )
+        """))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == (
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
+    )
+    assert upgraded.current_version == 33
+    assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
+    with engine.connect() as connection:
+        raw_checksum = connection.execute(text(
+            "SELECT raw_checksum FROM canonical_game_ledger_games "
+            "WHERE game_id = '0022400001'"
+        )).scalar_one()
+        raw_count = connection.execute(text(
+            "SELECT COUNT(*) FROM canonical_game_ledger_raw_rows WHERE game_id = '0022400001'"
+        )).scalar_one()
+    assert raw_checksum is None
+    assert raw_count == 0
+
+
+def test_ledger_observation_evidence_migration_backfills_existing_accepted_games(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-032.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 32),
+        )
+        run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO collection_observations (
+                observation_id, client_observation_id, collector_id, manifest_id,
+                environment, provider, observation_type, scope, season, cutoff,
+                schema_version, checksum, payload, payload_bytes, retrieved_at, accepted_at
+            ) VALUES (
+                'obs-existing-1', 'client:obs-existing-1', 'railway-ledger', 'm',
+                'server', 'pbp', 'canonical_game_ledger', '{"game_id":"0022400001"}',
+                '2024-25', '2024-11-16 00:00:00', 1, 'c', '{}', 2,
+                '2024-11-16 00:00:00', '2024-11-16 00:00:00'
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO canonical_game_ledger_games (
+                game_id, season, season_type, game_date,
+                home_team_id, home_team_tricode, away_team_id, away_team_tricode,
+                status, source_observation_id, checksum, retrieved_at, updated_at
+            ) VALUES (
+                '0022400001', '2024-25', 'Regular Season', '2024-11-15',
+                1610612747, 'LAL', 1610612759, 'SAS',
+                'final', 'obs-existing-1', 'typed-checksum',
+                '2024-11-16 00:00:00', '2024-11-16 00:00:00'
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO canonical_game_ledger_games (
+                game_id, season, season_type, game_date,
+                home_team_id, home_team_tricode, away_team_id, away_team_tricode,
+                status, source_observation_id, checksum, retrieved_at, updated_at
+            ) VALUES (
+                '0022400002', '2024-25', 'Regular Season', '2024-11-14',
+                1610612747, 'LAL', 1610612759, 'SAS',
+                'final', 'legacy:0022400002', 'typed-checksum',
+                '2024-11-15 00:00:00', '2024-11-15 00:00:00'
+            )
+        """))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == ("033_ledger_observation_evidence",)
+    assert upgraded.current_version == 33
+    with engine.connect() as connection:
+        references = connection.execute(text(
+            "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
+            "ORDER BY observation_id"
+        )).all()
+    assert references == [("obs-existing-1", "0022400001")]
 
 
 def test_postgres_migrations_take_one_transaction_advisory_lock():
@@ -428,6 +538,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -474,8 +586,10 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
-    assert upgraded.current_version == 31
+    assert upgraded.current_version == 33
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -486,12 +600,17 @@ def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_
     inspector = inspect(engine)
 
     assert inspector.get_foreign_keys("publication_versions") == []
-    foreign_keys = inspector.get_foreign_keys("publication_observations")
     assert {
         (tuple(item["constrained_columns"]), item["referred_table"], item["options"].get("ondelete"))
-        for item in foreign_keys
+        for item in inspector.get_foreign_keys("publication_observations")
     } == {
         (("publication_id",), "publication_versions", "CASCADE"),
+        (("observation_id",), "collection_observations", "RESTRICT"),
+    }
+    assert {
+        (tuple(item["constrained_columns"]), item["referred_table"], item["options"].get("ondelete"))
+        for item in inspector.get_foreign_keys("canonical_game_ledger_observation_evidence")
+    } == {
         (("observation_id",), "collection_observations", "RESTRICT"),
     }
     parity_columns = {
@@ -540,6 +659,8 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
 
 
@@ -582,7 +703,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 31
+    assert result.current_version == 33
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -716,6 +837,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "canonical_game_ledger_backfill",
             "canonical_game_ledger_publications",
             "canonical_game_ledger_parity_artifacts",
+            "canonical_game_ledger_raw_rows",
+            "canonical_game_ledger_observation_evidence",
         ]
     )
     assert application.extensions["dependencies"].athlete_catalog_service is not None
@@ -848,6 +971,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -900,10 +1025,12 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
-    assert upgraded.current_version == 31
+    assert upgraded.current_version == 33
     assert repeated.applied == ()
-    assert repeated.current_version == 31
+    assert repeated.current_version == 33
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -965,6 +1092,8 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "029_publication_activations",
         "030_bind_publication_activation_candidates",
         "031_repair_canonical_game_ledger_tables",
+        "032_ledger_raw_row_evidence",
+        "033_ledger_observation_evidence",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
