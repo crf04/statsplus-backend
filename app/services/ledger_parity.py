@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, make_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
@@ -70,6 +71,7 @@ class LedgerParityArtifactRepository:
         report: LedgerParityReport,
         publication_id: str,
         payload_checksum: str,
+        connection: Connection | None = None,
     ) -> LedgerParityArtifact:
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
@@ -92,7 +94,11 @@ class LedgerParityArtifactRepository:
             ),
             created_at=self.clock(),
         )
-        with self.engine.begin() as connection:
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else self.engine.begin()
+        ) as connection:
             connection.execute(LedgerParityArtifact.__table__.insert().values(
                 **{column.name: getattr(row, column.name) for column in LedgerParityArtifact.__table__.columns}
             ))

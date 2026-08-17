@@ -29,6 +29,7 @@ from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher, PublicationFence
 from app.services.stats_freshness_repository import StatsFreshnessWriter
+from app.services.team_matchup_publications import publication_stream
 from app.utils.performance_monitor import monitor_nba_api_calls
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,9 @@ class DataService:
                 table_streams = {
                     "general_opponent_stats": "traditional_opponent_season",
                     "player_per36_stats": "player_per36",
-                    "team_play_types": "synergy_play_types_opponent_season",
+                    "team_play_types": publication_stream("play_types", "season"),
                     "player_play_types": "synergy_play_types",
-                    "opp_shooting_zone": "exact_shot_zones_opponent_season",
+                    "opp_shooting_zone": publication_stream("shot_zones", "season"),
                     "player_shooting_zones": "exact_shot_zones",
                     "processed_team_assists": "assist_locations_season",
                     "processed_player_assists": "player_assist_locations",
@@ -102,7 +103,7 @@ class DataService:
                 }
                 table_streams.update({
                     shooting_type.replace(" ", "_").lower():
-                    "grouped_shot_types_opponent_season"
+                    publication_stream("shot_types", "season")
                     for shooting_type in SHOOTING_TYPES
                 })
                 for table_name in frames:
@@ -135,9 +136,9 @@ class DataService:
             stream_by_table = {
                 "general_opponent_stats": "traditional_opponent_season",
                 "player_per36_stats": "player_per36",
-                "team_play_types": "synergy_play_types_opponent_season",
+                "team_play_types": publication_stream("play_types", "season"),
                 "player_play_types": "synergy_play_types",
-                "opp_shooting_zone": "exact_shot_zones_opponent_season",
+                "opp_shooting_zone": publication_stream("shot_zones", "season"),
                 "player_shooting_zones": "exact_shot_zones",
                 "processed_team_assists": "assist_locations_season",
                 "processed_player_assists": "player_assist_locations",
@@ -146,7 +147,7 @@ class DataService:
             }
             stream_by_table.update({
                 shooting_type.replace(" ", "_").lower():
-                "grouped_shot_types_opponent_season"
+                publication_stream("shot_types", "season")
                 for shooting_type in SHOOTING_TYPES
             })
             stream_key = stream_by_table.get(table_name)

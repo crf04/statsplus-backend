@@ -11,6 +11,12 @@ NBA_TEAM_TRICODES = frozenset(
         "TOR", "UTA", "WAS",
     }
 )
+NBA_TEAM_ID_TO_TRICODE = dict(zip(
+    range(1610612737, 1610612767),
+    ("ATL", "BOS", "CLE", "NOP", "CHI", "DAL", "DEN", "GSW", "HOU", "LAC",
+     "LAL", "MIA", "MIL", "MIN", "BKN", "NYK", "ORL", "IND", "PHI", "PHX",
+     "POR", "SAC", "SAS", "OKC", "TOR", "UTA", "MEM", "WAS", "DET", "CHA"),
+))
 
 NBA_TEAM_ABBREVIATION_DIALECTS = {
     "GS": "GSW",

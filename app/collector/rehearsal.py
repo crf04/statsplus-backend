@@ -9,6 +9,7 @@ from typing import Any
 from .normalizers import (
     PLAY_TYPES,
     SHOT_TYPES,
+    SHOT_ZONES,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
     normalize_opponent_zone_response,
@@ -56,11 +57,28 @@ class SanitizedFixtureProvider:
 
     def fetch_opponent_shot_chart(self, general_range: str, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("opponent_shot_type", general_range=general_range, date_from=date_from, **parameters)
-        return [{"team_id": parameters["team_id"], "category": general_range, "FGA": 1, "FGM": 1}]
+        return [{
+            "team_id": parameters["team_id"], "category": general_range,
+            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+            "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
+            "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
+        }]
 
     def fetch_opponent_shooting_zone(self, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("opponent_zone", date_from=date_from, **parameters)
-        return [self._zones(team_id=parameters["team_id"])]
+        return [{
+            "team_id": parameters["team_id"],
+            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+            **{
+                f"{zone}_{stat}": 1
+                for zone in SHOT_ZONES if zone != "Corner 3"
+                for stat in ("OPP_FGM", "OPP_FGA")
+            },
+            "Left Corner 3_OPP_FGM": 0.5,
+            "Left Corner 3_OPP_FGA": 0.5,
+            "Right Corner 3_OPP_FGM": 0.5,
+            "Right Corner 3_OPP_FGA": 0.5,
+        }]
 
     @staticmethod
     def _zones(**identity: Any) -> dict[str, Any]:

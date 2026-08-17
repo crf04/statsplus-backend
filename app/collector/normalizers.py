@@ -50,8 +50,28 @@ def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
     return provider_classification
 
 
+def _flatten_frame_columns(response: Any) -> Any:
+    """Return a frame whose grouped provider columns have stable flat names."""
+
+    if (
+        pd is not None
+        and isinstance(response, pd.DataFrame)
+        and isinstance(response.columns, pd.MultiIndex)
+    ):
+        response = response.copy()
+        response.columns = [
+            "_".join(
+                str(part).strip() for part in column
+                if str(part).strip() and str(part).strip().lower() != "nan"
+            )
+            for column in response.columns
+        ]
+    return response
+
+
 def _records(response: Any) -> list[dict[str, Any]]:
     if pd is not None and isinstance(response, pd.DataFrame):
+        response = _flatten_frame_columns(response)
         return [dict(row) for row in response.to_dict(orient="records")]
     if isinstance(response, Mapping):
         result_sets = response.get("resultSets")
@@ -107,6 +127,10 @@ def _plain(value: Any) -> Any:
         if value.tzinfo is None:
             raise ProviderContractError("provider_timestamp_unaware")
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
     if pd is not None:
         try:
             if pd.isna(value):
@@ -257,7 +281,17 @@ def normalize_schedule_response(
         status_key = status.casefold()
         if status_key not in {"1", "2", "3", "scheduled", "final", "finished", "completed", "closed", "live", "in progress", "postponed", "cancelled", "canceled", "game over", "game finished"}:
             raise ProviderContractError("provider_schema_changed")
-        normalized.append({
+        status = {
+            "1": "Scheduled",
+            "2": "Live",
+            "3": "Final",
+            "finished": "Final",
+            "completed": "Final",
+            "closed": "Final",
+            "game over": "Final",
+            "game finished": "Final",
+        }.get(status_key, status)
+        event = {
             "nba_game_id": game_id,
             "home_team_id": home,
             "away_team_id": away,
@@ -265,7 +299,22 @@ def normalize_schedule_response(
             "status": status,
             "phase": "Regular Season",
             "classification": "Regular Season",
-        })
+        }
+        is_postponed = _value(row, "is_postponed")
+        postponed_status = _value(row, "postponed_status")
+        postponement_evidence = _value(row, "postponement_evidence")
+        if status_key == "postponed":
+            is_postponed = True
+            postponed_status = postponed_status or "postponed"
+        if is_postponed is not None:
+            if not isinstance(is_postponed, bool):
+                raise ProviderContractError("provider_schema_changed")
+            event["is_postponed"] = is_postponed
+        if postponed_status not in (None, ""):
+            event["postponed_status"] = _text(postponed_status)
+        if postponement_evidence not in (None, "", {}, []):
+            event["postponement_evidence"] = _plain(postponement_evidence)
+        normalized.append(event)
     normalized.sort(key=lambda item: (item["scheduled_at"], item["nba_game_id"]))
     payload = {
         "events": normalized,
@@ -406,6 +455,13 @@ def _stat_rows(
             (("fga_frequency", "FGA_FREQUENCY"), "share"),
             (("fgm", "FGM"), "makes"),
             (("fga", "FGA"), "attempts"),
+            (("fg2m", "FG2M"), "FG2M"),
+            (("fg2a", "FG2A"), "FG2A"),
+            (("fg3m", "FG3M"), "FG3M"),
+            (("fg3a", "FG3A"), "FG3A"),
+            (("poss", "POSS"), "POSS"),
+            (("pts", "PTS"), "PTS"),
+            (("min", "MIN", "minutes"), "minutes"),
         ):
             aliases = source if isinstance(source, tuple) else (source,)
             raw = _value(row, *aliases)
@@ -422,12 +478,19 @@ def _stat_rows(
         # aliases without deriving or filling provider values.
         if "makes" in stats and "attempts" in stats and stats["makes"] > stats["attempts"]:
             raise ProviderContractError("value_invariant_failed")
+        if any(
+            made in stats and attempted in stats and stats[made] > stats[attempted]
+            for made, attempted in (("FG2M", "FG2A"), ("FG3M", "FG3A"))
+        ):
+            raise ProviderContractError("value_invariant_failed")
         normalized.append(stats)
     normalized.sort(key=lambda item: tuple(str(item.get(key, "")) for key in (*required_identity, "category")))
     complete = set(required) <= present
     base = {
         "synergy_play_types": "play_types",
+        "synergy_opponent": "play_types",
         "grouped_shot_types": "shot_types",
+        "shot_types_opponent": "shot_types",
     }.get(observation_type, observation_type)
     payload = {
         "base": base,
@@ -467,6 +530,29 @@ def normalize_synergy_response(
     )
 
 
+def normalize_opponent_synergy_response(
+    response: Any, *, season: str, cutoff: datetime | str,
+    scope: Mapping[str, Any] | None = None,
+) -> NormalizedObservation:
+    scope = dict(scope or {
+        "window": "season", "subject": "opponent", "phase": "Regular Season",
+    })
+    if scope.get("window") != "season":
+        raise ProviderContractError("provider_window_unsupported")
+    requested = scope.get("play_type")
+    required = (str(requested),) if requested is not None else None
+    observation = _stat_rows(
+        response, categories=PLAY_TYPES, category_names=("category", "play_type", "PLAY_TYPE"),
+        observation_type="synergy_opponent", scope=scope, season=season,
+        cutoff=cutoff, endpoint="synergy_opponent", required_identity=("team_id",),
+        required_categories=required,
+    )
+    _require_opponent_contract(
+        observation, require_games_played=True, require_minutes=True,
+    )
+    return observation
+
+
 def normalize_grouped_shot_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
@@ -488,24 +574,37 @@ def normalize_grouped_shot_response(
 def normalize_opponent_grouped_shot_response(
     response: Any, *, season: str, cutoff: datetime | str,
     team_id: int, window: str = "season", category: str | None = None,
+    value_mode: str = "totals_with_minutes",
+    endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
-    scope = {"window": window, "subject": "opponent", "team_id": team_id, "phase": "Regular Season"}
+    scope = {
+        "window": window, "subject": "opponent", "team_id": team_id,
+        "phase": "Regular Season", "value_mode": value_mode,
+        "season": _canonical_season(season), "season_type": "Regular Season",
+        "endpoint_window": dict(endpoint_window or {}),
+    }
     if category is not None:
         scope["category"] = category
     required = (str(category),) if category is not None else None
-    return _stat_rows(
+    observation = _stat_rows(
         response, categories=SHOT_TYPES, category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
-        observation_type="grouped_shot_types", scope=scope, season=season,
+        observation_type="shot_types_opponent", scope=scope, season=season,
         cutoff=cutoff, endpoint="opponent_shot_types", required_identity=("team_id",),
         category_default=str(category or "Catch and Shoot"),
         required_categories=required,
     )
+    _require_opponent_contract(
+        observation, scoped_team_id=team_id, require_games_played=True,
+        require_minutes=True,
+    )
+    return observation
 
 
 def _zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any], endpoint: str, identity: Sequence[str],
+    observation_type: str = "exact_shot_zones",
 ) -> NormalizedObservation:
     rows = _records(response)
     output: list[dict[str, Any]] = []
@@ -515,12 +614,46 @@ def _zone_response(
         for field in identity:
             aliases = (field, field.upper())
             identity_values[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
-        values: dict[str, Any] = {}
+        values: dict[str, dict[str, Any]] = {}
         for zone in SHOT_ZONES:
-            raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
-            if raw is None:
+            if observation_type == "exact_shot_zones":
+                raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
+                if raw is None:
+                    raise ProviderContractError("provider_schema_changed")
+                values[zone] = {"value": _number(raw)}
+                continue
+            flattened = zone.replace(" ", "_")
+            makes = _value(
+                row, f"{zone}_OPP_FGM", f"{flattened}_OPP_FGM",
+                f"{zone}_FGM", f"{flattened}_FGM",
+            )
+            attempts = _value(
+                row, f"{zone}_OPP_FGA", f"{flattened}_OPP_FGA",
+                f"{zone}_FGA", f"{flattened}_FGA",
+            )
+            if zone == "Corner 3":
+                left_makes = _value(row, "Left Corner 3_OPP_FGM")
+                left_attempts = _value(row, "Left Corner 3_OPP_FGA")
+                right_makes = _value(row, "Right Corner 3_OPP_FGM")
+                right_attempts = _value(row, "Right Corner 3_OPP_FGA")
+                side_values = (
+                    left_makes, left_attempts, right_makes, right_attempts
+                )
+                if makes is not None or attempts is not None:
+                    if makes is None or attempts is None or any(
+                        value is not None for value in side_values
+                    ):
+                        raise ProviderContractError("provider_schema_changed")
+                elif all(value is not None for value in side_values):
+                    makes = _number(left_makes) + _number(right_makes)
+                    attempts = _number(left_attempts) + _number(right_attempts)
+                else:
+                    raise ProviderContractError("provider_schema_changed")
+            if makes is None or attempts is None:
                 raise ProviderContractError("provider_schema_changed")
-            values[zone] = _number(raw)
+            values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}
+            if values[zone]["FGM"] > values[zone]["FGA"]:
+                raise ProviderContractError("value_invariant_failed")
         key = tuple(identity_values.values())
         if key in seen:
             raise ProviderContractError("duplicate_identity")
@@ -530,11 +663,16 @@ def _zone_response(
         # one registry row per zone so category coverage is inspectable.
         for zone in SHOT_ZONES:
             zone_record = dict(identity_values)
+            games_played = _value(row, "games_played", "GP")
+            if games_played is not None:
+                zone_record["games_played"] = _number(
+                    games_played, integer=True
+                )
             zone_record.update({
                 "base": "shot_zones",
                 "category": zone,
                 "slice_key": zone,
-                "value": values[zone],
+                **values[zone],
             })
             output.append(zone_record)
     output.sort(key=lambda item: tuple(str(item.get(field, "")) for field in (*identity, "category")))
@@ -544,7 +682,7 @@ def _zone_response(
         "coverage": {"zones": list(SHOT_ZONES), "scope": dict(scope)},
     }
     return NormalizedObservation(
-        observation_type="exact_shot_zones", scope=scope,
+        observation_type=observation_type, scope=scope,
         season=_canonical_season(season), cutoff=_timestamp(cutoff), payload=payload,
         provenance=_provenance(endpoint=endpoint, scope=scope, records=len(output)),
         complete=bool(output),
@@ -563,11 +701,52 @@ def normalize_zone_response(
 
 def normalize_opponent_zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
-    team_id: int, window: str = "season",
+    team_id: int, window: str = "season", value_mode: str = "per48",
+    endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
-    scope = {"window": window, "subject": "opponent", "team_id": team_id, "phase": "Regular Season"}
-    return _zone_response(response, season=season, cutoff=cutoff, scope=scope, endpoint="opponent_zones", identity=("team_id",))
+    scope = {
+        "window": window, "subject": "opponent", "team_id": team_id,
+        "phase": "Regular Season", "value_mode": value_mode,
+        "season": _canonical_season(season), "season_type": "Regular Season",
+        "endpoint_window": dict(endpoint_window or {}),
+    }
+    observation = _zone_response(
+        response, season=season, cutoff=cutoff, scope=scope,
+        endpoint="opponent_zones", identity=("team_id",),
+        observation_type="shot_zones_opponent",
+    )
+    _require_opponent_contract(
+        observation, scoped_team_id=team_id, require_games_played=True
+    )
+    return observation
+
+
+def _require_opponent_contract(
+    observation: NormalizedObservation, *, scoped_team_id: int | None = None,
+    require_games_played: bool = False, require_minutes: bool = False,
+) -> None:
+    """Require real endpoint identity/count facts before envelope creation."""
+
+    records = observation.payload.get("records")
+    if not isinstance(records, list) or not records:
+        raise ProviderContractError("provider_schema_changed")
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ProviderContractError("provider_schema_changed")
+        if scoped_team_id is not None and record.get("team_id") != scoped_team_id:
+            raise ProviderContractError("manifest_scope_mismatch")
+        games_played = record.get("games_played")
+        if games_played is None:
+            if require_games_played:
+                raise ProviderContractError("provider_window_unverified")
+            continue
+        if _number(games_played, integer=True) <= 0:
+            raise ProviderContractError("value_invariant_failed")
+        if require_minutes:
+            minutes = record.get("minutes")
+            if minutes is None or _number(minutes) <= 0:
+                raise ProviderContractError("provider_window_unverified")
 
 
 # Friendly aliases used by compatibility probes and release tests.
@@ -583,6 +762,7 @@ __all__ = [
     "normalize_grouped_shot_response", "normalize_opponent_grouped_shot_response",
     "normalize_opponent_zone_response", "normalize_roster_response",
     "normalize_schedule_response", "normalize_synergy_response",
+    "normalize_opponent_synergy_response",
     "normalize_zone_response", "normalize_schedule", "normalize_roster",
     "normalize_synergy", "normalize_shot_type_response", "normalize_shot_zone_response",
 ]

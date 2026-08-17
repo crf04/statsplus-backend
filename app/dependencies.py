@@ -137,6 +137,8 @@ def build_dependencies(
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None
+    l15_expectation_resolver = None
+    publication_write_capability = None
     canonical_game_ledger_repository = ledger_materialization_service = ledger_backfill_service = None
     ledger_matchup_materialization_service = None
     if not demo_database:
@@ -149,7 +151,12 @@ def build_dependencies(
         collection_control = CollectionControlService(
             engine, environment=settings.environment
         )
-        publication_service = PublicationService(engine)
+        from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+        l15_expectation_resolver = ActiveManifestLedgerGovernanceReader(engine)
+        publication_service = PublicationService(
+            engine,
+            l15_expectation_resolver=l15_expectation_resolver,
+        )
         from app.services.database_first_activation import DatabaseFirstPublicationReader
         from app.services.database_first_activation import LegacyWriteFence
 
@@ -161,6 +168,10 @@ def build_dependencies(
             collection_control=collection_control,
             collector_tokens=collector_tokens,
             alert_adapter=EmailAlertAdapter(),
+            l15_expectation_resolver=l15_expectation_resolver,
+        )
+        publication_write_capability = (
+            publication_service.governed_publication_write_capability()
         )
         if inspect(engine).has_table("publication_streams"):
             publication_service.register_default_streams()
@@ -303,11 +314,14 @@ def build_dependencies(
             publication_reader=publication_reader,
         )
         team_matchup_repository = TeamMatchupRepository(
-            engine, write_fence=write_fence
+            engine,
+            write_fence=write_fence,
+            publication_write_capability=publication_write_capability,
         )
         team_matchup_query_service = TeamMatchupQueryService(
             team_matchup_repository,
             publication_reader=publication_reader,
+            l15_expectation_resolver=l15_expectation_resolver,
         )
         from app.services.canonical_game_ledger import (
             CanonicalGameLedgerRepository,
@@ -355,6 +369,8 @@ def build_dependencies(
                 LedgerMatchupMaterializationService(
                     canonical_game_ledger_repository,
                     team_matchup_repository,
+                    publication_reader=publication_reader,
+                    l15_expectation_resolver=l15_expectation_resolver,
                 )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)

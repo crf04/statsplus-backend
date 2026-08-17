@@ -7,8 +7,13 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import pandas as pd
+from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -16,18 +21,55 @@ from app.collector.config import CollectorConfig, CollectorConfigurationError, l
 from app.collector.contracts import ProviderContractError
 from app.collector.normalizers import (
     normalize_grouped_shot_response,
+    normalize_opponent_grouped_shot_response,
+    normalize_opponent_zone_response,
     normalize_roster_response,
     normalize_schedule_response,
     normalize_synergy_response,
     normalize_zone_response,
 )
 from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
+from app.collector.provider import _StandaloneNBAProvider
 from app.collector.runner import (
     EXIT_NO_WORK,
     EXIT_NON_RETRYABLE,
     EXIT_RETRY,
     RunDisposition,
     ResidentialCollector,
+)
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_STREAMS,
+)
+from app.domain.slate_time import slate_date_for_instant
+from app.models.collection_control import (
+    CollectionObservation,
+    CompositionJob,
+    PublicationPointer,
+    PublicationVersion,
+)
+from app.migrations import run_migrations
+from app.services.collection_control import (
+    CollectorTokenService,
+    CollectionControlService,
+    ControlPlaneError,
+    NBA_TEAM_IDS,
+    ObservationIngestionService,
+    PublicationService,
+    _collector_scope_descriptors,
+)
+from app.services import collection_control as collection_control_module
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.ledger_runtime import LedgerRuntime
+from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from app.services.ledger_matchup_materialization import (
+    LedgerMatchupMaterializationService,
+)
+from app.services.team_matchup_repository import (
+    TeamMatchupFact,
+    TeamMatchupObservation,
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
 )
 
 UTC = timezone.utc
@@ -139,6 +181,116 @@ def test_live_schedule_shape_selects_regular_season_by_canonical_game_id():
     assert result.payload["records"][0]["phase"] == "Regular Season"
 
 
+def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
+    shot = normalize_opponent_grouped_shot_response(
+        pd.DataFrame([{
+            "TEAM_ID": 1610612737,
+            "GENERAL_RANGE": "Catch and Shoot",
+            "GP": 15, "MIN": 725,
+            "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
+        }]),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
+        category="Catch and Shoot",
+    )
+    assert shot.observation_type == "shot_types_opponent"
+    assert {
+        key: shot.payload["records"][0][key]
+        for key in ("FG2M", "FG2A", "FG3M", "FG3A")
+    } == {"FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6}
+    with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
+        normalize_opponent_grouped_shot_response(
+            pd.DataFrame([{
+                "TEAM_ID": 1610612738, "GP": 15, "MIN": 725,
+                "GENERAL_RANGE": "Catch and Shoot",
+                "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
+            }]),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+            category="Catch and Shoot",
+        )
+
+    columns = [("", "TEAM_ID")]
+    columns.append(("", "GP"))
+    values = [1610612737, 15]
+    for zone in (
+        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+        "Above the Break 3",
+    ):
+        columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
+        values.extend((4, 8))
+    for zone in ("Left Corner 3", "Right Corner 3"):
+        columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
+        values.extend((2, 4))
+    zone = normalize_opponent_zone_response(
+        pd.DataFrame([values], columns=pd.MultiIndex.from_tuples(columns)),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
+    )
+    assert zone.observation_type == "shot_zones_opponent"
+    assert len(zone.payload["records"]) == 5
+    assert {
+        (row["category"], row["FGM"], row["FGA"])
+        for row in zone.payload["records"]
+    } == {
+        (zone_name, 4, 8)
+        for zone_name in (
+            "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+            "Corner 3", "Above the Break 3",
+        )
+    }
+    bound = _StandaloneNBAProvider._bind_window_gp(
+        pd.DataFrame(
+            [values], columns=pd.MultiIndex.from_tuples(columns)
+        ).drop(columns=[("", "GP")]),
+        pd.DataFrame([{"TEAM_ID": 1610612737, "GP": 15, "MIN": 725}]),
+        team_id=1610612737,
+    )
+    assert bound["TEAM_ID"].tolist() == [1610612737]
+    assert bound["GP"].tolist() == [15]
+    assert bound["MIN"].tolist() == [725]
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [values + [4, 8]],
+                columns=pd.MultiIndex.from_tuples(
+                    columns
+                    + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
+                ),
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    wrong_team_values = list(values)
+    wrong_team_values[0] = 1610612738
+    with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [wrong_team_values], columns=pd.MultiIndex.from_tuples(columns)
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [values[:1] + values[2:]],
+                columns=pd.MultiIndex.from_tuples(columns[:1] + columns[2:]),
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+
+
+def test_schedule_normalizer_canonicalizes_terminal_alias_and_postponement():
+    row = {
+        **_schedule()[0],
+        "status": "Game Finished",
+        "is_postponed": True,
+        "postponement_evidence": {"reason": "weather"},
+    }
+    event = normalize_schedule_response(
+        [row], season="2025-26", cutoff=NOW
+    ).payload["records"][0]
+    assert event["status"] == "Final"
+    assert event["is_postponed"] is True
+    assert event["postponement_evidence"] == {"reason": "weather"}
+
+
 def test_live_roster_shape_skips_inactive_unaffiliated_players_before_team_validation():
     rows = [
         {
@@ -225,12 +377,747 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
 def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
 
-    descriptors = _collector_scope_descriptors({"grouped_shot_types", "exact_shot_zones"}, NOW)
+    l15_boundaries = {
+        int(team_id): "07/30/2026" for team_id in NBA_TEAM_IDS
+    }
+    descriptors = _collector_scope_descriptors({
+        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
+    }, NOW, l15_date_from_by_team=l15_boundaries)
     opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
-    assert {str(item["parameters"]["team_id"]) for item in opponent} == NBA_TEAM_IDS
-    assert {item["parameters"]["window"] for item in opponent} == {"season", "l15"}
-    assert {item["parameters"]["date_to"] for item in opponent} == {NOW.date().isoformat()}
-    assert all(item["parameters"]["date_from"] is None for item in opponent)
+    team_scoped = [item for item in opponent if "team_id" in item["parameters"]]
+    assert {str(item["parameters"]["team_id"]) for item in team_scoped} == NBA_TEAM_IDS
+    assert {item["parameters"]["window"] for item in team_scoped} == {"season", "l15"}
+    assert {item["parameters"]["date_to"] for item in team_scoped} == {"08/13/2026"}
+    assert {
+        item["parameters"]["date_from"]
+        for item in team_scoped
+        if item["parameters"]["window"] == "season"
+    } == {None}
+    assert {
+        item["parameters"]["date_from"]
+        for item in team_scoped
+        if item["parameters"]["window"] == "l15"
+    } == {"07/30/2026"}
+    assert {
+        item["parameters"]["per_mode"] for item in team_scoped
+        if item["scope"] == "shot_types_opponent"
+    } == {"Totals"}
+    assert {
+        item["parameters"]["value_mode"] for item in team_scoped
+        if item["scope"] == "shot_types_opponent"
+    } == {"totals_with_minutes"}
+    assert {
+        item["parameters"]["per_mode"] for item in team_scoped
+        if item["scope"] == "shot_zones_opponent"
+    } == {"Per48"}
+    synergy = [item for item in opponent if item["scope"] == "synergy_opponent"]
+    assert len(synergy) == 11
+    assert {item["parameters"]["window"] for item in synergy} == {"season"}
+    assert {item["parameters"]["subject_code"] for item in synergy} == {"T"}
+    assert {item["parameters"]["type_grouping"] for item in synergy} == {"Defensive"}
+    assert {item["parameters"]["per_mode"] for item in synergy} == {"Totals"}
+    assert not any(item["scope"] in {"grouped_shot_types", "exact_shot_zones"} for item in opponent)
+
+    l15_only = _collector_scope_descriptors(
+        {"grouped_shot_types_opponent_l15"}, NOW,
+        l15_date_from_by_team=l15_boundaries,
+    )
+    assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
+    assert {item["scope"] for item in l15_only} == {"shot_types_opponent"}
+
+    utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    prior_slate = _collector_scope_descriptors(
+        {"shot_zones_opponent"}, utc_evening,
+        l15_date_from_by_team={
+            int(team_id): "10/15/2025" for team_id in NBA_TEAM_IDS
+        },
+    )
+    assert {
+        item["parameters"]["date_to"]
+        for item in prior_slate
+        if item["parameters"].get("subject") == "opponent"
+    } == {"11/01/2025"}
+
+
+@pytest.mark.parametrize(
+    ("evidence_mode", "expected_composed"),
+    (
+        ("complete", 5), ("partial", 4), ("tampered", 4), ("gp14", 4),
+        ("permuted", 1), ("projection_failure", 5),
+        ("mixed_projection_failure", 2),
+        ("mixed_governance_type_error", 2),
+        ("mixed_governance_runtime_error", 2),
+        ("mixed_governance_db_error", 2),
+        ("backdated_synergy", 4),
+        ("l15_boundary_mismatch", 4),
+    ),
+)
+def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
+    tmp_path: Path, evidence_mode: str, expected_composed: int, monkeypatch,
+):
+    control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
+    run_migrations(control_db)
+    team_ids = sorted(NBA_TEAM_IDS)
+    cutoff = (
+        NOW - timedelta(days=1)
+        if evidence_mode == "backdated_synergy"
+        else NOW
+    )
+    control = CollectionControlService(control_db, clock=lambda: NOW)
+    control.activate_season("2025-26", actor="operator")
+    event_payload = {"complete_snapshot": True, "events": [{
+        "nba_game_id": f"game-{round_index}-{pair_index}",
+        "home_team_id": team_ids[pair_index * 2],
+        "away_team_id": team_ids[pair_index * 2 + 1],
+        "phase": "Regular Season", "status": "Final",
+        "scheduled_at": (
+            cutoff - timedelta(days=15 - round_index, hours=1)
+        ).isoformat(),
+    } for round_index in range(15) for pair_index in range(15)]}
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    event_publication = control.publish_catalog(
+        event_request.request_id, event_payload, version="event-v1"
+    )
+    assert event_publication.complete
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(athlete_request.request_id, {"complete_snapshot": True, "identities": [{
+        "player_id": "1", "team_id": team_ids[0], "status": "active",
+        "event_ids": [
+            f"game-{round_index}-{pair_index}"
+            for round_index in range(15) for pair_index in range(15)
+        ],
+    }]}, version="athlete-v1")
+    observation_types = {
+        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
+    }
+    publication_streams = {
+        template.format(window=window)
+        for base, template in NBA_PUBLICATION_STREAMS.items()
+        for window in ("season", "l15")
+        if not (base == "play_types" and window == "l15")
+    }
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff,
+        scopes={*publication_streams, "canonical_game_ledger"},
+        collect_before=NOW + timedelta(hours=1),
+    )
+    manifest_scopes = set(json.loads(manifest.scopes))
+    assert observation_types <= manifest_scopes
+    l15_date_from = slate_date_for_instant(
+        cutoff - timedelta(days=15, hours=1)
+    ).strftime("%m/%d/%Y")
+    descriptors = _collector_scope_descriptors(
+        manifest_scopes,
+        cutoff,
+        l15_date_from_by_team={
+            int(team_id): l15_date_from for team_id in team_ids
+        },
+    )
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": manifest.manifest_id, "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": sorted(manifest_scopes),
+        "scope_descriptors": descriptors,
+    }]}
+
+    class OpponentProvider(FakeProvider):
+        def fetch_synergy_play_types(self, category, **kwargs):
+            assert kwargs["player_or_team_abbreviation"] == "T"
+            assert kwargs["type_grouping"] == "Defensive"
+            assert kwargs["per_mode_simple"] == "Totals"
+            rows = [{
+                "team_id": int(team_id), "category": category,
+                "GP": 15, "MIN": 750, "POSS": 10, "PTS": 12,
+            } for team_id in team_ids]
+            return rows[:1] if evidence_mode == "partial" and category == "Transition" else rows
+
+        def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
+            assert kwargs["per_mode_simple"] == "Totals"
+            assert kwargs["date_to"] == cutoff.strftime("%m/%d/%Y")
+            assert _date_from == (
+                l15_date_from if kwargs["last_n_games"] == 15 else None
+            )
+            return [{
+                "team_id": kwargs["team_id"], "category": category,
+                "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
+                "MIN": 725,
+                "FG2M": 40, "FG2A": 80, "FG3M": 20, "FG3A": 60,
+            }]
+
+        def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            assert kwargs["per_mode_detailed"] == "Per48"
+            assert _date_from == (
+                l15_date_from if kwargs["last_n_games"] == 15 else None
+            )
+            return [{
+                "team_id": kwargs["team_id"],
+                "GP": 15,
+                **{
+                    f"{zone}_{stat}": value
+                    for zone in (
+                        "Restricted Area", "In The Paint (Non-RA)",
+                        "Mid-Range", "Above the Break 3",
+                    )
+                    for stat, value in (("OPP_FGM", 4), ("OPP_FGA", 8))
+                },
+                "Left Corner 3_OPP_FGM": 2,
+                "Left Corner 3_OPP_FGA": 4,
+                "Right Corner 3_OPP_FGM": 2,
+                "Right Corner 3_OPP_FGA": 4,
+            }]
+
+    collector, transport, outbox = _collector(
+        tmp_path, discovery=discovery, provider=OpponentProvider()
+    )
+    result = collector.run()
+    assert result.disposition is RunDisposition.COMPLETE
+    uploaded = [
+        json.loads(gzip.decompress(call[3]))
+        for call in transport.calls
+        if "/api/collector/observations" in call[1]
+    ]
+    assert {document["observation_type"] for document in uploaded} == observation_types
+    assert not {"synergy_play_types", "grouped_shot_types", "exact_shot_zones"}.intersection(
+        document["observation_type"] for document in uploaded
+    )
+
+    governance = ActiveManifestLedgerGovernanceReader(control_db)
+    publications = PublicationService(
+        control_db, clock=lambda: NOW,
+        l15_expectation_resolver=governance,
+    )
+    for base, template in NBA_PUBLICATION_STREAMS.items():
+        for window in ("season", "l15"):
+            if base == "play_types" and window == "l15":
+                continue
+            observation_type = {
+                "play_types": "synergy_opponent",
+                "shot_types": "shot_types_opponent",
+                "shot_zones": "shot_zones_opponent",
+            }[base]
+            publications.register_stream(
+                template.format(window=window), provider="nba",
+                owner="residential_collector",
+                required_observations=[observation_type],
+                publication_strategy="snapshot_replace",
+                supported_windows=[window], completeness_rule="base_complete",
+                enabled=True,
+            )
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: NOW
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=sorted(observation_types),
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ingestion = ObservationIngestionService(
+        control_db, publication_service=publications, clock=lambda: NOW
+    )
+    replayed_cutoff = json.loads(json.dumps(next(
+        document for document in uploaded
+        if document["observation_type"] == "shot_types_opponent"
+    )))
+    replayed_cutoff["client_observation_id"] += "-wrong-cutoff"
+    replayed_cutoff["scope"]["endpoint_window"]["date_to"] = "08/11/2026"
+    replayed_payload = json.dumps(
+        replayed_cutoff.pop("payload"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ControlPlaneError, match="manifest_scope_mismatch"):
+        ingestion.ingest(claims, replayed_cutoff, replayed_payload)
+    replayed_l15 = json.loads(json.dumps(next(
+        document for document in uploaded
+        if document["observation_type"] == "shot_types_opponent"
+        and document["scope"]["window"] == "l15"
+    )))
+    replayed_l15["client_observation_id"] += "-wrong-l15-boundary"
+    replayed_l15["scope"]["endpoint_window"]["date_from"] = "01/01/1900"
+    replayed_l15_payload = json.dumps(
+        replayed_l15.pop("payload"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ControlPlaneError, match="provider_window_unverified"):
+        ingestion.ingest(claims, replayed_l15, replayed_l15_payload)
+    for observation_type in ("shot_types_opponent", "shot_zones_opponent"):
+        mismatched = json.loads(json.dumps(next(
+            document
+            for document in uploaded
+            if document["observation_type"] == observation_type
+        )))
+        mismatched["client_observation_id"] += "-scope-mismatch"
+        scoped_team_id = int(mismatched["scope"]["team_id"])
+        mismatched["scope"]["team_id"] = next(
+            int(team_id) for team_id in team_ids if int(team_id) != scoped_team_id
+        )
+        assert {
+            int(record["team_id"])
+            for record in mismatched["payload"]["records"]
+        } == {scoped_team_id}
+        assert mismatched["observation_type"] == observation_type
+        assert int(mismatched["scope"]["team_id"]) != scoped_team_id
+        mismatched_payload = json.dumps(
+            mismatched.pop("payload"), sort_keys=True, separators=(",", ":")
+        ).encode()
+        with pytest.raises(ControlPlaneError, match="malformed_payload"):
+            ingestion.ingest(claims, mismatched, mismatched_payload)
+    for document in uploaded:
+        payload = json.dumps(
+            document.pop("payload"), sort_keys=True, separators=(",", ":")
+        ).encode()
+        ingestion.ingest(claims, document, payload)
+    queued_streams = set(publication_streams)
+    if evidence_mode in {
+        "mixed_projection_failure", "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
+        nba_stream = "grouped_shot_types_opponent_season"
+        with control_db.begin() as connection:
+            connection.execute(delete(CompositionJob).where(
+                CompositionJob.stream_key != nba_stream
+            ))
+            connection.execute(CompositionJob.__table__.insert().values(
+                job_id="mixed-ledger-job",
+                stream_key="traditional_opponent_season",
+                manifest_id=manifest.manifest_id,
+                season="2025-26", cutoff=cutoff, status="queued",
+                attempts=0, created_at=NOW, updated_at=NOW,
+            ))
+        queued_streams = {nba_stream, "traditional_opponent_season"}
+    if evidence_mode == "tampered":
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type == "shot_types_opponent"
+            )).mappings().all()
+            target = next(
+                row for row in observations
+                if json.loads(row["scope"])["window"] == "season"
+            )
+            connection.execute(update(CollectionObservation).where(
+                CollectionObservation.observation_id == target["observation_id"]
+            ).values(payload=target["payload"] + " "))
+    if evidence_mode == "permuted":
+        next_team = {
+            int(team_id): int(team_ids[(index + 1) % len(team_ids)])
+            for index, team_id in enumerate(team_ids)
+        }
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type.in_((
+                    "shot_types_opponent", "shot_zones_opponent",
+                ))
+            )).mappings().all()
+            for observation in observations:
+                scope = json.loads(observation["scope"])
+                scope["team_id"] = next_team[int(scope["team_id"])]
+                connection.execute(update(CollectionObservation).where(
+                    CollectionObservation.observation_id
+                    == observation["observation_id"]
+                ).values(scope=json.dumps(scope, sort_keys=True)))
+    if evidence_mode == "l15_boundary_mismatch":
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type == "shot_types_opponent"
+            )).mappings().all()
+            target = next(
+                row for row in observations
+                if json.loads(row["scope"])["window"] == "l15"
+            )
+            scope = json.loads(target["scope"])
+            scope["endpoint_window"]["date_from"] = "01/01/1900"
+            connection.execute(update(CollectionObservation).where(
+                CollectionObservation.observation_id == target["observation_id"]
+            ).values(scope=json.dumps(scope, sort_keys=True)))
+    with control_db.connect() as connection:
+        assert {
+            row.stream_key
+            for row in connection.execute(select(CompositionJob))
+        } == queued_streams
+
+    with pytest.raises(
+        ControlPlaneError,
+        match=(
+            "provider_unbounded_as_of"
+            if evidence_mode == "backdated_synergy"
+            else "publication_candidate_invalid"
+        ),
+    ):
+        publications.compose(
+            "synergy_play_types_opponent_season", season="2025-26",
+            cutoff=cutoff, payload={"rows": []},
+            manifest_id=manifest.manifest_id,
+        )
+    matchup_repository = TeamMatchupRepository(
+        control_db,
+        publication_write_capability=(
+            publications.governed_publication_write_capability()
+        ),
+    )
+    preserved_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    matchup_repository.replace_snapshots(
+        [(
+            preserved_scope,
+            [
+                TeamMatchupFact(
+                    team_id=team_id, base="traditional", slice_key="overall",
+                    stat_key="FGA", raw_value=1, denominator_value=1,
+                    denominator_unit="minutes", provider="ledger",
+                )
+                for team_id in team_ids
+            ],
+            [TeamMatchupObservation(surface="traditional", status="available")],
+        )],
+        retrieved_at=cutoff,
+    )
+    class FailOnceMaterialization(LedgerMatchupMaterializationService):
+        fail_once = evidence_mode in {
+            "projection_failure", "mixed_projection_failure",
+        }
+
+        def refresh_publication_surfaces(self, *args, **kwargs):
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("injected matchup projection failure")
+            return super().refresh_publication_surfaces(*args, **kwargs)
+
+        def materialize(self, season, *, as_of, **kwargs):
+            if evidence_mode not in {
+                "mixed_projection_failure", "mixed_governance_type_error",
+                "mixed_governance_runtime_error", "mixed_governance_db_error",
+            }:
+                return super().materialize(season, as_of=as_of, **kwargs)
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("injected mixed matchup projection failure")
+            governed = governance.read_for_composition(
+                season, cutoff, manifest.manifest_id
+            )
+            return self.refresh_publication_surfaces(
+                season,
+                as_of=as_of,
+                expected_game_ids_by_team=governed.expected_season_game_ids,
+                expected_l15_game_ids=governed.expected_l15_game_ids,
+                team_ids=governed.team_ids,
+                session=kwargs.get("session"),
+            )
+
+    matchup_materialization = FailOnceMaterialization(
+        CanonicalGameLedgerRepository(control_db),
+        matchup_repository,
+        publication_reader=DatabaseFirstPublicationReader(
+            control_db, clock=lambda: NOW
+        ),
+        l15_expectation_resolver=governance,
+        clock=lambda: NOW,
+    )
+    ledger_window = SimpleNamespace(complete=True, reason=None)
+    ledger_l15_window = SimpleNamespace(
+        complete=False, reason="insufficient governed games"
+    )
+    ledger_materialization = SimpleNamespace(compose=lambda *args, **kwargs: (
+        SimpleNamespace(
+            season_window=ledger_window,
+            l15_window=ledger_l15_window,
+            assist_location_season=None,
+            assist_location_l15=None,
+        )
+    ))
+    runtime_repository = SimpleNamespace(
+        engine=control_db,
+        list_games=lambda *args, **kwargs: (),
+        get_game=lambda *args, **kwargs: None,
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=runtime_repository,
+        materialization=(
+            ledger_materialization
+            if evidence_mode in {
+                "mixed_projection_failure", "mixed_governance_type_error",
+                "mixed_governance_runtime_error", "mixed_governance_db_error",
+            }
+            else None
+        ),
+        governance=governance,
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: NOW,
+    )
+    original_resolver = publications.l15_expectation_resolver
+    if evidence_mode.startswith("mixed_governance_"):
+        class BrokenResolver:
+            def resolve_team_game_ids(self, *args, **kwargs):
+                if evidence_mode == "mixed_governance_type_error":
+                    raise TypeError("resolver implementation defect")
+                if evidence_mode == "mixed_governance_runtime_error":
+                    raise RuntimeError("resolver runtime defect")
+                raise OperationalError("SELECT governed", {}, RuntimeError("db down"))
+
+        publications.l15_expectation_resolver = BrokenResolver()
+    if evidence_mode in {
+        "projection_failure", "mixed_projection_failure",
+        "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
+        assert runtime.compose_queued("2025-26") == 0
+        with control_db.connect() as connection:
+            assert {
+                row.status for row in connection.execute(select(CompositionJob))
+            } == {"queued"}
+            assert connection.execute(select(PublicationVersion)).all() == []
+            assert connection.execute(
+                select(PublicationPointer.__table__)
+            ).mappings().all() == []
+        failed_snapshot = matchup_repository.get_snapshot(preserved_scope)
+        assert {fact.base for fact in failed_snapshot.facts} == {"traditional"}
+        publications.l15_expectation_resolver = original_resolver
+    composed = runtime.compose_queued("2025-26")
+    with control_db.connect() as connection:
+        composition_diagnostics = [
+            (row.stream_key, row.status, row.last_error)
+            for row in connection.execute(select(CompositionJob))
+        ]
+    assert composed == expected_composed, composition_diagnostics
+    with control_db.connect() as connection:
+        job_statuses = {
+            row.stream_key: row.status
+            for row in connection.execute(select(CompositionJob))
+        }
+    assert job_statuses == {
+        stream_key: (
+            "failed"
+            if (
+                evidence_mode == "partial"
+                and stream_key == "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "backdated_synergy"
+                and stream_key == "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "tampered"
+                and stream_key == "grouped_shot_types_opponent_season"
+            ) or (
+                evidence_mode == "gp14"
+                and stream_key == "grouped_shot_types_opponent_l15"
+            ) or (
+                evidence_mode == "permuted"
+                and stream_key != "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "l15_boundary_mismatch"
+                and stream_key == "grouped_shot_types_opponent_l15"
+            )
+            else "succeeded"
+        )
+        for stream_key in queued_streams
+    }
+    if evidence_mode == "projection_failure":
+        with control_db.connect() as connection:
+            assert len(connection.execute(select(PublicationVersion)).all()) == 5
+    reader = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW)
+    expected_values = {
+        "synergy_play_types_opponent_season": ("Transition_PTS", 12 * 48 / 750),
+        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 40 * 48 / 725),
+        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 40 * 48 / 725),
+        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4),
+        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4),
+    }
+    if evidence_mode == "partial":
+        expected_values.pop("synergy_play_types_opponent_season")
+        assert not reader.read(
+            "synergy_play_types_opponent_season", season="2025-26"
+        ).available
+    if evidence_mode == "backdated_synergy":
+        expected_values.pop("synergy_play_types_opponent_season")
+        assert not reader.read(
+            "synergy_play_types_opponent_season", season="2025-26"
+        ).available
+        with control_db.connect() as connection:
+            synergy_job = connection.execute(select(CompositionJob).where(
+                CompositionJob.stream_key
+                == "synergy_play_types_opponent_season"
+            )).one()
+        assert synergy_job.status == "failed"
+        assert synergy_job.last_error == "provider_unbounded_as_of"
+        with control_db.begin() as connection:
+            connection.execute(update(CompositionJob).where(
+                CompositionJob.job_id == synergy_job.job_id
+            ).values(status="queued", last_error=None))
+        assert runtime.compose_queued("2025-26") == 0
+        with control_db.connect() as connection:
+            retried_job = connection.execute(select(CompositionJob).where(
+                CompositionJob.job_id == synergy_job.job_id
+            )).one()
+            synergy_pointer = connection.execute(select(PublicationPointer).where(
+                PublicationPointer.stream_key
+                == "synergy_play_types_opponent_season"
+            )).first()
+        assert retried_job.status == "failed"
+        assert retried_job.last_error == "provider_unbounded_as_of"
+        assert synergy_pointer is None
+    if evidence_mode == "tampered":
+        expected_values.pop("grouped_shot_types_opponent_season")
+        assert not reader.read(
+            "grouped_shot_types_opponent_season", season="2025-26"
+        ).available
+    if evidence_mode == "gp14":
+        expected_values.pop("grouped_shot_types_opponent_l15")
+        assert not reader.read(
+            "grouped_shot_types_opponent_l15", season="2025-26"
+        ).available
+    if evidence_mode == "l15_boundary_mismatch":
+        expected_values.pop("grouped_shot_types_opponent_l15")
+        assert not reader.read(
+            "grouped_shot_types_opponent_l15", season="2025-26"
+        ).available
+    if evidence_mode == "permuted":
+        expected_values = {
+            "synergy_play_types_opponent_season": (
+                "Transition_PTS", 12 * 48 / 750,
+            )
+        }
+    if evidence_mode in {
+        "mixed_projection_failure", "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
+        expected_values = {
+            "grouped_shot_types_opponent_season": (
+                "catch_and_shoot_FG2M", 40 * 48 / 725,
+            )
+        }
+    for stream_key, (metric, expected) in expected_values.items():
+        read = reader.read(stream_key, season="2025-26")
+        assert read.available and len(read.decoded or ()) == 30
+        assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
+        assert read.payload["source_observations"]
+    if evidence_mode in {"complete", "projection_failure"}:
+        season_snapshot = matchup_repository.get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", cutoff.date())
+        )
+        l15_snapshot = matchup_repository.get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+        )
+        assert {fact.base for fact in season_snapshot.facts} >= {
+            "play_types", "shot_types", "shot_zones",
+        }
+        assert {fact.base for fact in l15_snapshot.facts} >= {
+            "shot_types", "shot_zones",
+        }
+        assert all(
+            fact.publication is not None
+            for fact in (*season_snapshot.facts, *l15_snapshot.facts)
+            if fact.base in {"play_types", "shot_types", "shot_zones"}
+        )
+        assert any(
+            fact.base == "traditional" and fact.raw_value == 1
+            for fact in season_snapshot.facts
+        )
+        if evidence_mode == "projection_failure":
+            with control_db.connect() as connection:
+                prior_pointers = {
+                    row.stream_key: row.active_publication_id
+                    for row in connection.execute(
+                        select(PublicationPointer)
+                    )
+                }
+            with control_db.begin() as connection:
+                connection.execute(update(CompositionJob).values(
+                    status="queued", last_error=None,
+                ))
+            matchup_materialization.fail_once = True
+            assert runtime.compose_queued("2025-26") == 0
+            assert matchup_repository.get_snapshot(
+                TeamMatchupSnapshotScope("2025-26", cutoff.date())
+            ) == season_snapshot
+            with control_db.connect() as connection:
+                assert {
+                    row.stream_key: row.active_publication_id
+                    for row in connection.execute(select(PublicationPointer))
+                } == prior_pointers
+                assert len(connection.execute(select(PublicationVersion)).all()) == 5
+                assert {
+                    row.status
+                    for row in connection.execute(select(CompositionJob))
+                } == {"queued"}
+            assert runtime.compose_queued("2025-26") == 5
+            with control_db.connect() as connection:
+                versions_by_stream = {}
+                for version in connection.execute(select(PublicationVersion)):
+                    versions_by_stream[version.stream_key] = (
+                        versions_by_stream.get(version.stream_key, 0) + 1
+                    )
+                assert set(versions_by_stream.values()) == {2}
+                assert {
+                    row.status
+                    for row in connection.execute(select(CompositionJob))
+                } == {"succeeded"}
+        if evidence_mode == "complete":
+            stream_key = "grouped_shot_types_opponent_season"
+            stale_session = Session(control_db, expire_on_commit=False)
+            advancing_session = Session(control_db, expire_on_commit=False)
+            try:
+                stale_pointer = stale_session.get(PublicationPointer, stream_key)
+                assert stale_pointer is not None
+                initial_fence = stale_pointer.fence
+                initial_active = stale_pointer.active_publication_id
+                original_compose_payload = (
+                    collection_control_module._compose_nba_observation_payload
+                )
+                concurrent = None
+                advance_started = False
+
+                def advance_during_stale_derivation(*args, **kwargs):
+                    nonlocal advance_started, concurrent
+                    if not advance_started:
+                        advance_started = True
+                        with advancing_session.begin():
+                            concurrent = publications.compose_from_observations(
+                                stream_key, season="2025-26", cutoff=cutoff,
+                                manifest_id=manifest.manifest_id,
+                                session=advancing_session,
+                            )
+                    return original_compose_payload(*args, **kwargs)
+
+                monkeypatch.setattr(
+                    collection_control_module,
+                    "_compose_nba_observation_payload",
+                    advance_during_stale_derivation,
+                )
+                with pytest.raises(ControlPlaneError, match="stale_composition"):
+                    publications.compose_from_observations(
+                        stream_key, season="2025-26", cutoff=cutoff,
+                        manifest_id=manifest.manifest_id,
+                        session=stale_session,
+                    )
+                stale_session.rollback()
+            finally:
+                stale_session.close()
+                advancing_session.close()
+            assert concurrent is not None
+            with control_db.connect() as connection:
+                pointer = connection.execute(select(PublicationPointer).where(
+                    PublicationPointer.stream_key == stream_key
+                )).one()
+                versions = connection.execute(select(PublicationVersion).where(
+                    PublicationVersion.stream_key == stream_key
+                )).all()
+            assert pointer.fence == initial_fence + 1
+            assert pointer.previous_publication_id == initial_active
+            assert pointer.active_publication_id == concurrent.publication_id
+            assert {
+                row.publication_id for row in versions if row.status == "active"
+            } == {concurrent.publication_id}
+            assert all(
+                row.status == "superseded"
+                for row in versions
+                if row.publication_id == initial_active
+            )
+    with control_db.connect() as connection:
+        assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
+    outbox.close()
 
 
 def test_windows_task_lifecycle_requires_explicit_named_promotion():

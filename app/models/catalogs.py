@@ -11,27 +11,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-#: Canonical Synergy play types; order matches the published research tables.
-PLAY_TYPES: tuple[str, ...] = (
-    "Transition",
-    "Isolation",
-    "PRBallHandler",
-    "PRRollMan",
-    "OffRebound",
-    "Spotup",
-    "Cut",
-    "Handoff",
-    "OffScreen",
-    "Misc",
-    "Postup",
+from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPES,
+    SHOT_TYPE_DISPLAY_TO_STORED,
 )
 
-#: Shooting-type categories used by the "shooting type" filters and tables.
-SHOOTING_TYPES: tuple[str, ...] = (
-    "Catch and Shoot",
-    "Pullups",
-    "Less Than 10 ft",
-)
+# Compatibility aliases for callers that consume the general filter catalog.
+# The matchup publication taxonomy is owned by the low-level domain module;
+# this module keeps the historical public names for the broader API catalog.
+SHOOTING_TYPES: tuple[str, ...] = tuple(SHOT_TYPE_DISPLAY_TO_STORED)
 LESS_THAN_TEN_FEET_FILTER = SHOOTING_TYPES[2]
 
 # Values accepted from older clients.  The service normalizes these to the

@@ -11,7 +11,9 @@ from uuid import uuid4
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session
 
+from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CompositionJob
 
 from app.services.canonical_game_ledger import (
@@ -86,6 +88,7 @@ class LedgerMaterializationService:
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None = None,
         team_ids: frozenset[int] | None = None,
         require_assist_locations: bool = False,
+        session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
@@ -230,15 +233,28 @@ class LedgerMaterializationService:
             )
             for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
-        self.repository.publish_metadata_batch(publications)
-        publication_cutoff = cutoff or datetime.combine(
-            as_of, datetime.min.time(), timezone.utc
-        )
-        if publication_cutoff.tzinfo is None or publication_cutoff.date() != as_of:
-            raise LedgerMaterializationUnavailable(
-                "publication cutoff must be aware and match the materialization date"
-            )
+        publication_cutoff = None
         if self.publication_service is not None:
+            # Metadata-only derivation is governed by its Eastern ``as_of``
+            # date. Minting an immutable publication additionally requires the
+            # exact manifest cutoff; fabricating UTC midnight would describe
+            # the prior Eastern slate for part of every day.
+            if (
+                cutoff is None
+                or cutoff.tzinfo is None
+                or slate_date_for_instant(cutoff) != as_of
+            ):
+                raise LedgerMaterializationUnavailable(
+                    "publication cutoff must be explicit, aware, and match "
+                    "the materialization date"
+                )
+            publication_cutoff = cutoff
+        self.repository.publish_metadata_batch(
+            publications,
+            connection=session.connection() if session is not None else None,
+        )
+        if self.publication_service is not None:
+            assert publication_cutoff is not None
             provenance = {
                 game.source_observation_id: game.game_id
                 for game in eligible
@@ -265,6 +281,7 @@ class LedgerMaterializationService:
                     cutoff=publication_cutoff,
                     payload=json.loads(_payload_json(payload)),
                     provenance=provenance,
+                    **({} if session is None else {"session": session}),
                 )
             parity_specs = (
                 (
@@ -324,6 +341,10 @@ class LedgerMaterializationService:
                     report=report,
                     publication_id=candidate.publication_id,
                     payload_checksum=candidate.checksum,
+                    **(
+                        {} if session is None
+                        else {"connection": session.connection()}
+                    ),
                 )
         return result
 

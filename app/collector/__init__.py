@@ -19,6 +19,7 @@ from .contracts import (
 from .normalizers import (
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
+    normalize_opponent_synergy_response,
     normalize_opponent_zone_response,
     normalize_roster_response,
     normalize_schedule_response,
@@ -63,6 +64,7 @@ __all__ = [
     "payload_checksum",
     "normalize_grouped_shot_response",
     "normalize_opponent_grouped_shot_response",
+    "normalize_opponent_synergy_response",
     "normalize_opponent_zone_response",
     "normalize_roster_response",
     "normalize_schedule_response",
