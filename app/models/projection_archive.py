@@ -26,6 +26,7 @@ class ProviderPoll(Base):
     query_key = Column(String(72), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=False)
     outcome = Column(String(24), nullable=False)
     snapshot_id = Column(
         String(72),
@@ -59,6 +60,7 @@ class ProjectionProviderSnapshot(Base):
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     accepted_at = Column(DateTime(timezone=True), nullable=False)
     checksum = Column(String(64), nullable=False, unique=True)
+    content_checksum = Column(String(64), nullable=False)
     evidence_document = Column(Text, nullable=False)
 
     __table_args__ = (
@@ -68,6 +70,13 @@ class ProjectionProviderSnapshot(Base):
             "season",
             "query_key",
             "retrieved_at",
+        ),
+        Index(
+            "ix_projection_provider_snapshots_scope_content",
+            "provider",
+            "season",
+            "query_key",
+            "content_checksum",
         ),
     )
 
@@ -115,7 +124,7 @@ class ProjectionObservation(Base):
 
 
 class ProjectionMaterializationGeneration(Base):
-    """One atomic advancement of the provider-scoped latest read model."""
+    """One atomic materialization decision for changed snapshot evidence."""
 
     __tablename__ = "projection_materialization_generations"
 
@@ -129,6 +138,7 @@ class ProjectionMaterializationGeneration(Base):
         nullable=False,
     )
     created_at = Column(DateTime(timezone=True), nullable=False)
+    outcome = Column(String(32), nullable=False)
 
     __table_args__ = (
         UniqueConstraint(

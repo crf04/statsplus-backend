@@ -1,7 +1,7 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
 from datetime import date, datetime, timedelta, timezone
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +15,7 @@ from app import create_app
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
+    FeatureSettings,
     NBASeasonSettings,
     RuntimeSettings,
 )
@@ -62,7 +63,6 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import StoredPlayerPoolReader
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
-    ProjectionArchive,
 )
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolSnapshotRepository,
@@ -1253,22 +1253,55 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
 
 def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_without_provider_calls(
     tmp_path,
+    monkeypatch,
 ):
-    engine = create_engine(f"sqlite:///{tmp_path / 'projection-route.sqlite3'}")
+    database_url = f"sqlite:///{tmp_path / 'projection-route.sqlite3'}"
+    engine = create_engine(database_url)
     run_migrations(engine)
     settings = RuntimeSettings(
         environment="testing",
         auth=AuthenticationSettings(firebase_admin_disabled=True),
         cache=CacheSettings(enabled=False),
+        database={"url": database_url},
+        features=FeatureSettings(projection_archive_read_enabled=True),
         nba=NBASeasonSettings(current_season=SEASON),
     )
+    monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: engine)
+    monkeypatch.setattr(
+        "app.providers.nba_stats.NBAStatsAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_stats.PBPStatsAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_game_logs.PBPGameLogAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    assembled = app.extensions["dependencies"]
+    assert isinstance(
+        assembled.projection_player_pool_reader,
+        LatestProjectionPlayerPoolReader,
+    )
+    assert assembled.slate_service.player_pool is assembled.projection_player_pool_reader
+    assert assembled.matchup_service.player_pool is assembled.projection_player_pool_reader
+
     catalog = StatisticCatalog.load_default()
-    ProjectionArchive(engine, catalog).ingest_complete_snapshot(
+    assembled.projection_archive.ingest_complete_snapshot(
         _recorded_projection_snapshot(catalog),
         query=NBAMarketQuery(season=SEASON),
         accepted_at=NOW,
     )
-    pool = LatestProjectionPlayerPoolReader(engine)
+    pool = assembled.projection_player_pool_reader
     event_catalog = _event_catalog(engine, settings)
     stats_freshness = StatsFreshnessRepository(engine)
     stats_freshness.record_success(NOW)
@@ -1283,29 +1316,16 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         injuries=None,
         clock=lambda: NOW,
     )
-    providers = {"nba": _NoProvider(), "pbp": _NoProvider(), "dfs": _NoProvider()}
-    app = create_app(
-        {
-            "TESTING": True,
-            "RUNTIME_SETTINGS": settings,
-            "DEPENDENCIES": SimpleNamespace(
-                settings=settings,
-                slate_service=SlateService(
-                    event_catalog,
-                    settings=settings,
-                    player_pool=pool,
-                    injuries=None,
-                    clock=lambda: NOW,
-                ),
-                matchup_service=matchup_service,
-                nba_stats_provider=providers["nba"],
-                pbp_stats_provider=providers["pbp"],
-                dfs_providers={"dabble": providers["dfs"]},
-                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
-            ),
-            "SKIP_FIREBASE_INIT": True,
-            "SKIP_TABLE_CREATE": True,
-        }
+    app.extensions["dependencies"] = replace(
+        assembled,
+        slate_service=SlateService(
+            event_catalog,
+            settings=settings,
+            player_pool=pool,
+            injuries=None,
+            clock=lambda: NOW,
+        ),
+        matchup_service=matchup_service,
     )
     client = app.test_client()
 

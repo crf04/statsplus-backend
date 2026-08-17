@@ -3,13 +3,15 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from sqlalchemy import create_engine, select
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
     LatestPlayerProjection,
+    ProjectionMaterializationGeneration,
+    ProjectionObservation,
+    ProjectionProviderSnapshot,
     ProviderPoll,
 )
 from app.providers.dfs import (
@@ -148,10 +150,11 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         },
     }
 
+    repeated_retrieved_at = OBSERVED_AT.replace(minute=31)
     repeated = archive.ingest_complete_snapshot(
-        snapshot,
+        replace(snapshot, retrieved_at=repeated_retrieved_at),
         query=NBAMarketQuery(season=SEASON),
-        accepted_at=OBSERVED_AT.replace(minute=31),
+        accepted_at=OBSERVED_AT.replace(minute=32),
         poll_started_at=OBSERVED_AT.replace(minute=29),
     )
     assert repeated.changed is False
@@ -167,7 +170,15 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     assert [poll["outcome"] for poll in polls] == ["changed", "unchanged"]
     assert polls[0]["started_at"] is None
     assert polls[1]["started_at"] == OBSERVED_AT.replace(minute=29, tzinfo=None)
-    assert polls[1]["completed_at"] == OBSERVED_AT.replace(minute=31, tzinfo=None)
+    assert polls[1]["completed_at"] == OBSERVED_AT.replace(minute=32, tzinfo=None)
+    assert polls[1]["retrieved_at"] == repeated_retrieved_at.replace(tzinfo=None)
+    with engine.connect() as connection:
+        assert len(connection.execute(select(ProjectionProviderSnapshot)).all()) == 1
+        assert len(connection.execute(select(ProjectionObservation)).all()) == 1
+        assert (
+            len(connection.execute(select(ProjectionMaterializationGeneration)).all())
+            == 1
+        )
 
     later_observation = OBSERVED_AT + timedelta(minutes=2)
     archive.ingest_complete_snapshot(
@@ -178,12 +189,13 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         ),
         accepted_at=later_observation,
     )
-    combined = LatestProjectionPlayerPoolReader(
-        engine
-    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
-    assert combined.freshness["providers"]["dabble"][
-        "retrieved_at"
-    ] == OBSERVED_AT.isoformat()
+    combined = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert (
+        combined.freshness["providers"]["dabble"]["retrieved_at"]
+        == OBSERVED_AT.isoformat()
+    )
     much_later = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
         season=SEASON,
         game_id=GAME_ID,
@@ -347,12 +359,22 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         ),
         retrieved_at=replacement_time,
     )
-    with pytest.raises(ValueError, match="same observation time"):
-        archive.ingest_complete_snapshot(
-            same_time_conflict,
-            query=query,
-            accepted_at=replacement_time + timedelta(minutes=2),
-        )
+    same_time_result = archive.ingest_complete_snapshot(
+        same_time_conflict,
+        query=query,
+        accepted_at=replacement_time + timedelta(minutes=2),
+    )
+    assert same_time_result.changed is True
+    assert same_time_result.materialization_outcome == "same_time_not_promoted"
+    assert archive.load_source_snapshot(same_time_result.snapshot_id) is not None
+    with engine.connect() as connection:
+        generation_outcome = connection.execute(
+            select(ProjectionMaterializationGeneration.outcome).where(
+                ProjectionMaterializationGeneration.generation_id
+                == same_time_result.generation_id
+            )
+        ).scalar_one()
+    assert generation_outcome == "same_time_not_promoted"
 
     with engine.connect() as connection:
         assert connection.execute(select(LatestPlayerProjection.__table__)).all() == []
@@ -366,6 +388,75 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         "retrieved_at": None,
         "providers": {},
     }
+
+
+def test_duplicate_content_market_reference_keeps_all_evidence_and_first_latest(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'duplicate-market.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    first = PlayerProjectionMarket(
+        provider="dabble",
+        athlete=AthleteEvidence(
+            canonical_id=7,
+            name="Canonical Player",
+            team=TeamEvidence(canonical_id=10),
+        ),
+        event=EventEvidence(canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="dabble",
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    result = ProjectionArchive(engine, catalog).ingest_complete_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(
+                first,
+                first,
+            ),
+            coverage=CoverageEvidence(
+                fetched_count=2,
+                eligible_count=2,
+                normalized_count=2,
+                expected_total=2,
+            ),
+            retrieved_at=OBSERVED_AT,
+        ),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+
+    with engine.connect() as connection:
+        observations = (
+            connection.execute(
+                select(
+                    ProjectionObservation.observation_id,
+                    ProjectionObservation.ordinal,
+                ).order_by(ProjectionObservation.ordinal)
+            )
+            .mappings()
+            .all()
+        )
+        latest_observation_id = connection.execute(
+            select(LatestPlayerProjection.observation_id)
+        ).scalar_one()
+    assert result.observation_count == 2
+    assert len(observations) == 2
+    assert latest_observation_id == observations[0]["observation_id"]
 
 
 def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_path):

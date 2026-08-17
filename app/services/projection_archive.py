@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from typing import Any
 
 from sqlalchemy import delete, insert, select
@@ -45,6 +46,7 @@ class ProjectionArchiveResult:
     generation_id: str
     changed: bool
     observation_count: int
+    materialization_outcome: str
 
 
 def _digest(prefix: str, *values: object) -> str:
@@ -54,6 +56,18 @@ def _digest(prefix: str, *values: object) -> str:
 
 def _snapshot_checksum(query_key: str, document: str) -> str:
     return sha256(f"{query_key}\x1f{document}".encode("utf-8")).hexdigest()
+
+
+def _snapshot_content_checksum(query_key: str, document: str) -> str:
+    payload = json.loads(document)
+    del payload["retrieved_at"]
+    canonical_content = json.dumps(
+        payload,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return _snapshot_checksum(query_key, canonical_content)
 
 
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -114,6 +128,7 @@ class ProjectionArchive:
         query_key = _query_key(query)
         document = serialize_provider_snapshot(source, query)
         checksum = _snapshot_checksum(query_key, document)
+        content_checksum = _snapshot_content_checksum(query_key, document)
         snapshot_id = f"psn_{checksum}"
         generation_id = _digest("gen", snapshot_id)
         poll_id = _digest("poll", snapshot_id, accepted.isoformat())
@@ -122,6 +137,33 @@ class ProjectionArchive:
         snapshot_table = ProjectionProviderSnapshot.__table__
 
         with self.engine.begin() as connection:
+            current = self._current_materialization(
+                connection,
+                provider=snapshot.provider,
+                season=query.season,
+                query_key=query_key,
+            )
+            if current is not None and current["content_checksum"] == content_checksum:
+                self._record_poll(
+                    connection,
+                    poll_id=poll_id,
+                    snapshot=snapshot,
+                    season=query.season,
+                    query_key=query_key,
+                    started_at=poll_started,
+                    completed_at=accepted,
+                    outcome="unchanged",
+                    snapshot_id=str(current["snapshot_id"]),
+                    observation_count=len(snapshot.markets),
+                )
+                return ProjectionArchiveResult(
+                    snapshot_id=str(current["snapshot_id"]),
+                    generation_id=str(current["generation_id"]),
+                    changed=False,
+                    observation_count=len(snapshot.markets),
+                    materialization_outcome="unchanged",
+                )
+
             existing = connection.execute(
                 select(snapshot_table.c.snapshot_id).where(
                     snapshot_table.c.checksum == checksum
@@ -145,13 +187,12 @@ class ProjectionArchive:
                     generation_id=generation_id,
                     changed=False,
                     observation_count=len(snapshot.markets),
+                    materialization_outcome="unchanged",
                 )
 
-            advances_latest = self._advances_latest(
-                connection,
-                snapshot=snapshot,
-                season=query.season,
-                query_key=query_key,
+            materialization_outcome = self._materialization_outcome(
+                current,
+                incoming_retrieved_at=snapshot.retrieved_at,
             )
 
             connection.execute(
@@ -165,6 +206,7 @@ class ProjectionArchive:
                     retrieved_at=snapshot.retrieved_at,
                     accepted_at=accepted,
                     checksum=checksum,
+                    content_checksum=content_checksum,
                     evidence_document=document,
                 )
             )
@@ -181,9 +223,10 @@ class ProjectionArchive:
                     query_key=query_key,
                     snapshot_id=snapshot_id,
                     created_at=accepted,
+                    outcome=materialization_outcome,
                 )
             )
-            if advances_latest:
+            if materialization_outcome == "advanced":
                 self._advance_latest(
                     connection,
                     observation_rows,
@@ -210,6 +253,7 @@ class ProjectionArchive:
             generation_id=generation_id,
             changed=True,
             observation_count=len(observation_rows),
+            materialization_outcome=materialization_outcome,
         )
 
     def load_source_snapshot(self, snapshot_id: str) -> ProviderSnapshot | None:
@@ -237,40 +281,57 @@ class ProjectionArchive:
         return deserialize_provider_snapshot(document)
 
     @staticmethod
-    def _advances_latest(
+    def _current_materialization(
         connection: Any,
         *,
-        snapshot: ProviderSnapshot,
+        provider: str,
         season: str,
         query_key: str,
-    ) -> bool:
+    ) -> Any | None:
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
-        current_retrieved_at = connection.execute(
-            select(snapshot_table.c.retrieved_at)
-            .select_from(
-                generation_table.join(
-                    snapshot_table,
-                    generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+        return (
+            connection.execute(
+                select(
+                    generation_table.c.generation_id,
+                    snapshot_table.c.snapshot_id,
+                    snapshot_table.c.retrieved_at,
+                    snapshot_table.c.content_checksum,
                 )
+                .select_from(
+                    generation_table.join(
+                        snapshot_table,
+                        generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                    )
+                )
+                .where(
+                    generation_table.c.provider == provider,
+                    generation_table.c.season == season,
+                    generation_table.c.query_key == query_key,
+                    generation_table.c.outcome == "advanced",
+                )
+                .order_by(snapshot_table.c.retrieved_at.desc())
+                .limit(1)
             )
-            .where(
-                generation_table.c.provider == snapshot.provider,
-                generation_table.c.season == season,
-                generation_table.c.query_key == query_key,
-            )
-            .order_by(snapshot_table.c.retrieved_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if current_retrieved_at is None:
-            return True
-        incoming = assume_utc(snapshot.retrieved_at)
-        current = assume_utc(current_retrieved_at)
-        if incoming == current:
-            raise ValueError(
-                "different projection snapshots cannot share the same observation time"
-            )
-        return incoming > current
+            .mappings()
+            .one_or_none()
+        )
+
+    @staticmethod
+    def _materialization_outcome(
+        current: Any | None,
+        *,
+        incoming_retrieved_at: datetime,
+    ) -> str:
+        if current is None:
+            return "advanced"
+        incoming = assume_utc(incoming_retrieved_at)
+        current_retrieved_at = assume_utc(current["retrieved_at"])
+        if incoming > current_retrieved_at:
+            return "advanced"
+        if incoming == current_retrieved_at:
+            return "same_time_not_promoted"
+        return "older_not_promoted"
 
     @staticmethod
     def _record_poll(
@@ -294,6 +355,7 @@ class ProjectionArchive:
                 query_key=query_key,
                 started_at=started_at,
                 completed_at=completed_at,
+                retrieved_at=snapshot.retrieved_at,
                 outcome=outcome,
                 snapshot_id=snapshot_id,
                 observation_count=observation_count,
@@ -391,9 +453,14 @@ class ProjectionArchive:
                 table.c.query_key == query_key,
             )
         )
+        materialized_references: set[str] = set()
         for row in observation_rows:
             if not row["targetable"]:
                 continue
+            reference = str(row["market_reference"])
+            if reference in materialized_references:
+                continue
+            materialized_references.add(reference)
             connection.execute(
                 insert(table).values(
                     provider=row["provider"],
@@ -527,6 +594,7 @@ class LatestProjectionPlayerPoolReader:
             return {"state": "missing", "observed_at": None}
         observed_at = min(assume_utc(row["observed_at"]) for row in rows)
         return {"state": "live", "observed_at": observed_at.isoformat()}
+
 
 __all__ = [
     "LatestProjectionPlayerPoolReader",

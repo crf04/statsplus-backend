@@ -336,7 +336,12 @@ the single write interface for this first vertical slice. It accepts one
 Complete normalized `ProviderSnapshot` and its canonical season query and
 writes one Provider Poll for every accepted attempt. A changed attempt writes
 one checksummed source-evidence document, immutable market observations, and
-one materialization generation atomically. A caller may supply the actual poll
+one materialization generation atomically. The evidence checksum covers the
+entire canonical document, including `retrieved_at`, for later verification. A
+separate query-scoped content checksum excludes only that retrieval timestamp,
+so a later poll confirming identical markets and coverage records an unchanged
+poll without duplicating the snapshot, observations, or generation. A caller
+may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,
 and the acceptance time is the completion time. Poll outcomes are `changed` or
 `unchanged`; unchanged evidence points at the existing immutable snapshot.
@@ -344,8 +349,11 @@ Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An
 older snapshot remains immutable evidence but cannot move Latest backward. An
-identical snapshot at the same observation time is idempotent; a different
-document at the same provider/query observation time is refused as ambiguous.
+identical snapshot at the same observation time is idempotent. A different
+document at the same provider/query observation time is archived with a
+`same_time_not_promoted` materialization outcome and cannot replace the current
+Latest set; `older_not_promoted` records the corresponding older-snapshot
+decision.
 Thresholds, selections, modifiers, prices, provider labels, and source
 identity round-trip through the existing strict Provider Snapshot codec; raw
 upstream payloads are never stored. Governed identities and targetability are
@@ -353,6 +361,11 @@ relational fields beside that immutable evidence. Valid unresolved and
 non-targetable markets stay in the archive but do not enter the live read
 model. Provider market IDs use the established deterministic market-reference
 authority, including its content-derived fallback when an ID is absent.
+Conflicting repeated provider IDs are already rejected by the normalized
+`ProviderSnapshot` contract, while equivalent repeats are collapsed there. If
+ID-less markets nevertheless produce the same content-derived reference, every
+occurrence stays in immutable observations and the first targetable occurrence
+by source ordinal is the sole Latest pointer for that reference.
 
 `LatestProjectionPlayerPoolReader` is the database-only read interface. It
 unions current Latest Player Projections by canonical player, category, and

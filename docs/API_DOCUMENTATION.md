@@ -313,6 +313,10 @@ targetable players. For a multi-game request with both live and missing games,
 because it contains live rows. Aggregate and per-provider observation times
 are the oldest included times, so neither understates the age of evidence in
 the union.
+An unchanged provider poll is recognized from canonical market, coverage, and
+query content even though its retrieval time is newer; the poll retains that
+new retrieval time while the existing immutable snapshot remains the content
+authority.
 The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and
