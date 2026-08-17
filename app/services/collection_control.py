@@ -21,7 +21,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Mapping, NamedTuple
+from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from sqlalchemy import case, func, select
 from sqlalchemy.engine import Engine
@@ -482,6 +482,19 @@ class ControlPlaneError(ValueError):
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds
         super().__init__(message or reason)
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerPublicationComposition:
+    """One governed ledger payload staged by an atomic publication batch."""
+
+    stream_key: str
+    season: str
+    cutoff: datetime
+    payload: Any
+    provenance: Mapping[str, str | None]
+    reason: str = "ledger correction"
+    manifest_id: str | None = None
 
 
 class UnresolvedIdentityError(ValueError):
@@ -2316,6 +2329,13 @@ class ObservationIngestionService(_SessionService):
 class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
+    def stream_enabled(self, stream_key: str) -> bool:
+        with self.session() as session:
+            stream = session.get(PublicationStream, stream_key)
+            if stream is None:
+                raise ControlPlaneError("stream_not_found")
+            return bool(stream.enabled)
+
     def register_stream(self, stream_key: str, *, provider: str, owner: str,
                         required_observations: Iterable[str], publication_strategy: str,
                         supported_windows: Iterable[str] = (), enabled: bool | None = None,
@@ -2608,32 +2628,6 @@ class PublicationService(_SessionService):
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
-            pointer = session.scalar(select(PublicationPointer).where(
-                PublicationPointer.stream_key == stream_key
-            ).with_for_update())
-            if pointer is not None and pointer.active_publication_id:
-                current = session.get(PublicationVersion, pointer.active_publication_id)
-                if (
-                    current is not None
-                    and current.season == season
-                    and _aware(current.cutoff) == _aware(cutoff)
-                    and current.checksum == _checksum(encoded)
-                    and (
-                        ledger_provenance is not None
-                        or current.reason == reason
-                    )
-                    and (
-                        ledger_provenance is None
-                        or self._publication_provenance_matches(
-                            session,
-                            current.publication_id,
-                            ledger_provenance,
-                        )
-                    )
-                ):
-                    if expected_fence is not None and pointer.fence != expected_fence:
-                        raise ControlPlaneError("stale_composition")
-                    return current
             provenance_ids = (
                 self._assert_ledger_provenance(
                     session,
@@ -2648,42 +2642,76 @@ class PublicationService(_SessionService):
                     manifest_id=manifest_id,
                 )
             )
-            if pointer is None:
-                if expected_fence not in (None, 0):
+            return self._compose_active_in_session(
+                session, stream_key=stream_key, season=season, cutoff=cutoff,
+                encoded=encoded, payload=payload, expected_fence=expected_fence,
+                reason=reason, provenance_ids=provenance_ids, now=now,
+                provenance=ledger_provenance,
+            )
+
+    def _compose_active_in_session(
+        self, session: Session, *, stream_key: str, season: str,
+        cutoff: datetime, encoded: str, payload: Any,
+        expected_fence: int | None, reason: str | None,
+        provenance_ids: set[str], now: datetime,
+        provenance: Mapping[str, str | None] | None = None,
+    ) -> PublicationVersion:
+        stream = session.get(PublicationStream, stream_key)
+        if stream is None or not stream.enabled:
+            raise ControlPlaneError("stream_unavailable")
+        pointer = session.scalar(select(PublicationPointer).where(
+            PublicationPointer.stream_key == stream_key
+        ).with_for_update())
+        if pointer is not None and pointer.active_publication_id:
+            current = session.get(PublicationVersion, pointer.active_publication_id)
+            if (
+                current is not None and current.season == season
+                and _aware(current.cutoff) == _aware(cutoff)
+                and current.checksum == _checksum(encoded)
+                and (provenance is not None or current.reason == reason)
+                and (provenance is None or self._publication_provenance_matches(
+                    session, current.publication_id, provenance
+                ))
+            ):
+                if expected_fence is not None and pointer.fence != expected_fence:
                     raise ControlPlaneError("stale_composition")
-                pointer = PublicationPointer(stream_key=stream_key, fence=0, updated_at=now)
-                session.add(pointer)
-                try:
-                    session.flush()
-                except IntegrityError as error:
-                    raise ControlPlaneError("stale_composition") from error
-            elif expected_fence is None:
-                raise ControlPlaneError("expected_fence_required")
-            if expected_fence is not None and pointer.fence != expected_fence:
+                return current
+        if pointer is None:
+            if expected_fence not in (None, 0):
                 raise ControlPlaneError("stale_composition")
-            old = pointer.active_publication_id
-            next_version = session.scalar(select(PublicationVersion.version).where(PublicationVersion.stream_key == stream_key,
-                PublicationVersion.season == season).order_by(PublicationVersion.version.desc()).limit(1)) or 0
-            pointer.fence += 1
-            publication = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=season,
+            pointer = PublicationPointer(stream_key=stream_key, fence=0, updated_at=now)
+            session.add(pointer)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                raise ControlPlaneError("stale_composition") from error
+        elif expected_fence is None:
+            raise ControlPlaneError("expected_fence_required")
+        if expected_fence is not None and pointer.fence != expected_fence:
+            raise ControlPlaneError("stale_composition")
+        old = pointer.active_publication_id
+        next_version = session.scalar(select(PublicationVersion.version).where(PublicationVersion.stream_key == stream_key,
+            PublicationVersion.season == season).order_by(PublicationVersion.version.desc()).limit(1)) or 0
+        pointer.fence += 1
+        publication = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=season,
                 cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=_checksum(encoded), payload=encoded,
                 created_at=now, reason=reason, fence=pointer.fence)
-            session.add(publication)
-            session.flush()
-            _write_publication_projection(session, publication, payload)
-            for observation_id in sorted(provenance_ids):
-                session.add(PublicationObservation(
+        session.add(publication)
+        session.flush()
+        _write_publication_projection(session, publication, payload)
+        for observation_id in sorted(provenance_ids):
+            session.add(PublicationObservation(
                     publication_id=publication.publication_id,
                     observation_id=observation_id,
                     role="completeness_evidence",
                     created_at=now,
-                ))
-            if old:
-                previous = session.get(PublicationVersion, old)
-                if previous is not None:
-                    previous.status = "superseded"
-            pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
-            session.flush()
+            ))
+        if old:
+            previous = session.get(PublicationVersion, old)
+            if previous is not None:
+                previous.status = "superseded"
+        pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
+        session.flush()
         return publication
 
     def recompose_ledger(
@@ -2733,6 +2761,33 @@ class PublicationService(_SessionService):
             reason=reason,
         )
 
+    def recompose_ledger_batch(
+        self, compositions: Sequence[LedgerPublicationComposition],
+    ) -> tuple[PublicationVersion, ...]:
+        """Validate and advance all enabled ledger streams in one transaction."""
+        items = tuple(compositions)
+        if not items or len({item.stream_key for item in items}) != len(items):
+            raise ControlPlaneError("duplicate_publication_stream")
+        now = self.clock()
+        with self.session() as session, session.begin():
+            results = []
+            for item in sorted(items, key=lambda value: value.stream_key):
+                stream = session.get(PublicationStream, item.stream_key)
+                if stream is None or not stream.enabled:
+                    raise ControlPlaneError("stream_unavailable")
+                provenance_ids = self._assert_ledger_provenance(
+                    session, season=item.season, cutoff=_aware(item.cutoff),
+                    provenance=item.provenance, manifest_id=item.manifest_id,
+                )
+                pointer = session.get(PublicationPointer, item.stream_key)
+                results.append(self._compose_active_in_session(
+                    session, stream_key=item.stream_key, season=item.season,
+                    cutoff=item.cutoff, encoded=_json(item.payload), payload=item.payload,
+                    expected_fence=(pointer.fence if pointer is not None else 0), reason=item.reason,
+                    provenance_ids=provenance_ids, provenance=item.provenance, now=now,
+                ))
+            return tuple(results)
+
     def compose_inactive_ledger(
         self,
         stream_key: str,
@@ -2751,6 +2806,9 @@ class PublicationService(_SessionService):
             stream = session.get(PublicationStream, stream_key)
             if stream is None or stream.provider != "ledger" or stream.enabled:
                 raise ControlPlaneError("inactive_ledger_stream_required")
+            self._assert_ledger_provenance(
+                session, season=season, cutoff=_aware(cutoff), provenance=provenance,
+            )
             existing = session.scalar(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
@@ -2767,47 +2825,6 @@ class PublicationService(_SessionService):
                 )
             ):
                 return existing
-            if not provenance:
-                raise ControlPlaneError("ledger_provenance_required")
-            accepted_rows = session.scalars(select(CollectionObservation).where(
-                CollectionObservation.observation_id.in_(tuple(provenance)),
-                CollectionObservation.season == season,
-                CollectionObservation.provider == "pbp",
-                CollectionObservation.observation_type == "canonical_game_ledger",
-            )).all()
-            accepted = {row.observation_id for row in accepted_rows}
-            if accepted != set(provenance):
-                raise ControlPlaneError("ledger_provenance_not_accepted")
-            manifest_ids = {row.manifest_id for row in accepted_rows}
-            if len(manifest_ids) != 1 or None in manifest_ids:
-                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-            manifest_id = str(next(iter(manifest_ids)))
-            manifest = session.get(CollectionManifest, manifest_id)
-            governed_cutoff = _aware(cutoff)
-            if (
-                manifest is None
-                or manifest.season != season
-                or _aware(manifest.cutoff) != governed_cutoff
-                or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
-                or 1 not in set(json.loads(manifest.accepted_versions))
-            ):
-                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-            for observation in accepted_rows:
-                try:
-                    scope = json.loads(observation.scope)
-                except (TypeError, ValueError) as error:
-                    raise ControlPlaneError("ledger_provenance_scope_mismatch") from error
-                if (
-                    not isinstance(scope, Mapping)
-                    or scope.get("surface") != "canonical_game_ledger"
-                    or str(scope.get("game_id") or "")
-                    != str(provenance[observation.observation_id] or "")
-                    or _aware(observation.cutoff) != governed_cutoff
-                    or _aware(observation.retrieved_at) > _aware(manifest.collect_before)
-                    or _aware(observation.accepted_at) > _aware(manifest.collect_before)
-                    or observation.schema_version not in set(json.loads(manifest.accepted_versions))
-                ):
-                    raise ControlPlaneError("ledger_provenance_scope_mismatch")
             next_version = session.scalar(
                 select(PublicationVersion.version).where(
                     PublicationVersion.stream_key == stream_key,

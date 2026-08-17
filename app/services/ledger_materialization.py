@@ -13,6 +13,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 
 from app.models.collection_control import CollectionManifest, CompositionJob
+from app.services.collection_control import LedgerPublicationComposition
 
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -256,6 +257,7 @@ class LedgerMaterializationService:
                 if l15_window.complete:
                     candidates.append(("assist_locations_l15", assist_l15.teams))
             candidate_versions = {}
+            batch = []
             for stream_key, payload in candidates:
                 encoded_payload = json.loads(_payload_json(payload))
                 selected_game_ids = (
@@ -270,14 +272,19 @@ class LedgerMaterializationService:
                 }
                 publication_reason = recomposition_reason or "historical ledger rehearsal"
                 if activate:
-                    candidate_versions[stream_key] = self.publication_service.recompose_ledger(
-                        stream_key,
-                        season=canonical_season,
-                        cutoff=publication_cutoff,
-                        payload=encoded_payload,
-                        provenance=provenance,
-                        reason=publication_reason,
+                    composition = LedgerPublicationComposition(
+                        stream_key=stream_key, season=canonical_season,
+                        cutoff=publication_cutoff, payload=encoded_payload,
+                        provenance=provenance, reason=publication_reason,
                     )
+                    if self.publication_service.stream_enabled(stream_key):
+                        batch.append(composition)
+                    else:
+                        candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
+                            stream_key, season=canonical_season, cutoff=publication_cutoff,
+                            payload=encoded_payload, provenance=provenance,
+                            reason=publication_reason,
+                        )
                 else:
                     candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                         stream_key,
@@ -287,6 +294,11 @@ class LedgerMaterializationService:
                         provenance=provenance,
                         reason=publication_reason,
                     )
+            if activate and batch:
+                candidate_versions.update({
+                    publication.stream_key: publication
+                    for publication in self.publication_service.recompose_ledger_batch(batch)
+                })
             parity_specs = (
                 (
                     "player_game_logs",

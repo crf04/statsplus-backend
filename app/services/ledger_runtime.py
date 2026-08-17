@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 from typing import Mapping, Protocol
 from uuid import uuid4
 
@@ -21,6 +22,11 @@ from app.domain.nba_events import is_final_event, is_postponed_event
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
+from app.services.ledger_materialization import LedgerMaterializationUnavailable
+from app.services.ledger_derivations import LedgerDerivationUnavailable
+from app.services.collection_control import ControlPlaneError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +359,7 @@ class LedgerRuntime:
                     activate=self.publication_service is not None,
                     recomposition_reason=reason,
                 )
-            except Exception:
+            except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable, ValueError, RuntimeError):
                 self._mark_slice_failed(
                     season=season,
                     cutoff=stored_cutoff,
@@ -362,6 +368,9 @@ class LedgerRuntime:
                     reason="recomposition_failed",
                 )
                 continue
+            except Exception:
+                logger.exception("unexpected ledger recomposition failure", extra={"season": season})
+                raise
             succeeded = set()
             if materialized.season_window.complete:
                 succeeded |= {
