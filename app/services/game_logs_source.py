@@ -10,6 +10,7 @@ seasons that have not yet been durably covered.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import pandas as pd
@@ -32,11 +33,19 @@ class EventCatalogReader(Protocol):
 class PlayerGameLogReader(Protocol):
     """Durable player-game-log read seam used by the stored source."""
 
-    def list_player_rows(self, season: str, player_id: int) -> tuple[Any, ...]: ...
+    def list_player_rows(
+        self,
+        season: str,
+        player_id: int,
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> tuple[Any, ...]: ...
 
     def has_complete_publication(self, season: str) -> bool: ...
 
     def get_read_freshness(self, season: str) -> Any: ...
+
+    def read_publication_snapshot(self, season: str) -> Any | None: ...
 
 
 class GameLogsSource(Protocol):
@@ -54,6 +63,35 @@ class GameLogsSource(Protocol):
         """Whether Redis caching applies to this season's source result."""
 
     def record_cache_hit(self, operation: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GameLogsReadPlan:
+    """One request's stable source choice and immutable publication read."""
+
+    source: GameLogsSource
+    cacheable: bool
+    publication_snapshot: Any | None = None
+
+    def get_player_logs(
+        self,
+        player_id: int,
+        season: str,
+        *,
+        cache_status: str = CACHE_MISS,
+    ) -> pd.DataFrame:
+        if self.publication_snapshot is None:
+            return self.source.get_player_logs(
+                player_id,
+                season,
+                cache_status=cache_status,
+            )
+        return self.source.get_player_logs(
+            player_id,
+            season,
+            cache_status=cache_status,
+            publication_snapshot=self.publication_snapshot,
+        )
 
 
 class LivePBPGameLogsSource:
@@ -117,9 +155,14 @@ class StoredGameLogsSource:
         season: str,
         *,
         cache_status: str = CACHE_MISS,
+        publication_snapshot: Any | None = None,
     ) -> pd.DataFrame:
         del cache_status
-        records = self.repository.list_player_rows(season, player_id)
+        records = self.repository.list_player_rows(
+            season,
+            player_id,
+            publication_snapshot=publication_snapshot,
+        )
         # The legacy request-time contract serves Regular Season games only;
         # the live PBP path requests that phase explicitly, so the stored path
         # must project the same phase for parity.
@@ -163,23 +206,38 @@ class DatabaseFirstGameLogsSource:
         *,
         cache_status: str = CACHE_MISS,
     ) -> pd.DataFrame:
-        source = self._source_for(season)
-        return source.get_player_logs(
+        return self.prepare(season).get_player_logs(
             player_id,
             season,
             cache_status=cache_status,
         )
 
     def cached(self, season: str) -> bool:
-        return not self.repository.has_complete_publication(season)
+        return self.prepare(season).cacheable
+
+    def prepare(self, season: str) -> GameLogsReadPlan:
+        """Choose one source and retain its publication snapshot for the request."""
+
+        read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
+        publication_snapshot = (
+            read_snapshot(season) if callable(read_snapshot) else None
+        )
+        if publication_snapshot is not None:
+            publication = publication_snapshot.read("player_game_logs")
+            complete = (
+                not publication.legacy_fallback_allowed
+                and publication.available
+            )
+        else:
+            complete = self.repository.has_complete_publication(season)
+        return GameLogsReadPlan(
+            source=self.stored_source if complete else self.live_source,
+            cacheable=not complete,
+            publication_snapshot=publication_snapshot if complete else None,
+        )
 
     def record_cache_hit(self, operation: str) -> None:
         self.live_source.record_cache_hit(operation)
-
-    def _source_for(self, season: str) -> GameLogsSource:
-        if self.repository.has_complete_publication(season):
-            return self.stored_source
-        return self.live_source
 
 
 def _recency_frame(frame: pd.DataFrame) -> pd.DataFrame:

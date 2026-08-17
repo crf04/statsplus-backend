@@ -629,6 +629,27 @@ class PlayerGameLogRepository:
         except SQLAlchemyError:
             return False
 
+    def read_publication_snapshot(self, season: str) -> Any | None:
+        """Read the player-log publication once for one request.
+
+        The database-first game-log router uses this snapshot for both its
+        source decision and the stored row projection.  Readers without the
+        snapshot seam retain the legacy completeness path.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        if self._publication_reader is None:
+            return None
+        snapshot = getattr(self._publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(self._publication_reader, "read_snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            return snapshot(("player_game_logs",), season=canonical_season)
+        except SQLAlchemyError:
+            return None
+
     def stored_game_ids(self, season: str) -> frozenset[str]:
         """Return the governed game identities with stored facts for a season."""
         canonical_season = validate_canonical_season(season)
