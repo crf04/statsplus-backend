@@ -1114,6 +1114,34 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
             generation=7,
             claimed_generation=7,
         ))
+        connection.execute(CompositionJob.__table__.insert(), [
+            {
+                "job_id": "stale-traditional",
+                "stream_key": "traditional_opponent_season",
+                "manifest_id": manifest_id,
+                "season": "2025-26",
+                "cutoff": AS_OF + timedelta(days=2),
+                "status": "running",
+                "attempts": 0,
+                "created_at": AS_OF,
+                "updated_at": AS_OF,
+                "generation": 7,
+                "claimed_generation": 7,
+            },
+            {
+                "job_id": "stale-assist",
+                "stream_key": "assist_locations_season",
+                "manifest_id": manifest_id,
+                "season": "2025-26",
+                "cutoff": AS_OF + timedelta(days=2),
+                "status": "running",
+                "attempts": 0,
+                "created_at": AS_OF,
+                "updated_at": AS_OF,
+                "generation": 8,
+                "claimed_generation": 7,
+            },
+        ])
 
     season_scope = TeamMatchupSnapshotScope("2025-26", AS_OF.date())
     l15_scope = TeamMatchupSnapshotScope("2025-26", AS_OF.date(), 15)
@@ -1128,6 +1156,17 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
                     slice_key="traditional",
                     stat_key="OPP_REB",
                     raw_value=10,
+                    denominator_value=48,
+                    denominator_unit="minutes",
+                    provider="ledger",
+                    cutoff=AS_OF,
+                ),
+                TeamMatchupFact(
+                    team_id=1,
+                    base="assist_locations",
+                    slice_key="assist_locations",
+                    stat_key="OPP_ASSISTS_AT_RIM",
+                    raw_value=4,
                     denominator_value=48,
                     denominator_unit="minutes",
                     provider="ledger",
@@ -1148,65 +1187,99 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     with sessions() as session, session.begin():
         with pytest.raises(PermissionError, match="not_authorized"):
-            repository._issue_ledger_recomposition_authority(
+            with repository._ledger_recomposition_authority(
                 session,
                 claimed_job_generations={"unrelated-authority": 7},
                 season="2025-26",
                 cutoff=AS_OF + timedelta(days=1),
                 manifest_id=manifest_id,
-            )
-        authority = repository._issue_ledger_recomposition_authority(
+            ):
+                pass
+        with pytest.raises(PermissionError, match="not_authorized"):
+            with repository._ledger_recomposition_authority(
+                session,
+                claimed_job_generations={"stale-traditional": 7},
+                season="2025-26",
+                cutoff=AS_OF + timedelta(days=2),
+                manifest_id=manifest_id,
+            ):
+                pass
+        with repository._ledger_recomposition_authority(
             session,
             claimed_job_generations=claims,
             season="2025-26",
             cutoff=AS_OF,
             manifest_id=manifest_id,
-        )
-        with sessions() as other, other.begin():
+        ) as authority:
+            with pytest.raises(AttributeError):
+                authority.season = "1999-00"
+            with sessions() as other, other.begin():
+                with pytest.raises(PermissionError, match="not_authorized"):
+                    repository.replace_ledger_snapshots(
+                        valid_snapshots,
+                        retrieved_at=AS_OF + timedelta(hours=18),
+                        session=other,
+                        authority=authority,
+                    )
             with pytest.raises(PermissionError, match="not_authorized"):
                 repository.replace_ledger_snapshots(
-                    valid_snapshots,
+                    (
+                        snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date())),
+                        snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date(), 15)),
+                    ),
                     retrieved_at=AS_OF + timedelta(hours=18),
-                    session=other,
+                    session=session,
                     authority=authority,
                 )
-        with pytest.raises(PermissionError, match="not_authorized"):
-            repository.replace_ledger_snapshots(
-                (
-                    snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date())),
-                    snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date(), 15)),
-                ),
-                retrieved_at=AS_OF + timedelta(hours=18),
-                session=session,
-                authority=authority,
+            with pytest.raises(PermissionError, match="not_authorized"):
+                repository.replace_ledger_snapshots(
+                    (
+                        snapshot(TeamMatchupSnapshotScope(
+                            "2025-26", AS_OF.date() + timedelta(days=1)
+                        )),
+                        snapshot(TeamMatchupSnapshotScope(
+                            "2025-26", AS_OF.date() + timedelta(days=1), 15
+                        )),
+                    ),
+                    retrieved_at=AS_OF + timedelta(hours=18),
+                    session=session,
+                    authority=authority,
+                )
+            partial = tuple(
+                (scope, facts, observations[:1])
+                for scope, facts, observations in valid_snapshots
             )
-        with pytest.raises(PermissionError, match="not_authorized"):
-            repository.replace_ledger_snapshots(
-                (
-                    snapshot(TeamMatchupSnapshotScope(
-                        "2025-26", AS_OF.date() + timedelta(days=1)
-                    )),
-                    snapshot(TeamMatchupSnapshotScope(
-                        "2025-26", AS_OF.date() + timedelta(days=1), 15
-                    )),
-                ),
-                retrieved_at=AS_OF + timedelta(hours=18),
-                session=session,
-                authority=authority,
-            )
-        repository.replace_ledger_snapshots(
-            valid_snapshots,
-            retrieved_at=AS_OF + timedelta(hours=18),
-            session=session,
-            authority=authority,
-        )
-        with pytest.raises(PermissionError, match="not_authorized"):
+            with pytest.raises(PermissionError, match="not_authorized"):
+                repository.replace_ledger_snapshots(
+                    partial,
+                    retrieved_at=AS_OF + timedelta(hours=18),
+                    session=session,
+                    authority=authority,
+                )
             repository.replace_ledger_snapshots(
                 valid_snapshots,
                 retrieved_at=AS_OF + timedelta(hours=18),
                 session=session,
                 authority=authority,
             )
+            with pytest.raises(PermissionError, match="not_authorized"):
+                repository.replace_ledger_snapshots(
+                    valid_snapshots,
+                    retrieved_at=AS_OF + timedelta(hours=18),
+                    session=session,
+                    authority=authority,
+                )
+        assert repository._issued_authorities == {}
+        with pytest.raises(RuntimeError, match="before consumption"):
+            with repository._ledger_recomposition_authority(
+                session,
+                claimed_job_generations=claims,
+                season="2025-26",
+                cutoff=AS_OF,
+                manifest_id=manifest_id,
+            ):
+                raise RuntimeError("before consumption")
+        assert repository._issued_authorities == {}
 
 
 def test_correction_changes_exact_l15_boundary(tmp_path):

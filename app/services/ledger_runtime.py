@@ -186,6 +186,13 @@ _SEASON_STREAMS = frozenset({
     "assist_locations_season",
 })
 
+_MATCHUP_STREAMS = frozenset({
+    "traditional_opponent_season",
+    "traditional_opponent_l15",
+    "assist_locations_season",
+    "assist_locations_l15",
+})
+
 
 def _composition_failure_reason(
     stream_key: str,
@@ -449,13 +456,19 @@ class LedgerRuntime:
                         row.claimed_generation = int(row.generation or 1)
                         row.updated_at = self.clock()
                     session.flush()
-                    if self.matchup_materialization is not None:
+                    claimed_streams = {
+                        str(row["stream_key"])
+                        for row in slice_jobs
+                    }
+                    if (
+                        self.matchup_materialization is not None
+                        and claimed_streams & _MATCHUP_STREAMS
+                    ):
                         # Matchup facts, surface observations, ledger metadata,
                         # candidates, enabled publications, and pointer fences
                         # all use this same session transaction.
-                        write_authority = (
-                            self.matchup_materialization
-                            ._issue_runtime_write_authority(
+                        with (
+                            self.matchup_materialization._runtime_write_authority(
                                 session,
                                 claimed_job_generations={
                                     str(row["job_id"]): int(row["generation"])
@@ -465,21 +478,24 @@ class LedgerRuntime:
                                 cutoff=cutoff,
                                 manifest_id=manifest_id,
                             )
-                        )
-                        self.matchup_materialization.materialize(
-                            season,
-                            as_of=cutoff.date(),
-                            cutoff=cutoff,
-                            recomposition_reason=reason,
-                            affected_team_ids=(affected_team_ids or None),
-                            trigger_game_id=trigger_game_id,
-                            trigger_game_ids=(trigger_game_ids or None),
-                            expected_game_ids=governance.expected_game_ids,
-                            expected_l15_game_ids=governance.expected_l15_game_ids,
-                            team_ids=governance.team_ids,
-                            write_authority=write_authority,
-                            session=session,
-                        )
+                            as issued
+                        ):
+                            write_authority = issued
+                            self.matchup_materialization.materialize(
+                                season,
+                                as_of=cutoff.date(),
+                                cutoff=cutoff,
+                                recomposition_reason=reason,
+                                affected_team_ids=(affected_team_ids or None),
+                                trigger_game_id=trigger_game_id,
+                                trigger_game_ids=(trigger_game_ids or None),
+                                expected_game_ids=governance.expected_game_ids,
+                                expected_l15_game_ids=governance.expected_l15_game_ids,
+                                team_ids=governance.team_ids,
+                                write_authority=write_authority,
+                                claimed_streams=frozenset(claimed_streams),
+                                session=session,
+                            )
                     materialized = self.materialization.compose(
                         games,
                         season=season,

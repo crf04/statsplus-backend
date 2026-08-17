@@ -287,14 +287,86 @@ def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
     )
     assert {item.surface for item in season.observations} == {
         "traditional",
-        "assist_locations",
     }
     assert {fact.base for fact in season.facts} == {
         "traditional",
-        "assist_locations",
     }
     assert all(fact.ledger_checksum for fact in season.facts)
     assert all(fact.game_ids for fact in season.facts)
+
+
+def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
+    tmp_path,
+):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-only-retry.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id
+            for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in team_ids
+    }
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="player-only",
+            stream_key="player_game_logs",
+            manifest_id=None,
+            season="2025-26",
+            cutoff=cutoff,
+            status="queued",
+            attempts=0,
+            created_at=cutoff,
+            updated_at=cutoff,
+        ))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, expected, team_ids, expected_l15
+            )
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    matchup_repository = TeamMatchupRepository(engine)
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            matchup_repository,
+            clock=lambda: cutoff + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob)).mappings().one()
+    assert job["status"] == "succeeded"
+    assert matchup_repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    ).observations == ()
+    assert matchup_repository._issued_authorities == {}
 
 
 def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
@@ -323,7 +395,7 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(CompositionJob.__table__.insert().values(
-            job_id="matchup", stream_key="traditional_opponent_season",
+            job_id="matchup", stream_key="traditional_opponent_l15",
             manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
             attempts=0, created_at=cutoff, updated_at=cutoff,
         ))
@@ -369,7 +441,6 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
         (item.surface, item.status, item.unavailable_reason)
         for item in l15.observations
     } == {
-        ("assist_locations", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     assert len(captured["expected_l15_game_ids"]) == 30

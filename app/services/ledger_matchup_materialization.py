@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable
@@ -43,6 +44,7 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.team_matchup_repository import (
+    _LEDGER_SURFACE_BY_STREAM,
     _LedgerRecompositionAuthority,
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -122,6 +124,7 @@ class LedgerMatchupMaterializationService:
         trigger_game_id: str | None = None,
         trigger_game_ids: frozenset[str] | None = None,
         write_authority: _LedgerRecompositionAuthority | None = None,
+        claimed_streams: frozenset[str] | None = None,
         session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
@@ -240,8 +243,35 @@ class LedgerMatchupMaterializationService:
         else:
             snapshots.append((l15_scope, l15_facts, l15_observations))
         if write_authority is not None:
-            if session is None:
+            if session is None or claimed_streams is None:
                 raise PermissionError("ledger_recomposition_session_required")
+            requested_surfaces = frozenset(
+                _LEDGER_SURFACE_BY_STREAM[stream]
+                for stream in claimed_streams
+                if stream in _LEDGER_SURFACE_BY_STREAM
+            )
+            snapshots = [
+                (
+                    scope,
+                    tuple(
+                        fact
+                        for fact in facts
+                        if (scope.stored_window_games, fact.base)
+                        in requested_surfaces
+                    ),
+                    tuple(
+                        observation
+                        for observation in observations
+                        if (scope.stored_window_games, observation.surface)
+                        in requested_surfaces
+                    ),
+                )
+                for scope, facts, observations in snapshots
+                if any(
+                    window == scope.stored_window_games
+                    for window, _ in requested_surfaces
+                )
+            ]
             self.matchup_repository.replace_ledger_snapshots(
                 snapshots,
                 **snapshot_kwargs,
@@ -263,7 +293,8 @@ class LedgerMatchupMaterializationService:
             l15_selection=self._selection(l15_window, l15_scope, checksums),
         )
 
-    def _issue_runtime_write_authority(
+    @contextmanager
+    def _runtime_write_authority(
         self,
         session: Session,
         *,
@@ -271,14 +302,15 @@ class LedgerMatchupMaterializationService:
         season: str,
         cutoff: datetime,
         manifest_id: str | None,
-    ) -> _LedgerRecompositionAuthority:
-        return self.matchup_repository._issue_ledger_recomposition_authority(
+    ):
+        with self.matchup_repository._ledger_recomposition_authority(
             session,
             claimed_job_generations=claimed_job_generations,
             season=season,
             cutoff=cutoff,
             manifest_id=manifest_id,
-        )
+        ) as issued:
+            yield issued
 
     def _load_games(
         self,

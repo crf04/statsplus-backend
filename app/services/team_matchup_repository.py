@@ -33,46 +33,23 @@ _LEDGER_SURFACE_BY_STREAM = {
     "assist_locations_l15": (15, "assist_locations"),
 }
 _REQUIRED_LEDGER_MATCHUP_STREAMS = frozenset(_LEDGER_SURFACE_BY_STREAM)
-_LEDGER_AUTHORITY_KEY = object()
 
 
 class _LedgerRecompositionAuthority:
-    """One-use proof bound to one claimed runtime transaction and slice."""
+    """Opaque identity; every authorization fact stays repository-private."""
 
-    __slots__ = (
-        "_issuer",
-        "_session",
-        "_transaction",
-        "claims",
-        "season",
-        "cutoff",
-        "manifest_id",
-        "allowed_surfaces",
-    )
+    __slots__ = ()
 
-    def __init__(
-        self,
-        key,
-        *,
-        issuer,
-        session,
-        transaction,
-        claims,
-        season,
-        cutoff,
-        manifest_id,
-        allowed_surfaces,
-    ) -> None:
-        if key is not _LEDGER_AUTHORITY_KEY:
-            raise TypeError("ledger recomposition authority is private")
-        self._issuer = issuer
-        self._session = session
-        self._transaction = transaction
-        self.claims = dict(claims)
-        self.season = season
-        self.cutoff = assume_utc(cutoff)
-        self.manifest_id = manifest_id
-        self.allowed_surfaces = frozenset(allowed_surfaces)
+
+@dataclass(frozen=True, slots=True)
+class _IssuedLedgerAuthority:
+    session: Session
+    transaction: object
+    claims: tuple[tuple[str, int], ...]
+    season: str
+    cutoff: datetime
+    manifest_id: str | None
+    required_surfaces: frozenset[tuple[int, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +141,9 @@ class TeamMatchupRepository:
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
-        self._ledger_authorities: set[_LedgerRecompositionAuthority] = set()
+        self._issued_authorities: dict[
+            _LedgerRecompositionAuthority, _IssuedLedgerAuthority
+        ] = {}
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -231,7 +210,7 @@ class TeamMatchupRepository:
             snapshots=received,
         ):
             raise PermissionError("ledger_recomposition_write_not_authorized")
-        self._ledger_authorities.discard(authority)
+        self._issued_authorities.pop(authority, None)
         self._replace_snapshots(
             received,
             retrieved_at=retrieved_at,
@@ -241,7 +220,8 @@ class TeamMatchupRepository:
             enforce_legacy_fence=False,
         )
 
-    def _issue_ledger_recomposition_authority(
+    @contextmanager
+    def _ledger_recomposition_authority(
         self,
         session: Session,
         *,
@@ -249,8 +229,8 @@ class TeamMatchupRepository:
         season: str,
         cutoff: datetime,
         manifest_id: str | None,
-    ) -> _LedgerRecompositionAuthority:
-        """Issue one private proof after re-locking the exact running job slice."""
+    ):
+        """Yield one private proof and revoke it on every exit path."""
 
         transaction = session.get_transaction()
         claims = {
@@ -263,37 +243,45 @@ class TeamMatchupRepository:
             cutoff=cutoff,
             manifest_id=manifest_id,
         )
-        row_claims = {
-            str(row.job_id): int(row.generation)
-            for row in rows
+        valid_rows = tuple(
+            row for row in rows
             if row.status == "running"
             and int(row.claimed_generation or 0) == int(row.generation)
+        )
+        row_claims = {
+            str(row.job_id): int(row.generation)
+            for row in valid_rows
         }
-        represented_streams = {str(row.stream_key) for row in rows}
+        represented_streams = {str(row.stream_key) for row in valid_rows}
         if (
             transaction is None
             or not transaction.is_active
             or not claims
+            or len(valid_rows) != len(rows)
             or row_claims != claims
             or not _REQUIRED_LEDGER_MATCHUP_STREAMS & represented_streams
         ):
             raise PermissionError("ledger_recomposition_write_not_authorized")
-        authority = _LedgerRecompositionAuthority(
-            _LEDGER_AUTHORITY_KEY,
-            issuer=self,
+        required_surfaces = frozenset(
+            _LEDGER_SURFACE_BY_STREAM[stream]
+            for stream in represented_streams
+            if stream in _LEDGER_SURFACE_BY_STREAM
+        )
+        authority = _LedgerRecompositionAuthority()
+        state = _IssuedLedgerAuthority(
             session=session,
             transaction=transaction,
-            claims=claims,
+            claims=tuple(sorted(claims.items())),
             season=season,
-            cutoff=cutoff,
+            cutoff=assume_utc(cutoff),
             manifest_id=manifest_id,
-            # Matchup projection replaces Season + exact-L15 atomically. Any
-            # represented matchup job authorizes that single coupled batch;
-            # a player-log/per36-only slice authorizes none of it.
-            allowed_surfaces=set(_LEDGER_SURFACE_BY_STREAM.values()),
+            required_surfaces=required_surfaces,
         )
-        self._ledger_authorities.add(authority)
-        return authority
+        self._issued_authorities[authority] = state
+        try:
+            yield authority
+        finally:
+            self._issued_authorities.pop(authority, None)
 
     @staticmethod
     def _claimed_slice_rows(
@@ -324,49 +312,76 @@ class TeamMatchupRepository:
         session: Session,
         snapshots,
     ) -> bool:
+        if not isinstance(authority, _LedgerRecompositionAuthority):
+            return False
+        state = self._issued_authorities.get(authority)
         if (
-            not isinstance(authority, _LedgerRecompositionAuthority)
-            or authority._issuer is not self
-            or authority._session is not session
-            or authority._transaction is not session.get_transaction()
+            state is None
+            or state.session is not session
+            or state.transaction is not session.get_transaction()
             or not session.in_transaction()
-            or authority not in self._ledger_authorities
         ):
             return False
         rows = self._claimed_slice_rows(
             session,
-            season=authority.season,
-            cutoff=authority.cutoff,
-            manifest_id=authority.manifest_id,
+            season=state.season,
+            cutoff=state.cutoff,
+            manifest_id=state.manifest_id,
         )
-        if {
+        valid_rows = tuple(
+            row for row in rows
+            if row.status == "running"
+            and int(row.claimed_generation or 0) == int(row.generation)
+        )
+        if len(valid_rows) != len(rows) or tuple(sorted({
             str(row.job_id): int(row.generation)
-            for row in rows
-            if int(row.claimed_generation or 0) == int(row.generation)
-        } != authority.claims:
+            for row in valid_rows
+        }.items())) != state.claims:
             return False
-        if {scope.stored_window_games for scope, _, _ in snapshots} != {0, 15}:
+        required_windows = {
+            window for window, _ in state.required_surfaces
+        }
+        if (
+            len(snapshots) != len(required_windows)
+            or {scope.stored_window_games for scope, _, _ in snapshots}
+            != required_windows
+        ):
             return False
+        submitted_surfaces = set()
         for scope, facts, observations in snapshots:
-            if scope.season != authority.season or scope.as_of != authority.cutoff.date():
+            if scope.season != state.season or scope.as_of != state.cutoff.date():
                 return False
-            surfaces = {
-                *(fact.base for fact in facts),
-                *(observation.surface for observation in observations),
+            expected_surfaces = {
+                surface
+                for window, surface in state.required_surfaces
+                if window == scope.stored_window_games
             }
-            if any(
-                (scope.stored_window_games, surface)
-                not in authority.allowed_surfaces
-                for surface in surfaces
+            observed_surfaces = tuple(
+                observation.surface for observation in observations
+            )
+            fact_surfaces = {fact.base for fact in facts}
+            if (
+                len(observed_surfaces) != len(expected_surfaces)
+                or set(observed_surfaces) != expected_surfaces
+                or not fact_surfaces <= expected_surfaces
+                or any(
+                    observation.status == "available"
+                    and observation.surface not in fact_surfaces
+                    for observation in observations
+                )
             ):
                 return False
+            submitted_surfaces.update(
+                (scope.stored_window_games, surface)
+                for surface in observed_surfaces
+            )
             if any(
                 item.cutoff is None
-                or assume_utc(item.cutoff) != authority.cutoff
+                or assume_utc(item.cutoff) != state.cutoff
                 for item in (*facts, *observations)
             ):
                 return False
-        return True
+        return submitted_surfaces == set(state.required_surfaces)
 
     def _replace_snapshots(
         self,
