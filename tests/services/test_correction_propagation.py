@@ -129,37 +129,399 @@ def _boundary_observation_values(game, *, cutoff, manifest_id):
     }
 
 
-def test_correction_jobs_record_target_lineage_and_replay_is_idempotent(tmp_path):
-    engine = _engine(tmp_path)
-    repository = CanonicalGameLedgerRepository(
-        engine,
-        correction_sink=LedgerCorrectionQueue(clock=lambda: AS_OF),
+def test_replay_successful_correction_is_idempotent(tmp_path):
+    """A replayed accepted correction leaves every governed projection unchanged."""
+    engine = _engine(tmp_path, "replay.sqlite3")
+    manifest_id = "replay-manifest"
+    cutoff = AS_OF
+    runtime_now = cutoff + timedelta(hours=18)
+    games = _league_games()
+    streams = (
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
     )
-    game = _league_games()[0]
-    repository.replace_game(game)
-    corrected = replace(
-        game,
-        team_facts=(replace(game.team_facts[0], points=game.team_facts[0].points + 1), game.team_facts[1]),
-    )
-    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
 
-    repository.replace_game(corrected)
-    with engine.connect() as connection:
-        first_jobs = connection.execute(select(CompositionJob.__table__)).mappings().all()
-    assert len(first_jobs) == len(LedgerCorrectionQueue.STREAMS)
-    assert {
-        tuple(json.loads(row["affected_team_ids"])) for row in first_jobs
-    } == {
-        tuple(sorted(fact.team_id for fact in corrected.team_facts))
-    }
-    assert {row["recomposition_reason"] for row in first_jobs} == {"correction"}
-    assert {row["ledger_checksum"] for row in first_jobs} == {corrected.checksum}
-    assert all(json.loads(row["source_observation_ids"]) == [corrected.source_observation_id] for row in first_jobs)
-    repository.replace_game(corrected)
-    with engine.connect() as connection:
-        replay_jobs = connection.execute(select(CompositionJob.__table__)).mappings().all()
-    assert len(replay_jobs) == len(first_jobs)
-    assert {row["job_id"] for row in replay_jobs} == {row["job_id"] for row in first_jobs}
+    def event_values(game):
+        scheduled_at = datetime.combine(game.game_date, datetime.min.time(), UTC)
+        return {
+            "nba_game_id": game.game_id,
+            "season": game.season,
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": scheduled_at,
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": cutoff,
+            "last_seen_at": cutoff,
+        }
+
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), [
+            event_values(game) for game in games
+        ])
+
+    publications = PublicationService(engine, clock=lambda: runtime_now)
+    publications.register_default_streams()
+    for stream_key, windows in (
+        ("traditional_opponent_season", ("season",)),
+        ("traditional_opponent_l15", ("l15",)),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=windows,
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+
+    queue = LedgerCorrectionQueue(
+        clock=lambda: runtime_now,
+        require_governance=True,
+    )
+    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    ledger.replace_games_atomic(
+        games,
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=cutoff, manifest_id=manifest_id
+            )
+            for game in games
+        },
+    )
+    matchup = TeamMatchupRepository(engine)
+    matchup_materialization = LedgerMatchupMaterializationService(
+        ledger, matchup, clock=lambda: runtime_now
+    )
+    materialization = LedgerMaterializationService(
+        ledger,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=LegacyParityDiagnosticReader(engine),
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+    governance_reader = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: runtime_now
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=materialization,
+        governance=governance_reader,
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+
+    governance = governance_reader.read_for_composition(
+        "2025-26", cutoff, manifest_id
+    )
+    assert len(governance.expected_game_ids) == len(games)
+    assert len(governance.expected_l15_game_ids) == 30
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+
+    query = TeamMatchupQueryService(matchup, clock=lambda: runtime_now)
+    season_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    l15_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+
+    def public_state():
+        season_snapshot = matchup.get_snapshot(season_scope)
+        l15_snapshot = matchup.get_snapshot(l15_scope)
+        season_window = query.get_window(season_scope)
+        l15_window = query.get_window(l15_scope)
+        season_fact = next(
+            fact
+            for fact in season_snapshot.facts
+            if fact.team_id == 1
+            and fact.base == "traditional"
+            and fact.stat_key == "OPP_REB"
+        )
+        l15_fact = next(
+            fact
+            for fact in l15_snapshot.facts
+            if fact.team_id == 1
+            and fact.base == "traditional"
+            and fact.stat_key == "OPP_REB"
+        )
+        season_metric = next(
+            metric
+            for metric in season_window.team_metrics[1]
+            if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+        )
+        l15_metric = next(
+            metric
+            for metric in l15_window.team_metrics[1]
+            if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+        )
+        return {
+            "season_snapshot": season_snapshot,
+            "l15_snapshot": l15_snapshot,
+            "season_window": season_window,
+            "l15_window": l15_window,
+            "season_fact": season_fact,
+            "l15_fact": l15_fact,
+            "season_metric": season_metric,
+            "l15_metric": l15_metric,
+        }
+
+    def durable_state():
+        with engine.connect() as connection:
+            jobs = tuple(sorted(
+                (
+                    row["job_id"],
+                    row["stream_key"],
+                    row["status"],
+                    row["attempts"],
+                    row["last_error"],
+                    row["manifest_id"],
+                    row["trigger_game_id"],
+                    row["trigger_game_ids"],
+                    row["affected_team_ids"],
+                    row["source_observation_ids"],
+                    row["ledger_checksum"],
+                    row["game_set_checksum"],
+                    row["ledger_evidence"],
+                    row["recomposition_reason"],
+                )
+                for row in connection.execute(
+                    select(CompositionJob.__table__)
+                ).mappings()
+            ))
+            versions = tuple(sorted(
+                (
+                    row["stream_key"],
+                    row["publication_id"],
+                    row["version"],
+                    row["status"],
+                    row["checksum"],
+                    row["reason"],
+                    row["fence"],
+                )
+                for row in connection.execute(
+                    select(PublicationVersion.__table__)
+                ).mappings()
+            ))
+            pointers = tuple(sorted(
+                (
+                    row["stream_key"],
+                    row["active_publication_id"],
+                    row["previous_publication_id"],
+                    row["fence"],
+                    row["updated_at"],
+                )
+                for row in connection.execute(
+                    select(PublicationPointer.__table__).where(
+                        PublicationPointer.__table__.c.stream_key.in_(streams)
+                    )
+                ).mappings()
+            ))
+            publication_lineage = tuple(sorted(
+                (
+                    row["publication_id"],
+                    row["observation_id"],
+                    row["role"],
+                    row["slice_key"],
+                )
+                for row in connection.execute(
+                    select(PublicationObservation.__table__)
+                ).mappings()
+            ))
+            collection_observations = tuple(sorted(
+                (
+                    row["observation_id"],
+                    row["checksum"],
+                )
+                for row in connection.execute(
+                    select(CollectionObservation.__table__)
+                ).mappings()
+            ))
+        return {
+            "jobs": jobs,
+            "versions": versions,
+            "pointers": pointers,
+            "publication_lineage": publication_lineage,
+            "collection_observations": collection_observations,
+        }
+
+    baseline_public = public_state()
+    baseline_durable = durable_state()
+    assert len(baseline_durable["jobs"]) == len(LedgerCorrectionQueue.STREAMS)
+    assert {row[2] for row in baseline_durable["jobs"]} == {"succeeded"}
+    assert len(baseline_durable["versions"]) == 6
+    assert len(baseline_durable["collection_observations"]) == len(games)
+    assert len(baseline_durable["publication_lineage"]) == 1350
+    assert baseline_public["season_fact"].raw_value == 75
+    assert baseline_public["l15_fact"].raw_value == 75
+    assert baseline_public["season_metric"].rank == 1
+    assert baseline_public["l15_metric"].rank == 1
+
+    original_game = games[0]
+    corrected_team_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.team_facts
+    )
+    corrected_game = replace(
+        original_game,
+        team_facts=corrected_team_facts,
+        source_observation_id="obs:replay:corrected",
+        retrieved_at=cutoff + timedelta(hours=1),
+    )
+    corrected_game = replace(
+        corrected_game,
+        raw_rows=raw_rows_from_facts(corrected_game),
+    ).with_checksum()
+    correction_observation = _boundary_observation_values(
+        corrected_game, cutoff=cutoff, manifest_id=manifest_id
+    )
+    first_result = ledger.replace_games_atomic(
+        (corrected_game,),
+        accepted_observations={
+            corrected_game.source_observation_id: correction_observation,
+        },
+    )[0]
+    assert first_result.replaced
+    assert not first_result.inserted
+    assert first_result.checksum == corrected_game.checksum
+    assert corrected_game.source_observation_id != original_game.source_observation_id
+    assert corrected_game.checksum != original_game.checksum
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+
+    after_success_public = public_state()
+    after_success_durable = durable_state()
+    assert len(after_success_durable["jobs"]) == len(baseline_durable["jobs"])
+    assert {row[2] for row in after_success_durable["jobs"]} == {"succeeded"}
+    assert after_success_public["season_fact"].raw_value == 85
+    assert after_success_public["l15_fact"].raw_value == 85
+    assert after_success_public["season_metric"].allowed_per_48 == pytest.approx(17 / 3)
+    assert after_success_public["l15_metric"].allowed_per_48 == pytest.approx(17 / 3)
+    assert after_success_public["season_metric"].rank == 30
+    assert after_success_public["l15_metric"].rank == 30
+    assert corrected_game.source_observation_id in (
+        after_success_public["season_fact"].source_observation_ids
+    )
+    assert corrected_game.source_observation_id in (
+        after_success_public["l15_fact"].source_observation_ids
+    )
+    assert after_success_public["season_fact"].ledger_checksum != (
+        baseline_public["season_fact"].ledger_checksum
+    )
+    assert after_success_public["l15_fact"].ledger_checksum != (
+        baseline_public["l15_fact"].ledger_checksum
+    )
+    assert after_success_public["season_fact"].ledger_checksum == (
+        "53617324660245c98262bfe374f4a7e2daa1ac9f2428a1e1355d0b5822389f54"
+    )
+    assert after_success_public["l15_fact"].ledger_checksum == (
+        "53617324660245c98262bfe374f4a7e2daa1ac9f2428a1e1355d0b5822389f54"
+    )
+    assert after_success_public["season_fact"].game_set_checksum == (
+        "5df170f5cd61b6674db39e5e2bb4c3ff7e5baf7d2a0c2ededfc2970eb216ccc9"
+    )
+    assert after_success_public["l15_fact"].game_set_checksum == (
+        "5df170f5cd61b6674db39e5e2bb4c3ff7e5baf7d2a0c2ededfc2970eb216ccc9"
+    )
+    assert len(after_success_durable["collection_observations"]) == len(
+        baseline_durable["collection_observations"]
+    ) + 1
+    assert len(after_success_durable["versions"]) == 12
+    assert len(after_success_durable["publication_lineage"]) == 2700
+    assert all(row[2] == "succeeded" for row in after_success_durable["jobs"])
+    assert all(
+        corrected_game.source_observation_id in json.loads(row[9])
+        for row in after_success_durable["jobs"]
+    )
+    assert all(
+        row[6] == original_game.game_id
+        and json.loads(row[7]) == [original_game.game_id]
+        for row in after_success_durable["jobs"]
+    )
+    baseline_pointers = dict(
+        (row[0], row) for row in baseline_durable["pointers"]
+    )
+    success_pointers = dict(
+        (row[0], row) for row in after_success_durable["pointers"]
+    )
+    assert set(success_pointers) == set(streams)
+    for stream in streams:
+        assert baseline_pointers[stream][3] == 1
+        assert success_pointers[stream][3] == 2
+        assert success_pointers[stream][1] != baseline_pointers[stream][1]
+        assert success_pointers[stream][3] == baseline_pointers[stream][3] + 1
+    assert len(after_success_durable["versions"]) > len(
+        baseline_durable["versions"]
+    )
+    assert all(
+        row[4]
+        for row in after_success_durable["versions"]
+    )
+    correction_rows = [
+        row
+        for row in after_success_durable["collection_observations"]
+        if row[0] == corrected_game.source_observation_id
+    ]
+    assert correction_rows == [
+        (
+            corrected_game.source_observation_id,
+            correction_observation["checksum"],
+        )
+    ]
+    assert correction_observation["checksum"] == hashlib.sha256(
+        correction_observation["payload"].encode()
+    ).hexdigest()
+
+    replay_result = ledger.replace_games_atomic(
+        (corrected_game,),
+        accepted_observations={
+            corrected_game.source_observation_id: correction_observation,
+        },
+    )[0]
+    assert replay_result.game_id == corrected_game.game_id
+    assert replay_result.checksum == corrected_game.checksum
+    assert not replay_result.inserted
+    assert not replay_result.replaced
+    assert replay_result.row_count == 0
+    assert publications.reconcile_pending(
+        season="2025-26", cutoff=cutoff
+    ) == len(streams)
+    assert runtime.compose_queued("2025-26") == 0
+
+    after_replay_public = public_state()
+    after_replay_durable = durable_state()
+    assert after_replay_public == after_success_public
+    assert after_replay_durable == after_success_durable
+    assert len(after_replay_durable["jobs"]) == len(after_success_durable["jobs"])
+    assert len(after_replay_durable["versions"]) == len(after_success_durable["versions"])
+    assert after_replay_durable["pointers"] == after_success_durable["pointers"]
+    assert after_replay_durable["publication_lineage"] == (
+        after_success_durable["publication_lineage"]
+    )
+    assert after_replay_durable["collection_observations"] == (
+        after_success_durable["collection_observations"]
+    )
 
 
 def test_coalesced_correction_union_keeps_all_trigger_and_source_lineage(tmp_path):
