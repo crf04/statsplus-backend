@@ -9,7 +9,7 @@ import logging
 from typing import Mapping, Protocol
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.models.collection_control import (
@@ -23,6 +23,7 @@ from app.domain.nba_events import is_final_event, is_postponed_event
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
+from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_materialization import LedgerMaterializationUnavailable
 from app.services.ledger_derivations import LedgerDerivationUnavailable
 from app.services.collection_control import ControlPlaneError
@@ -295,7 +296,11 @@ class LedgerRuntime:
                         CompositionJob.manifest_id == manifest_id,
                         CompositionJob.status == "queued",
                     ).with_for_update().order_by(
-                        CompositionJob.stream_key,
+                        case(
+                            *[(CompositionJob.stream_key == stream, index)
+                              for stream, index in LedgerCorrectionQueue.STREAM_ORDER.items()],
+                            else_=len(LedgerCorrectionQueue.STREAM_ORDER),
+                        ),
                         CompositionJob.created_at,
                         CompositionJob.job_id,
                     )).all()
@@ -368,6 +373,11 @@ class LedgerRuntime:
                             if isinstance(raw_evidence, str) and raw_evidence
                             else raw_evidence if isinstance(raw_evidence, dict) else {}
                         )
+                        pending_ids = set(_json_list(row.get("trigger_game_ids")))
+                        if not pending_ids and row.get("trigger_game_id"):
+                            pending_ids = {str(row["trigger_game_id"])}
+                        if not pending_ids.issubset(evidence):
+                            raise ControlPlaneError("pending_ledger_evidence_mismatch")
                         if any(
                             game_id in games_by_id
                             and str(checksum) != str(games_by_id[game_id].checksum)

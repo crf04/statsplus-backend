@@ -404,6 +404,7 @@ class LedgerCorrectionQueue:
         "assist_locations_l15",
         "player_per36",
     )
+    STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 
     def __init__(self, *, clock=None, require_governance: bool = False) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -541,6 +542,7 @@ class LedgerCorrectionQueue:
                     trigger_game_ids = (game.game_id,)
                     trigger_game_id = game.game_id
                     merged_team_ids = affected_team_ids
+                    evidence = {game.game_id: game.checksum}
                 connection.execute(
                     update(table).where(table.c.job_id == existing["job_id"]).values(
                         status="queued",
