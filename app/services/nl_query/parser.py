@@ -535,6 +535,12 @@ class AmbiguityDetector:
         if components.player_name:
             player_words = components.player_name.split()
             if len(player_words) >= 2:
+                canonical_name_pattern = (
+                    rf'(?<!\w){re.escape(components.player_name.lower())}(?!\w)'
+                )
+                if re.search(canonical_name_pattern, query.lower()):
+                    return ambiguities
+
                 last_name = player_words[-1].lower()
                 # Find other players with same last name
                 same_last_name = [p for p in self.players if p.lower().split()[-1] == last_name and p != components.player_name]
