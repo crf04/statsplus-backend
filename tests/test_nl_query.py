@@ -142,6 +142,19 @@ class TestBaseQueryParser(unittest.TestCase):
         self.assertEqual(components.player_name, "LeBron James")
         self.assertEqual(components.time_period, "season")
         self.assertFalse(components.confidence_breakdown.should_use_llm)
+
+    def test_exact_player_fallback_counts_as_covered_deterministic_text(self):
+        # Keep this player out of the initialized spaCy ruler so the parser's
+        # exact database-name fallback owns extraction, matching the live
+        # Donovan Mitchell regression.
+        self.parser.players.append("Donovan Mitchell")
+
+        components = self.parser.parse("Donovan Mitchell this year")
+
+        self.assertEqual(components.player_name, "Donovan Mitchell")
+        self.assertEqual(components.time_period, "season")
+        self.assertEqual(components.confidence_breakdown.coverage_score, 1.0)
+        self.assertFalse(components.confidence_breakdown.should_use_llm)
     
     def test_query_preprocessing(self):
         """Test query preprocessing and normalization"""
