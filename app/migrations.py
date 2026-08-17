@@ -23,6 +23,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.sql import func
 
 
@@ -984,6 +985,159 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
 
+def _upgrade_projection_archive_transitions(connection: Connection) -> None:
+    """Upgrade migration-37 projection tables for truthful poll transitions."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProviderPoll,
+    )
+
+    inspector = inspect(connection)
+    poll_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("projection_provider_polls")
+    }
+    latest_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("latest_player_projections")
+    }
+    already_current = (
+        {"failure_reason", "promoted"} <= set(poll_columns)
+        and poll_columns["retrieved_at"]["nullable"]
+        and poll_columns["generation_id"]["nullable"]
+        and "confirmed_at" in latest_columns
+        and not latest_columns["confirmed_at"]["nullable"]
+    )
+    if already_current:
+        return
+
+    if connection.dialect.name == "sqlite":
+        _rebuild_projection_transition_tables_sqlite(
+            connection,
+            (
+                ProviderPoll.__table__,
+                ProjectionMaterializationGeneration.__table__,
+                ProjectionObservation.__table__,
+                LatestPlayerProjection.__table__,
+            ),
+        )
+        return
+
+    poll_name = connection.dialect.identifier_preparer.quote(
+        "projection_provider_polls"
+    )
+    latest_name = connection.dialect.identifier_preparer.quote(
+        "latest_player_projections"
+    )
+    if "failure_reason" not in poll_columns:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD COLUMN failure_reason VARCHAR(64)"
+        ))
+    if "promoted" not in poll_columns:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD COLUMN promoted BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        connection.execute(text(
+            f"UPDATE {poll_name} SET promoted = TRUE WHERE outcome <> 'failed'"
+        ))
+    connection.execute(text(
+        f"ALTER TABLE {poll_name} ALTER COLUMN retrieved_at DROP NOT NULL"
+    ))
+    connection.execute(text(
+        f"ALTER TABLE {poll_name} ALTER COLUMN generation_id DROP NOT NULL"
+    ))
+    if "confirmed_at" not in latest_columns:
+        connection.execute(text(
+            f"ALTER TABLE {latest_name} ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE"
+        ))
+        connection.execute(text(
+            f"UPDATE {latest_name} SET confirmed_at = observed_at"
+        ))
+        connection.execute(text(
+            f"ALTER TABLE {latest_name} ALTER COLUMN confirmed_at SET NOT NULL"
+        ))
+    constraint_names = {
+        constraint["name"]
+        for constraint in inspect(connection).get_check_constraints(
+            "projection_provider_polls"
+        )
+    }
+    if "ck_projection_provider_poll_outcome" not in constraint_names:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_outcome "
+            "CHECK (outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed'))"
+        ))
+    if "ck_projection_provider_poll_payload" not in constraint_names:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_payload CHECK ("
+            "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL "
+            "AND generation_id IS NULL AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
+            "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
+            "AND retrieved_at IS NOT NULL AND failure_reason IS NULL))"
+        ))
+
+
+def _rebuild_projection_transition_tables_sqlite(
+    connection: Connection,
+    tables: tuple[Table, ...],
+) -> None:
+    """Rebuild the v37 FK-connected projection cluster on SQLite."""
+
+    suffix = "__038"
+    names = {table.name: f"{table.name}{suffix}" for table in tables}
+    for table in tables:
+        ddl = str(CreateTable(table).compile(dialect=connection.dialect))
+        for original, temporary in sorted(
+            names.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            ddl = ddl.replace(original, temporary)
+        connection.exec_driver_sql(ddl)
+
+    inspector = inspect(connection)
+    for table in tables:
+        source_columns = {
+            column["name"]
+            for column in inspector.get_columns(table.name)
+        }
+        destinations = [column.name for column in table.columns]
+        expressions = []
+        for column in destinations:
+            if column in source_columns:
+                expressions.append(column)
+            elif column == "confirmed_at":
+                expressions.append("observed_at AS confirmed_at")
+            elif column == "promoted":
+                expressions.append("CASE WHEN outcome = 'failed' THEN 0 ELSE 1 END AS promoted")
+            elif column == "failure_reason":
+                expressions.append("NULL AS failure_reason")
+            else:
+                raise RuntimeError(
+                    f"migration 038 cannot backfill projection column {column}"
+                )
+        connection.exec_driver_sql(
+            f"INSERT INTO {names[table.name]} ({', '.join(destinations)}) "
+            f"SELECT {', '.join(expressions)} FROM {table.name}"
+        )
+
+    for table in reversed(tables):
+        connection.exec_driver_sql(f"DROP TABLE {table.name}")
+    for table in tables:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {names[table.name]} RENAME TO {table.name}"
+        )
+    for table in tables:
+        for index in table.indexes:
+            connection.exec_driver_sql(
+                str(CreateIndex(index).compile(dialect=connection.dialect))
+            )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    if violations:
+        raise RuntimeError("migration 038 left invalid projection foreign keys")
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -1037,6 +1191,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _create_publication_player_game_log_projection,
     ),
     Migration(37, "037_projection_archive", _create_projection_archive_tables),
+    Migration(
+        38,
+        "038_projection_archive_transitions",
+        _upgrade_projection_archive_transitions,
+    ),
 )
 
 

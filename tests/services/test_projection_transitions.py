@@ -153,6 +153,48 @@ def test_partial_updates_present_offerings_without_retiring_omissions(tmp_path):
         assert len(generations) == 1
 
 
+@pytest.mark.parametrize(
+    ("targetability", "expected_ordinal"),
+    (((True, False), 0), ((False, True), 1)),
+)
+def test_partial_repeated_reference_uses_one_transition_plan_for_checksum_and_write(
+    tmp_path,
+    monkeypatch,
+    targetability,
+    expected_ordinal,
+):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    market = _market(catalog)
+    partial = _snapshot(
+        "dabble",
+        SnapshotStatus.PARTIAL,
+        (market, market),
+        OBSERVED_AT,
+    )
+    base_row = archive._observation_rows(partial)[0]
+    rows = [dict(base_row, ordinal=0), dict(base_row, ordinal=1)]
+    reference = rows[0]["market_reference"]
+    for row, targetable in zip(rows, targetability, strict=True):
+        row["market_reference"] = reference
+        row["targetable"] = targetable
+    monkeypatch.setattr(archive, "_observation_rows", lambda _snapshot: rows)
+
+    archive.ingest_snapshot(partial, query=QUERY, accepted_at=OBSERVED_AT)
+
+    with engine.connect() as connection:
+        selected_ordinal = connection.execute(
+            select(ProjectionObservation.ordinal)
+            .join(
+                LatestPlayerProjection,
+                LatestPlayerProjection.observation_id
+                == ProjectionObservation.observation_id,
+            )
+        ).scalar_one()
+    assert selected_ordinal == expected_ordinal
+
+
 def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
@@ -213,6 +255,71 @@ def test_unchanged_poll_refreshes_health_without_duplicate_evidence(tmp_path):
         assert connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
         assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 1
         assert connection.execute(select(func.count()).select_from(ProjectionMaterializationGeneration)).scalar_one() == 1
+
+
+def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    market = _market(catalog)
+    snapshot = _snapshot("dabble", SnapshotStatus.COMPLETE, (market,), OBSERVED_AT)
+    archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
+    confirmed_at = OBSERVED_AT + timedelta(minutes=10)
+    archive.ingest_snapshot(
+        replace(snapshot, retrieved_at=confirmed_at),
+        query=QUERY,
+        accepted_at=confirmed_at,
+    )
+    failed_at = OBSERVED_AT + timedelta(minutes=20)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        completed_at=failed_at,
+        failure_reason="access_denied",
+    )
+
+    late_at = OBSERVED_AT - timedelta(minutes=1)
+    archive.ingest_snapshot(
+        replace(snapshot, retrieved_at=late_at),
+        query=QUERY,
+        accepted_at=failed_at + timedelta(seconds=1),
+    )
+    changed_market = replace(market, market_id="late-changed")
+    changed_late_at = OBSERVED_AT + timedelta(minutes=5)
+    archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (changed_market,),
+            changed_late_at,
+        ),
+        query=QUERY,
+        accepted_at=failed_at + timedelta(seconds=2),
+    )
+
+    pool = _reader(engine, ("dabble",), failed_at + timedelta(seconds=2)).get_pool_for_game(
+        season=SEASON,
+        game_id=GAME_ID,
+    )
+    assert pool.freshness["status"] == "stale-served"
+    assert pool.freshness["observed_at"] == confirmed_at.isoformat()
+    with engine.connect() as connection:
+        confirmations = connection.execute(
+            select(LatestPlayerProjection.confirmed_at)
+        ).scalars().all()
+        polls = connection.execute(
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
+                ProviderPoll.completed_at
+            )
+        ).all()
+    assert confirmations == [confirmed_at.replace(tzinfo=None)]
+    assert polls == [
+        ("changed", True),
+        ("unchanged", True),
+        ("failed", False),
+        ("unchanged", False),
+        ("changed", False),
+    ]
 
 
 def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tmp_path):

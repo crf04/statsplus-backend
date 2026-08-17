@@ -1409,6 +1409,23 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         player["canonical_id"] for player in failed_matchup.get_json()["players"]
     ] == [2544]
 
+    late_accepted_at = failed_at + timedelta(seconds=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(
+            recorded_snapshot,
+            markets=(
+                replace(recorded_snapshot.markets[0], market_id="late-market"),
+            ),
+            retrieved_at=rematerialized_at,
+        ),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=late_accepted_at,
+    )
+    pool.clock = lambda: late_accepted_at
+    late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert late_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
+    assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
+
     empty_at = failed_at + timedelta(minutes=1)
     assembled.projection_recorder.record_complete_snapshot(
         ProviderSnapshot(

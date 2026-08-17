@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from app.migrations import run_migrations
+from app.migrations import MIGRATIONS, run_migrations
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
 
@@ -30,6 +30,89 @@ def _sqlite_schema_snapshot(database_path: str | Path) -> tuple[bytes, tuple[tup
             ).fetchall()
         )
     return file_digest, schema
+
+
+def _create_projection_v37_fixture(engine) -> None:
+    """Create the released migration-37 projection cluster, including one row."""
+
+    statements = (
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE projection_provider_snapshots (snapshot_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, contract_version VARCHAR(32) NOT NULL, snapshot_status VARCHAR(16) NOT NULL, retrieved_at DATETIME NOT NULL, accepted_at DATETIME NOT NULL, checksum VARCHAR(64) NOT NULL UNIQUE, content_checksum VARCHAR(64) NOT NULL, evidence_document TEXT NOT NULL)",
+        "CREATE TABLE projection_provider_polls (poll_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, started_at DATETIME, completed_at DATETIME NOT NULL, retrieved_at DATETIME NOT NULL, outcome VARCHAR(24) NOT NULL, snapshot_id VARCHAR(72) REFERENCES projection_provider_snapshots(snapshot_id) ON DELETE RESTRICT, generation_id VARCHAR(72) NOT NULL, observation_count INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE projection_materialization_generations (generation_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, snapshot_id VARCHAR(72) NOT NULL REFERENCES projection_provider_snapshots(snapshot_id) ON DELETE RESTRICT, source_poll_id VARCHAR(72) NOT NULL UNIQUE REFERENCES projection_provider_polls(poll_id) ON DELETE RESTRICT, created_at DATETIME NOT NULL, retrieved_at DATETIME NOT NULL, materialization_checksum VARCHAR(64) NOT NULL, outcome VARCHAR(32) NOT NULL, CONSTRAINT uq_projection_materialization_generation_identity UNIQUE (snapshot_id, materialization_checksum, retrieved_at))",
+        "CREATE TABLE projection_observations (observation_id VARCHAR(72) PRIMARY KEY, snapshot_id VARCHAR(72) NOT NULL REFERENCES projection_provider_snapshots(snapshot_id) ON DELETE RESTRICT, generation_id VARCHAR(72) NOT NULL REFERENCES projection_materialization_generations(generation_id) ON DELETE RESTRICT, source_poll_id VARCHAR(72) NOT NULL REFERENCES projection_provider_polls(poll_id) ON DELETE RESTRICT, ordinal INTEGER NOT NULL, provider VARCHAR(64) NOT NULL, provider_market_id VARCHAR(255), market_reference VARCHAR(72) NOT NULL, canonical_game_id VARCHAR(32), canonical_player_id INTEGER, canonical_player_name VARCHAR(255), canonical_team_id INTEGER, canonical_statistic_id VARCHAR(128), market_category VARCHAR(32), market_status VARCHAR(32) NOT NULL, market_variant VARCHAR(32) NOT NULL, scoring_period VARCHAR(32) NOT NULL, targetable BOOLEAN NOT NULL DEFAULT 0, observed_at DATETIME NOT NULL, CONSTRAINT uq_projection_observations_generation_ordinal UNIQUE (generation_id, ordinal))",
+        "CREATE TABLE latest_player_projections (provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, canonical_game_id VARCHAR(32) NOT NULL, canonical_player_id INTEGER NOT NULL, market_reference VARCHAR(72) NOT NULL, observation_id VARCHAR(72) NOT NULL REFERENCES projection_observations(observation_id) ON DELETE RESTRICT, generation_id VARCHAR(72) NOT NULL REFERENCES projection_materialization_generations(generation_id) ON DELETE RESTRICT, canonical_team_id INTEGER NOT NULL, canonical_player_name VARCHAR(255) NOT NULL, canonical_statistic_id VARCHAR(128) NOT NULL, market_category VARCHAR(32) NOT NULL, observed_at DATETIME NOT NULL, PRIMARY KEY (provider, season, query_key, canonical_game_id, canonical_player_id, market_reference))",
+    )
+    observed_at = "2026-01-02 12:30:00"
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.exec_driver_sql(statement)
+        for migration in MIGRATIONS[:37]:
+            connection.execute(
+                text("INSERT INTO schema_migrations (version, name) VALUES (:version, :name)"),
+                {"version": migration.version, "name": migration.name},
+            )
+        connection.execute(text(
+            "INSERT INTO projection_provider_snapshots VALUES "
+            "('snapshot','dabble','2025-26','query','1','complete',:at,:at,'checksum','content','{}')"
+        ), {"at": observed_at})
+        connection.execute(text(
+            "INSERT INTO projection_provider_polls VALUES "
+            "('poll','dabble','2025-26','query',NULL,:at,:at,'changed','snapshot','generation',1)"
+        ), {"at": observed_at})
+        connection.execute(text(
+            "INSERT INTO projection_materialization_generations VALUES "
+            "('generation','dabble','2025-26','query','snapshot','poll',:at,:at,'materialized','advanced')"
+        ), {"at": observed_at})
+        connection.execute(text(
+            "INSERT INTO projection_observations VALUES "
+            "('observation','snapshot','generation','poll',0,'dabble','market','reference','game',7,'Player 7',10,'points','PTS','available','standard','full_game',1,:at)"
+        ), {"at": observed_at})
+        connection.execute(text(
+            "INSERT INTO latest_player_projections VALUES "
+            "('dabble','2025-26','query','game',7,'reference','observation','generation',10,'Player 7','points','PTS',:at)"
+        ), {"at": observed_at})
+
+
+def test_projection_transition_migration_upgrades_authentic_v37_sqlite(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-v37.sqlite3'}")
+    _create_projection_v37_fixture(engine)
+
+    upgraded = run_migrations(engine)
+    repeated = run_migrations(engine)
+
+    assert upgraded.applied == ("038_projection_archive_transitions",)
+    assert upgraded.current_version == 38
+    assert repeated.applied == ()
+    inspector = inspect(engine)
+    poll_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("projection_provider_polls")
+    }
+    assert poll_columns["retrieved_at"]["nullable"] is True
+    assert poll_columns["generation_id"]["nullable"] is True
+    assert {"failure_reason", "promoted"} <= set(poll_columns)
+    latest_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("latest_player_projections")
+    }
+    assert latest_columns["confirmed_at"]["nullable"] is False
+    with engine.connect() as connection:
+        migrated = connection.execute(text(
+            "SELECT promoted, confirmed_at, observed_at FROM projection_provider_polls "
+            "JOIN latest_player_projections ON 1 = 1 WHERE poll_id = 'poll'"
+        )).one()
+        assert migrated[0] == 1
+        assert migrated[1] == migrated[2]
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO projection_provider_polls "
+            "(poll_id, provider, season, query_key, completed_at, retrieved_at, "
+            "outcome, promoted, failure_reason, snapshot_id, generation_id, observation_count) "
+            "VALUES ('failed','dabble','2025-26','query','2026-01-02 13:00:00',NULL,"
+            "'failed',0,'access_denied',NULL,NULL,0)"
+        ))
 
 
 def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
@@ -77,6 +160,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -394,6 +478,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (35, "035_governed_catalog_freshness"),
             (36, "036_publication_player_game_log_projection"),
             (37, "037_projection_archive"),
+            (38, "038_projection_archive_transitions"),
         ]
 
 
@@ -443,6 +528,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -517,6 +603,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
     assert result.applied == (
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -550,7 +637,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 37
+    assert repaired.current_version == 38
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -587,8 +674,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
-    assert upgraded.current_version == 37
+    assert upgraded.current_version == 38
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -658,8 +746,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
-    assert upgraded.current_version == 37
+    assert upgraded.current_version == 38
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -730,6 +819,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -782,8 +872,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
-    assert upgraded.current_version == 37
+    assert upgraded.current_version == 38
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -859,6 +950,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
 
 
@@ -901,7 +993,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 37
+    assert result.current_version == 38
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1182,6 +1274,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1240,10 +1333,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
-    assert upgraded.current_version == 37
+    assert upgraded.current_version == 38
     assert repeated.applied == ()
-    assert repeated.current_version == 37
+    assert repeated.current_version == 38
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -1311,6 +1405,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
         "037_projection_archive",
+        "038_projection_archive_transitions",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

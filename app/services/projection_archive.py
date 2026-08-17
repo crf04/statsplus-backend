@@ -12,7 +12,7 @@ import re
 import threading
 from typing import Any, Callable
 
-from sqlalchemy import delete, inspect, insert, select, update
+from sqlalchemy import delete, func, inspect, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -52,6 +52,10 @@ PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_materialization_generations",
     "latest_player_projections",
 )
+PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
+    "projection_provider_polls": ("failure_reason", "promoted"),
+    "latest_player_projections": ("confirmed_at",),
+}
 DEFAULT_PROJECTION_ARCHIVE_MAX_MARKETS = 10_000
 DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 PROJECTION_LIVE_MAX_AGE = timedelta(minutes=15)
@@ -60,15 +64,28 @@ _FAILURE_REASON = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 def require_projection_archive_schema(engine: Engine) -> None:
+    inspector = inspect(engine)
     missing_tables = tuple(
         table_name
         for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
-        if not inspect(engine).has_table(table_name)
+        if not inspector.has_table(table_name)
     )
-    if missing_tables:
+    missing_columns = tuple(
+        f"{table_name}.{column_name}"
+        for table_name, required_columns in PROJECTION_ARCHIVE_REQUIRED_COLUMNS.items()
+        if table_name not in missing_tables
+        for column_name in required_columns
+        if column_name
+        not in {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
+    )
+    if missing_tables or missing_columns:
+        missing = (*missing_tables, *missing_columns)
         raise ConfigurationError(
-            "Projection archive dependencies require migration "
-            "037_projection_archive; missing tables: " + ", ".join(missing_tables)
+            "Projection archive dependencies require migrations "
+            "037_projection_archive and 038_projection_archive_transitions; missing: "
+            + ", ".join(missing)
         )
 
 
@@ -89,6 +106,13 @@ class ProjectionPollResult:
 
     poll_id: str
     outcome: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PartialLatestTransition:
+    references: tuple[str, ...]
+    selected_rows: tuple[dict[str, Any], ...]
+    checksum: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,14 +296,27 @@ class ProjectionArchive:
                 season=query.season,
                 query_key=query_key,
             )
+            promoted_through = self._promotion_fence(
+                connection,
+                provider=snapshot.provider,
+                season=query.season,
+                query_key=query_key,
+            )
+            materialization_outcome = self._materialization_outcome(
+                current,
+                incoming_retrieved_at=snapshot.retrieved_at,
+                promoted_through=promoted_through,
+            )
+            partial_transition = None
             if snapshot.status is SnapshotStatus.PARTIAL:
-                materialization_checksum = self._merged_latest_checksum(
+                partial_transition = self._plan_partial_transition(
                     connection,
                     observation_rows,
                     provider=snapshot.provider,
                     season=query.season,
                     query_key=query_key,
                 )
+                materialization_checksum = partial_transition.checksum
             if (
                 current is not None
                 and current["content_checksum"] == content_checksum
@@ -294,19 +331,21 @@ class ProjectionArchive:
                     started_at=poll_started,
                     completed_at=accepted,
                     outcome="unchanged",
+                    promoted=materialization_outcome == "advanced",
                     snapshot_id=str(current["snapshot_id"]),
                     generation_id=str(current["generation_id"]),
                     observation_count=observation_count,
                 )
-                self._confirm_latest(
-                    connection,
-                    observation_rows,
-                    provider=snapshot.provider,
-                    season=query.season,
-                    query_key=query_key,
-                    confirmed_at=snapshot.retrieved_at,
-                    complete=snapshot.status is SnapshotStatus.COMPLETE,
-                )
+                if materialization_outcome == "advanced":
+                    self._confirm_latest(
+                        connection,
+                        observation_rows,
+                        provider=snapshot.provider,
+                        season=query.season,
+                        query_key=query_key,
+                        confirmed_at=snapshot.retrieved_at,
+                        complete=snapshot.status is SnapshotStatus.COMPLETE,
+                    )
                 return ProjectionArchiveResult(
                     snapshot_id=str(current["snapshot_id"]),
                     generation_id=str(current["generation_id"]),
@@ -318,6 +357,15 @@ class ProjectionArchive:
             provider_content_unchanged = (
                 current is not None and current["content_checksum"] == content_checksum
             )
+            if (
+                provider_content_unchanged
+                and materialization_outcome == "same_time_not_promoted"
+            ):
+                # A governed mapping correction can rematerialize the exact
+                # confirmed provider observation without inventing a newer
+                # provider time. Same-time conflicting provider content still
+                # remains non-promoting below.
+                materialization_outcome = "advanced"
             existing = connection.execute(
                 select(snapshot_table.c.snapshot_id).where(
                     snapshot_table.c.checksum == checksum
@@ -349,6 +397,7 @@ class ProjectionArchive:
                     started_at=poll_started,
                     completed_at=accepted,
                     outcome="unchanged",
+                    promoted=False,
                     snapshot_id=snapshot_id,
                     generation_id=generation_id,
                     observation_count=observation_count,
@@ -360,11 +409,6 @@ class ProjectionArchive:
                     observation_count=observation_count,
                     materialization_outcome="unchanged",
                 )
-
-            materialization_outcome = self._materialization_outcome(
-                current,
-                incoming_retrieved_at=snapshot.retrieved_at,
-            )
 
             if existing is None and not provider_content_unchanged:
                 connection.execute(insert(snapshot_table).values(
@@ -404,6 +448,7 @@ class ProjectionArchive:
                         else "changed"
                     )
                 ),
+                promoted=materialization_outcome == "advanced",
                 snapshot_id=snapshot_id,
                 generation_id=generation_id,
                 observation_count=observation_count,
@@ -437,9 +482,10 @@ class ProjectionArchive:
                         generation_id=generation_id,
                     )
                 else:
-                    self._merge_latest(
+                    assert partial_transition is not None
+                    self._apply_partial_transition(
                         connection,
-                        observation_rows,
+                        partial_transition,
                         provider=snapshot.provider,
                         season=query.season,
                         query_key=query_key,
@@ -502,6 +548,7 @@ class ProjectionArchive:
                         completed_at=completed,
                         retrieved_at=None,
                         outcome="failed",
+                        promoted=False,
                         failure_reason=normalized_reason,
                         snapshot_id=None,
                         generation_id=None,
@@ -674,16 +721,40 @@ class ProjectionArchive:
         current: Any | None,
         *,
         incoming_retrieved_at: datetime,
+        promoted_through: datetime | None = None,
     ) -> str:
-        if current is None:
+        if current is None and promoted_through is None:
             return "advanced"
         incoming = assume_utc(incoming_retrieved_at)
-        current_retrieved_at = assume_utc(current["retrieved_at"])
+        fences = []
+        if current is not None:
+            fences.append(assume_utc(current["retrieved_at"]))
+        if promoted_through is not None:
+            fences.append(assume_utc(promoted_through))
+        current_retrieved_at = max(fences)
         if incoming > current_retrieved_at:
             return "advanced"
         if incoming == current_retrieved_at:
             return "same_time_not_promoted"
         return "older_not_promoted"
+
+    @staticmethod
+    def _promotion_fence(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+    ) -> datetime | None:
+        table = ProviderPoll.__table__
+        return connection.execute(
+            select(func.max(table.c.retrieved_at)).where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+                table.c.promoted.is_(True),
+            )
+        ).scalar_one()
 
     @staticmethod
     def _record_poll(
@@ -696,6 +767,7 @@ class ProjectionArchive:
         started_at: datetime | None,
         completed_at: datetime,
         outcome: str,
+        promoted: bool,
         snapshot_id: str,
         generation_id: str,
         observation_count: int,
@@ -710,6 +782,7 @@ class ProjectionArchive:
                 completed_at=completed_at,
                 retrieved_at=snapshot.retrieved_at,
                 outcome=outcome,
+                promoted=promoted,
                 snapshot_id=snapshot_id,
                 generation_id=generation_id,
                 observation_count=observation_count,
@@ -831,15 +904,15 @@ class ProjectionArchive:
             )
 
     @staticmethod
-    def _merged_latest_checksum(
+    def _plan_partial_transition(
         connection: Any,
         observation_rows: list[dict[str, Any]],
         *,
         provider: str,
         season: str,
         query_key: str,
-    ) -> str:
-        """Describe the complete candidate Latest state produced by a partial."""
+    ) -> _PartialLatestTransition:
+        """Plan one canonical partial Latest transition and its checksum."""
 
         table = LatestPlayerProjection.__table__
         current = connection.execute(
@@ -861,10 +934,16 @@ class ProjectionArchive:
             str(row["market_reference"]): dict(row)
             for row in current
         }
+        references = tuple(
+            sorted({str(row["market_reference"]) for row in observation_rows})
+        )
+        for reference in references:
+            state.pop(reference, None)
+        selected: dict[str, dict[str, Any]] = {}
         for row in observation_rows:
             reference = str(row["market_reference"])
-            state.pop(reference, None)
-            if row["targetable"] and reference not in state:
+            if row["targetable"] and reference not in selected:
+                selected[reference] = row
                 state[reference] = {
                     "market_reference": reference,
                     "canonical_game_id": row["canonical_game_id"],
@@ -874,19 +953,23 @@ class ProjectionArchive:
                     "canonical_statistic_id": row["canonical_statistic_id"],
                     "market_category": row["market_category"],
                 }
-        return sha256(
+        checksum = sha256(
             json.dumps(
                 [state[key] for key in sorted(state)],
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
+        return _PartialLatestTransition(
+            references=references,
+            selected_rows=tuple(selected[key] for key in sorted(selected)),
+            checksum=checksum,
+        )
 
-    @classmethod
-    def _merge_latest(
-        cls,
+    @staticmethod
+    def _apply_partial_transition(
         connection: Any,
-        observation_rows: list[dict[str, Any]],
+        transition: _PartialLatestTransition,
         *,
         provider: str,
         season: str,
@@ -901,18 +984,15 @@ class ProjectionArchive:
             table.c.season == season,
             table.c.query_key == query_key,
         )
-        references = tuple({str(row["market_reference"]) for row in observation_rows})
-        if references:
+        if transition.references:
             connection.execute(
-                delete(table).where(*scope, table.c.market_reference.in_(references))
+                delete(table).where(
+                    *scope,
+                    table.c.market_reference.in_(transition.references),
+                )
             )
         connection.execute(update(table).where(*scope).values(generation_id=generation_id))
-        materialized_references: set[str] = set()
-        for row in observation_rows:
-            reference = str(row["market_reference"])
-            if not row["targetable"] or reference in materialized_references:
-                continue
-            materialized_references.add(reference)
+        for row in transition.selected_rows:
             connection.execute(
                 insert(table).values(
                     provider=row["provider"],
@@ -957,9 +1037,8 @@ class ProjectionArchive:
             if not references:
                 return
             predicates.append(table.c.market_reference.in_(references))
-        connection.execute(
-            update(table).where(*predicates).values(confirmed_at=confirmed_at)
-        )
+        predicates.append(table.c.confirmed_at < confirmed_at)
+        connection.execute(update(table).where(*predicates).values(confirmed_at=confirmed_at))
 
 
 class LatestProjectionPlayerPoolReader:
@@ -1016,45 +1095,54 @@ class LatestProjectionPlayerPoolReader:
         poll_table = ProviderPoll.__table__
         providers_in_scope = tuple(item.provider for item in self.scopes)
         with self.engine.connect() as connection:
-            rows = (
-                connection.execute(
-                    select(table).where(
-                        table.c.season == season,
-                        table.c.provider.in_(providers_in_scope),
-                        table.c.query_key == self.scope.query_key,
-                        table.c.canonical_game_id.in_(requested_games),
-                    ).order_by(
-                        table.c.provider,
-                        table.c.canonical_player_id,
-                        table.c.market_reference,
-                    )
+            if self.engine.dialect.name == "postgresql":
+                connection = connection.execution_options(
+                    isolation_level="REPEATABLE READ"
                 )
-                .mappings()
-                .all()
-            )
-            polls = (
-                connection.execute(
-                    select(
-                        poll_table.c.provider,
-                        poll_table.c.outcome,
-                        poll_table.c.completed_at,
-                    ).where(
-                        poll_table.c.season == season,
-                        poll_table.c.provider.in_(providers_in_scope),
-                        poll_table.c.query_key == self.scope.query_key,
-                    ).order_by(
-                        poll_table.c.provider,
-                        poll_table.c.completed_at.desc(),
-                        poll_table.c.poll_id.desc(),
+            with connection.begin():
+                rows = (
+                    connection.execute(
+                        select(table).where(
+                            table.c.season == season,
+                            table.c.provider.in_(providers_in_scope),
+                            table.c.query_key == self.scope.query_key,
+                            table.c.canonical_game_id.in_(requested_games),
+                        ).order_by(
+                            table.c.provider,
+                            table.c.canonical_player_id,
+                            table.c.market_reference,
+                        )
                     )
+                    .mappings()
+                    .all()
                 )
-                .mappings()
-                .all()
-            )
+                polls = (
+                    connection.execute(
+                        select(
+                            poll_table.c.provider,
+                            poll_table.c.outcome,
+                            poll_table.c.promoted,
+                            poll_table.c.completed_at,
+                        ).where(
+                            poll_table.c.season == season,
+                            poll_table.c.provider.in_(providers_in_scope),
+                            poll_table.c.query_key == self.scope.query_key,
+                        ).order_by(
+                            poll_table.c.provider,
+                            poll_table.c.completed_at.desc(),
+                            poll_table.c.poll_id.desc(),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
 
         latest_outcomes: dict[str, str] = {}
         for poll in polls:
-            latest_outcomes.setdefault(str(poll["provider"]), str(poll["outcome"]))
+            if poll["outcome"] == "failed" or poll["promoted"]:
+                latest_outcomes.setdefault(
+                    str(poll["provider"]), str(poll["outcome"])
+                )
         now = (
             assume_utc(self.clock())
             if self.clock is not None

@@ -331,7 +331,10 @@ snapshot.
 #### Projection archive expansion path
 
 Migration 037 adds the durable projection evidence path without replacing the
-legacy Player Pool reader. `ProjectionRecordingService.record_snapshot()` and
+legacy Player Pool reader. Migration 038 upgrades already-migrated databases
+with poll promotion/failure state and per-offering confirmation time; it
+backfills existing Latest confirmations from their observation times.
+`ProjectionRecordingService.record_snapshot()` and
 `record_failed_poll()` are the application recording boundaries and delegate
 durable work to `ProjectionArchive`. They accept an already retrieved Complete
 or Partial normalized `ProviderSnapshot`, or one bounded failure, and its
@@ -365,6 +368,9 @@ and the acceptance time is the completion time. Poll outcomes are `changed`,
 `partial`, `rematerialized`, `unchanged`, or `failed`. Failed polls carry a
 bounded reason but no snapshot or generation; unchanged evidence points at the
 existing immutable snapshot and generation.
+Each poll also records whether it promoted materialized state. Valid late polls
+remain immutable health evidence, but they cannot lower an offering's
+confirmation time or mask an intervening provider failure.
 The attempt identity is the exact evidence document, optional start, and
 completion time: replaying that recorded attempt returns its persisted result
 without adding a poll, while a different start, retrieval, or completion time
@@ -423,7 +429,11 @@ confirmations and expires without deleting Latest or immutable history. A target
 requires the canonical athlete's name as well as its governed IDs; an ID is
 never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current
-evidence reports `state: missing` and `observed_at: null`.
+evidence reports `state: missing` and `observed_at: null`. Latest rows and their
+promotion-aware poll health are read in one database snapshot. PostgreSQL uses
+`REPEATABLE READ`; SQLite uses one explicit read transaction. A writer
+committing between those queries therefore cannot pair old Latest state with
+new poll health.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate and
 Matchup. Matchup Selection uses a thin adapter over that reader which translates

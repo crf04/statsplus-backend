@@ -326,6 +326,8 @@ query content even though its retrieval time is newer; it confirms existing
 Latest references without duplicating observations while the immutable snapshot
 remains the content authority. Enabled providers are unioned; an unpolled or
 disabled provider expires independently and cannot erase another contribution.
+Late valid polls remain archived but do not refresh eligibility or mask a newer
+failure; confirmation timestamps never move backward.
 The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and

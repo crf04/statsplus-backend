@@ -39,6 +39,7 @@ class ProviderPoll(Base):
     completed_at = Column(DateTime(timezone=True), nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=True)
     outcome = Column(String(24), nullable=False)
+    promoted = Column(Boolean, nullable=False, default=False, server_default="false")
     failure_reason = Column(String(64), nullable=True)
     snapshot_id = Column(
         String(72),
@@ -54,7 +55,7 @@ class ProviderPoll(Base):
             name="ck_projection_provider_poll_outcome",
         ),
         CheckConstraint(
-            "(outcome = 'failed' AND snapshot_id IS NULL AND generation_id IS NULL "
+            "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL AND generation_id IS NULL "
             "AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
             "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
             "AND retrieved_at IS NOT NULL AND failure_reason IS NULL)",
