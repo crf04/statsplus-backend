@@ -343,7 +343,8 @@ Late valid polls remain archived but do not refresh eligibility or mask a newer
 failure; the failure attempt's actual start time (or its completion time when
 the start is unavailable) fences evidence retrieved earlier, even when that
 evidence arrives later. Confirmation timestamps never move backward. A success
-retrieved after the failed attempt may promote and recover provider health.
+retrieved after the failed attempt may promote and recover provider health,
+including when that success is accepted before the older failed attempt finishes.
 The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and

@@ -1293,15 +1293,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         "app.providers.pbp_game_logs.PBPGameLogAdapter",
         lambda **_kwargs: _NoProvider(),
     )
-    app = create_app(
-        {
-            "TESTING": True,
-            "RUNTIME_SETTINGS": settings,
-            "SKIP_FIREBASE_INIT": True,
-            "SKIP_TABLE_CREATE": True,
-        }
-    )
-    assembled = app.extensions["dependencies"]
+    assembled = build_dependencies(settings)
     assert isinstance(
         assembled.projection_player_pool_reader,
         LatestProjectionPlayerPoolReader,
@@ -1310,34 +1302,68 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert assembled.matchup_service.player_pool is assembled.projection_player_pool_reader
 
     catalog = StatisticCatalog.load_default()
-    pool = assembled.projection_player_pool_reader
-    pool.clock = lambda: NOW
     event_catalog = _event_catalog(engine, settings)
     stats_freshness = StatsFreshnessRepository(engine)
     stats_freshness.record_success(NOW)
-    matchup_service = MatchupService(
-        event_catalog=event_catalog,
-        player_pool=pool,
-        player_logs=_player_logs(engine, catalog),
-        player_diets=_player_diets(engine),
-        team_matchups=_team_matchups(engine),
-        stats_freshness=stats_freshness,
-        settings=settings,
-        injuries=None,
-        clock=lambda: NOW,
-    )
-    app.extensions["dependencies"] = replace(
-        assembled,
-        slate_service=SlateService(
-            event_catalog,
-            settings=settings,
-            player_pool=pool,
-            injuries=None,
-            clock=lambda: NOW,
-        ),
-        matchup_service=matchup_service,
-    )
-    client = app.test_client()
+    player_logs = _player_logs(engine, catalog)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+    archetypes = assembled.matchup_selection_service.archetypes
+    route_now = [NOW]
+
+    def route_client(dependencies):
+        template = dependencies.projection_player_pool_reader
+        assert isinstance(template, LatestProjectionPlayerPoolReader)
+        reader = LatestProjectionPlayerPoolReader(
+            engine,
+            template.scopes,
+            clock=lambda: route_now[0],
+            required_providers=template.required_providers,
+        )
+        route_settings = dependencies.settings
+        route_dependencies = replace(
+            dependencies,
+            projection_player_pool_reader=reader,
+            slate_service=SlateService(
+                event_catalog,
+                settings=route_settings,
+                player_pool=reader,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_service=MatchupService(
+                event_catalog=event_catalog,
+                player_pool=reader,
+                player_logs=player_logs,
+                player_diets=player_diets,
+                team_matchups=team_matchups,
+                stats_freshness=stats_freshness,
+                settings=route_settings,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_selection_service=MatchupSelectionService(
+                event_catalog=event_catalog,
+                player_pool=ProjectionSelectionPlayerPoolReader(reader),
+                player_logs=player_logs,
+                archetypes=archetypes,
+                statistic_catalog=catalog,
+                settings=route_settings,
+                publication_reader=dependencies.publication_reader,
+            ),
+        )
+        route_app = create_app(
+            {
+                "TESTING": True,
+                "RUNTIME_SETTINGS": route_settings,
+                "DEPENDENCIES": route_dependencies,
+                "SKIP_FIREBASE_INIT": True,
+                "SKIP_TABLE_CREATE": True,
+            }
+        )
+        return route_app.test_client(), reader
+
+    client, pool = route_client(assembled)
 
     missing_selection = client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
@@ -1363,15 +1389,6 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=query,
         accepted_at=preflight_empty_at,
     )
-    route_dependencies = app.extensions["dependencies"]
-
-    def use_projection_reader(reader):
-        route_dependencies.slate_service.player_pool = reader
-        route_dependencies.matchup_service.player_pool = reader
-        route_dependencies.matchup_selection_service.player_pool = (
-            ProjectionSelectionPlayerPoolReader(reader)
-        )
-
     dabble_only_settings = settings.model_copy(
         update={
             "providers": settings.providers.model_copy(
@@ -1379,14 +1396,15 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             )
         }
     )
-    dabble_only_reader = build_dependencies(
-        dabble_only_settings
-    ).projection_player_pool_reader
+    dabble_only_dependencies = build_dependencies(dabble_only_settings)
+    dabble_only_client, dabble_only_reader = route_client(dabble_only_dependencies)
     assert isinstance(dabble_only_reader, LatestProjectionPlayerPoolReader)
-    dabble_only_reader.clock = lambda: NOW
-    use_projection_reader(dabble_only_reader)
-    disabled_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    disabled_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    disabled_empty_matchup = dabble_only_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    disabled_empty_slate = dabble_only_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
     assert disabled_empty_matchup.get_json()["freshness"]["pool"] == {
         "state": "missing",
         "observed_at": None,
@@ -1404,8 +1422,6 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         "observed_at": None,
     }
 
-    pool.clock = lambda: NOW
-    use_projection_reader(pool)
     mixed_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     mixed_empty_slate = client.get("/api/games/slate?date=2026-01-15")
     assert mixed_empty_matchup.get_json()["freshness"]["pool"]["state"] == "missing"
@@ -1422,26 +1438,33 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             )
         }
     )
-    empty_registry_reader = build_dependencies(
-        empty_registry_settings
-    ).projection_player_pool_reader
+    empty_registry_dependencies = build_dependencies(empty_registry_settings)
+    empty_registry_client, empty_registry_reader = route_client(
+        empty_registry_dependencies
+    )
     assert isinstance(empty_registry_reader, LatestProjectionPlayerPoolReader)
-    empty_registry_reader.clock = lambda: NOW
-    use_projection_reader(empty_registry_reader)
-    all_disabled_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    all_disabled_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    all_disabled_empty_matchup = empty_registry_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    all_disabled_empty_slate = empty_registry_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
     assert all_disabled_empty_matchup.get_json()["freshness"]["pool"]["state"] == "live"
     assert all_disabled_empty_matchup.get_json()["players"] == []
     assert all_disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "live",
         "observed_at": preflight_empty_at.isoformat(),
     }
-    empty_registry_reader.clock = lambda: preflight_empty_at + timedelta(
+    route_now[0] = preflight_empty_at + timedelta(
         minutes=15,
         microseconds=1,
     )
-    expired_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    expired_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    expired_empty_matchup = empty_registry_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    expired_empty_slate = empty_registry_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
     assert expired_empty_matchup.get_json()["freshness"]["pool"] == {
         "status": "unavailable",
         "state": "missing",
@@ -1454,8 +1477,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         "observed_at": None,
     }
 
-    pool.clock = lambda: NOW
-    use_projection_reader(pool)
+    route_now[0] = NOW
     recorded_snapshot = _recorded_projection_snapshot(catalog)
     prizepicks_snapshot = _recorded_projection_snapshot(catalog, provider="prizepicks")
     for snapshot in (recorded_snapshot, prizepicks_snapshot):
@@ -1483,7 +1505,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     )
 
     rematerialized_at = NOW + timedelta(minutes=2)
-    pool.clock = lambda: rematerialized_at
+    route_now[0] = rematerialized_at
     assembled.projection_recorder.archive.market_categories["points"] = "PRA"
     for snapshot in (recorded_snapshot, prizepicks_snapshot):
         assembled.projection_recorder.record_complete_snapshot(
@@ -1595,7 +1617,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=query,
         accepted_at=partial_at,
     )
-    pool.clock = lambda: partial_at
+    route_now[0] = partial_at
     assert client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()[
         "freshness"
     ]["pool"]["status"] == "fresh"
@@ -1609,7 +1631,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         completed_at=failed_at,
         failure_reason="access_denied",
     )
-    pool.clock = lambda: failed_at
+    route_now[0] = failed_at
     failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert failed_matchup.status_code == 200
     failed_freshness = failed_matchup.get_json()["freshness"]["pool"]
@@ -1638,7 +1660,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=query,
         accepted_at=late_accepted_at,
     )
-    pool.clock = lambda: late_accepted_at
+    route_now[0] = late_accepted_at
     late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert "status" not in late_matchup.get_json()["freshness"]["pool"]
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
@@ -1659,7 +1681,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=query,
         accepted_at=late_accepted_at + timedelta(seconds=1),
     )
-    pool.clock = lambda: late_accepted_at + timedelta(seconds=1)
+    route_now[0] = late_accepted_at + timedelta(seconds=1)
     late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
     assert [
@@ -1680,7 +1702,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=query,
         accepted_at=recovered_at,
     )
-    pool.clock = lambda: recovered_at
+    route_now[0] = recovered_at
     recovered_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert [
         player["canonical_id"] for player in recovered_matchup.get_json()["players"]
@@ -1710,7 +1732,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             query=query,
             accepted_at=empty_at,
         )
-    pool.clock = lambda: empty_at
+    route_now[0] = empty_at
     empty_slate = client.get("/api/games/slate?date=2026-01-15")
     empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert empty_slate.status_code == 200
@@ -1817,14 +1839,14 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             ),
         )
     assert after_disabled_rejections == before_disabled_rejections
-    route_dependencies = app.extensions["dependencies"]
-    route_dependencies.slate_service.player_pool = all_disabled_pool
-    route_dependencies.matchup_service.player_pool = all_disabled_pool
-    route_dependencies.matchup_selection_service.player_pool = (
-        ProjectionSelectionPlayerPoolReader(all_disabled_pool)
+    all_disabled_client, controlled_all_disabled_pool = route_client(
+        all_disabled_dependencies
     )
-    all_disabled_pool.clock = lambda: disabled_at + timedelta(minutes=14)
-    disabled_live_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert controlled_all_disabled_pool.required_providers == frozenset()
+    route_now[0] = disabled_at + timedelta(minutes=14)
+    disabled_live_matchup = all_disabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
     assert disabled_live_matchup.status_code == 200
     assert [
         player["canonical_id"]
@@ -1847,8 +1869,10 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         },
     }
     all_disabled_at = disabled_at + timedelta(minutes=16)
-    all_disabled_pool.clock = lambda: all_disabled_at
-    all_disabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    route_now[0] = all_disabled_at
+    all_disabled_matchup = all_disabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
     assert all_disabled_matchup.status_code == 200
     assert all_disabled_matchup.get_json()["players"] == []
     assert all_disabled_matchup.get_json()["freshness"]["pool"] == {
@@ -1858,7 +1882,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         "retrieved_at": None,
         "providers": {},
     }
-    all_disabled_selection = client.get(
+    all_disabled_selection = all_disabled_client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
     assert all_disabled_selection.status_code == 503
@@ -1901,9 +1925,16 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             completed_at=all_disabled_at,
             failure_reason="access_denied",
         )
-    partially_enabled_pool.clock = lambda: all_disabled_at
-    route_dependencies.matchup_service.player_pool = partially_enabled_pool
-    partially_enabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    partially_enabled_client, controlled_partially_enabled_pool = route_client(
+        partially_enabled_dependencies
+    )
+    assert controlled_partially_enabled_pool.required_providers == frozenset(
+        {"dabble"}
+    )
+    route_now[0] = all_disabled_at
+    partially_enabled_matchup = partially_enabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
     assert partially_enabled_matchup.status_code == 200
     assert partially_enabled_matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",

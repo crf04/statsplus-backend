@@ -4,11 +4,21 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
+from types import SimpleNamespace
 from threading import Barrier, Event
 
 import pytest
 from sqlalchemy import create_engine, event, func, inspect, insert, select, text
 
+from app import create_app
+from app.config.settings import (
+    AuthenticationSettings,
+    CacheSettings,
+    FeatureSettings,
+    NBASeasonSettings,
+    ProviderSettings,
+    RuntimeSettings,
+)
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.models import Base
 from app.migrations import run_migrations
@@ -39,6 +49,7 @@ from app.services.projection_archive import (
     ProjectionArchive,
     ProjectionArchiveReadScope,
 )
+from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -547,6 +558,185 @@ def test_postgres_failure_attempt_fences_late_evidence_until_recovery(
         "older_not_promoted",
         "advanced",
     ]
+
+
+def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fences(
+    projection_pg_engine,
+    authenticate,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    route_now = [OBSERVED_AT]
+    reader = LatestProjectionPlayerPoolReader(
+        projection_pg_engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: route_now[0],
+        required_providers=("dabble",),
+    )
+
+    class EventCatalog:
+        @staticmethod
+        def count_events(season):
+            assert season == SEASON
+            return 1
+
+        @staticmethod
+        def get_freshness(season, *, now):
+            assert season == SEASON
+            assert now == route_now[0]
+            return {"last_success_at": OBSERVED_AT.isoformat()}
+
+        @staticmethod
+        def get_events_between(season, start, end):
+            assert season == SEASON
+            assert start < end
+            return (
+                {
+                    "nba_game_id": GAME_ID,
+                    "scheduled_at": "2026-01-02T23:00:00+00:00",
+                    "status_text": "Scheduled",
+                    "status_code": 1,
+                    "classification": "Regular Season",
+                    "away_team": {
+                        "id": 10,
+                        "tricode": "AWY",
+                        "name": "Away",
+                    },
+                    "home_team": {
+                        "id": 20,
+                        "tricode": "HME",
+                        "name": "Home",
+                    },
+                },
+            )
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=False),
+        cache=CacheSettings(enabled=False),
+        database={"url": str(projection_pg_engine.url)},
+        features=FeatureSettings(projection_archive_read_enabled=True),
+        providers=ProviderSettings(dfs_enabled_providers=("dabble",)),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    slate_service = SlateService(
+        EventCatalog(),
+        settings=settings,
+        player_pool=reader,
+        injuries=None,
+        clock=lambda: route_now[0],
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                slate_service=slate_service,
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    client = app.test_client()
+    headers = authenticate()
+
+    assert client.get("/api/games/slate?date=2026-01-02").status_code == 401
+    archive.ingest_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    initial = client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    assert initial.status_code == 200
+    assert initial.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": OBSERVED_AT.isoformat(),
+    }
+    assert initial.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 1
+
+    recovery_during_attempt_at = OBSERVED_AT + timedelta(minutes=11)
+    archive.ingest_snapshot(
+        _snapshot(catalog, recovery_during_attempt_at, "21.5"),
+        query=query,
+        accepted_at=recovery_during_attempt_at,
+    )
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=12)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=query,
+        poll_started_at=OBSERVED_AT + timedelta(minutes=10),
+        completed_at=failure_completed_at,
+        failure_reason="access_denied",
+    )
+    route_now[0] = failure_completed_at
+    recovered = client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    assert recovered.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
+        "status": "fresh",
+        "retrieved_at": recovery_during_attempt_at.isoformat(),
+    }
+
+    newer_failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=query,
+        poll_started_at=OBSERVED_AT + timedelta(minutes=19),
+        completed_at=newer_failure_completed_at,
+        failure_reason="access_denied",
+    )
+    late_retrieved_at = OBSERVED_AT + timedelta(minutes=15)
+    late_changed = archive.ingest_snapshot(
+        _snapshot(catalog, late_retrieved_at, "22.5"),
+        query=query,
+        accepted_at=newer_failure_completed_at + timedelta(seconds=1),
+    )
+    late_empty = archive.ingest_snapshot(
+        replace(
+            _snapshot(catalog, late_retrieved_at, "22.5"),
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+        ),
+        query=query,
+        accepted_at=newer_failure_completed_at + timedelta(seconds=2),
+    )
+    route_now[0] = newer_failure_completed_at + timedelta(seconds=2)
+    stale = client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    assert late_changed.materialization_outcome == "older_not_promoted"
+    assert late_empty.materialization_outcome == "older_not_promoted"
+    assert stale.get_json()["freshness"]["pool"]["providers"]["dabble"][
+        "status"
+    ] == "stale-served"
+    assert stale.get_json()["games"][0]["projection_state"][
+        "observed_at"
+    ] == recovery_during_attempt_at.isoformat()
+    assert stale.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 1
+
+    final_recovery_at = OBSERVED_AT + timedelta(minutes=21)
+    archive.ingest_snapshot(
+        _snapshot(catalog, final_recovery_at, "23.5"),
+        query=query,
+        accepted_at=final_recovery_at,
+    )
+    route_now[0] = final_recovery_at
+    final = client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    assert final.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
+        "status": "fresh",
+        "retrieved_at": final_recovery_at.isoformat(),
+    }
+    assert final.get_json()["games"][0]["projection_state"][
+        "observed_at"
+    ] == final_recovery_at.isoformat()
 
 
 def test_postgres_migration_upgrades_an_existing_v37_projection_schema(

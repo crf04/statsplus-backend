@@ -389,7 +389,11 @@ provider/query scope, using its actual poll start when supplied and otherwise
 its honest completion time. Evidence retrieved before that attempt remains
 auditable as `older_not_promoted`, even when it arrives later, and cannot retire
 Latest rows or clear the six-hour failure fallback. Evidence genuinely retrieved
-after the failed attempt may promote and restore successful health.
+after the failed attempt may promote and restore successful health. Read health
+uses that same attempt chronology rather than failure completion order, so a
+success retrieved after a failed attempt began remains the recovery even when
+the older attempt finishes and is recorded later. Exact failed-attempt replay
+retains its original poll identity and cannot change that ordering.
 Accepted snapshot identity is provider, governed query, provider retrieval
 instant, and exact evidence checksum. Delayed delivery of that same evidence
 returns its persisted result without adding a poll, generation, observation,

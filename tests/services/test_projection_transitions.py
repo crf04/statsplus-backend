@@ -603,6 +603,78 @@ def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
     ]
 
 
+def test_failure_completion_does_not_mask_recovery_after_its_attempt_began(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    initial = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, market_id="initial", player_id=7),),
+        OBSERVED_AT,
+    )
+    archive.ingest_snapshot(initial, query=QUERY, accepted_at=OBSERVED_AT)
+
+    failure_started_at = OBSERVED_AT + timedelta(minutes=10)
+    recovery_at = OBSERVED_AT + timedelta(minutes=11)
+    recovery = archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, market_id="recovery", player_id=8),),
+            recovery_at,
+        ),
+        query=QUERY,
+        accepted_at=recovery_at,
+    )
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=12)
+    first_failure = archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=failure_started_at,
+        completed_at=failure_completed_at,
+        failure_reason="access_denied",
+    )
+    replayed_failure = archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=failure_started_at,
+        completed_at=failure_completed_at,
+        failure_reason="access_denied",
+    )
+
+    recovered_pool = _reader(
+        engine,
+        ("dabble",),
+        failure_completed_at,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert recovery.materialization_outcome == "advanced"
+    assert first_failure == replayed_failure
+    assert recovered_pool.freshness["status"] == "fresh"
+    assert recovered_pool.freshness["observed_at"] == recovery_at.isoformat()
+    assert [player.canonical_player_id for player in recovered_pool.players] == [8]
+
+    newer_failure_started_at = OBSERVED_AT + timedelta(minutes=13)
+    newer_failure_completed_at = OBSERVED_AT + timedelta(minutes=14)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=newer_failure_started_at,
+        completed_at=newer_failure_completed_at,
+        failure_reason="access_denied",
+    )
+    failed_pool = _reader(
+        engine,
+        ("dabble",),
+        newer_failure_completed_at,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert failed_pool.freshness["status"] == "stale-served"
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProviderPoll)
+        ).scalar_one() == 4
+
+
 def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
     tmp_path,
 ):

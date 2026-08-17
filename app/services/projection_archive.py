@@ -13,7 +13,7 @@ import re
 import threading
 from typing import Any, Callable
 
-from sqlalchemy import delete, func, inspect, insert, select, update
+from sqlalchemy import case, delete, func, inspect, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -1279,6 +1279,12 @@ class LatestProjectionPlayerPoolReader:
                             poll_table.c.query_key == self.scope.query_key,
                         ).order_by(
                             poll_table.c.provider,
+                            func.coalesce(
+                                poll_table.c.retrieved_at,
+                                poll_table.c.started_at,
+                                poll_table.c.completed_at,
+                            ).desc(),
+                            case((poll_table.c.outcome == "failed", 1), else_=0).desc(),
                             poll_table.c.completed_at.desc(),
                             poll_table.c.poll_id.desc(),
                         )
@@ -1561,12 +1567,12 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None,
         require_complete: bool,
     ) -> ProjectionArchiveResult:
+        require_projection_archive_schema(self.archive.engine)
         if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
             raise ValueError(
                 "only complete provider snapshots may enter this archive path"
             )
         self._scope_for(snapshot.provider, query)
-        require_projection_archive_schema(self.archive.engine)
         return self.archive.ingest_snapshot(
             snapshot,
             query=query,
@@ -1599,8 +1605,8 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None = None,
         failure_reason: str,
     ) -> ProjectionPollResult:
-        self._scope_for(provider, query)
         require_projection_archive_schema(self.archive.engine)
+        self._scope_for(provider, query)
         return self.archive.record_failed_poll(
             provider=provider,
             query=query,
