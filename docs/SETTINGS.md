@@ -81,7 +81,9 @@ enabled on an application database, one database-only reader is
 used by Slate, Matchup, and Matchup Selection. Dependency assembly also exposes
 the named projection recording service on application databases so an
 operator-owned collector can submit an already retrieved Complete normalized
-snapshot. Provider polling and scheduling belong to later slices.
+snapshot. The recorder and reader share the same provider/current-season
+canonical query scope, and the recorder rejects a different provider or query
+before writing. Provider polling and scheduling belong to later slices.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

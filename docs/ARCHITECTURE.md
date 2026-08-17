@@ -335,6 +335,10 @@ legacy Player Pool reader. `ProjectionRecordingService.record_complete_snapshot(
 is the application recording boundary for this first vertical slice and
 delegates durable work to `ProjectionArchive`. It accepts one already retrieved
 Complete normalized `ProviderSnapshot` and its canonical season query and
+writes only when its provider and canonical query key match the exact
+`ProjectionArchiveReadScope` shared with the request reader; a mismatch is
+rejected before persistence instead of creating invisible evidence. The
+lower-level archive retains multi-scope capability for internal use. It then
 writes one Provider Poll for every accepted attempt. A changed attempt writes
 one checksummed source-evidence document, immutable market observations, and
 one materialization generation atomically. The evidence checksum covers the

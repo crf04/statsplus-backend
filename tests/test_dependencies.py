@@ -222,6 +222,8 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_archive.engine is dependencies.engine
     assert isinstance(dependencies.projection_recorder, ProjectionRecordingService)
     assert dependencies.projection_recorder.archive is dependencies.projection_archive
+    assert dependencies.projection_recorder.scope is reader.scope
+    assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader

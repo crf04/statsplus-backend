@@ -455,14 +455,14 @@ def build_dependencies(
     projection_archive = (
         None if demo_database else ProjectionArchive(engine, statistic_catalog)
     )
-    projection_recorder = (
-        None
-        if projection_archive is None
-        else ProjectionRecordingService(projection_archive)
-    )
     projection_read_scope = ProjectionArchiveReadScope(
         provider=settings.features.projection_archive_read_provider,
         query=NBAMarketQuery(season=settings.nba.current_season),
+    )
+    projection_recorder = (
+        None
+        if projection_archive is None
+        else ProjectionRecordingService(projection_archive, projection_read_scope)
     )
     projection_player_pool_reader = (
         LatestProjectionPlayerPoolReader(engine, projection_read_scope)

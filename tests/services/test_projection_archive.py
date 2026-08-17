@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Event
 
+import pytest
 from sqlalchemy import create_engine, select
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -38,6 +39,7 @@ from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
+    ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
 )
 from app.services.statistic_catalog import StatisticCatalog
@@ -129,9 +131,41 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     )
 
     archive = ProjectionArchive(engine, catalog)
-    result = archive.ingest_complete_snapshot(
+    scope = ProjectionArchiveReadScope(
+        provider="dabble", query=NBAMarketQuery(season=SEASON)
+    )
+    recorder = ProjectionRecordingService(archive, scope)
+    with pytest.raises(ValueError, match="query is outside the configured read scope"):
+        recorder.record_complete_snapshot(
+            snapshot,
+            query=NBAMarketQuery(
+                season=SEASON,
+                market_statuses=(MarketStatus.AVAILABLE,),
+            ),
+            accepted_at=OBSERVED_AT,
+        )
+    other_provider_market = replace(
+        market,
+        provider="prizepicks",
+        market_id="prize-market-7",
+        statistic_match=replace(market.statistic_match, provider="prizepicks"),
+    )
+    with pytest.raises(ValueError, match="provider is outside the configured read scope"):
+        recorder.record_complete_snapshot(
+            replace(
+                snapshot,
+                provider="prizepicks",
+                markets=(other_provider_market,),
+            ),
+            query=scope.query,
+            accepted_at=OBSERVED_AT,
+        )
+    with engine.connect() as connection:
+        assert connection.execute(select(ProviderPoll)).all() == []
+
+    result = recorder.record_complete_snapshot(
         snapshot,
-        query=NBAMarketQuery(season=SEASON),
+        query=scope.query,
         accepted_at=OBSERVED_AT,
     )
     pool = _reader(engine).get_pool_for_game(

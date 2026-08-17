@@ -752,10 +752,15 @@ class ProjectionSelectionPlayerPoolReader:
 
 
 class ProjectionRecordingService:
-    """Application boundary for recording an already retrieved Complete snapshot."""
+    """Record Complete snapshots only into the application's selected read scope."""
 
-    def __init__(self, archive: ProjectionArchive) -> None:
+    def __init__(
+        self,
+        archive: ProjectionArchive,
+        scope: ProjectionArchiveReadScope,
+    ) -> None:
         self.archive = archive
+        self.scope = scope
 
     def record_complete_snapshot(
         self,
@@ -765,6 +770,16 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
     ) -> ProjectionArchiveResult:
+        provider = snapshot.provider.strip().casefold()
+        if provider != self.scope.provider:
+            raise ValueError(
+                "projection snapshot provider is outside the configured read scope: "
+                f"expected {self.scope.provider!r}, received {provider!r}"
+            )
+        if _query_key(query) != self.scope.query_key:
+            raise ValueError(
+                "projection snapshot query is outside the configured read scope"
+            )
         return self.archive.ingest_complete_snapshot(
             snapshot,
             query=query,
