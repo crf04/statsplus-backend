@@ -1813,7 +1813,9 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
                 stream_key=stream, season="2025-26", cutoff=AS_OF,
                 payload=payload_for(stream, "new"), provenance=provenance,
             ) for stream in streams]
-            return publications.recompose_ledger_batch(compositions)
+            return publications.recompose_ledger_batch(
+                compositions, session=kwargs["session"]
+            )
 
     repository = CanonicalGameLedgerRepository(engine)
     runtime = __import__("app.services.ledger_runtime", fromlist=["LedgerRuntime"]).LedgerRuntime(
