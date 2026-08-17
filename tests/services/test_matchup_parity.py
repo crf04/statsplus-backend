@@ -670,6 +670,8 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
         ).mappings().one()
     provider_identity = json.dumps({
         "window": window,
+        "provider_source": "nba_stats.team_game_log",
+        "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
         "teams": {
             str(team_id): {
                 "expected_games": len(game_ids_by_team[team_id]),

@@ -308,13 +308,24 @@ class TeamMatchupRefreshService:
                 default_status="missing",
                 default_reason="governed_team_roster_incomplete",
             )
-            self.repository.replace_snapshots(
-                (
-                    (season_scope, (), observations),
-                    (rolling_scope, (), observations),
-                ),
-                retrieved_at=retrieved_at,
+            snapshots = (
+                (season_scope, (), observations),
+                (rolling_scope, (), observations),
             )
+            if provenance is None:
+                self.repository.replace_snapshots(snapshots, retrieved_at=retrieved_at)
+            else:
+                with self.repository.engine.begin() as connection:
+                    self._revalidate_provenance(
+                        provenance,
+                        season=canonical_season,
+                        connection=connection,
+                    )
+                    self.repository.replace_snapshots(
+                        snapshots,
+                        retrieved_at=retrieved_at,
+                        connection=connection,
+                    )
             return
         boundaries = TeamWindowBoundaryResolver().last_n(
             events, as_of=snapshot_date, window_games=15
@@ -347,6 +358,7 @@ class TeamMatchupRefreshService:
                     team_id: len(game_ids)
                     for team_id, game_ids in season_game_ids_by_team.items()
                 },
+                collect_before=provenance.collect_before if provenance else None,
             )
         season_facts = self._bind_legacy_window_evidence(
             season_facts, season_provider_game_ids or {}, season_window_identity,
@@ -405,6 +417,7 @@ class TeamMatchupRefreshService:
                     expected_counts={
                         team_id: 15 for team_id in rolling_game_ids_by_team
                     },
+                    collect_before=provenance.collect_before if provenance else None,
                 )
             rolling_facts = self._bind_legacy_window_evidence(
                 rolling_facts,
@@ -421,15 +434,28 @@ class TeamMatchupRefreshService:
                 rolling_observations, rolling_window_identity,
                 provenance=provenance, cutoff=retrieved_at,
             )
-        if provenance is not None:
-            self._revalidate_provenance(provenance, season=canonical_season)
-        self.repository.replace_snapshots(
-            (
-                (season_scope, season_facts, season_observations),
-                (rolling_scope, rolling_facts, rolling_observations),
-            ),
-            retrieved_at=retrieved_at,
+        snapshots = (
+            (season_scope, season_facts, season_observations),
+            (rolling_scope, rolling_facts, rolling_observations),
         )
+        if provenance is None:
+            self.repository.replace_snapshots(snapshots, retrieved_at=retrieved_at)
+        else:
+            # Revalidation and the legacy replacement share one transaction.
+            # The provider calls above may be slow, but once they finish there
+            # is no unlocked authority-to-write gap left for a manifest or
+            # canonical pointer mutation to race through.
+            with self.repository.engine.begin() as connection:
+                self._revalidate_provenance(
+                    provenance,
+                    season=canonical_season,
+                    connection=connection,
+                )
+                self.repository.replace_snapshots(
+                    snapshots,
+                    retrieved_at=retrieved_at,
+                    connection=connection,
+                )
 
     def _provenance_for_snapshot(
         self, season: str, snapshot_date: date
@@ -487,18 +513,24 @@ class TeamMatchupRefreshService:
         )
 
     def _revalidate_provenance(
-        self, provenance: TeamMatchupProvenance, *, season: str
+        self, provenance: TeamMatchupProvenance, *, season: str,
+        connection=None,
     ) -> None:
         """Re-read governance after provider I/O and reject authority drift."""
 
+        if connection is None:
+            with self.repository.engine.connect() as owned_connection:
+                return self._revalidate_provenance(
+                    provenance, season=season, connection=owned_connection
+                )
+
         now = assume_utc(self._clock())
-        with self.repository.engine.connect() as connection:
-            manifest = connection.execute(select(CollectionManifest.__table__).where(
-                CollectionManifest.manifest_id == provenance.manifest_id,
-            ).with_for_update()).mappings().one_or_none()
-            pointer = connection.execute(select(PublicationPointer.__table__).where(
-                PublicationPointer.stream_key == "canonical_game_ledger",
-            ).with_for_update()).mappings().one_or_none()
+        manifest = connection.execute(select(CollectionManifest.__table__).where(
+            CollectionManifest.manifest_id == provenance.manifest_id,
+        ).with_for_update()).mappings().one_or_none()
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.stream_key == "canonical_game_ledger",
+        ).with_for_update()).mappings().one_or_none()
         if manifest is None or manifest["status"] != "active":
             raise _ProviderWindowUnverified("governance changed during provider collection")
         try:
@@ -512,6 +544,10 @@ class TeamMatchupRefreshService:
             manifest["season"] != season
             or assume_utc(manifest["cutoff"]) != provenance.cutoff
             or manifest.get("checksum") != provenance.manifest_checksum
+            or provenance.collect_before is None
+            or assume_utc(manifest["collect_before"]) != assume_utc(
+                provenance.collect_before
+            )
             or assume_utc(manifest["collect_before"]) <= now
             or "canonical_game_ledger" not in scopes
             or 1 not in accepted_versions
@@ -519,10 +555,8 @@ class TeamMatchupRefreshService:
             != provenance.event_catalog_publication_id
             or manifest["event_catalog_checksum"]
             != provenance.event_catalog_checksum
-            or (
-                pointer is None
-                and provenance.canonical_ledger_pointer_fence is not None
-            )
+            or (pointer is None)
+            != (provenance.canonical_ledger_pointer_fence is None)
             or (
                 pointer is not None
                 and (
@@ -535,19 +569,24 @@ class TeamMatchupRefreshService:
             raise _ProviderWindowUnverified("governance changed during provider collection")
         # This verifies the immutable payload/checksum and its exact identity,
         # rather than trusting manifest columns alone.
-        self._immutable_catalog_events(season, provenance)
+        self._immutable_catalog_events(season, provenance, connection=connection)
 
     def _immutable_catalog_events(
-        self, season: str, provenance: TeamMatchupProvenance
+        self, season: str, provenance: TeamMatchupProvenance, connection=None,
     ) -> list[dict[str, Any]]:
         """Read the exact manifest-bound catalog, never mutable event rows."""
         from app.models.collection_control import CatalogPublication
 
-        with self.repository.engine.connect() as connection:
-            row = connection.execute(select(CatalogPublication.__table__).where(
-                CatalogPublication.publication_id
-                == provenance.event_catalog_publication_id,
-            )).mappings().one_or_none()
+        if connection is None:
+            with self.repository.engine.connect() as owned_connection:
+                return self._immutable_catalog_events(
+                    season, provenance, connection=owned_connection
+                )
+
+        row = connection.execute(select(CatalogPublication.__table__).where(
+            CatalogPublication.publication_id
+            == provenance.event_catalog_publication_id,
+        ).with_for_update()).mappings().one_or_none()
         if (
             row is None
             or row["season"] != season
@@ -663,12 +702,14 @@ class TeamMatchupRefreshService:
         *, window: str, game_ids_by_team: Mapping[int, tuple[str, ...]],
         provider_game_ids_by_team: Mapping[int, tuple[str, ...]],
         expected_counts: Mapping[int, int],
+        collect_before: datetime | None = None,
     ) -> str:
         """Record provider request evidence only after count verification.
 
         The Event Catalog IDs are not appended as a post-hoc label.  The
-        collector first verifies each provider aggregate's returned game count
-        against this immutable set, then stores this canonical evidence.
+        collector first obtains exact IDs from the independent TeamGameLog
+        detail response, verifies each aggregate's returned count against the
+        immutable set, then stores this canonical evidence.
         """
         if set(game_ids_by_team) != set(expected_counts):
             raise _ProviderWindowUnverified("provider window team set is incomplete")
@@ -683,8 +724,12 @@ class TeamMatchupRefreshService:
             for team_id in game_ids_by_team
         ):
             raise _ProviderWindowUnverified("provider game IDs do not match authority")
+        if collect_before is None:
+            raise _ProviderWindowUnverified("provider collection fence is unavailable")
         return json.dumps({
             "window": window,
+            "provider_source": "nba_stats.team_game_log",
+            "collect_before": assume_utc(collect_before).isoformat(),
             "teams": {
                 str(team_id): {
                     "expected_games": expected_counts[team_id],
@@ -793,15 +838,29 @@ class TeamMatchupRefreshService:
         failures: dict[str, tuple[str, str | None]] = {}
         provider_ids_by_surface: dict[str, dict[int, tuple[str, ...]]] = {}
         try:
+            if verify_window:
+                provider_ids_by_surface["traditional"] = (
+                    self._independent_provider_game_ids(
+                        season=season,
+                        season_type="Regular Season",
+                        team_ids=team_ids,
+                        date_from=None,
+                        date_to=date_to,
+                        last_n_games=None,
+                    )
+                )
             traditional_frame = self.nba_stats.fetch_opponent_team_stats(
                 None, per_mode_detailed="Totals", **common
             )
             if verify_window:
-                provider_ids_by_surface["traditional"] = self._verify_aggregate_window(
+                self._verify_aggregate_window(
                     traditional_frame,
                     expected_game_counts=expected_game_counts,
                     expected_game_ids_by_team=expected_game_ids_by_team,
-                    require_game_ids=True,
+                    # LeagueDashTeamStats is an aggregate endpoint and does
+                    # not expose membership.  Exact IDs come only from the
+                    # independent TeamGameLog response above.
+                    require_game_ids=False,
                 )
             minutes_by_team = self._minutes_by_team(traditional_frame)
         except (ProviderResponseError, ValueError) as error:
@@ -871,6 +930,12 @@ class TeamMatchupRefreshService:
                 except (ProviderResponseError, ValueError) as error:
                     failures["play_types"] = self._provider_failure(error)
         try:
+            if verify_window:
+                provider_ids = provider_ids_by_surface.get("traditional")
+                if provider_ids is None:
+                    raise _ProviderWindowUnverified(
+                        "independent provider game membership is unavailable"
+                    )
             assist_frame = self.pbp_stats.fetch_totals_frame(
                         "opponent",
                         season=season,
@@ -880,11 +945,14 @@ class TeamMatchupRefreshService:
                         to_date=snapshot_date.isoformat(),
                     )
             if verify_window:
-                provider_ids_by_surface["assist_locations"] = self._verify_aggregate_window(
+                self._verify_aggregate_window(
                     assist_frame,
                     expected_game_counts=expected_game_counts,
                     expected_game_ids_by_team=expected_game_ids_by_team,
-                    require_game_ids=True,
+                    require_game_ids=False,
+                )
+                provider_ids_by_surface["assist_locations"] = (
+                    provider_ids_by_surface["traditional"]
                 )
             facts_by_surface["assist_locations"] = self._require_governed_roster(
                 self._assist_facts(assist_frame),
@@ -946,21 +1014,33 @@ class TeamMatchupRefreshService:
                 for surface in ("traditional", "shot_types", "shot_zones")
             ):
                 try:
+                    if verify_window:
+                        provider_ids = self._independent_provider_game_ids(
+                            season=season,
+                            season_type=season_type,
+                            team_ids=(team_id,),
+                            date_from=self._nba_date(boundary.from_date),
+                            date_to=date_to,
+                            last_n_games=15,
+                        )
+                        provider_ids_by_surface["traditional"][team_id] = (
+                            provider_ids[team_id]
+                        )
                     traditional_frame = self.nba_stats.fetch_opponent_team_stats(
                         self._nba_date(boundary.from_date),
                         per_mode_detailed="Totals",
                         **common,
                     )
-                    provider_ids = self._verify_team_window(
+                    self._verify_team_window(
                         traditional_frame,
                         team_id=team_id,
                         expected_games=len(boundary.game_ids),
                         expected_game_ids=boundary.game_ids,
                         require_game_count=True,
-                        require_game_ids=verify_window,
+                        # LeagueDashTeamStats is aggregate-only; membership is
+                        # independently evidenced by TeamGameLog above.
+                        require_game_ids=False,
                     )
-                    if provider_ids is not None:
-                        provider_ids_by_surface["traditional"][team_id] = provider_ids
                     minutes_by_team = self._minutes_by_team(traditional_frame)
                     if "traditional" not in failures:
                         facts_by_surface["traditional"].extend(
@@ -1036,6 +1116,12 @@ class TeamMatchupRefreshService:
 
             if "assist_locations" not in failures:
                 try:
+                    if verify_window:
+                        provider_ids = provider_ids_by_surface["traditional"].get(team_id)
+                        if provider_ids is None:
+                            raise _ProviderWindowUnverified(
+                                "independent provider game membership is unavailable"
+                            )
                     frame = self.pbp_stats.fetch_totals_frame(
                         "opponent",
                         season=season,
@@ -1044,21 +1130,23 @@ class TeamMatchupRefreshService:
                         from_date=boundary.from_date.isoformat(),
                         to_date=boundary.to_date.isoformat(),
                     )
-                    provider_ids = self._verify_team_window(
+                    self._verify_team_window(
                         frame,
                         team_id=team_id,
                         expected_games=len(boundary.game_ids),
                         expected_game_ids=boundary.game_ids,
                         require_game_count=True,
-                        require_game_ids=verify_window,
+                        require_game_ids=False,
                         required_columns=(
                             "TeamId",
                             "SecondsPlayed",
                             "GamesPlayed",
                         ),
                     )
-                    if provider_ids is not None:
-                        provider_ids_by_surface["assist_locations"][team_id] = provider_ids
+                    if verify_window:
+                        provider_ids_by_surface["assist_locations"][team_id] = (
+                            provider_ids_by_surface["traditional"][team_id]
+                        )
                     facts_by_surface["assist_locations"].extend(
                         self._with_start(
                             self._assist_facts(frame),
@@ -1087,6 +1175,56 @@ class TeamMatchupRefreshService:
     @staticmethod
     def _nba_date(value: date) -> str:
         return value.strftime("%m/%d/%Y")
+
+    def _independent_provider_game_ids(
+        self,
+        *,
+        season: str,
+        season_type: str,
+        team_ids: Iterable[int],
+        date_from: str | None,
+        date_to: str | None,
+        last_n_games: int | None,
+    ) -> dict[int, tuple[str, ...]]:
+        """Collect membership from a provider detail endpoint.
+
+        Aggregate rows are intentionally never treated as game identity
+        evidence.  Production NBAStatsAdapter exposes TeamGameLog; injected
+        providers must expose the same optional seam in governed runs or the
+        window is unavailable rather than being relabeled from the catalog.
+        """
+        fetcher = getattr(self.nba_stats, "fetch_team_game_ids", None)
+        if not callable(fetcher):
+            raise _ProviderWindowUnverified(
+                "provider detail endpoint cannot prove exact game membership"
+            )
+        result: dict[int, tuple[str, ...]] = {}
+        for team_id in team_ids:
+            values = fetcher(
+                team_id=int(team_id),
+                season=season,
+                season_type=season_type,
+                date_from=date_from,
+                date_to=date_to,
+                last_n_games=last_n_games,
+            )
+            if isinstance(values, pd.DataFrame):
+                if "GAME_ID" not in values.columns:
+                    raise _ProviderWindowUnverified(
+                        "provider detail response is missing GAME_ID"
+                    )
+                values = values["GAME_ID"].tolist()
+            if isinstance(values, str) or not isinstance(values, Iterable):
+                raise _ProviderWindowUnverified(
+                    "provider detail response has invalid game membership"
+                )
+            ids = tuple(sorted(str(value).strip() for value in values))
+            if not ids or any(not value for value in ids) or len(ids) != len(set(ids)):
+                raise _ProviderWindowUnverified(
+                    "provider detail response has invalid game membership"
+                )
+            result[int(team_id)] = ids
+        return result
 
     @classmethod
     def _verify_team_window(

@@ -644,6 +644,7 @@ class NBAStatsAdapter:
         *,
         endpoint_factory: Callable[..., object] | None = None,
         roster_endpoint_factory: Callable[..., object] | None = None,
+        team_game_log_endpoint_factory: Callable[..., object] | None = None,
     ):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
@@ -656,6 +657,7 @@ class NBAStatsAdapter:
         self._endpoint_factory = endpoint_factory
         self._schedule_endpoint_factory = endpoint_factory
         self._roster_endpoint_factory = roster_endpoint_factory
+        self._team_game_log_endpoint_factory = team_game_log_endpoint_factory
 
     @property
     def max_concurrency(self) -> int:
@@ -920,6 +922,62 @@ class NBAStatsAdapter:
             cache_status=cache_status,
             required_columns=("TEAM_ID", "TEAM_NAME"),
         )
+
+    def fetch_team_game_ids(
+        self,
+        team_id: int,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+        date_from: str | None = None,
+        date_to: str | None = None,
+        last_n_games: int | None = None,
+    ) -> tuple[str, ...]:
+        """Return exact game IDs from the independent TeamGameLog endpoint.
+
+        LeagueDash aggregates expose only counts and totals.  This endpoint is
+        the provider's detail-level membership evidence and is intentionally a
+        separate factory seam from the aggregate endpoints.
+        """
+        if not isinstance(team_id, int) or team_id <= 0:
+            raise ValueError("team_id must be a positive integer")
+        canonical_season = validate_canonical_season(season)
+        factory = (
+            self._team_game_log_endpoint_factory
+            or endpoints.teamgamelog.TeamGameLog
+        )
+
+        def build(timeout: float) -> object:
+            parameters: dict[str, object] = {
+                "team_id": team_id,
+                "season": canonical_season,
+                "season_type_all_star": season_type,
+                "date_from_nullable": date_from or "",
+                "date_to_nullable": date_to or "",
+                "timeout": timeout,
+            }
+            if last_n_games is not None:
+                parameters["last_n_games"] = last_n_games
+            return factory(**parameters)
+
+        frame = self.run_endpoint(
+            "team_game_log",
+            build,
+            required_columns=("GAME_ID",),
+        )
+        if frame is None:
+            raise ProviderResponseError("NBA Stats returned no team game log.")
+        ids: list[str] = []
+        for value in frame["GAME_ID"].tolist():
+            if value is None or pd.isna(value):
+                raise ProviderResponseError("NBA Stats returned a game log without GAME_ID.")
+            game_id = str(value).strip()
+            if not game_id:
+                raise ProviderResponseError("NBA Stats returned an empty GAME_ID.")
+            ids.append(game_id)
+        if len(ids) != len(set(ids)):
+            raise ProviderResponseError("NBA Stats returned duplicate GAME_ID values.")
+        return tuple(sorted(ids))
 
     def fetch_opponent_shot_chart(
         self,

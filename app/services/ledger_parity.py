@@ -14,13 +14,20 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
-from app.models.collection_control import AuditEvent, PublicationVersion
+from app.models.collection_control import (
+    AuditEvent,
+    CatalogPublication,
+    CollectionManifest,
+    PublicationPointer,
+    PublicationVersion,
+)
 
 from app.domain.matchup_parity_contract import (
     HARD_CLASSIFICATIONS,
     MATCHUP_REQUIRED_STREAMS,
     SOFT_CLASSIFICATIONS,
 )
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import matchup_stream_key
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.utc import assume_utc
@@ -31,6 +38,7 @@ from app.services.ledger_derivations import (
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
 )
+from app.services.ledger_lineage import LedgerLineage
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 
@@ -44,6 +52,7 @@ def matchup_parity_artifact_is_activatable(
     artifact: LedgerParityArtifact,
     *,
     stream_key: str | None = None,
+    session: Session | None = None,
 ) -> bool:
     """Return whether an artifact contains only exact/soft matchup evidence."""
 
@@ -56,6 +65,11 @@ def matchup_parity_artifact_is_activatable(
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     if not isinstance(document, Mapping):
+        return False
+    # Rejected evidence is permanently ineligible, even if an operator left
+    # the original status as exact.  This keeps a historical decision from
+    # silently becoming activation authority on a later rerun.
+    if getattr(artifact, "decision", None) == "rejected":
         return False
     if document.get("status") not in {"exact", "adjudication_required"}:
         return False
@@ -73,9 +87,41 @@ def matchup_parity_artifact_is_activatable(
     )
     if any(key not in document for key in required_evidence):
         return False
+    def game_set_checksum(value) -> str | None:
+        if not isinstance(value, Mapping):
+            return None
+        game_ids: list[str] = []
+        for team_id, ids in value.items():
+            if not isinstance(team_id, str) or not isinstance(ids, list):
+                return None
+            if any(not isinstance(game_id, str) or not game_id for game_id in ids):
+                return None
+            game_ids.extend(ids)
+        return LedgerLineage.for_game_ids(game_ids)
+
+    legacy_checksum = game_set_checksum(document["legacy_game_ids_by_team"])
+    ledger_checksum = game_set_checksum(document["ledger_game_ids_by_team"])
+    expected_team_ids = {
+        str(team_id) for team_id in NBA_TEAM_ID_TO_TRICODE
+    }
+    report_team_ids = document.get("expected_team_ids")
+    legacy_team_ids = set(document["legacy_game_ids_by_team"])
+    ledger_team_ids = set(document["ledger_game_ids_by_team"])
+    complete_report = all(
+        document.get(field) is True
+        for field in (
+            "league_complete",
+            "team_identities_exact",
+            "game_sets_exact",
+            "cutoffs_aligned",
+            "rankings_deterministic",
+        )
+    )
     if (
         document.get("ledger_publication_id") != artifact.publication_id
         or document.get("ledger_payload_checksum") != artifact.payload_checksum
+        or not isinstance(artifact.payload_checksum, str)
+        or len(artifact.payload_checksum) != 64
         or not all(
             isinstance(document.get(key), str) and document.get(key).strip()
             for key in (
@@ -86,8 +132,36 @@ def matchup_parity_artifact_is_activatable(
             )
         )
         or document["legacy_game_ids_by_team"] != document["ledger_game_ids_by_team"]
+        or legacy_checksum is None
+        or ledger_checksum is None
+        or document["legacy_game_set_checksum"] != legacy_checksum
+        or document["ledger_game_set_checksum"] != ledger_checksum
+        or not complete_report
+        or not isinstance(report_team_ids, list)
+        or len(report_team_ids) != 30
+        or {str(team_id) for team_id in report_team_ids} != expected_team_ids
+        or legacy_team_ids != expected_team_ids
+        or ledger_team_ids != expected_team_ids
+        or (
+            document.get("window") == "l15"
+            and any(
+                len(document["legacy_game_ids_by_team"][team_id]) != 15
+                or len(document["ledger_game_ids_by_team"][team_id]) != 15
+                for team_id in expected_team_ids
+            )
+        )
     ):
         return False
+    if session is not None:
+        publication = session.get(PublicationVersion, artifact.publication_id)
+        if (
+            publication is None
+            or publication.checksum != artifact.payload_checksum
+            or not publication_payload_matches_checksum(
+                publication.payload, publication.checksum
+            )
+        ):
+            return False
     differences = document.get("differences", ())
     if not isinstance(differences, list):
         return False
@@ -126,15 +200,24 @@ def matchup_parity_cohort_is_activatable(
     """
 
     def validated(row: LedgerParityArtifact, stream_key: str):
-        if not matchup_parity_artifact_is_activatable(row, stream_key=stream_key):
+        if not matchup_parity_artifact_is_activatable(
+            row, stream_key=stream_key, session=session
+        ):
             return None
-        if row.status != "exact" and row.decision != "approved":
+        if row.decision == "rejected" or (
+            row.status != "exact" and row.decision != "approved"
+        ):
             return None
         publication = session.get(PublicationVersion, row.publication_id)
         if (
             publication is None
             or publication.status not in {"candidate", "active"}
+            or publication.season != season
+            or assume_utc(publication.cutoff) != target_cutoff
             or row.payload_checksum != publication.checksum
+            or not publication_payload_matches_checksum(
+                publication.payload, publication.checksum
+            )
         ):
             return None
         try:
@@ -181,10 +264,62 @@ def matchup_parity_cohort_is_activatable(
         return authority
 
     target_cutoff = assume_utc(cutoff)
-    all_rows = session.scalars(select(LedgerParityArtifact).where(
-        LedgerParityArtifact.season == season,
-        LedgerParityArtifact.stream_key.in_(_MATCHUP_STREAMS),
-    )).all()
+    # Lock the complete candidate history before selecting.  The lock order is
+    # deterministic so concurrent activation attempts cannot validate one
+    # generation and mutate a different one between reads.
+    all_rows = session.scalars(
+        select(LedgerParityArtifact).where(
+            LedgerParityArtifact.season == season,
+            LedgerParityArtifact.stream_key.in_(_MATCHUP_STREAMS),
+        ).order_by(
+            LedgerParityArtifact.stream_key,
+            LedgerParityArtifact.created_at,
+            LedgerParityArtifact.artifact_id,
+        ).with_for_update()
+    ).all()
+    history_publication_ids = {
+        row.publication_id for row in all_rows if row.publication_id
+    }
+    # Lock every authority row referenced by the history before any artifact
+    # is considered.  This closes the read/lock gap around a concurrent
+    # supersession or payload mutation.
+    history_publications = session.scalars(
+        select(PublicationVersion).where(
+            PublicationVersion.publication_id.in_(history_publication_ids)
+        ).order_by(PublicationVersion.publication_id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).all() if history_publication_ids else []
+    history_manifest_ids = {
+        publication.manifest_id
+        for publication in history_publications
+        if publication.manifest_id
+    }
+    history_catalog_ids = {
+        publication.event_catalog_publication_id
+        for publication in history_publications
+        if publication.event_catalog_publication_id
+    }
+    if history_manifest_ids:
+        session.scalars(
+            select(CollectionManifest).where(
+                CollectionManifest.manifest_id.in_(history_manifest_ids)
+            ).order_by(CollectionManifest.manifest_id).with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+    if history_catalog_ids:
+        session.scalars(
+            select(CatalogPublication).where(
+                CatalogPublication.publication_id.in_(history_catalog_ids)
+            ).order_by(CatalogPublication.publication_id).with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+    pointer_streams = tuple(sorted((*_MATCHUP_STREAMS, "canonical_game_ledger")))
+    session.scalars(
+        select(PublicationPointer).where(
+            PublicationPointer.stream_key.in_(pointer_streams)
+        ).order_by(PublicationPointer.stream_key).with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
     rows_by_stream: dict[str, list[LedgerParityArtifact]] = {
         stream_key: sorted(
             (
@@ -217,6 +352,46 @@ def matchup_parity_cohort_is_activatable(
     }
     if len(authorities) != 1:
         return False
+
+    selected_publication_ids = {
+        row.publication_id for row, _ in selected.values()
+    }
+    publications = session.scalars(
+        select(PublicationVersion).where(
+            PublicationVersion.publication_id.in_(selected_publication_ids)
+        ).order_by(PublicationVersion.publication_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
+    if {row.publication_id for row in publications} != selected_publication_ids:
+        return False
+    selected_authority = next(iter(authorities))
+    manifest_id, catalog_id, catalog_checksum = selected_authority
+    manifests = session.scalars(
+        select(CollectionManifest).where(
+            CollectionManifest.manifest_id == manifest_id
+        ).with_for_update().execution_options(populate_existing=True)
+    ).all()
+    catalogs = session.scalars(
+        select(CatalogPublication).where(
+            CatalogPublication.publication_id == catalog_id
+        ).with_for_update().execution_options(populate_existing=True)
+    ).all()
+    if (
+        len(manifests) != 1
+        or len(catalogs) != 1
+        or manifests[0].status != "active"
+        or manifests[0].checksum is None
+        or manifests[0].event_catalog_publication_id != catalog_id
+        or manifests[0].event_catalog_checksum != catalog_checksum
+        or catalogs[0].checksum != catalog_checksum
+        or not publication_payload_matches_checksum(
+            catalogs[0].payload, catalogs[0].checksum
+        )
+    ):
+        return False
+    # Pointers were locked before validation and remain held until the caller
+    # mutates the selected stream pointer in this activation transaction.
 
     supplied = session.get(LedgerParityArtifact, artifact_id)
     if supplied is None or supplied.stream_key not in _MATCHUP_STREAMS:

@@ -538,11 +538,13 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         *,
         endpoint_factory: Callable[..., Any] | None = None,
         roster_endpoint_factory: Callable[..., Any] | None = None,
+        team_game_log_endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__(
             settings=settings,
             endpoint_factory=endpoint_factory,
             roster_endpoint_factory=roster_endpoint_factory,
+            team_game_log_endpoint_factory=team_game_log_endpoint_factory,
         )
         self._endpoint_factory = (
             endpoint_factory or endpoints.playergamelogs.PlayerGameLogs

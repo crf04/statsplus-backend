@@ -60,6 +60,7 @@ NBA_STATS_OPERATIONS = frozenset(
         "league_opponent_team_stats",
         "league_opponent_shot_chart",
         "league_opponent_shooting_zone",
+        "team_game_log",
         "league_player_shot_type",
         "synergy_team_play_types",
         "synergy_player_play_types",

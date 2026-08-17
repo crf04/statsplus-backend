@@ -42,6 +42,7 @@ from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
     parse_recorded_player_diet,
 )
+from app.utils.telemetry import ProviderResponseError
 from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
@@ -290,6 +291,50 @@ def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
     assert captured["timeout"] == 7.5
     assert captured["player_id_nullable"] == "123"
     assert captured["season_nullable"] == "2024-25"
+
+
+def test_team_game_log_returns_independent_exact_membership():
+    captured = {}
+
+    class TeamGameLogFixture:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"GAME_ID": ["g-2", "g-1"]})]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1, timeout=7.5),
+        team_game_log_endpoint_factory=TeamGameLogFixture,
+    )
+
+    assert adapter.fetch_team_game_ids(
+        1610612738,
+        "2024-25",
+        date_from="01/01/2025",
+        date_to="01/31/2025",
+        last_n_games=15,
+    ) == ("g-1", "g-2")
+    assert captured["team_id"] == 1610612738
+    assert captured["season"] == "2024-25"
+    assert captured["last_n_games"] == 15
+    assert captured["timeout"] == 7.5
+
+
+def test_team_game_log_rejects_missing_membership_ids():
+    class TeamGameLogFixture:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"GP": [15]})]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1),
+        team_game_log_endpoint_factory=TeamGameLogFixture,
+    )
+    with pytest.raises(ProviderResponseError):
+        adapter.fetch_team_game_ids(1610612738, "2024-25")
 
 
 def test_adapter_propagates_provider_timeout(monkeypatch):

@@ -3120,7 +3120,7 @@ class PublicationService(_SessionService):
                     )
 
                     if not matchup_parity_artifact_is_activatable(
-                        artifact, stream_key=parity_stream
+                        artifact, stream_key=parity_stream, session=session
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
                     if not matchup_parity_cohort_is_activatable(

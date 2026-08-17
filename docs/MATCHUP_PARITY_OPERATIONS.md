@@ -28,16 +28,20 @@ facts and their persisted immutable provider-window evidence, plus the
 immutable candidate `PublicationVersion` rows; it does not accept
 caller-authored materialization JSON. Legacy rows must carry a non-null exact
 cutoff, manifest/Event Catalog publication ID and checksum, and provider
-window identity. The provider aggregate must return exact game IDs; those IDs
-are independently compared with the immutable authority (game-point equality
-alone is insufficient) before they are retained. The `cutoff` must be the exact
+window identity. LeagueDashTeamStats and PBP totals are aggregate endpoints and
+are not treated as membership evidence: production runs call the independent
+NBA Stats TeamGameLog detail endpoint for exact returned IDs, compare those IDs
+with immutable authority, and bind both traditional and assist aggregates to
+that evidence. Missing IDs, wrong same-count IDs, or an unavailable detail
+endpoint fail the window closed; game-point equality alone is insufficient.
+The `cutoff` must be the exact
 aware immutable manifest cutoff, never a fabricated midnight: it is the same
 cutoff both materializers ran at, and it is what the artifacts are bound to.
 The refresh locks and snapshots the active manifest, `collect_before`,
 `canonical_game_ledger` scope/schema-v1, Event Catalog identity/checksum, and
 canonical-ledger pointer before provider I/O, then revalidates the same rows
-after collection; any authority, status, cutoff, or pointer drift fails the
-window closed.
+after collection in the transaction that persists the legacy snapshots; any
+authority, status, cutoff, or pointer drift fails the window closed.
 
 ## Bounded dual-run
 
@@ -78,7 +82,8 @@ from counts and denominators use the single documented tolerance
 (`MATCHUP_PARITY_TOLERANCE`, `1e-6`). Reports retain exact legacy and ledger
 game-ID maps/checksums and both sides' manifest/Event Catalog identities;
 activation validates these fields against the candidate rather than trusting a
-boolean status. A missing surface, a single missing
+boolean status, and recomputes the report game-set and candidate payload
+checksums before activation. A missing surface, a single missing
 metric, an unavailable observation, an authority/scope/cutoff mismatch, an
 integer or game-set failure, or a byte-contract failure is `failed` and cannot
 be adjudicated. Only the documented floating semantic differences may be

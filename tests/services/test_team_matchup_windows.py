@@ -393,6 +393,47 @@ def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
         )
 
 
+@pytest.mark.parametrize(
+    "returned_ids",
+    [
+        tuple(f"game-{index}" for index in range(15)),
+        tuple(f"wrong-{index}" for index in range(15)),
+        tuple(f"game-{index}" for index in range(14)),
+    ],
+)
+def test_independent_provider_detail_membership_rejects_missing_or_wrong_same_count(
+    returned_ids,
+):
+    class DetailProvider:
+        def fetch_team_game_ids(self, *, team_id, season, **kwargs):
+            assert team_id == BOS
+            assert season == "2024-25"
+            return returned_ids
+
+    service = object.__new__(TeamMatchupRefreshService)
+    service.nba_stats = DetailProvider()
+    expected = tuple(sorted(f"game-{index}" for index in range(15)))
+    actual = service._independent_provider_game_ids(
+        season="2024-25",
+        season_type="Regular Season",
+        team_ids=(BOS,),
+        date_from="03/01/2025",
+        date_to="03/15/2025",
+        last_n_games=15,
+    )
+    if set(returned_ids) == set(expected) and len(returned_ids) == len(expected):
+        assert actual == {BOS: expected}
+    else:
+        with pytest.raises(ValueError, match="game IDs"):
+            TeamMatchupRefreshService._provider_window_identity(
+                window="l15",
+                game_ids_by_team={BOS: expected},
+                provider_game_ids_by_team=actual,
+                expected_counts={BOS: 15},
+                collect_before=datetime(2025, 3, 16, tzinfo=timezone.utc),
+            )
+
+
 def test_repository_rejects_a_future_scope_without_polluting_latest(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'future-write.sqlite3'}")
     run_migrations(engine)

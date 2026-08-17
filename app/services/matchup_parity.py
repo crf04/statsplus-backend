@@ -631,7 +631,19 @@ class StoredLegacyMatchupSource:
         try:
             identity = json.loads(window_identity)
             identity_teams = identity["teams"]
-            if identity["window"] != window or not isinstance(identity_teams, dict):
+            if (
+                identity["window"] != window
+                or identity.get("provider_source") != "nba_stats.team_game_log"
+                or not isinstance(identity.get("collect_before"), str)
+                or not isinstance(identity_teams, dict)
+            ):
+                raise ValueError
+            governed_collect_before = getattr(governance, "collect_before", None)
+            if (
+                governed_collect_before is None
+                or _aware(datetime.fromisoformat(identity["collect_before"]))
+                != _aware(governed_collect_before)
+            ):
                 raise ValueError
             actual_ids_by_team = {
                 str(team_id): sorted(str(game_id) for game_id in game_ids)
