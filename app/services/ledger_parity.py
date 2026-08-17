@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass, make_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -71,6 +70,7 @@ class LedgerParityArtifactRepository:
         report: LedgerParityReport,
         publication_id: str,
         payload_checksum: str,
+        session: Session | None = None,
         connection: Connection | None = None,
     ) -> LedgerParityArtifact:
         if not publication_id or len(payload_checksum) != 64:
@@ -94,14 +94,19 @@ class LedgerParityArtifactRepository:
             ),
             created_at=self.clock(),
         )
-        with (
-            nullcontext(connection)
-            if connection is not None
-            else self.engine.begin()
-        ) as connection:
-            connection.execute(LedgerParityArtifact.__table__.insert().values(
-                **{column.name: getattr(row, column.name) for column in LedgerParityArtifact.__table__.columns}
-            ))
+        values = {
+            column.name: getattr(row, column.name)
+            for column in LedgerParityArtifact.__table__.columns
+        }
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
+        if session is not None:
+            session.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        elif connection is not None:
+            connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        else:
+            with self.engine.begin() as connection:
+                connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
         return row
 
     def latest(self, stream_key: str, season: str) -> LedgerParityArtifact | None:
@@ -158,14 +163,23 @@ class LegacyParityDiagnosticReader:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def read(self, stream_key: str) -> tuple[Mapping[str, object], ...]:
+    def read(
+        self,
+        stream_key: str,
+        *,
+        session: Session | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
         from sqlalchemy import inspect, text
 
         table = self.TABLES[stream_key]
-        if table not in inspect(self.engine).get_table_names():
+        inspector = inspect(session.connection() if session is not None else self.engine)
+        if table not in inspector.get_table_names():
             raise ValueError(f"required legacy parity table {table} is unavailable")
-        with self.engine.connect() as connection:
-            rows = tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
+        if session is not None:
+            rows = tuple(dict(row) for row in session.execute(text(f'SELECT * FROM "{table}"')).mappings())
+        else:
+            with self.engine.connect() as connection:
+                rows = tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
         if not rows:
             raise ValueError(f"required legacy parity table {table} is empty")
         return rows

@@ -309,6 +309,25 @@ class CompositionJob(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
     last_error = Column(String(64), nullable=True)
+    # Correction propagation keeps the exact invalidation request beside the
+    # idempotent job.  The JSON columns are intentionally bounded metadata,
+    # not a second copy of the ledger payload.
+    # Legacy singular field remains readable; new writes use the plural JSON
+    # text field so coalesced invalidations are not truncated.
+    trigger_game_id = Column(String(64), nullable=True)
+    trigger_game_ids = Column(Text, nullable=False, default="[]", server_default="[]")
+    affected_team_ids = Column(Text, nullable=False, default="[]", server_default="[]")
+    source_observation_ids = Column(Text, nullable=False, default="[]", server_default="[]")
+    recomposition_reason = Column(String(128), nullable=True)
+    ledger_checksum = Column(String(64), nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
+    ledger_evidence = Column(Text, nullable=False, default="{}", server_default="{}")
+    # ``generation`` versions the complete queued lineage.  A worker records
+    # the generation it claimed; completion is accepted only when that exact
+    # generation is still running, so a correction accepted mid-composition
+    # remains queued for the next worker pass.
+    generation = Column(Integer, nullable=False, default=1, server_default="1")
+    claimed_generation = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_composition_job_status"),

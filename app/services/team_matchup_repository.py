@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
-from typing import Iterable
+from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
 
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.publication_integrity import publication_payload_matches_checksum
@@ -23,6 +24,7 @@ from app.models.team_matchup import (
 )
 from app.models.collection_control import (
     CatalogPublication,
+    CompositionJob,
     CollectionManifest,
     PublicationPointer,
     PublicationVersion,
@@ -36,6 +38,31 @@ from app.utils.db import is_demo_database_url
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+_LEDGER_SURFACE_BY_STREAM = {
+    "traditional_opponent_season": (0, "traditional"),
+    "traditional_opponent_l15": (15, "traditional"),
+    "assist_locations_season": (0, "assist_locations"),
+    "assist_locations_l15": (15, "assist_locations"),
+}
+_REQUIRED_LEDGER_MATCHUP_STREAMS = frozenset(_LEDGER_SURFACE_BY_STREAM)
+
+
+class _LedgerRecompositionAuthority:
+    """Opaque identity; every authorization fact stays repository-private."""
+
+    __slots__ = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedLedgerAuthority:
+    session: Session
+    transaction: object
+    claims: tuple[tuple[str, int], ...]
+    season: str
+    cutoff: datetime
+    manifest_id: str | None
+    required_surfaces: frozenset[tuple[int, str]]
 
 
 _PUBLICATION_CAPABILITY_TOKEN = object()
@@ -289,6 +316,10 @@ class TeamMatchupFact:
     #: collected legacy facts leave both empty.
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    source_observation_ids: tuple[str, ...] = ()
+    game_set_checksum: str | None = None
+    cutoff: datetime | None = None
+    recomposition_reason: str | None = None
     publication: PublicationLineage | None = None
 
 
@@ -299,6 +330,10 @@ class TeamMatchupObservation:
     unavailable_reason: str | None = None
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    source_observation_ids: tuple[str, ...] = ()
+    game_set_checksum: str | None = None
+    cutoff: datetime | None = None
+    recomposition_reason: str | None = None
     publication: PublicationLineage | None = None
 
 
@@ -334,6 +369,9 @@ class TeamMatchupRepository:
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
+        self._issued_authorities: dict[
+            _LedgerRecompositionAuthority, _IssuedLedgerAuthority
+        ] = {}
         self._publication_write_capability = publication_write_capability
 
     @staticmethod
@@ -356,12 +394,21 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+        session: Session | None = None,
         connection: Connection | None = None,
     ) -> None:
         """Replace legacy/provider snapshots behind the normal write fence."""
 
         return self._replace_snapshots(
-            snapshots, retrieved_at=retrieved_at, connection=connection
+            snapshots,
+            retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
+            connection=connection,
+            enforce_legacy_fence=True,
         )
 
     def replace_governed_publication_snapshots(
@@ -375,7 +422,10 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
         capability: PublicationWriteCapability | None = None,
+        session: Session | None = None,
         connection: Connection | None = None,
     ) -> None:
         """Replace snapshots after checking active/candidate publication state."""
@@ -383,10 +433,221 @@ class TeamMatchupRepository:
         return self._replace_snapshots(
             snapshots,
             retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
             governed_publication=True,
             capability=capability,
             connection=connection,
+            enforce_legacy_fence=False,
         )
+
+    def replace_ledger_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        session: Session,
+        authority: _LedgerRecompositionAuthority,
+        affected_team_ids_by_scope: Mapping[
+            TeamMatchupSnapshotScope, frozenset[int] | None
+        ] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+    ) -> None:
+        """Replace ledger-owned surfaces inside an authorized runtime transaction."""
+
+        received = tuple(
+            (scope, tuple(facts), tuple(observations))
+            for scope, facts, observations in snapshots
+        )
+        if not self._authority_allows(
+            authority,
+            session=session,
+            snapshots=received,
+        ):
+            raise PermissionError("ledger_recomposition_write_not_authorized")
+        self._issued_authorities.pop(authority, None)
+        self._replace_snapshots(
+            received,
+            retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
+            enforce_legacy_fence=False,
+        )
+
+    @contextmanager
+    def _ledger_recomposition_authority(
+        self,
+        session: Session,
+        *,
+        claimed_job_generations: Mapping[str, int],
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ):
+        """Yield one private proof and revoke it on every exit path."""
+
+        transaction = session.get_transaction()
+        claims = {
+            str(job_id): int(generation)
+            for job_id, generation in claimed_job_generations.items()
+        }
+        rows = self._claimed_slice_rows(
+            session,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+        )
+        valid_rows = tuple(
+            row for row in rows
+            if row.status == "running"
+            and int(row.claimed_generation or 0) == int(row.generation)
+        )
+        row_claims = {
+            str(row.job_id): int(row.generation)
+            for row in valid_rows
+        }
+        represented_streams = {str(row.stream_key) for row in valid_rows}
+        if (
+            transaction is None
+            or not transaction.is_active
+            or not claims
+            or len(valid_rows) != len(rows)
+            or row_claims != claims
+            or not _REQUIRED_LEDGER_MATCHUP_STREAMS & represented_streams
+        ):
+            raise PermissionError("ledger_recomposition_write_not_authorized")
+        required_surfaces = frozenset(
+            _LEDGER_SURFACE_BY_STREAM[stream]
+            for stream in represented_streams
+            if stream in _LEDGER_SURFACE_BY_STREAM
+        )
+        authority = _LedgerRecompositionAuthority()
+        state = _IssuedLedgerAuthority(
+            session=session,
+            transaction=transaction,
+            claims=tuple(sorted(claims.items())),
+            season=season,
+            cutoff=assume_utc(cutoff),
+            manifest_id=manifest_id,
+            required_surfaces=required_surfaces,
+        )
+        self._issued_authorities[authority] = state
+        try:
+            yield authority
+        finally:
+            self._issued_authorities.pop(authority, None)
+
+    @staticmethod
+    def _claimed_slice_rows(
+        session: Session,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ):
+        statement = select(
+            CompositionJob.job_id,
+            CompositionJob.stream_key,
+            CompositionJob.generation,
+            CompositionJob.claimed_generation,
+            CompositionJob.status,
+        ).where(
+            CompositionJob.season == season,
+            CompositionJob.cutoff == assume_utc(cutoff),
+            CompositionJob.manifest_id == manifest_id,
+            CompositionJob.status == "running",
+        )
+        return session.execute(statement.with_for_update()).all()
+
+    def _authority_allows(
+        self,
+        authority,
+        *,
+        session: Session,
+        snapshots,
+    ) -> bool:
+        if not isinstance(authority, _LedgerRecompositionAuthority):
+            return False
+        state = self._issued_authorities.get(authority)
+        if (
+            state is None
+            or state.session is not session
+            or state.transaction is not session.get_transaction()
+            or not session.in_transaction()
+        ):
+            return False
+        rows = self._claimed_slice_rows(
+            session,
+            season=state.season,
+            cutoff=state.cutoff,
+            manifest_id=state.manifest_id,
+        )
+        valid_rows = tuple(
+            row for row in rows
+            if row.status == "running"
+            and int(row.claimed_generation or 0) == int(row.generation)
+        )
+        if len(valid_rows) != len(rows) or tuple(sorted({
+            str(row.job_id): int(row.generation)
+            for row in valid_rows
+        }.items())) != state.claims:
+            return False
+        required_windows = {
+            window for window, _ in state.required_surfaces
+        }
+        if (
+            len(snapshots) != len(required_windows)
+            or {scope.stored_window_games for scope, _, _ in snapshots}
+            != required_windows
+        ):
+            return False
+        submitted_surfaces = set()
+        for scope, facts, observations in snapshots:
+            allowed_as_of = {
+                state.cutoff.date(),
+                state.cutoff.astimezone(EASTERN).date(),
+            }
+            if scope.season != state.season or scope.as_of not in allowed_as_of:
+                return False
+            expected_surfaces = {
+                surface
+                for window, surface in state.required_surfaces
+                if window == scope.stored_window_games
+            }
+            observed_surfaces = tuple(
+                observation.surface for observation in observations
+            )
+            fact_surfaces = {fact.base for fact in facts}
+            if (
+                len(observed_surfaces) != len(expected_surfaces)
+                or set(observed_surfaces) != expected_surfaces
+                or not fact_surfaces <= expected_surfaces
+                or any(
+                    observation.status == "available"
+                    and observation.surface not in fact_surfaces
+                    for observation in observations
+                )
+            ):
+                return False
+            submitted_surfaces.update(
+                (scope.stored_window_games, surface)
+                for surface in observed_surfaces
+            )
+            if any(
+                item.cutoff is None
+                or assume_utc(item.cutoff) != state.cutoff
+                for item in (*facts, *observations)
+            ):
+                return False
+        return submitted_surfaces == set(state.required_surfaces)
 
     def _replace_snapshots(
         self,
@@ -399,11 +660,16 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[
+            TeamMatchupSnapshotScope, frozenset[int] | None
+        ] | None,
+        affected_team_ids: frozenset[int] | None,
+        session: Session | None,
         governed_publication: bool = False,
         capability: PublicationWriteCapability | None = None,
         connection: Connection | None = None,
+        enforce_legacy_fence: bool,
     ) -> None:
-        """Replace related windows in one transaction after collection."""
 
         received = tuple(
             (scope, tuple(facts), tuple(observations))
@@ -417,17 +683,17 @@ class TeamMatchupRepository:
         current_date = observed_at.astimezone(EASTERN).date()
         if any(scope.as_of > current_date for scope, _, _ in received):
             raise ValueError("future as_of dates cannot be published")
+        if affected_team_ids_by_scope is None and affected_team_ids is not None:
+            affected_team_ids_by_scope = {
+                scope: affected_team_ids for scope, _, _ in received
+            }
         prepared = tuple(
             (scope, *self._prepare_surface_publication(facts, observations))
             for scope, facts, observations in received
         )
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with (
-            nullcontext(connection)
-            if connection is not None
-            else self.engine.begin()
-        ) as connection:
+        with self._connection_scope(session, connection) as connection:
             if governed_publication:
                 capability = capability or self._publication_write_capability
                 if capability is None:
@@ -461,23 +727,66 @@ class TeamMatchupRepository:
                             ).mappings()
                         )
                     )
-                changed_surfaces = {
-                    observation.surface
-                    for observation in observation_rows
-                    if self._surface_changed(
-                        observation,
-                        facts_by_surface.get(observation.surface, ()),
-                        existing_observations.get(observation.surface),
-                        existing_facts.get(observation.surface, ()),
-                        observed_at,
-                        scope.as_of,
+                if affected_team_ids_by_scope is None:
+                    target_team_ids = None
+                else:
+                    selected_targets = affected_team_ids_by_scope.get(scope, frozenset())
+                    target_team_ids = (
+                        None
+                        if selected_targets is None
+                        else frozenset(selected_targets)
                     )
-                }
-                scoped_changes.append(
-                    (scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces)
+                    # A targeted correction cannot preserve a snapshot that
+                    # does not exist yet. Build the complete scope on first
+                    # materialization; subsequent corrections can narrow it.
+                    if (
+                        target_team_ids is not None
+                        and any(
+                            observation.surface not in existing_observations
+                            for observation in observation_rows
+                        )
+                    ):
+                        target_team_ids = None
+                changed_surfaces = (
+                    set()
+                    if target_team_ids == frozenset()
+                    else {
+                        observation.surface
+                        for observation in observation_rows
+                        if self._surface_changed(
+                            observation,
+                            facts_by_surface.get(observation.surface, ()),
+                            existing_observations.get(observation.surface),
+                            existing_facts.get(observation.surface, ()),
+                            observed_at,
+                            scope.as_of,
+                            target_team_ids,
+                        )
+                    }
                 )
-            checker = getattr(self._write_fence, "assert_writable", None)
-            for scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces in scoped_changes:
+                scoped_changes.append(
+                    (
+                        scope,
+                        fact_rows,
+                        observation_rows,
+                        replace_surfaces,
+                        changed_surfaces,
+                        target_team_ids,
+                    )
+                )
+            checker = (
+                getattr(self._write_fence, "assert_writable", None)
+                if enforce_legacy_fence
+                else None
+            )
+            for (
+                scope,
+                fact_rows,
+                observation_rows,
+                replace_surfaces,
+                changed_surfaces,
+                target_team_ids,
+            ) in scoped_changes:
                 if callable(checker):
                     stream_by_surface = {
                         "traditional": (
@@ -491,6 +800,21 @@ class TeamMatchupRepository:
                             "assist_locations_l15"
                             if scope.window_games is not None
                             else "assist_locations_season",
+                        ),
+                        "play_types": (
+                            "synergy_play_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "synergy_play_types_opponent_season",
+                        ),
+                        "shot_types": (
+                            "grouped_shot_types_opponent_l15"
+                            if scope.window_games is not None
+                            else "grouped_shot_types_opponent_season",
+                        ),
+                        "shot_zones": (
+                            "exact_shot_zones_opponent_l15"
+                            if scope.window_games is not None
+                            else "exact_shot_zones_opponent_season",
                         ),
                     }
                     stream_by_surface.update({
@@ -527,12 +851,16 @@ class TeamMatchupRepository:
                 }
                 changed_replace_surfaces = set(replace_surfaces) & changed_surfaces
                 if changed_replace_surfaces:
-                    connection.execute(
-                        delete(fact_table).where(
-                            *self._scope(fact_table, scope),
-                            fact_table.c.base.in_(changed_replace_surfaces),
-                        )
-                    )
+                    conditions = [
+                        *self._scope(fact_table, scope),
+                        fact_table.c.base.in_(changed_replace_surfaces),
+                    ]
+                    if target_team_ids is not None:
+                        if target_team_ids:
+                            conditions.append(fact_table.c.team_id.in_(target_team_ids))
+                        else:
+                            conditions.append(fact_table.c.team_id.in_((-1,)))
+                    connection.execute(delete(fact_table).where(*conditions))
                 if changed_surfaces:
                     connection.execute(
                         delete(observation_table).where(
@@ -541,7 +869,12 @@ class TeamMatchupRepository:
                         )
                     )
                 changed_fact_rows = tuple(
-                    fact for fact in fact_rows if fact.base in changed_replace_surfaces
+                    fact for fact in fact_rows
+                    if fact.base in changed_replace_surfaces
+                    and (
+                        target_team_ids is None
+                        or fact.team_id in target_team_ids
+                    )
                 )
                 if changed_fact_rows:
                     connection.execute(
@@ -562,11 +895,48 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(fact.game_ids),
                                 "ledger_checksum": fact.ledger_checksum,
+                                "source_observation_ids": _source_observation_ids_json(
+                                    fact.source_observation_ids
+                                ),
+                                "game_set_checksum": fact.game_set_checksum,
+                                "cutoff": fact.cutoff,
+                                "recomposition_reason": fact.recomposition_reason,
                                 **_publication_columns(fact.publication),
                             }
                             for fact in changed_fact_rows
                         ],
                     )
+                if target_team_ids is not None and target_team_ids:
+                    # A targeted rebuild replaces values only for affected
+                    # teams, but the surface observation is one atomic
+                    # publication. Refresh the lineage metadata on retained
+                    # teams as well so a query can never pair a new surface
+                    # provenance row with stale fact provenance. Values and
+                    # identities remain untouched.
+                    metadata_by_team = {}
+                    for fact in fact_rows:
+                        if fact.team_id in target_team_ids:
+                            continue
+                        metadata_by_team.setdefault((fact.team_id, fact.base), fact)
+                    for (team_id, base), fact in metadata_by_team.items():
+                        connection.execute(
+                            TeamMatchupFactRow.__table__.update().where(
+                                *self._scope(fact_table, scope),
+                                fact_table.c.base == base,
+                                fact_table.c.team_id == team_id,
+                            ).values(
+                                retrieved_at=observed_at,
+                                game_ids=_game_ids_json(fact.game_ids),
+                                ledger_checksum=fact.ledger_checksum,
+                                source_observation_ids=_source_observation_ids_json(
+                                    fact.source_observation_ids
+                                ),
+                                game_set_checksum=fact.game_set_checksum,
+                                cutoff=fact.cutoff,
+                                recomposition_reason=fact.recomposition_reason,
+                                **_publication_columns(fact.publication),
+                            )
+                        )
                 changed_observations = tuple(
                     observation
                     for observation in observation_rows
@@ -584,11 +954,34 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(observation.game_ids),
                                 "ledger_checksum": observation.ledger_checksum,
+                                "source_observation_ids": _source_observation_ids_json(
+                                    observation.source_observation_ids
+                                ),
+                                "game_set_checksum": observation.game_set_checksum,
+                                "cutoff": observation.cutoff,
+                                "recomposition_reason": observation.recomposition_reason,
                                 **_publication_columns(observation.publication),
                             }
                             for observation in changed_observations
                         ],
                     )
+
+    @contextmanager
+    def _connection_scope(
+        self,
+        session: Session | None = None,
+        connection: Connection | None = None,
+    ):
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
+        if connection is not None:
+            yield connection
+            return
+        if session is not None:
+            yield session.connection()
+            return
+        with self.engine.begin() as connection:
+            yield connection
 
     @staticmethod
     def _fact_signature(row) -> tuple:
@@ -606,6 +999,10 @@ class TeamMatchupRepository:
             assume_utc(row["retrieved_at"]),
             _parse_game_ids(row["game_ids"]),
             row["ledger_checksum"],
+            _parse_source_observation_ids(row["source_observation_ids"]),
+            row["game_set_checksum"],
+            _optional_aware(row["cutoff"]),
+            row["recomposition_reason"],
             _publication_from_row(row),
         )
 
@@ -618,6 +1015,7 @@ class TeamMatchupRepository:
         existing_facts: tuple[tuple, ...],
         observed_at: datetime,
         window_end_date: date,
+        affected_team_ids: frozenset[int] | None = None,
     ) -> bool:
         if existing_observation is None:
             return True
@@ -629,6 +1027,11 @@ class TeamMatchupRepository:
             or _parse_game_ids(existing_observation["game_ids"])
             != observation.game_ids
             or existing_observation["ledger_checksum"] != observation.ledger_checksum
+            or _parse_source_observation_ids(existing_observation["source_observation_ids"])
+            != observation.source_observation_ids
+            or existing_observation["game_set_checksum"] != observation.game_set_checksum
+            or _optional_aware(existing_observation["cutoff"]) != _optional_aware(observation.cutoff)
+            or existing_observation["recomposition_reason"] != observation.recomposition_reason
             or _publication_from_row(existing_observation) != observation.publication
         ):
             return True
@@ -650,12 +1053,24 @@ class TeamMatchupRepository:
                     observed_at,
                     fact.game_ids,
                     fact.ledger_checksum,
+                    fact.source_observation_ids,
+                    fact.game_set_checksum,
+                    _optional_aware(fact.cutoff),
+                    fact.recomposition_reason,
                     fact.publication,
                 )
                 for fact in facts
+                if affected_team_ids is None or fact.team_id in affected_team_ids
             )
         )
-        return expected != existing_facts
+        existing_expected = tuple(
+            sorted(
+                signature
+                for signature in existing_facts
+                if affected_team_ids is None or signature[0] in affected_team_ids
+            )
+        )
+        return expected != existing_expected
 
     @staticmethod
     def _prepare_surface_publication(
@@ -790,6 +1205,12 @@ class TeamMatchupRepository:
                     window_end_date=row["window_end_date"],
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    source_observation_ids=_parse_source_observation_ids(
+                        row["source_observation_ids"]
+                    ),
+                    game_set_checksum=row["game_set_checksum"],
+                    cutoff=_optional_aware(row["cutoff"]),
+                    recomposition_reason=row["recomposition_reason"],
                     publication=_publication_from_row(row),
                 )
                 for row in fact_rows
@@ -802,6 +1223,12 @@ class TeamMatchupRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    source_observation_ids=_parse_source_observation_ids(
+                        row["source_observation_ids"]
+                    ),
+                    game_set_checksum=row["game_set_checksum"],
+                    cutoff=_optional_aware(row["cutoff"]),
+                    recomposition_reason=row["recomposition_reason"],
                     publication=_publication_from_row(row),
                 )
                 for row in observation_rows
@@ -884,6 +1311,36 @@ def _parse_game_ids(value: str | None) -> tuple[str, ...]:
     ):
         return ()
     return tuple(parsed)
+
+
+def _source_observation_ids_json(observation_ids: tuple[str, ...]) -> str | None:
+    """Serialize immutable source-observation lineage deterministically."""
+
+    if not observation_ids:
+        return None
+    return json.dumps(sorted(set(observation_ids)), separators=(",", ":"))
+
+
+def _parse_source_observation_ids(value: str | None) -> tuple[str, ...]:
+    """Parse source-observation lineage, failing closed for legacy rows."""
+
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(parsed, list) or any(
+        not isinstance(observation_id, str) for observation_id in parsed
+    ):
+        return ()
+    return tuple(parsed)
+
+
+def _optional_aware(value: datetime | None) -> datetime | None:
+    """Normalize nullable database timestamps for deterministic signatures."""
+
+    return None if value is None else assume_utc(value)
 
 
 def _publication_columns(

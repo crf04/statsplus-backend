@@ -4,9 +4,11 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, update
+from sqlalchemy.orm import sessionmaker
 
 from app.migrations import MIGRATIONS, run_migrations
 from app.models.collection_control import (
@@ -25,6 +27,7 @@ from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, ra
 from app.collector.normalizers import normalize_schedule_response
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
 from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
@@ -221,6 +224,33 @@ def test_manifest_catalog_binding_migration_rejects_two_eligible_catalogs(tmp_pa
         ).mappings().one()
     assert manifest["event_catalog_publication_id"] is None
     assert manifest["event_catalog_checksum"] is None
+
+
+def test_composition_governance_rejects_unbound_manifest_even_with_legacy_events(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'unbound-composition.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 2, 4, 30, tzinfo=timezone.utc)
+    event = _catalog_events(_league_games()[:1], cutoff)[0]
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="unbound-composition",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="unbound-composition",
+            status="active",
+            created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert().values(**event))
+
+    with pytest.raises(ValueError, match="immutable Event Catalog"):
+        ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
+            "2025-26", cutoff, "unbound-composition"
+        )
 
 
 def test_date_cutoff_lookup_uses_eastern_slate_day_across_fall_back(tmp_path):
@@ -654,14 +684,233 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     assert set(listed_through) == {slate_date}
     assert {item.surface for item in season.observations} == {
         "traditional",
-        "assist_locations",
     }
     assert {fact.base for fact in season.facts} == {
         "traditional",
-        "assist_locations",
     }
     assert all(fact.ledger_checksum for fact in season.facts)
     assert all(fact.game_ids for fact in season.facts)
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "slate_date"),
+    (
+        (datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc), date(2025, 11, 2)),
+        (datetime(2025, 3, 10, 3, 30, tzinfo=timezone.utc), date(2025, 3, 9)),
+    ),
+    ids=("fall-back", "spring-forward"),
+)
+def test_publication_materialization_uses_eastern_slate_date_for_cutoff(
+    tmp_path, cutoff, slate_date,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / f'materialization-{slate_date}.sqlite3'}")
+    run_migrations(engine)
+    game = replace(
+        _league_games()[0],
+        game_date=slate_date - timedelta(days=1),
+        retrieved_at=cutoff,
+        checksum=None,
+    )
+    game = game.with_checksum()
+    repository = CanonicalGameLedgerRepository(engine)
+    repository.replace_games_atomic((game,))
+    expected = frozenset({game.game_id})
+    expected_l15 = {
+        team_id: expected
+        for team_id in (game.home_team_id, game.away_team_id)
+    }
+
+    class Publication:
+        def compose_inactive_ledger(self, stream_key, **kwargs):
+            return SimpleNamespace(
+                publication_id=f"publication:{stream_key}",
+                checksum="p" * 64,
+            )
+
+    class Parity:
+        def record(self, *args, **kwargs):
+            return None
+
+        def read(self, stream_key, **kwargs):
+            return ()
+
+    materialization = LedgerMaterializationService(
+        repository,
+        parity_repository=Parity(),
+        parity_reader=Parity(),
+        publication_service=Publication(),
+        clock=lambda: cutoff,
+    )
+
+    result = materialization.compose(
+        (game,),
+        season=game.season,
+        as_of=slate_date,
+        cutoff=cutoff,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_l15,
+        team_ids=frozenset(expected_l15),
+    )
+
+    assert result.as_of == slate_date
+
+
+def test_nba_only_projection_uses_eastern_slate_date_after_utc_rollover(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'nba-only-rollover.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    slate_date = date(2025, 11, 2)
+    games = _league_games()
+    repository = CanonicalGameLedgerRepository(engine)
+    repository.replace_games_atomic(games)
+    stream_key = next(iter(sorted(NBA_PUBLICATION_STREAM_KEYS)))
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="nba-only-rollover",
+            stream_key=stream_key,
+            manifest_id="bound-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            status="queued",
+            attempts=0,
+            created_at=cutoff,
+            updated_at=cutoff,
+            generation=1,
+            claimed_generation=None,
+        ))
+
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id
+            for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season,
+                governed_cutoff,
+                expected,
+                frozenset(range(1, 31)),
+                expected_l15,
+                event_catalog_publication_id="event-catalog",
+                event_catalog_checksum="c" * 64,
+            )
+
+    class Publication:
+        def session(self):
+            return sessionmaker(bind=engine, expire_on_commit=False)()
+
+        def compose_from_observations(self, *args, **kwargs):
+            return object()
+
+    class Matchup:
+        def __init__(self):
+            self.as_of = None
+
+        def refresh_publication_surfaces(self, *args, **kwargs):
+            self.as_of = kwargs["as_of"]
+
+    matchup = Matchup()
+    listed_through = []
+    list_games = repository.list_games
+
+    def capture_list_games(season, *, through=None, connection=None):
+        listed_through.append(through)
+        return list_games(season, through=through, connection=connection)
+
+    repository.list_games = capture_list_games
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=None,
+        governance=Governance(),
+        matchup_materialization=matchup,
+        publication_service=Publication(),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+    assert listed_through == [slate_date]
+    assert matchup.as_of == slate_date
+
+
+def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
+    tmp_path,
+):
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-only-retry.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id
+            for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in team_ids
+    }
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="player-only",
+            stream_key="player_game_logs",
+            manifest_id=None,
+            season="2025-26",
+            cutoff=cutoff,
+            status="queued",
+            attempts=0,
+            created_at=cutoff,
+            updated_at=cutoff,
+        ))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, expected, team_ids, expected_l15
+            )
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    matchup_repository = TeamMatchupRepository(engine)
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            matchup_repository,
+            clock=lambda: cutoff + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob)).mappings().one()
+    assert job["status"] == "succeeded"
+    assert matchup_repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    ).observations == ()
+    assert matchup_repository._issued_authorities == {}
 
 
 def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
@@ -696,7 +945,7 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(CompositionJob.__table__.insert().values(
-            job_id="matchup", stream_key="traditional_opponent_season",
+            job_id="matchup", stream_key="traditional_opponent_l15",
             manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
             attempts=0, created_at=cutoff, updated_at=cutoff,
         ))
@@ -742,7 +991,6 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
         (item.surface, item.status, item.unavailable_reason)
         for item in l15.observations
     } == {
-        ("assist_locations", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     assert len(captured["expected_l15_game_ids"]) == 30

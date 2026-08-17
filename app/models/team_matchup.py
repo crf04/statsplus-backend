@@ -47,6 +47,10 @@ class TeamMatchupFactRow(Base):
     #: provider-collected legacy facts; ledger-owned facts always carry both.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    source_observation_ids = Column(Text, nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
+    cutoff = Column(DateTime(timezone=True), nullable=True)
+    recomposition_reason = Column(String(128), nullable=True)
     #: Immutable NBA publication lineage; legacy and ledger-owned facts keep
     #: these columns NULL.
     publication_id = Column(String(128), nullable=True)
@@ -93,6 +97,10 @@ class TeamMatchupSurfaceObservationRow(Base):
     #: provider-collected legacy observations.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    source_observation_ids = Column(Text, nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
+    cutoff = Column(DateTime(timezone=True), nullable=True)
+    recomposition_reason = Column(String(128), nullable=True)
     publication_id = Column(String(128), nullable=True)
     publication_cutoff = Column(String(64), nullable=True)
     publication_freshness = Column(String(32), nullable=True)

@@ -262,6 +262,186 @@ def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
             connection.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)")
             )
+        if "source_observation_ids" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN source_observation_ids TEXT")
+            )
+        if "game_set_checksum" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN game_set_checksum VARCHAR(64)")
+            )
+        if "cutoff" not in existing:
+            cutoff_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if connection.dialect.name == "postgresql"
+                else "DATETIME"
+            )
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN cutoff {cutoff_type}")
+            )
+        if "recomposition_reason" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN recomposition_reason VARCHAR(128)")
+            )
+
+
+def _upgrade_correction_propagation(connection: Connection) -> None:
+    """Add durable correction metadata without changing the migration head.
+
+    The correction seam was added after migration 034 had already shipped in
+    some environments.  Keeping this additive upgrade in migration 036 makes
+    both fresh and upgraded temporary databases expose the same contract while
+    preserving the repository's linear migration history.
+    """
+    preparer = connection.dialect.identifier_preparer
+    timestamp_type = (
+        "TIMESTAMP WITH TIME ZONE"
+        if connection.dialect.name == "postgresql"
+        else "DATETIME"
+    )
+    additions = {
+        "composition_jobs": {
+            "trigger_game_id": "VARCHAR(64)",
+            "trigger_game_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "affected_team_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "source_observation_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "recomposition_reason": "VARCHAR(128)",
+            "ledger_checksum": "VARCHAR(64)",
+            "game_set_checksum": "VARCHAR(64)",
+            "ledger_evidence": "TEXT NOT NULL DEFAULT '{}'",
+            "generation": "INTEGER NOT NULL DEFAULT 1",
+            "claimed_generation": "INTEGER",
+        },
+        "team_matchup_facts": {
+            "source_observation_ids": "TEXT",
+            "game_set_checksum": "VARCHAR(64)",
+            "cutoff": timestamp_type,
+            "recomposition_reason": "VARCHAR(128)",
+        },
+        "team_matchup_surface_observations": {
+            "source_observation_ids": "TEXT",
+            "game_set_checksum": "VARCHAR(64)",
+            "cutoff": timestamp_type,
+            "recomposition_reason": "VARCHAR(128)",
+        },
+    }
+    correction_columns_added = False
+    for table_name, table_additions in additions.items():
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        table = preparer.quote(table_name)
+        for name, type_sql in table_additions.items():
+            if name in existing:
+                continue
+            connection.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
+            ))
+            correction_columns_added |= table_name == "composition_jobs"
+
+    # The compatibility backfill is only safe while the correction columns are
+    # being introduced.  Re-running migrations is a normal startup operation;
+    # once the schema is current, rewriting a live row could clear a worker's
+    # claim while it is composing.
+    if correction_columns_added:
+        _backfill_correction_lineage(connection)
+
+
+def _backfill_correction_lineage(connection: Connection) -> None:
+    """Upgrade legacy singular/scalar queue lineage into keyed evidence.
+
+    The additive columns intentionally had harmless defaults so old writes
+    could continue during a rolling deploy.  A default ``[]``/``{}`` is not
+    evidence, though: once the writer is upgraded, old queued rows must retain
+    their singular trigger and checksum rather than silently becoming an
+    unrelated empty job.
+    """
+
+    import hashlib
+    import json
+
+    table = Table("composition_jobs", MetaData(), autoload_with=connection)
+
+    def parsed_list(value) -> list[str]:
+        if value is None or value == "":
+            return []
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if isinstance(parsed, list):
+            return [
+                str(item) for item in parsed
+                if isinstance(item, (str, int)) and str(item)
+            ]
+        if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+            return [str(parsed)]
+        return []
+
+    def parsed_mapping(value) -> dict[str, str]:
+        if value is None or value == "":
+            return {}
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(game_id): str(checksum)
+            for game_id, checksum in parsed.items()
+            if isinstance(game_id, (str, int))
+            and isinstance(checksum, (str, int))
+            and str(game_id)
+            and str(checksum)
+        }
+
+    rows = connection.execute(select(table)).mappings().all()
+    for row in rows:
+        trigger_ids = parsed_list(row.get("trigger_game_ids"))
+        legacy_trigger = row.get("trigger_game_id")
+        if not trigger_ids and legacy_trigger:
+            trigger_ids = [str(legacy_trigger)]
+        evidence = parsed_mapping(row.get("ledger_evidence"))
+        if not evidence and trigger_ids and row.get("ledger_checksum"):
+            # Legacy rows had only one checksum, so it can safely be bound to
+            # the singular trigger.  For malformed multi-trigger legacy rows,
+            # retain the evidence as one deterministic fallback rather than
+            # inventing a checksum for an unknown game.
+            if len(trigger_ids) == 1:
+                evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
+        if not trigger_ids and evidence:
+            trigger_ids = sorted(evidence)
+        if not trigger_ids and not evidence and not row.get("trigger_game_id"):
+            # There is no legacy evidence to recover; normalize only the
+            # generation so future claims are still versioned.  A live claim
+            # is not compatibility data and must survive this upgrade.
+            values = {"generation": max(int(row.get("generation") or 0), 1)}
+            connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
+            continue
+        trigger_ids = sorted(set(trigger_ids) | set(evidence))
+        if evidence:
+            encoded_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
+            if len(evidence) == 1:
+                checksum = next(iter(evidence.values()))
+            else:
+                checksum = hashlib.sha256(encoded_evidence.encode()).hexdigest()
+        else:
+            encoded_evidence = "{}"
+            checksum = row.get("ledger_checksum")
+        encoded_ids = json.dumps(trigger_ids, separators=(",", ":"))
+        values = {
+            "trigger_game_ids": encoded_ids,
+            "trigger_game_id": trigger_ids[0] if len(trigger_ids) == 1 else None,
+            "ledger_evidence": encoded_evidence,
+            "ledger_checksum": checksum,
+            "game_set_checksum": hashlib.sha256(
+                json.dumps(trigger_ids, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "generation": max(int(row.get("generation") or 0), 1),
+        }
+        connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
 
 
 def _add_team_matchup_publication_lineage(connection: Connection) -> None:
@@ -955,6 +1135,8 @@ def _create_publication_player_game_log_projection(
 ) -> None:
     """Create and backfill immutable player-log rows keyed by publication."""
 
+    _upgrade_correction_propagation(connection)
+
     from app.models.collection_control import PublicationVersion
     from app.models.player_game_log import PublicationPlayerGameLog
     from app.services.database_first_activation import PublicationPayloadError
@@ -1335,6 +1517,13 @@ def run_migrations(engine: Engine) -> MigrationResult:
             )
             applied_versions.add(migration.version)
             applied_names.append(migration.name)
+
+        # Issue #116 extends the already-published migration-036 head.  Run
+        # this additive, idempotent compatibility upgrade for databases that
+        # recorded 036 before the correction metadata existed; fresh databases
+        # have already executed it from the 036 upgrade function above.
+        if max(applied_versions, default=0) >= 36:
+            _upgrade_correction_propagation(connection)
 
     return MigrationResult(
         applied=tuple(applied_names),

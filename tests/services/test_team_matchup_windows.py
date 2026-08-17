@@ -453,9 +453,10 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "team_matchup_facts",
         "team_matchup_surface_observations",
     }.issubset(inspect(engine).get_table_names())
-    assert {
+    fact_columns = {
         column["name"] for column in inspect(engine).get_columns("team_matchup_facts")
-    } == {
+    }
+    assert {
         "id",
         "season",
         "as_of_date",
@@ -472,13 +473,22 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "window_start_date",
         "window_end_date",
         "retrieved_at",
+    } <= fact_columns
+    # Migration 034 and the correction-propagation upgrade add lineage to the
+    # migration-012 read model.  Keep this assertion additive so future
+    # schema-compatible columns do not make the migration smoke test brittle.
+    assert {
         "game_ids",
         "ledger_checksum",
+        "source_observation_ids",
+        "game_set_checksum",
+        "cutoff",
+        "recomposition_reason",
         "publication_id",
         "publication_cutoff",
         "publication_freshness",
         "publication_version",
-    }
+    } <= fact_columns
 
 
 def test_stored_raw_facts_produce_deterministic_30_team_league_metrics(tmp_path):

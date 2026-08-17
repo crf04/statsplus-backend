@@ -5,27 +5,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
+import logging
 from typing import Mapping, Protocol
+from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy.orm import sessionmaker
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
-from app.domain.nba_events import is_completed_non_postponed_event
+from app.domain.nba_events import (
+    is_completed_non_postponed_event,
+)
 from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
     CollectionManifest,
+    CollectionObservation,
     CompositionJob,
+    ReconciliationItem,
 )
-from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
+from app.services.ledger_materialization import LedgerCorrectionQueue
+from app.services.ledger_materialization import LedgerMaterializationUnavailable
+from app.services.ledger_derivations import LedgerDerivationUnavailable
+from app.services.ledger_lineage import LedgerLineage
+from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +107,11 @@ class ActiveManifestLedgerGovernanceReader:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
-        return self.read_for_composition(season, cutoff)
+        return self._read(
+            season,
+            cutoff,
+            require_collection_authorization=False,
+        )
 
     def read_for_composition(
         self,
@@ -262,7 +279,15 @@ class ActiveManifestLedgerGovernanceReader:
             raise PublicationGovernanceUnavailable(
                 "active manifest and completed Event Catalog governance are required"
             )
-        events = self._immutable_catalog_events(manifest)
+        if (
+            manifest["event_catalog_publication_id"]
+            and manifest["event_catalog_checksum"]
+        ):
+            events = self._immutable_catalog_events(manifest)
+        else:
+            raise PublicationGovernanceUnavailable(
+                "active manifest and immutable Event Catalog governance are required"
+            )
         if not events:
             raise PublicationGovernanceUnavailable(
                 "completed Regular Season Event Catalog governance is required"
@@ -277,7 +302,9 @@ class ActiveManifestLedgerGovernanceReader:
             team_id: tuple(
                 str(event["nba_game_id"])
                 for event in reversed(events)
-                if team_id in {event["home_team_id"], event["away_team_id"]}
+                if team_id in {
+                    event["home_team_id"], event["away_team_id"]
+                }
             )
             for team_id in team_ids
         }
@@ -437,6 +464,13 @@ _SEASON_STREAMS = frozenset({
     "assist_locations_season",
 })
 
+_MATCHUP_STREAMS = frozenset({
+    "traditional_opponent_season",
+    "traditional_opponent_l15",
+    "assist_locations_season",
+    "assist_locations_l15",
+})
+
 
 def _composition_failure_reason(
     stream_key: str,
@@ -505,7 +539,9 @@ class LedgerRuntime:
         self.materialization = materialization
         self.governance = governance
         self.matchup_materialization = matchup_materialization
-        self.publication_service = publication_service
+        self.publication_service = publication_service or getattr(
+            materialization, "publication_service", None
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def refresh(
@@ -531,13 +567,13 @@ class LedgerRuntime:
     def compose_queued(self, season: str) -> int:
         table = CompositionJob.__table__
         with self.repository.engine.connect() as connection:
-            jobs = connection.execute(select(table).where(
+            queued = connection.execute(select(table).where(
                 table.c.season == season,
                 table.c.status == "queued",
             ).order_by(table.c.cutoff, table.c.created_at)).mappings().all()
         slices = sorted({
             (row["cutoff"], row["manifest_id"])
-            for row in jobs
+            for row in queued
         }, key=lambda item: (item[0], item[1] or ""))
         completed = 0
         for stored_cutoff, manifest_id in slices:
@@ -546,111 +582,231 @@ class LedgerRuntime:
                 if stored_cutoff.tzinfo is None
                 else stored_cutoff
             )
-            slice_jobs = [
-                row for row in jobs
-                if row["cutoff"] == stored_cutoff
-                and row["manifest_id"] == manifest_id
-            ]
-            nba_jobs = [
-                row for row in slice_jobs
-                if row["stream_key"] in NBA_PUBLICATION_STREAM_KEYS
-            ]
-            ledger_jobs = [
-                row for row in slice_jobs
-                if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
-            ]
-            publication_service = self.publication_service
-            if (nba_jobs or ledger_jobs) and publication_service is None:
-                publication_service = PublicationService(
-                    self.repository.engine,
-                    l15_expectation_resolver=self.governance,
-                )
-            if (
-                (nba_jobs or ledger_jobs)
-                and self.matchup_materialization is not None
-            ):
-                succeeded_jobs = []
-                failed_jobs = {}
-                succeeded_ledger_jobs = []
-                try:
-                    with publication_service.session() as session, session.begin():
-                        # Establish the outer write transaction before SQLite
-                        # savepoints; otherwise releasing the first savepoint
-                        # can commit it independently of a later projection
-                        # rollback.
-                        session.execute(update(table).where(
-                            table.c.job_id.in_([
-                                job["job_id"] for job in slice_jobs
-                            ]),
-                        ).values(updated_at=self.clock()))
-                        for job in nba_jobs:
-                            try:
-                                if not manifest_id:
-                                    raise ControlPlaneError(
-                                        "publication_governance_unavailable"
-                                    )
-                                with session.begin_nested():
-                                    publication_service.compose_from_observations(
-                                        job["stream_key"], season=season,
-                                        cutoff=cutoff, manifest_id=manifest_id,
-                                        session=session,
-                                    )
-                            except ControlPlaneError as error:
-                                failed_jobs[job["job_id"]] = str(error)[:255]
-                            else:
-                                succeeded_jobs.append(job)
-                        if succeeded_jobs or ledger_jobs:
-                            governance = self.governance.read_for_composition(
-                                season, cutoff, manifest_id,
-                            )
-                        if ledger_jobs:
-                            slate_date = slate_date_for_instant(cutoff)
-                            self.matchup_materialization.materialize(
-                                season,
-                                as_of=slate_date,
-                                expected_game_ids=governance.expected_game_ids,
-                                expected_l15_game_ids=(
-                                    governance.expected_l15_game_ids
-                                ),
-                                team_ids=governance.team_ids,
-                                session=session,
-                            )
-                            games = tuple(
-                                game
-                                for summary in self.repository.list_games(
-                                    season, through=slate_date
+            # Claim the complete slice under a row lock.  ``generation`` is
+            # lineage versioning, not an attempt count: acceptance can bump it
+            # while composition runs and leave the row queued for the next
+            # worker. Keep the claim transaction open through the input
+            # snapshot, every read-model write, and the completion CAS.
+            # PostgreSQL row locks then serialize acceptance behind this
+            # transaction; the final CAS remains a defensive fence for
+            # deployments without row-level locking.
+            slice_jobs = None
+            try:
+                with self._session_factory() as session, session.begin():
+                    rows = session.scalars(select(CompositionJob).where(
+                        CompositionJob.season == season,
+                        CompositionJob.cutoff == stored_cutoff,
+                        CompositionJob.manifest_id == manifest_id,
+                        CompositionJob.status == "queued",
+                    ).with_for_update().order_by(
+                        case(
+                            *[(CompositionJob.stream_key == stream, index)
+                              for stream, index in LedgerCorrectionQueue.STREAM_ORDER.items()],
+                            else_=len(LedgerCorrectionQueue.STREAM_ORDER),
+                        ),
+                        CompositionJob.created_at,
+                        CompositionJob.job_id,
+                    )).all()
+                    if not rows:
+                        continue
+                    slice_jobs = tuple(
+                        {
+                            "job_id": str(row.job_id),
+                            "stream_key": str(row.stream_key),
+                            "cutoff": row.cutoff,
+                            "manifest_id": row.manifest_id,
+                            "generation": int(row.generation or 1),
+                            "trigger_game_id": row.trigger_game_id,
+                            "trigger_game_ids": row.trigger_game_ids,
+                            "affected_team_ids": row.affected_team_ids,
+                            "source_observation_ids": row.source_observation_ids,
+                            "ledger_checksum": row.ledger_checksum,
+                            "game_set_checksum": row.game_set_checksum,
+                            "ledger_evidence": row.ledger_evidence,
+                            "recomposition_reason": row.recomposition_reason,
+                        }
+                        for row in rows
+                    )
+                    nba_jobs = tuple(
+                        row for row in slice_jobs
+                        if row["stream_key"] in NBA_PUBLICATION_STREAM_KEYS
+                    )
+                    ledger_jobs = tuple(
+                        row for row in slice_jobs
+                        if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+                    )
+                    active_jobs = ledger_jobs or slice_jobs
+                    reason = next(
+                        (
+                            str(row["recomposition_reason"])
+                            for row in active_jobs
+                            if row.get("recomposition_reason")
+                        ),
+                        "scheduled_reconciliation",
+                    )
+                    affected_team_ids = frozenset(
+                        int(team_id)
+                        for row in active_jobs
+                        for team_id in _json_list(row.get("affected_team_ids"))
+                        if str(team_id).isdigit()
+                    )
+                    trigger_game_ids = frozenset(
+                        str(game_id)
+                        for row in active_jobs
+                        for game_id in _json_list(row.get("trigger_game_ids"))
+                    )
+                    if not trigger_game_ids:
+                        trigger_game_ids = frozenset(
+                            str(row["trigger_game_id"])
+                            for row in active_jobs
+                            if row.get("trigger_game_id")
+                        )
+                    trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
+                    pending_source_observation_ids = {
+                        str(source_observation_id)
+                        for row in active_jobs
+                        for source_observation_id in _json_list(
+                            row.get("source_observation_ids")
+                        )
+                    }
+                    source_observation_ids_by_game = {}
+                    if pending_source_observation_ids:
+                        source_rows = session.scalars(
+                            select(CollectionObservation).where(
+                                CollectionObservation.observation_id.in_(
+                                    pending_source_observation_ids
                                 )
-                                if (
-                                    game := self.repository.get_game(
-                                        summary.game_id
-                                    )
-                                ) is not None
+                            ).order_by(
+                                CollectionObservation.accepted_at,
+                                CollectionObservation.observation_id,
                             )
-                            materialized = self.materialization.compose(
-                                games,
-                                season=season,
-                                as_of=slate_date,
-                                cutoff=cutoff,
-                                expected_game_ids=governance.expected_game_ids,
-                                expected_l15_game_ids=(
-                                    governance.expected_l15_game_ids
-                                ),
-                                team_ids=governance.team_ids,
-                                session=session,
+                        ).all()
+                        for source_row in source_rows:
+                            try:
+                                source_scope = json.loads(source_row.scope)
+                            except (TypeError, ValueError):
+                                continue
+                            if not isinstance(source_scope, Mapping):
+                                continue
+                            source_game_id = str(
+                                source_scope.get("game_id") or ""
                             )
-                            succeeded_streams = _succeeded_ledger_streams(
-                                materialized
+                            if source_game_id:
+                                source_observation_ids_by_game[source_game_id] = (
+                                    str(source_row.observation_id)
+                                )
+                    governance = self.governance.read_for_composition(
+                        season,
+                        cutoff,
+                        manifest_id,
+                    )
+                    composition_as_of = slate_date_for_instant(cutoff)
+                    read_connection = session.connection()
+                    try:
+                        summaries = self.repository.list_games(
+                            season,
+                            through=composition_as_of,
+                            connection=read_connection,
+                        )
+                    except TypeError as error:
+                        if "connection" not in str(error):
+                            raise
+                        summaries = self.repository.list_games(
+                            season,
+                            through=composition_as_of,
+                        )
+                    games = tuple(
+                        game
+                        for summary in summaries
+                        if (game := self.repository.get_game(
+                            summary.game_id,
+                            connection=read_connection,
+                        )) is not None
+                    )
+                    games_by_id = {game.game_id: game for game in games}
+                    for row in ledger_jobs:
+                        raw_evidence = row.get("ledger_evidence")
+                        evidence = (
+                            json.loads(raw_evidence)
+                            if isinstance(raw_evidence, str) and raw_evidence
+                            else raw_evidence if isinstance(raw_evidence, dict) else {}
+                        )
+                        pending_ids = set(_json_list(row.get("trigger_game_ids")))
+                        if not pending_ids and row.get("trigger_game_id"):
+                            pending_ids = {str(row["trigger_game_id"])}
+                        if pending_ids != set(evidence):
+                            raise ControlPlaneError("pending_ledger_evidence_mismatch")
+                        if evidence:
+                            expected_ledger_checksum = (
+                                next(iter(evidence.values()))
+                                if len(evidence) == 1
+                                else LedgerLineage.evidence_checksum(evidence)
                             )
-                            for job in ledger_jobs:
-                                if job["stream_key"] in succeeded_streams:
-                                    succeeded_ledger_jobs.append(job)
-                                else:
-                                    failed_jobs[job["job_id"]] = (
-                                        _composition_failure_reason(
-                                            job["stream_key"], materialized
-                                        )
-                                    )
-                        elif succeeded_jobs:
+                            expected_game_set_checksum = LedgerLineage.for_game_ids(
+                                evidence
+                            )
+                            if (
+                                str(row.get("ledger_checksum") or "")
+                                != expected_ledger_checksum
+                                or str(row.get("game_set_checksum") or "")
+                                != expected_game_set_checksum
+                            ):
+                                raise ControlPlaneError("pending_ledger_evidence_mismatch")
+                        if any(
+                            game_id in games_by_id
+                            and str(checksum) != str(games_by_id[game_id].checksum)
+                            for game_id, checksum in evidence.items()
+                        ):
+                            raise ControlPlaneError("queued_ledger_evidence_stale")
+                    if not trigger_game_ids:
+                        trigger_game_ids = frozenset(
+                            game.game_id
+                            for game in games
+                            if game.source_observation_id
+                            in pending_source_observation_ids
+                        )
+                        trigger_game_id = next(
+                            iter(sorted(trigger_game_ids)), None
+                        )
+                    # Publish the claim only after the complete input
+                    # snapshot is loaded, avoiding a SQLite writer lock while
+                    # repository reads establish the transaction snapshot.
+                    for row in rows:
+                        row.status = "running"
+                        row.claimed_generation = int(row.generation or 1)
+                        row.updated_at = self.clock()
+                    session.flush()
+                    nba_succeeded_streams: set[str] = set()
+                    nba_failures: dict[str, str] = {}
+                    publication_service = self.publication_service
+                    if nba_jobs and publication_service is None:
+                        publication_service = PublicationService(
+                            self.repository.engine,
+                            l15_expectation_resolver=self.governance,
+                        )
+                    for job in nba_jobs:
+                        try:
+                            if not manifest_id:
+                                raise ControlPlaneError(
+                                    "publication_governance_unavailable"
+                                )
+                            with session.begin_nested():
+                                publication_service.compose_from_observations(
+                                    job["stream_key"],
+                                    season=season,
+                                    cutoff=cutoff,
+                                    manifest_id=manifest_id,
+                                    session=session,
+                                )
+                        except ControlPlaneError as error:
+                            nba_failures[job["job_id"]] = str(error)[:255]
+                        else:
+                            nba_succeeded_streams.add(job["stream_key"])
+                    if nba_jobs and not ledger_jobs:
+                        if (
+                            nba_succeeded_streams
+                            and self.matchup_materialization is not None
+                        ):
                             self.matchup_materialization.refresh_publication_surfaces(
                                 season,
                                 as_of=slate_date_for_instant(cutoff),
@@ -663,136 +819,256 @@ class LedgerRuntime:
                                 team_ids=governance.team_ids,
                                 session=session,
                             )
-                        now = self.clock()
-                        successful_jobs = [
-                            *succeeded_jobs, *succeeded_ledger_jobs,
-                        ]
-                        if successful_jobs:
-                            session.execute(update(table).where(
-                                table.c.job_id.in_([
-                                    job["job_id"] for job in successful_jobs
-                                ]),
+                        cas_failed = False
+                        for job in nba_jobs:
+                            success = job["stream_key"] in nba_succeeded_streams
+                            result = session.execute(update(table).where(
+                                table.c.job_id == job["job_id"],
+                                table.c.status == "running",
+                                table.c.generation == job["generation"],
+                                table.c.claimed_generation == job["generation"],
                             ).values(
-                                status="succeeded", updated_at=now,
-                                last_error=None,
+                                status="succeeded" if success else "failed",
+                                updated_at=self.clock(),
+                                claimed_generation=None,
+                                last_error=(
+                                    None if success
+                                    else nba_failures.get(
+                                        job["job_id"],
+                                        "publication_composition_failed",
+                                    )
+                                ),
                             ))
-                        for job_id, last_error in failed_jobs.items():
-                            session.execute(update(table).where(
-                                table.c.job_id == job_id,
-                            ).values(
-                                status="failed", updated_at=now,
-                                last_error=last_error,
-                            ))
-                except Exception as error:
-                    # Publication pointers, projections, and Matchups rows were
-                    # rolled back together.  Keep successfully composed jobs
-                    # queued so the existing unique job can be retried.
-                    with self.repository.engine.begin() as connection:
-                        retryable_jobs = [*succeeded_jobs, *ledger_jobs]
-                        if retryable_jobs:
-                            connection.execute(update(table).where(
-                                table.c.job_id.in_([
-                                    job["job_id"] for job in retryable_jobs
-                                ]),
-                            ).values(
-                                status="queued", updated_at=self.clock(),
-                                last_error=str(error)[:255],
-                            ))
-                        for job_id, last_error in failed_jobs.items():
-                            connection.execute(update(table).where(
-                                table.c.job_id == job_id,
-                            ).values(
-                                status="failed", updated_at=self.clock(),
-                                last_error=last_error,
-                            ))
-                else:
-                    completed += len(succeeded_jobs) + len(succeeded_ledger_jobs)
-                continue
-            nba_succeeded = False
-            for job in nba_jobs:
-                try:
-                    if not manifest_id:
-                        raise ControlPlaneError("publication_governance_unavailable")
-                    publication_service.compose_from_observations(
-                        job["stream_key"], season=season, cutoff=cutoff,
-                        manifest_id=manifest_id,
-                    )
-                except ControlPlaneError as error:
-                    status, last_error = "failed", str(error)[:255]
-                else:
-                    status, last_error = "succeeded", None
-                    nba_succeeded = True
-                    completed += 1
-                with self.repository.engine.begin() as connection:
-                    connection.execute(update(table).where(
-                        table.c.job_id == job["job_id"],
-                    ).values(
-                        status=status, updated_at=self.clock(),
-                        last_error=last_error,
-                    ))
-            if not ledger_jobs:
-                if nba_succeeded and self.matchup_materialization is not None:
-                    governance = self.governance.read_for_composition(
-                        season, cutoff, manifest_id,
-                    )
-                    self.matchup_materialization.refresh_publication_surfaces(
-                        season,
-                        as_of=slate_date_for_instant(cutoff),
-                        expected_game_ids_by_team=(
-                            governance.expected_season_game_ids
-                        ),
+                            if result.rowcount != 1:
+                                cas_failed = True
+                            else:
+                                completed += int(success)
+                        if cas_failed:
+                            raise ControlPlaneError(
+                                "stale_composition_generation"
+                            )
+                        continue
+                    claimed_streams = {
+                        str(row["stream_key"])
+                        for row in slice_jobs
+                    }
+                    if (
+                        self.matchup_materialization is not None
+                        and claimed_streams & _MATCHUP_STREAMS
+                    ):
+                        # Matchup facts, surface observations, ledger metadata,
+                        # candidates, enabled publications, and pointer fences
+                        # all use this same session transaction.
+                        with (
+                            self.matchup_materialization._runtime_write_authority(
+                                session,
+                                claimed_job_generations={
+                                    str(row["job_id"]): int(row["generation"])
+                                    for row in slice_jobs
+                                },
+                                season=season,
+                                cutoff=cutoff,
+                                manifest_id=manifest_id,
+                            )
+                            as issued
+                        ):
+                            write_authority = issued
+                            self.matchup_materialization.materialize(
+                                season,
+                                as_of=composition_as_of,
+                                cutoff=cutoff,
+                                recomposition_reason=reason,
+                                affected_team_ids=(affected_team_ids or None),
+                                trigger_game_id=trigger_game_id,
+                                trigger_game_ids=(trigger_game_ids or None),
+                                expected_game_ids=governance.expected_game_ids,
+                                expected_l15_game_ids=governance.expected_l15_game_ids,
+                                team_ids=governance.team_ids,
+                                write_authority=write_authority,
+                                claimed_streams=frozenset(claimed_streams),
+                                session=session,
+                            )
+                    materialized = self.materialization.compose(
+                        games,
+                        season=season,
+                        as_of=composition_as_of,
+                        cutoff=cutoff,
+                        expected_game_ids=governance.expected_game_ids,
                         expected_l15_game_ids=governance.expected_l15_game_ids,
                         team_ids=governance.team_ids,
-                    )
-                continue
-            governance = self.governance.read_for_composition(
-                season,
-                cutoff,
-                manifest_id,
-            )
-            slate_date = slate_date_for_instant(cutoff)
-            if self.matchup_materialization is not None:
-                # Publish the disposable ledger-owned matchup read model at the
-                # exact composition cutoff before composing publication streams,
-                # so an incomplete Season/L15 publishes explicit unavailable
-                # observations instead of approximating a league window.
-                self.matchup_materialization.materialize(
-                    season,
-                    as_of=slate_date,
-                    expected_game_ids=governance.expected_game_ids,
-                    expected_l15_game_ids=governance.expected_l15_game_ids,
-                    team_ids=governance.team_ids,
-                )
-            games = tuple(
-                game
-                for summary in self.repository.list_games(season, through=slate_date)
-                if (game := self.repository.get_game(summary.game_id)) is not None
-            )
-            materialized = self.materialization.compose(
-                games,
-                season=season,
-                as_of=slate_date,
-                cutoff=cutoff,
-                expected_game_ids=governance.expected_game_ids,
-                expected_l15_game_ids=governance.expected_l15_game_ids,
-                team_ids=governance.team_ids,
-            )
-            succeeded = _succeeded_ledger_streams(materialized)
-            with self.repository.engine.begin() as connection:
-                for job in ledger_jobs:
-                    success = job["stream_key"] in succeeded
-                    connection.execute(update(table).where(
-                        table.c.job_id == job["job_id"],
-                    ).values(
-                        status="succeeded" if success else "failed",
-                        updated_at=self.clock(),
-                        last_error=(
-                            None if success
-                            else _composition_failure_reason(job["stream_key"], materialized)
+                        activate=self.publication_service is not None,
+                        recomposition_reason=reason,
+                        source_observation_ids_by_game=(
+                            source_observation_ids_by_game or None
                         ),
-                    ))
-                    completed += int(success)
+                        session=session,
+                    )
+                    succeeded = set()
+                    if materialized.season_window.complete:
+                        succeeded |= {
+                            "player_game_logs",
+                            "traditional_opponent_season",
+                            "player_per36",
+                        }
+                    if materialized.l15_window.complete:
+                        succeeded |= {"traditional_opponent_l15"}
+                    if (
+                        materialized.assist_location_season is not None
+                        and materialized.assist_location_l15 is not None
+                    ):
+                        if materialized.season_window.complete:
+                            succeeded |= {"assist_locations_season"}
+                        if materialized.l15_window.complete:
+                            succeeded |= {"assist_locations_l15"}
+                    cas_failed = False
+                    for job in slice_jobs:
+                        if job["stream_key"] in NBA_PUBLICATION_STREAM_KEYS:
+                            success = job["stream_key"] in nba_succeeded_streams
+                            failure_reason = nba_failures.get(
+                                job["job_id"],
+                                "publication_composition_failed",
+                            )
+                        else:
+                            success = job["stream_key"] in succeeded
+                            failure_reason = _composition_failure_reason(
+                                job["stream_key"], materialized
+                            )
+                        result = session.execute(update(table).where(
+                            table.c.job_id == job["job_id"],
+                            table.c.status == "running",
+                            table.c.generation == job["generation"],
+                            table.c.claimed_generation == job["generation"],
+                        ).values(
+                            status="succeeded" if success else "failed",
+                            updated_at=self.clock(),
+                            claimed_generation=None,
+                            last_error=(
+                                None if success
+                                else failure_reason
+                            ),
+                            # These columns are a pending-work envelope, not
+                            # a second publication audit log.  Successful
+                            # provenance is retained by PublicationObservation
+                            # for the version that was composed; leaving it on
+                            # a succeeded job makes reconciliation mistake an
+                            # already-composed source for new work.
+                            trigger_game_id=None if success else table.c.trigger_game_id,
+                            trigger_game_ids="[]" if success else table.c.trigger_game_ids,
+                            affected_team_ids="[]" if success else table.c.affected_team_ids,
+                            source_observation_ids="[]" if success else table.c.source_observation_ids,
+                            recomposition_reason=None if success else table.c.recomposition_reason,
+                            ledger_checksum=None if success else table.c.ledger_checksum,
+                            game_set_checksum=None if success else table.c.game_set_checksum,
+                            ledger_evidence="{}" if success else table.c.ledger_evidence,
+                        ))
+                        if result.rowcount != 1:
+                            cas_failed = True
+                        else:
+                            completed += int(success)
+                    if cas_failed:
+                        raise ControlPlaneError("stale_composition_generation")
+            except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable):
+                self._mark_slice_failed(
+                    season=season,
+                    cutoff=stored_cutoff,
+                    manifest_id=manifest_id,
+                    jobs=slice_jobs or (),
+                    reason="recomposition_failed",
+                )
+                continue
+            except Exception:
+                self._mark_slice_failed(
+                    season=season,
+                    cutoff=stored_cutoff,
+                    manifest_id=manifest_id,
+                    jobs=slice_jobs or (),
+                    reason="recomposition_failed",
+                )
+                logger.exception("unexpected ledger recomposition failure", extra={"season": season})
+                raise
         return completed
+
+    def _session_factory(self):
+        publication_service = self.publication_service
+        if publication_service is not None:
+            return publication_service.session()
+        return sessionmaker(bind=self.repository.engine, expire_on_commit=False)()
+
+    def _mark_slice_failed(
+        self,
+        *,
+        season: str,
+        cutoff,
+        manifest_id: str | None,
+        jobs,
+        reason: str,
+    ) -> None:
+        """Keep the last publication readable and leave a retryable marker."""
+        now = self.clock()
+        dedupe_key = f"ledger-recomposition:{season}:{cutoff}:{manifest_id or ''}"[:128]
+        table = CompositionJob.__table__
+        with self.repository.engine.begin() as connection:
+            for job in jobs:
+                connection.execute(update(table).where(
+                    table.c.job_id == job["job_id"],
+                    table.c.generation == job["generation"],
+                    or_(
+                        and_(
+                            table.c.status == "running",
+                            table.c.claimed_generation == job["generation"],
+                        ),
+                        and_(
+                            table.c.status == "queued",
+                            table.c.claimed_generation.is_(None),
+                        ),
+                    ),
+                ).values(
+                    status="failed",
+                    attempts=table.c.attempts + 1,
+                    updated_at=now,
+                    last_error=reason,
+                ))
+            existing = connection.execute(select(ReconciliationItem.__table__).where(
+                ReconciliationItem.__table__.c.dedupe_key == dedupe_key,
+            )).mappings().first()
+            details = json.dumps({
+                "cutoff": str(cutoff),
+                "manifest_id": manifest_id,
+                "job_ids": [str(job["job_id"]) for job in jobs],
+            }, sort_keys=True, separators=(",", ":"))
+            if existing is None:
+                connection.execute(ReconciliationItem.__table__.insert().values(
+                    item_id=str(uuid4()),
+                    season=season,
+                    kind="ledger_recomposition",
+                    reason=reason,
+                    details=details,
+                    dedupe_key=dedupe_key,
+                    status="open",
+                    created_at=now,
+                ))
+            else:
+                connection.execute(update(ReconciliationItem.__table__).where(
+                    ReconciliationItem.__table__.c.item_id == existing["item_id"],
+                ).values(
+                    status="open",
+                    resolved_at=None,
+                    details=details,
+                ))
+
+
+def _json_list(value) -> tuple[object, ...]:
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    if isinstance(parsed, list):
+        return tuple(parsed)
+    if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+        return (parsed,)
+    return ()
 
 
 __all__ = [

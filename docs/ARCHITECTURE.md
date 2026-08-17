@@ -1598,7 +1598,16 @@ surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
 `team_matchup_surface_observations`; provider-collected legacy rows keep both
-columns NULL. Migration 037 adds nullable publication ID, version, cutoff, and
+columns NULL, and the existing authenticated Matchups and player-game-log HTTP
+contracts are unchanged and remain provider-free at request time.
+Correction propagation adds nullable source-observation lineage, exact
+game-set checksum, cutoff, and recomposition reason to those read-model rows.
+Composition jobs retain the correction game, affected teams, source lineage,
+and corrected ledger checksum so targeted Season/L15 recomposition can be
+retried without reconstructing the original acceptance request. The additive
+compatibility upgrade runs with the existing migration head; no public route
+contract changes.
+Migration 037 adds nullable publication ID, version, cutoff, and
 freshness lineage to those same rows. The existing authenticated Matchups and
 player-game-log HTTP contracts are unchanged and remain provider-free at
 request time.
