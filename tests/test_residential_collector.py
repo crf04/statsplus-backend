@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, select
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -29,6 +30,22 @@ from app.collector.runner import (
     RunDisposition,
     ResidentialCollector,
 )
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_TAXONOMY,
+)
+from app.models.collection_control import CollectionObservation, CompositionJob
+from app.migrations import run_migrations
+from app.services.collection_control import (
+    CollectorTokenService,
+    CollectionControlService,
+    NBA_TEAM_IDS,
+    NBA_TEAM_ID_TO_TRICODE,
+    ObservationIngestionService,
+    PublicationService,
+    _collector_scope_descriptors,
+)
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
@@ -225,22 +242,218 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
 def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
 
-    descriptors = _collector_scope_descriptors({"grouped_shot_types", "exact_shot_zones"}, NOW)
+    descriptors = _collector_scope_descriptors({
+        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
+    }, NOW)
     opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
-    assert {str(item["parameters"]["team_id"]) for item in opponent} == NBA_TEAM_IDS
-    assert {item["parameters"]["window"] for item in opponent} == {"season", "l15"}
-    assert {item["parameters"]["date_to"] for item in opponent} == {NOW.date().isoformat()}
-    assert all(item["parameters"]["date_from"] is None for item in opponent)
+    team_scoped = [item for item in opponent if "team_id" in item["parameters"]]
+    assert {str(item["parameters"]["team_id"]) for item in team_scoped} == NBA_TEAM_IDS
+    assert {item["parameters"]["window"] for item in team_scoped} == {"season", "l15"}
+    assert {item["parameters"]["date_to"] for item in team_scoped} == {NOW.date().isoformat()}
+    assert all(item["parameters"]["date_from"] is None for item in team_scoped)
+    synergy = [item for item in opponent if item["scope"] == "synergy_opponent"]
+    assert len(synergy) == 11
+    assert {item["parameters"]["window"] for item in synergy} == {"season"}
+    assert {item["parameters"]["subject_code"] for item in synergy} == {"T"}
+    assert not any(item["scope"] in {"grouped_shot_types", "exact_shot_zones"} for item in opponent)
+
+    l15_only = _collector_scope_descriptors(
+        {"grouped_shot_types_opponent_l15"}, NOW
+    )
+    assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
+    assert {item["scope"] for item in l15_only} == {"shot_types_opponent"}
 
     utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
     prior_slate = _collector_scope_descriptors(
-        {"exact_shot_zones"}, utc_evening
+        {"shot_zones_opponent"}, utc_evening
     )
     assert {
         item["parameters"]["date_to"]
         for item in prior_slate
         if item["parameters"].get("subject") == "opponent"
     } == {"2025-11-01"}
+
+
+def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
+    tmp_path: Path,
+):
+    control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
+    run_migrations(control_db)
+    team_ids = sorted(NBA_TEAM_IDS)
+    cutoff = NOW - timedelta(days=1)
+    control = CollectionControlService(control_db, clock=lambda: NOW)
+    control.activate_season("2025-26", actor="operator")
+    event_payload = {"complete_snapshot": True, "events": [{
+        "nba_game_id": f"game-{round_index}-{pair_index}",
+        "home_team_id": team_ids[pair_index * 2],
+        "away_team_id": team_ids[pair_index * 2 + 1],
+        "phase": "Regular Season", "status": "Final",
+        "scheduled_at": (
+            cutoff - timedelta(days=15 - round_index, hours=1)
+        ).isoformat(),
+    } for round_index in range(15) for pair_index in range(15)]}
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    event_publication = control.publish_catalog(
+        event_request.request_id, event_payload, version="event-v1"
+    )
+    assert event_publication.complete
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(athlete_request.request_id, {"complete_snapshot": True, "identities": [{
+        "player_id": "1", "team_id": team_ids[0], "status": "active",
+        "event_ids": [
+            f"game-{round_index}-{pair_index}"
+            for round_index in range(15) for pair_index in range(15)
+        ],
+    }]}, version="athlete-v1")
+    observation_types = {
+        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
+    }
+    publication_streams = {
+        template.format(window=window)
+        for base, template in NBA_PUBLICATION_STREAMS.items()
+        for window in ("season", "l15")
+        if not (base == "play_types" and window == "l15")
+    }
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff,
+        scopes={*publication_streams, "canonical_game_ledger"},
+        collect_before=NOW + timedelta(hours=1),
+    )
+    manifest_scopes = set(json.loads(manifest.scopes))
+    assert observation_types <= manifest_scopes
+    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff)
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": manifest.manifest_id, "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": sorted(manifest_scopes),
+        "scope_descriptors": descriptors,
+    }]}
+
+    class OpponentProvider(FakeProvider):
+        def fetch_synergy_play_types(self, category, **kwargs):
+            assert kwargs["player_or_team_abbreviation"] == "T"
+            return [{
+                "team_id": int(team_id), "category": category,
+                "POSS": 10, "PTS": 12,
+            } for team_id in team_ids]
+
+        def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
+            return [{
+                "team_id": kwargs["team_id"], "category": category,
+                "FGA": 10, "FGM": 5,
+            }]
+
+        def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            return [{
+                "team_id": kwargs["team_id"],
+                "Restricted Area": 1, "In The Paint (Non-RA)": 2,
+                "Mid-Range": 3, "Corner 3": 4,
+                "Above the Break 3": 5,
+            }]
+
+    collector, transport, outbox = _collector(
+        tmp_path, discovery=discovery, provider=OpponentProvider()
+    )
+    result = collector.run()
+    assert result.disposition is RunDisposition.COMPLETE
+    uploaded = [
+        json.loads(gzip.decompress(call[3]))
+        for call in transport.calls
+        if "/api/collector/observations" in call[1]
+    ]
+    assert {document["observation_type"] for document in uploaded} == observation_types
+    assert not {"synergy_play_types", "grouped_shot_types", "exact_shot_zones"}.intersection(
+        document["observation_type"] for document in uploaded
+    )
+
+    governance = ActiveManifestLedgerGovernanceReader(control_db)
+    publications = PublicationService(
+        control_db, clock=lambda: NOW,
+        l15_expectation_resolver=governance,
+    )
+    for base, template in NBA_PUBLICATION_STREAMS.items():
+        for window in ("season", "l15"):
+            if base == "play_types" and window == "l15":
+                continue
+            observation_type = {
+                "play_types": "synergy_opponent",
+                "shot_types": "shot_types_opponent",
+                "shot_zones": "shot_zones_opponent",
+            }[base]
+            publications.register_stream(
+                template.format(window=window), provider="nba",
+                owner="residential_collector",
+                required_observations=[observation_type],
+                publication_strategy="snapshot_replace",
+                supported_windows=[window], completeness_rule="base_complete",
+                enabled=True,
+            )
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: NOW
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=sorted(observation_types),
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ingestion = ObservationIngestionService(
+        control_db, publication_service=publications, clock=lambda: NOW
+    )
+    for document in uploaded:
+        payload = json.dumps(
+            document.pop("payload"), sort_keys=True, separators=(",", ":")
+        ).encode()
+        ingestion.ingest(claims, document, payload)
+    with control_db.connect() as connection:
+        assert {
+            row.stream_key
+            for row in connection.execute(select(CompositionJob))
+        } == publication_streams
+
+    activated = set()
+    for base, template in NBA_PUBLICATION_STREAMS.items():
+        for window in ("season", "l15"):
+            if base == "play_types" and window == "l15":
+                continue
+            stream_key = template.format(window=window)
+            games_by_team = governance.resolve_team_game_ids(
+                "2025-26", cutoff, window=window,
+                manifest_id=manifest.manifest_id,
+                event_catalog_publication_id=manifest.event_catalog_publication_id,
+                event_catalog_checksum=manifest.event_catalog_checksum,
+            )
+            payload = {"rows": [{
+                "team_id": int(team_id),
+                "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
+                "game_ids": sorted(games_by_team[int(team_id)]),
+                "game_count": len(games_by_team[int(team_id)]),
+                "per48": {
+                    metric: float(index + 1)
+                    for index, metric in enumerate(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+                },
+            } for team_id in team_ids]}
+            publication = publications.compose(
+                stream_key, season="2025-26", cutoff=cutoff,
+                payload=payload, manifest_id=manifest.manifest_id,
+            )
+            assert publication.status == "active"
+            activated.add(stream_key)
+    assert activated == {
+        template.format(window=window)
+        for base, template in NBA_PUBLICATION_STREAMS.items()
+        for window in ("season", "l15")
+        if not (base == "play_types" and window == "l15")
+    }
+    with control_db.connect() as connection:
+        assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
+    outbox.close()
 
 
 def test_windows_task_lifecycle_requires_explicit_named_promotion():

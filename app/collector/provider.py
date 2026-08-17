@@ -14,6 +14,7 @@ from .normalizers import (
     SHOT_TYPES,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
+    normalize_opponent_synergy_response,
     normalize_opponent_zone_response,
     normalize_roster_response,
     normalize_schedule_response,
@@ -134,7 +135,7 @@ class ResidentialScopeExecutor:
         scope = work.scope.strip()
         parameters = _scope_mapping(work.parameters)
         window = str(parameters.get("window") or "season").strip().casefold()
-        if scope in {"synergy", "synergy_play_types"}:
+        if scope in {"synergy", "synergy_play_types", "synergy_opponent"}:
             if window != "season":
                 raise ProviderContractError("provider_window_unsupported")
             requested = parameters.get("play_type")
@@ -147,15 +148,24 @@ class ResidentialScopeExecutor:
                     season=work.season,
                     season_type="Regular Season",
                 )
-                yield normalize_synergy_response(
+                normalized_scope = {
+                    "window": "season", "phase": "Regular Season",
+                    "play_type": category,
+                    "subject": "opponent" if scope == "synergy_opponent" else "player",
+                }
+                normalizer = (
+                    normalize_opponent_synergy_response
+                    if scope == "synergy_opponent" else normalize_synergy_response
+                )
+                yield normalizer(
                     raw, season=work.season, cutoff=work.cutoff,
-                    scope={"window": "season", "phase": "Regular Season", "play_type": category},
+                    scope=normalized_scope,
                 )
             return
-        if scope in {"grouped_shot_types", "shot_types", "player_shot_types"}:
+        if scope in {"grouped_shot_types", "shot_types", "player_shot_types", "shot_types_opponent"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
-            subject = str(parameters.get("subject", "player")).casefold()
+            subject = "opponent" if scope == "shot_types_opponent" else str(parameters.get("subject", "player")).casefold()
             requested_value = parameters.get("general_range", parameters.get("category"))
             categories = (str(requested_value),) if requested_value is not None else SHOT_TYPES
             if subject == "opponent":
@@ -184,10 +194,10 @@ class ResidentialScopeExecutor:
                     scope={"window": window, "subject": "player", "category": category, "phase": "Regular Season"},
                 )
             return
-        if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones"}:
+        if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones", "shot_zones_opponent"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
-            subject = str(parameters.get("subject", "player")).casefold()
+            subject = "opponent" if scope == "shot_zones_opponent" else str(parameters.get("subject", "player")).casefold()
             if subject == "opponent":
                 team_id = parameters.get("team_id")
                 if team_id is None:

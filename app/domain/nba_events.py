@@ -63,7 +63,7 @@ def is_postponed_event(event: Mapping[str, object]) -> bool:
     """Whether normalized status or non-empty structured evidence says postponed."""
 
     return bool(
-        event.get("is_postponed")
+        event.get("is_postponed") is True
         or event.get("postponed_status")
         or event.get("postponement_evidence")
     )
@@ -73,10 +73,12 @@ def is_final_event(event: Mapping[str, object]) -> bool:
     """Whether governed code or normalized terminal text says a game is final."""
 
     status = event.get("status_text", event.get("status", ""))
+    status_text = str(status).strip().casefold()
     return bool(
         event.get("status_code") in {NBAGameStatus.FINAL, "3"}
-        or str(status).strip() == "3"
-        or str(status).casefold().startswith("final")
+        or status_text == "3"
+        or status_text.startswith("final")
+        or status_text in {"finished", "completed", "closed", "game over"}
     )
 
 

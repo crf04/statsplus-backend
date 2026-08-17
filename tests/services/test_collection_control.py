@@ -1452,6 +1452,9 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
         postponed_status="postponed",
         postponement_evidence={"reason": "arena"},
     )
+    payload["events"][4].update(status="Final", is_postponed=True)
+    for index, status in enumerate(("Completed", "Closed", "Game Over"), start=5):
+        payload["events"][index]["status"] = status
     first_request = control.create_bootstrap_request(
         "2025-26", "event", cutoff=cutoff
     )
@@ -1466,8 +1469,12 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
                     EventCatalogEntry.nba_game_id,
                     EventCatalogEntry.status_text,
                     EventCatalogEntry.status_code,
+                    EventCatalogEntry.postponed_status,
+                    EventCatalogEntry.postponement_evidence,
                 ).where(
-                    EventCatalogEntry.nba_game_id.in_(("game-2", "game-3"))
+                    EventCatalogEntry.nba_game_id.in_((
+                        "game-2", "game-3", "game-4", "game-5", "game-6", "game-7",
+                    ))
                 )
             )
         }
@@ -1477,6 +1484,14 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
     )
     assert stored["game-3"].status_text == "Scheduled"
     assert stored["game-3"].status_code is None
+    assert stored["game-4"].postponed_status == "postponed"
+    assert json.loads(stored["game-4"].postponement_evidence) == {
+        "is_postponed": True,
+    }
+    assert {
+        (stored[f"game-{index}"].status_text, stored[f"game-{index}"].status_code)
+        for index in (5, 6, 7)
+    } == {("Final", 3)}
     athlete_request = control.create_bootstrap_request(
         "2025-26", "athlete", cutoff=cutoff
     )
@@ -1492,6 +1507,14 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
         collect_before=now + timedelta(hours=1),
     )
     cycle = control.open_cycle(manifest.manifest_id)
+    governed = ActiveManifestLedgerGovernanceReader(control_db).read(
+        "2025-26", cutoff
+    )
+    assert "game-0" in governed.expected_game_ids
+    assert {"game-5", "game-6", "game-7"} <= governed.expected_game_ids
+    assert {"game-1", "game-3", "game-4"}.isdisjoint(
+        governed.expected_game_ids
+    )
 
     repeat_request = control.create_bootstrap_request(
         "2025-26", "event", cutoff=cutoff
@@ -1510,6 +1533,21 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
                 CollectionCycle.cycle_id == cycle.cycle_id
             )
         ).scalar_one() == "collecting"
+
+
+def test_event_catalog_rejects_nonboolean_standalone_postponement_flag(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    payload = _catalog_payload("event")
+    payload["events"][0]["is_postponed"] = "false"
+    request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(request.request_id, payload, version="invalid-flag")
 
 
 def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(control_db):

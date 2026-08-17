@@ -261,6 +261,10 @@ def normalize_schedule_response(
             "1": "Scheduled",
             "2": "Live",
             "3": "Final",
+            "finished": "Final",
+            "completed": "Final",
+            "closed": "Final",
+            "game over": "Final",
         }.get(status_key, status)
         normalized.append({
             "nba_game_id": game_id,
@@ -432,7 +436,9 @@ def _stat_rows(
     complete = set(required) <= present
     base = {
         "synergy_play_types": "play_types",
+        "synergy_opponent": "play_types",
         "grouped_shot_types": "shot_types",
+        "shot_types_opponent": "shot_types",
     }.get(observation_type, observation_type)
     payload = {
         "base": base,
@@ -472,6 +478,25 @@ def normalize_synergy_response(
     )
 
 
+def normalize_opponent_synergy_response(
+    response: Any, *, season: str, cutoff: datetime | str,
+    scope: Mapping[str, Any] | None = None,
+) -> NormalizedObservation:
+    scope = dict(scope or {
+        "window": "season", "subject": "opponent", "phase": "Regular Season",
+    })
+    if scope.get("window") != "season":
+        raise ProviderContractError("provider_window_unsupported")
+    requested = scope.get("play_type")
+    required = (str(requested),) if requested is not None else None
+    return _stat_rows(
+        response, categories=PLAY_TYPES, category_names=("category", "play_type", "PLAY_TYPE"),
+        observation_type="synergy_opponent", scope=scope, season=season,
+        cutoff=cutoff, endpoint="synergy_opponent", required_identity=("team_id",),
+        required_categories=required,
+    )
+
+
 def normalize_grouped_shot_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
@@ -501,7 +526,7 @@ def normalize_opponent_grouped_shot_response(
     required = (str(category),) if category is not None else None
     return _stat_rows(
         response, categories=SHOT_TYPES, category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
-        observation_type="grouped_shot_types", scope=scope, season=season,
+        observation_type="shot_types_opponent", scope=scope, season=season,
         cutoff=cutoff, endpoint="opponent_shot_types", required_identity=("team_id",),
         category_default=str(category or "Catch and Shoot"),
         required_categories=required,
@@ -511,6 +536,7 @@ def normalize_opponent_grouped_shot_response(
 def _zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any], endpoint: str, identity: Sequence[str],
+    observation_type: str = "exact_shot_zones",
 ) -> NormalizedObservation:
     rows = _records(response)
     output: list[dict[str, Any]] = []
@@ -549,7 +575,7 @@ def _zone_response(
         "coverage": {"zones": list(SHOT_ZONES), "scope": dict(scope)},
     }
     return NormalizedObservation(
-        observation_type="exact_shot_zones", scope=scope,
+        observation_type=observation_type, scope=scope,
         season=_canonical_season(season), cutoff=_timestamp(cutoff), payload=payload,
         provenance=_provenance(endpoint=endpoint, scope=scope, records=len(output)),
         complete=bool(output),
@@ -572,7 +598,11 @@ def normalize_opponent_zone_response(
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
     scope = {"window": window, "subject": "opponent", "team_id": team_id, "phase": "Regular Season"}
-    return _zone_response(response, season=season, cutoff=cutoff, scope=scope, endpoint="opponent_zones", identity=("team_id",))
+    return _zone_response(
+        response, season=season, cutoff=cutoff, scope=scope,
+        endpoint="opponent_zones", identity=("team_id",),
+        observation_type="shot_zones_opponent",
+    )
 
 
 # Friendly aliases used by compatibility probes and release tests.
@@ -588,6 +618,7 @@ __all__ = [
     "normalize_grouped_shot_response", "normalize_opponent_grouped_shot_response",
     "normalize_opponent_zone_response", "normalize_roster_response",
     "normalize_schedule_response", "normalize_synergy_response",
+    "normalize_opponent_synergy_response",
     "normalize_zone_response", "normalize_schedule", "normalize_roster",
     "normalize_synergy", "normalize_shot_type_response", "normalize_shot_zone_response",
 ]

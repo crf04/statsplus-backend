@@ -129,12 +129,25 @@ STREAM_BASES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset({"play_types"}),
     "grouped_shot_types": frozenset({"shot_types"}),
     "exact_shot_zones": frozenset({"shot_zones"}),
+    "synergy_opponent": frozenset({"play_types"}),
+    "shot_types_opponent": frozenset({"shot_types"}),
+    "shot_zones_opponent": frozenset({"shot_zones"}),
+    publication_stream("play_types", "season"): frozenset({"play_types"}),
+    publication_stream("shot_types", "season"): frozenset({"shot_types"}),
+    publication_stream("shot_types", "l15"): frozenset({"shot_types"}),
+    publication_stream("shot_zones", "season"): frozenset({"shot_zones"}),
+    publication_stream("shot_zones", "l15"): frozenset({"shot_zones"}),
     "assist_locations": frozenset({"assist_locations"}),
 }
 STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset(PLAY_TYPES),
     "grouped_shot_types": frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
     "exact_shot_zones": frozenset(SHOT_ZONE_SLICES),
+    publication_stream("play_types", "season"): frozenset(PLAY_TYPES),
+    publication_stream("shot_types", "season"): frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
+    publication_stream("shot_types", "l15"): frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
+    publication_stream("shot_zones", "season"): frozenset(SHOT_ZONE_SLICES),
+    publication_stream("shot_zones", "l15"): frozenset(SHOT_ZONE_SLICES),
     "assist_locations": frozenset({
         "Arc3Assists", "Corner3Assists", "AtRimAssists",
         "ShortMidRangeAssists", "LongMidRangeAssists",
@@ -147,6 +160,9 @@ OBSERVATION_BASES: dict[str, str] = {
     "grouped_shot_types": "shot_types",
     "shot_zones": "shot_zones",
     "exact_shot_zones": "shot_zones",
+    "synergy_opponent": "play_types",
+    "shot_types_opponent": "shot_types",
+    "shot_zones_opponent": "shot_zones",
     "assist_locations": "assist_locations",
 }
 
@@ -214,6 +230,28 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
     synergy = next((value for value in ("synergy_play_types", "synergy") if value in authorized), None)
     shots = next((value for value in ("grouped_shot_types", "shot_types") if value in authorized), None)
     zones = next((value for value in ("exact_shot_zones", "shot_zones") if value in authorized), None)
+    opponent_synergy = "synergy_opponent" if (
+        "synergy_opponent" in authorized
+        or publication_stream("play_types", "season") in authorized
+    ) else None
+    shot_stream_windows = {
+        window for window in ("season", "l15")
+        if publication_stream("shot_types", window) in authorized
+    }
+    zone_stream_windows = {
+        window for window in ("season", "l15")
+        if publication_stream("shot_zones", window) in authorized
+    }
+    opponent_shots = "shot_types_opponent" if (
+        "shot_types_opponent" in authorized or shot_stream_windows
+    ) else None
+    opponent_zones = "shot_zones_opponent" if (
+        "shot_zones_opponent" in authorized or zone_stream_windows
+    ) else None
+    if opponent_shots and not shot_stream_windows:
+        shot_stream_windows = {"season", "l15"}
+    if opponent_zones and not zone_stream_windows:
+        zone_stream_windows = {"season", "l15"}
     if synergy:
         descriptors.extend({"scope": synergy, "parameters": {
             "window": "season", "subject": "player", "play_type": category,
@@ -225,17 +263,22 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
         }} for category in SHOOTING_TYPES)
     if zones:
         descriptors.append({"scope": zones, "parameters": {"window": "season", "subject": "player"}})
+    if opponent_synergy:
+        descriptors.extend({"scope": opponent_synergy, "parameters": {
+            "window": "season", "subject": "opponent", "play_type": category,
+            "subject_code": "T", "type_grouping": "season",
+        }} for category in PLAY_TYPES)
     date_to = slate_date_for_instant(_aware(cutoff)).isoformat()
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             governed = {"window": window, "subject": "opponent", "team_id": team_id,
                         "date_from": None, "date_to": date_to}
-            if shots:
-                descriptors.extend({"scope": shots, "parameters": {
+            if opponent_shots and window in shot_stream_windows:
+                descriptors.extend({"scope": opponent_shots, "parameters": {
                     **governed, "general_range": category,
                 }} for category in SHOOTING_TYPES)
-            if zones:
-                descriptors.append({"scope": zones, "parameters": dict(governed)})
+            if opponent_zones and window in zone_stream_windows:
+                descriptors.append({"scope": opponent_zones, "parameters": dict(governed)})
     return descriptors
 
 
@@ -1111,6 +1154,12 @@ class CollectionControlService(_SessionService):
             "postponed_status": row.get("postponed_status"),
             "postponement_evidence": row.get("postponement_evidence"),
         }
+        standalone_postponed = row.get("is_postponed") is True
+        postponed_status = row.get("postponed_status")
+        postponement_evidence = row.get("postponement_evidence")
+        if standalone_postponed:
+            postponed_status = postponed_status or "postponed"
+            postponement_evidence = postponement_evidence or {"is_postponed": True}
         if is_completed_non_postponed_event(event_state):
             status = "Final"
             status_code = 3
@@ -1126,10 +1175,10 @@ class CollectionControlService(_SessionService):
             "away_team_name": str(row.get("away_team_name", away_value)).strip()[:128],
             "away_team_tricode": cls._catalog_team_tricode(away_value, team_id=away_id),
             "scheduled_at": scheduled_at, "status_text": status[:128],
-            "status_code": status_code, "postponed_status": row.get("postponed_status"),
-            "postponement_evidence": _json(row["postponement_evidence"])
-            if isinstance(row.get("postponement_evidence"), (dict, list))
-            else row.get("postponement_evidence"),
+            "status_code": status_code, "postponed_status": postponed_status,
+            "postponement_evidence": _json(postponement_evidence)
+            if isinstance(postponement_evidence, (dict, list))
+            else postponement_evidence,
             "classification": "Regular Season", "last_seen_at": now,
         }
         if existing is None:
@@ -1750,7 +1799,17 @@ class CollectionControlService(_SessionService):
                 },
             )
             raise ControlPlaneError("identity_unresolved")
-        scope_list = sorted({str(scope).strip() for scope in scopes if str(scope).strip()})
+        requested_scopes = {
+            str(scope).strip() for scope in scopes if str(scope).strip()
+        }
+        scope_list = sorted(requested_scopes | {
+            required
+            for definition in SURFACE_REGISTRY
+            if definition.stream_key in requested_scopes
+            and definition.stream_key in NBA_PUBLICATION_STREAM_KEYS
+            and definition.strategy != "never_schedule"
+            for required in definition.required
+        })
         try:
             versions = sorted({int(version) for version in accepted_versions})
         except (TypeError, ValueError) as error:
@@ -2310,7 +2369,14 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("scope_denied")
                 rehearsal_validation = observation_type == "rehearsal_validation" and allowed_scopes == {"rehearsal_validation"}
             if self.publication_service is not None and catalog_request is None and not rehearsal_validation:
-                stream = self._registered_stream(session, observation_type, envelope["provider"].strip())
+                window = (
+                    scope_value.get("window", scope_value.get("scope"))
+                    if isinstance(scope_value, Mapping) else None
+                )
+                stream = self._registered_stream(
+                    session, observation_type, envelope["provider"].strip(),
+                    window=str(window) if window is not None else None,
+                )
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
                 if not _claims_allow_surface(
@@ -2322,7 +2388,6 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("schema_unsupported")
                 supported_windows = set(json.loads(stream.supported_windows))
                 if isinstance(scope_value, Mapping):
-                    window = scope_value.get("window", scope_value.get("scope"))
                     if supported_windows and window is None:
                         raise ControlPlaneError("scope_unsupported")
                 if window is not None and str(window) not in supported_windows:
@@ -2390,6 +2455,7 @@ class ObservationIngestionService(_SessionService):
                     season=str(envelope["season"]),
                     cutoff=_parse_datetime(envelope["cutoff"]),
                     manifest_id=manifest_id,
+                    window=str(window) if window is not None else None,
                     session=session,
                 )
             if lease_grant is not None:
@@ -2399,11 +2465,19 @@ class ObservationIngestionService(_SessionService):
         return ObservationReceipt(row.observation_id, client_id, checksum)
 
     @staticmethod
-    def _registered_stream(session: Session, observation_type: str, provider: str) -> PublicationStream | None:
+    def _registered_stream(
+        session: Session, observation_type: str, provider: str, *,
+        window: str | None = None,
+    ) -> PublicationStream | None:
         """Resolve ownership from the executable registry persisted at boot."""
         streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
         for stream in streams:
-            if stream.provider == provider and observation_type in set(json.loads(stream.required_observations)):
+            supported_windows = set(json.loads(stream.supported_windows))
+            if (
+                stream.provider == provider
+                and observation_type in set(json.loads(stream.required_observations))
+                and (window is None or not supported_windows or window in supported_windows)
+            ):
                 return stream
         return None
 
@@ -2685,10 +2759,19 @@ class PublicationService(_SessionService):
 
     def enqueue_for_observation(self, observation_type: str, *, season: str, cutoff: datetime,
                                 manifest_id: str | None = None,
+                                window: str | None = None,
                                 session: Session | None = None) -> int:
         with self._session_scope(session) as session:
             streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
-            matching = [stream.stream_key for stream in streams if observation_type in set(json.loads(stream.required_observations))]
+            matching = [
+                stream.stream_key for stream in streams
+                if observation_type in set(json.loads(stream.required_observations))
+                and (
+                    window is None
+                    or not set(json.loads(stream.supported_windows))
+                    or window in set(json.loads(stream.supported_windows))
+                )
+            ]
             for stream_key in matching:
                 self.enqueue(stream_key, season=season, cutoff=cutoff,
                              manifest_id=manifest_id, session=session)
@@ -3051,11 +3134,7 @@ class PublicationService(_SessionService):
                             observed_slices.setdefault(slice_key, set()).add(observation.observation_id)
             if not accepted or (
                 expected_slices is not None
-                and (
-                    set(observed_slices) != set(expected_slices)
-                    or len({next(iter(ids)) for ids in observed_slices.values()})
-                    != len(expected_slices)
-                )
+                and set(observed_slices) != set(expected_slices)
             ):
                 raise ControlPlaneError("base_incomplete")
         if required and not provenance_ids:
@@ -4086,6 +4165,8 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
             status = row.get("status", row.get("status_text", row.get("status_code")))
             if "completed" in row and not isinstance(row["completed"], bool):
                 raise ValueError("event completed flag invalid")
+            if "is_postponed" in row and not isinstance(row["is_postponed"], bool):
+                raise ValueError("event postponed flag invalid")
             if status in (None, "") and "completed" not in row:
                 raise ValueError("event status required")
             if status not in (None, ""):
