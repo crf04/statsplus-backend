@@ -334,9 +334,11 @@ Migration 037 adds the durable projection evidence path without replacing the
 legacy Player Pool reader. Migration 038 upgrades already-migrated databases
 with poll promotion/failure state and per-offering confirmation time; it
 backfills poll promotion only when the referenced v37 generation was a winner,
-including unchanged confirmations that reference that winning generation.
-Older and equal-time losing generations remain non-promoted, while Latest
-confirmation advances to the newest winning poll retrieval time.
+including unchanged confirmations that reference that winning generation and
+are not older than its retrieval fence. Older/late unchanged polls and older or
+equal-time losing changed generations remain non-promoted, while Latest
+confirmation advances only to the newest temporally valid winning poll
+retrieval time.
 `ProjectionRecordingService.record_snapshot()` and
 `record_failed_poll()` are the application recording boundaries and delegate
 durable work to `ProjectionArchive`. They accept an already retrieved Complete
@@ -385,7 +387,9 @@ confirmation time or mask an intervening provider failure.
 Accepted snapshot identity is provider, governed query, provider retrieval
 instant, and exact evidence checksum. Delayed delivery of that same evidence
 returns its persisted result without adding a poll, generation, observation,
-or Latest mutation, regardless of a different start or acceptance time. A
+or Latest mutation, regardless of a different start or acceptance time. Replay
+lookup also joins that identity through the persisted snapshot, so poll IDs
+created before the transition migration remain idempotent after upgrade. A
 newer provider retrieval instant with unchanged content is a distinct health
 confirmation. Failed-attempt identity remains separately tied to its actual
 attempt timing. Query status filters are sorted exactly as the
@@ -450,6 +454,9 @@ through `app.domain.freshness`, including direct reader-constructor overrides.
 Populated Latest rows and successful Complete-empty evidence share one
 `within_max_age` classification, so both inclusive endpoints are identical and
 out-of-domain windows are rejected during construction.
+Without an injected test clock the reader uses `app.domain.utc.utc_now`; stored
+confirmation timestamps never substitute for the present and therefore cannot
+freeze freshness.
 `DFS_ENABLED_PROVIDERS` is the sole enablement authority. Dependency assembly
 always retains read scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`), independently of the enabled set, so rebuilding

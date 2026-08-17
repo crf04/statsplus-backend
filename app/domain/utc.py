@@ -13,10 +13,16 @@ def assume_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def utc_now() -> datetime:
+    """Return the repository's real current UTC clock value."""
+
+    return datetime.now(timezone.utc)
+
+
 def parse_utc_iso(value: str) -> datetime:
     """Parse one ISO timestamp, accepting the standard trailing-Z form."""
 
     return assume_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
 
 
-__all__ = ["assume_utc", "parse_utc_iso"]
+__all__ = ["assume_utc", "parse_utc_iso", "utc_now"]

@@ -491,7 +491,11 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
         player_ids=(9, 10),
         thresholds=("21.5", "11.5"),
     )
-    archive.ingest_snapshot(winner, query=query, accepted_at=OBSERVED_AT)
+    winner_result = archive.ingest_snapshot(
+        winner,
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
     archive.ingest_snapshot(
         older,
         query=query,
@@ -508,7 +512,50 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
         query=query,
         accepted_at=OBSERVED_AT + timedelta(minutes=4),
     )
+    archive.ingest_snapshot(
+        replace(winner, retrieved_at=OBSERVED_AT + timedelta(seconds=30)),
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=5),
+    )
+    historical_poll_id = "v37_historical_postgres_poll"
     with projection_pg_engine.begin() as connection:
+        winner_poll_id = connection.execute(
+            select(ProjectionMaterializationGeneration.source_poll_id).where(
+                ProjectionMaterializationGeneration.generation_id
+                == winner_result.generation_id
+            )
+        ).scalar_one()
+        connection.execute(
+            text(
+                "INSERT INTO projection_provider_polls "
+                "(poll_id, provider, season, query_key, started_at, completed_at, "
+                "retrieved_at, outcome, promoted, failure_reason, snapshot_id, "
+                "generation_id, observation_count) "
+                "SELECT :historical, provider, season, query_key, started_at, "
+                "completed_at, retrieved_at, outcome, promoted, failure_reason, "
+                "snapshot_id, generation_id, observation_count "
+                "FROM projection_provider_polls WHERE poll_id = :current"
+            ),
+            {"historical": historical_poll_id, "current": winner_poll_id},
+        )
+        connection.execute(
+            text(
+                "UPDATE projection_materialization_generations "
+                "SET source_poll_id = :historical WHERE source_poll_id = :current"
+            ),
+            {"historical": historical_poll_id, "current": winner_poll_id},
+        )
+        connection.execute(
+            text(
+                "UPDATE projection_observations SET source_poll_id = :historical "
+                "WHERE source_poll_id = :current"
+            ),
+            {"historical": historical_poll_id, "current": winner_poll_id},
+        )
+        connection.execute(
+            text("DELETE FROM projection_provider_polls WHERE poll_id = :current"),
+            {"current": winner_poll_id},
+        )
         connection.execute(text(
             "ALTER TABLE projection_provider_polls "
             "DROP CONSTRAINT ck_projection_provider_poll_payload, "
@@ -553,12 +600,48 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
             ("changed", False, "older_not_promoted"),
             ("changed", False, "same_time_not_promoted"),
             ("unchanged", True, "advanced"),
+            ("unchanged", False, "advanced"),
         ]
         latest_times = connection.execute(text(
             "SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections"
         )).one()
         assert latest_times.observed_at == OBSERVED_AT
         assert latest_times.confirmed_at == unchanged_at
+        before_replay = tuple(
+            connection.execute(select(func.count()).select_from(model)).scalar_one()
+            for model in (
+                ProviderPoll,
+                ProjectionProviderSnapshot,
+                ProjectionMaterializationGeneration,
+                ProjectionObservation,
+                LatestPlayerProjection,
+            )
+        )
+
+    replay = ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        winner,
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=10),
+        poll_started_at=OBSERVED_AT + timedelta(minutes=9),
+    )
+    assert replay == winner_result
+    with projection_pg_engine.connect() as connection:
+        after_replay = tuple(
+            connection.execute(select(func.count()).select_from(model)).scalar_one()
+            for model in (
+                ProviderPoll,
+                ProjectionProviderSnapshot,
+                ProjectionMaterializationGeneration,
+                ProjectionObservation,
+                LatestPlayerProjection,
+            )
+        )
+        assert connection.execute(
+            select(ProviderPoll.poll_id).where(
+                ProviderPoll.poll_id == historical_poll_id
+            )
+        ).scalar_one() == historical_poll_id
+    assert after_replay == before_replay
 
 
 def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(

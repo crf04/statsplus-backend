@@ -344,6 +344,44 @@ def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(t
         assert connection.execute(select(func.count()).select_from(LatestPlayerProjection)).scalar_one() == 1
 
 
+def test_default_reader_clock_expires_past_live_and_failure_fallback_evidence(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, player_id=7),),
+            past,
+        ),
+        query=QUERY,
+        accepted_at=past,
+    )
+    scope = ProjectionArchiveReadScope(provider="dabble", query=QUERY)
+
+    live_expired = LatestProjectionPlayerPoolReader(
+        engine,
+        scope,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert live_expired.players == ()
+    assert live_expired.freshness["state"] == "missing"
+
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        completed_at=past + timedelta(minutes=1),
+        failure_reason="access_denied",
+    )
+    fallback_expired = LatestProjectionPlayerPoolReader(
+        engine,
+        scope,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert fallback_expired.players == ()
+    assert fallback_expired.freshness["state"] == "missing"
+
+
 def test_unchanged_poll_refreshes_health_without_duplicate_evidence(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()

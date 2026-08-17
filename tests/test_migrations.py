@@ -5,13 +5,36 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, func, inspect, select, text
 
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import MIGRATIONS, run_migrations
+from app.models.projection_archive import (
+    LatestPlayerProjection,
+    ProjectionMaterializationGeneration,
+    ProjectionObservation,
+    ProjectionProviderSnapshot,
+    ProviderPoll,
+)
+from app.providers.dfs import (
+    AthleteEvidence,
+    CoverageEvidence,
+    EventEvidence,
+    MarketStatus,
+    MarketVariant,
+    NBAMarketQuery,
+    PlayerProjectionMarket,
+    ProviderSnapshot,
+    SnapshotStatus,
+    StatisticEvidence,
+    TeamEvidence,
+)
+from app.services.projection_archive import ProjectionArchive
+from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
 
@@ -37,6 +60,7 @@ def _create_projection_v37_fixture(engine) -> None:
 
     statements = (
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE projection_archive_scope_locks (provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, PRIMARY KEY (provider, season, query_key))",
         "CREATE TABLE projection_provider_snapshots (snapshot_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, contract_version VARCHAR(32) NOT NULL, snapshot_status VARCHAR(16) NOT NULL, retrieved_at DATETIME NOT NULL, accepted_at DATETIME NOT NULL, checksum VARCHAR(64) NOT NULL UNIQUE, content_checksum VARCHAR(64) NOT NULL, evidence_document TEXT NOT NULL)",
         "CREATE TABLE projection_provider_polls (poll_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, started_at DATETIME, completed_at DATETIME NOT NULL, retrieved_at DATETIME NOT NULL, outcome VARCHAR(24) NOT NULL, snapshot_id VARCHAR(72) REFERENCES projection_provider_snapshots(snapshot_id) ON DELETE RESTRICT, generation_id VARCHAR(72) NOT NULL, observation_count INTEGER NOT NULL DEFAULT 0)",
         "CREATE TABLE projection_materialization_generations (generation_id VARCHAR(72) PRIMARY KEY, provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, snapshot_id VARCHAR(72) NOT NULL REFERENCES projection_provider_snapshots(snapshot_id) ON DELETE RESTRICT, source_poll_id VARCHAR(72) NOT NULL UNIQUE REFERENCES projection_provider_polls(poll_id) ON DELETE RESTRICT, created_at DATETIME NOT NULL, retrieved_at DATETIME NOT NULL, materialization_checksum VARCHAR(64) NOT NULL, outcome VARCHAR(32) NOT NULL, CONSTRAINT uq_projection_materialization_generation_identity UNIQUE (snapshot_id, materialization_checksum, retrieved_at))",
@@ -100,6 +124,22 @@ def _create_projection_v37_fixture(engine) -> None:
                 "unchanged_poll",
                 "2026-01-02 12:33:00",
                 unchanged_at,
+                "unchanged",
+                "winner_snapshot",
+                "winner_generation",
+            ),
+            (
+                "older_unchanged_poll",
+                "2026-01-02 12:34:00",
+                "2026-01-02 12:29:00",
+                "unchanged",
+                "winner_snapshot",
+                "winner_generation",
+            ),
+            (
+                "late_unchanged_poll",
+                "2026-01-02 12:35:00",
+                "2026-01-02 12:30:30",
                 "unchanged",
                 "winner_snapshot",
                 "winner_generation",
@@ -179,7 +219,9 @@ def test_projection_transition_migration_upgrades_authentic_v37_sqlite(tmp_path)
             "SELECT poll_id, promoted FROM projection_provider_polls ORDER BY poll_id"
         )).all())
         assert promoted == {
+            "late_unchanged_poll": 0,
             "older_poll": 0,
+            "older_unchanged_poll": 0,
             "same_poll": 0,
             "unchanged_poll": 1,
             "winner_poll": 1,
@@ -207,6 +249,155 @@ def test_projection_transition_migration_upgrades_authentic_v37_sqlite(tmp_path)
             "VALUES ('failed','dabble','2025-26','query','2026-01-02 13:00:00',NULL,"
             "'failed',0,'access_denied',NULL,NULL,0)"
         ))
+
+
+def test_v37_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
+    tmp_path,
+):
+    staging = create_engine(f"sqlite:///{tmp_path / 'projection-current.sqlite3'}")
+    run_migrations(staging)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="legacy-market",
+        athlete=AthleteEvidence(
+            canonical_id=77,
+            name="Legacy Player",
+            team=TeamEvidence(canonical_id=10),
+        ),
+        event=EventEvidence(canonical_id="legacy-game"),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="prizepicks",
+        ),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    retrieved_at = datetime(2026, 1, 3, 12, tzinfo=timezone.utc)
+    snapshot = ProviderSnapshot(
+        provider="prizepicks",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=retrieved_at,
+    )
+    query = NBAMarketQuery(season="2025-26")
+    first = ProjectionArchive(staging, catalog).ingest_snapshot(
+        snapshot,
+        query=query,
+        accepted_at=retrieved_at,
+    )
+
+    upgraded_engine = create_engine(
+        f"sqlite:///{tmp_path / 'projection-v37-replay.sqlite3'}"
+    )
+    _create_projection_v37_fixture(upgraded_engine)
+    common_columns = {
+        ProjectionProviderSnapshot: (
+            "snapshot_id", "provider", "season", "query_key", "contract_version",
+            "snapshot_status", "retrieved_at", "accepted_at", "checksum",
+            "content_checksum", "evidence_document",
+        ),
+        ProviderPoll: (
+            "poll_id", "provider", "season", "query_key", "started_at",
+            "completed_at", "retrieved_at", "outcome", "snapshot_id",
+            "generation_id", "observation_count",
+        ),
+        ProjectionMaterializationGeneration: (
+            "generation_id", "provider", "season", "query_key", "snapshot_id",
+            "source_poll_id", "created_at", "retrieved_at",
+            "materialization_checksum", "outcome",
+        ),
+        ProjectionObservation: (
+            "observation_id", "snapshot_id", "generation_id", "source_poll_id",
+            "ordinal", "provider", "provider_market_id", "market_reference",
+            "canonical_game_id", "canonical_player_id", "canonical_player_name",
+            "canonical_team_id", "canonical_statistic_id", "market_category",
+            "market_status", "market_variant", "scoring_period", "targetable",
+            "observed_at",
+        ),
+        LatestPlayerProjection: (
+            "provider", "season", "query_key", "canonical_game_id",
+            "canonical_player_id", "market_reference", "observation_id",
+            "generation_id", "canonical_team_id", "canonical_player_name",
+            "canonical_statistic_id", "market_category", "observed_at",
+        ),
+    }
+    historical_poll_id = "v37_historical_poll"
+    with staging.connect() as source, upgraded_engine.begin() as target:
+        for model, columns in common_columns.items():
+            rows = source.execute(select(model.__table__)).mappings().all()
+            for source_row in rows:
+                row = {column: source_row[column] for column in columns}
+                if model is ProviderPoll:
+                    row["poll_id"] = historical_poll_id
+                elif model in (
+                    ProjectionMaterializationGeneration,
+                    ProjectionObservation,
+                ):
+                    row["source_poll_id"] = historical_poll_id
+                target.execute(
+                    text(
+                        f"INSERT INTO {model.__tablename__} "
+                        f"({', '.join(columns)}) VALUES "
+                        f"({', '.join(':' + column for column in columns)})"
+                    ),
+                    row,
+                )
+
+    upgraded = run_migrations(upgraded_engine)
+    with upgraded_engine.connect() as connection:
+        before = tuple(
+            connection.execute(select(func.count()).select_from(model)).scalar_one()
+            for model in (
+                ProviderPoll,
+                ProjectionProviderSnapshot,
+                ProjectionMaterializationGeneration,
+                ProjectionObservation,
+                LatestPlayerProjection,
+            )
+        )
+    replay = ProjectionArchive(upgraded_engine, catalog).ingest_snapshot(
+        snapshot,
+        query=query,
+        accepted_at=retrieved_at + timedelta(minutes=10),
+        poll_started_at=retrieved_at + timedelta(minutes=9),
+    )
+    repeated_migration = run_migrations(upgraded_engine)
+
+    assert upgraded.applied == ("038_projection_archive_transitions",)
+    assert replay == first
+    assert repeated_migration.applied == ()
+    with upgraded_engine.connect() as connection:
+        after = tuple(
+            connection.execute(select(func.count()).select_from(model)).scalar_one()
+            for model in (
+                ProviderPoll,
+                ProjectionProviderSnapshot,
+                ProjectionMaterializationGeneration,
+                ProjectionObservation,
+                LatestPlayerProjection,
+            )
+        )
+        assert connection.execute(
+            select(ProviderPoll.poll_id).where(
+                ProviderPoll.provider == "prizepicks"
+            )
+        ).scalar_one() == historical_poll_id
+    assert after == before
 
 
 def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):

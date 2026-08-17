@@ -27,7 +27,7 @@ from app.domain.freshness import (
 )
 from app.domain.market_content import market_evidence_key
 from app.domain.statistics import MatchState, ScoringPeriod
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, utc_now
 from app.models.projection_archive import (
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
@@ -342,7 +342,14 @@ class ProjectionArchive:
             query.season,
             query_key,
         ) as connection:
-            replayed = self._replayed_result(connection, poll_id)
+            replayed = self._replayed_result(
+                connection,
+                poll_id,
+                provider=snapshot.provider,
+                season=query.season,
+                query_key=query_key,
+                evidence_checksum=checksum,
+            )
             if replayed is not None:
                 return replayed
             current = self._current_materialization(
@@ -657,9 +664,15 @@ class ProjectionArchive:
     def _replayed_result(
         connection: Any,
         poll_id: str,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        evidence_checksum: str,
     ) -> ProjectionArchiveResult | None:
         poll_table = ProviderPoll.__table__
         generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
         poll = (
             connection.execute(
                 select(
@@ -672,6 +685,36 @@ class ProjectionArchive:
             .mappings()
             .one_or_none()
         )
+        if poll is None:
+            poll = (
+                connection.execute(
+                    select(
+                        poll_table.c.snapshot_id,
+                        poll_table.c.generation_id,
+                        poll_table.c.outcome,
+                        poll_table.c.observation_count,
+                    )
+                    .select_from(
+                        poll_table.join(
+                            snapshot_table,
+                            poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                        )
+                    )
+                    .where(
+                        poll_table.c.provider == provider,
+                        poll_table.c.season == season,
+                        poll_table.c.query_key == query_key,
+                        snapshot_table.c.checksum == evidence_checksum,
+                    )
+                    .order_by(
+                        poll_table.c.completed_at,
+                        poll_table.c.poll_id,
+                    )
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
         if poll is None:
             return None
         snapshot_id = str(poll["snapshot_id"])
@@ -1138,7 +1181,7 @@ class LatestProjectionPlayerPoolReader:
         if not required <= {item.provider for item in self.scopes}:
             raise ValueError("required projection providers must have read scopes")
         self.required_providers = frozenset(required)
-        self.clock = clock
+        self.clock = clock or utc_now
         self.live_max_age = live_max_age
         self.failure_fallback_max_age = failure_fallback_max_age
         self._live_max_age_seconds = exact_seconds(live_max_age)
@@ -1229,14 +1272,7 @@ class LatestProjectionPlayerPoolReader:
                 and poll["snapshot_status"] == SnapshotStatus.COMPLETE.value
             ):
                 latest_empty_success.setdefault(provider, poll)
-        now = (
-            assume_utc(self.clock())
-            if self.clock is not None
-            else max(
-                (assume_utc(row["confirmed_at"]) for row in rows),
-                default=datetime.now(timezone.utc),
-            )
-        )
+        now = assume_utc(self.clock())
         provider_statuses: dict[str, str] = {}
         eligible_rows: list[Any] = []
         for row in rows:

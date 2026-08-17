@@ -62,6 +62,7 @@ def _reader(
             provider=provider,
             query=query or NBAMarketQuery(season=SEASON),
         ),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
     )
 
 
