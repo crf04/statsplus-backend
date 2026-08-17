@@ -43,7 +43,6 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.team_matchup_repository import (
-    _LedgerRecompositionWriteCapability,
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
@@ -98,7 +97,6 @@ class LedgerMatchupMaterializationService:
         repository: CanonicalGameLedgerRepository,
         matchup_repository: TeamMatchupRepository,
         *,
-        ledger_write_capability: _LedgerRecompositionWriteCapability | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(repository, CanonicalGameLedgerRepository):
@@ -107,7 +105,6 @@ class LedgerMatchupMaterializationService:
             raise TypeError("matchup_repository must be a TeamMatchupRepository")
         self.repository = repository
         self.matchup_repository = matchup_repository
-        self._ledger_write_capability = ledger_write_capability
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def materialize(
@@ -123,6 +120,7 @@ class LedgerMatchupMaterializationService:
         affected_team_ids: frozenset[int] | None = None,
         trigger_game_id: str | None = None,
         trigger_game_ids: frozenset[str] | None = None,
+        claimed_job_generations: Mapping[str, int] | None = None,
         session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
@@ -240,14 +238,14 @@ class LedgerMatchupMaterializationService:
             )
         else:
             snapshots.append((l15_scope, l15_facts, l15_observations))
-        if self._ledger_write_capability is not None:
+        if claimed_job_generations is not None:
             if session is None:
                 raise PermissionError("ledger_recomposition_session_required")
             self.matchup_repository.replace_ledger_snapshots(
                 snapshots,
                 **snapshot_kwargs,
-                capability=self._ledger_write_capability,
                 session=session,
+                claimed_job_generations=claimed_job_generations,
             )
         elif session is None:
             self.matchup_repository.replace_snapshots(snapshots, **snapshot_kwargs)

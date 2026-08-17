@@ -626,6 +626,7 @@ class LedgerPublicationComposition:
     provenance: Mapping[str, str | None]
     reason: str = "ledger correction"
     manifest_id: str | None = None
+    corrected_provenance: Mapping[str, str] | None = None
 
 
 class UnresolvedIdentityError(ValueError):
@@ -2973,6 +2974,7 @@ class PublicationService(_SessionService):
         provenance_ids: set[str], now: datetime,
         provenance: Mapping[str, str | None] | None = None,
         derive_expected_fence_from_lock: bool = False,
+        corrected_provenance: Mapping[str, str] | None = None,
     ) -> PublicationVersion:
         stream = session.get(PublicationStream, stream_key)
         if stream is None or not stream.enabled:
@@ -2998,6 +3000,14 @@ class PublicationService(_SessionService):
             ):
                 if expected_fence is not None and pointer.fence != expected_fence:
                     raise ControlPlaneError("stale_composition")
+                self._invalidate_corrected_ledger_versions(
+                    session,
+                    stream_key=stream_key,
+                    season=season,
+                    corrected_provenance=corrected_provenance,
+                    keep_publication_id=current.publication_id,
+                    now=now,
+                )
                 return current
         if pointer is None:
             if expected_fence not in (None, 0):
@@ -3039,8 +3049,97 @@ class PublicationService(_SessionService):
         for previous in stale_versions:
             previous.status = "superseded"
         pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
+        self._invalidate_corrected_ledger_versions(
+            session,
+            stream_key=stream_key,
+            season=season,
+            corrected_provenance=corrected_provenance,
+            keep_publication_id=publication.publication_id,
+            now=now,
+        )
         session.flush()
         return publication
+
+    @staticmethod
+    def _invalidate_corrected_ledger_versions(
+        session: Session,
+        *,
+        stream_key: str,
+        season: str,
+        corrected_provenance: Mapping[str, str] | None,
+        keep_publication_id: str,
+        now: datetime,
+    ) -> None:
+        """Make every stale candidate containing corrected game evidence inert."""
+
+        corrected_sources_by_game = {
+            str(game_id): str(source_id)
+            for source_id, game_id in (corrected_provenance or {}).items()
+            if str(game_id) and str(source_id)
+        }
+        if not corrected_sources_by_game:
+            return
+        versions = list(session.scalars(select(PublicationVersion).where(
+            PublicationVersion.stream_key == stream_key,
+            PublicationVersion.season == season,
+            PublicationVersion.publication_id != keep_publication_id,
+            PublicationVersion.status.in_(("active", "candidate")),
+        )))
+        if not versions:
+            return
+        version_ids = {version.publication_id for version in versions}
+        lineage_by_publication: dict[str, dict[str, str]] = {
+            publication_id: {} for publication_id in version_ids
+        }
+        lineage_rows = session.execute(select(
+            PublicationObservation.publication_id,
+            PublicationObservation.observation_id,
+            CollectionObservation.scope,
+        ).join(
+            CollectionObservation,
+            CollectionObservation.observation_id
+            == PublicationObservation.observation_id,
+        ).where(
+            PublicationObservation.publication_id.in_(version_ids),
+        )).all()
+        for publication_id, observation_id, raw_scope in lineage_rows:
+            try:
+                scope = json.loads(raw_scope)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(scope, Mapping):
+                continue
+            game_id = str(scope.get("game_id") or "")
+            if game_id:
+                lineage_by_publication[str(publication_id)][game_id] = str(
+                    observation_id
+                )
+        stale_ids = {
+            version.publication_id
+            for version in versions
+            if any(
+                game_id in lineage_by_publication[version.publication_id]
+                and lineage_by_publication[version.publication_id][game_id]
+                != corrected_source_id
+                for game_id, corrected_source_id in corrected_sources_by_game.items()
+            )
+        }
+        for version in versions:
+            if version.publication_id in stale_ids:
+                version.status = "superseded"
+        if not stale_ids:
+            return
+        pointer = session.scalar(
+            select(PublicationPointer)
+            .where(PublicationPointer.stream_key == stream_key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if pointer is not None and pointer.active_publication_id in stale_ids:
+            pointer.previous_publication_id = pointer.active_publication_id
+            pointer.active_publication_id = None
+            pointer.fence = int(pointer.fence or 0) + 1
+            pointer.updated_at = now
 
     def recompose_ledger(
         self,
@@ -3060,34 +3159,20 @@ class PublicationService(_SessionService):
         publication fence; disabled streams retain the historical candidate
         path used during rehearsal.
         """
-        expected_fence = None
-        with self.session() as session:
-            pointer = session.get(PublicationPointer, stream_key)
-            if pointer is not None:
-                expected_fence = pointer.fence
-        with self.session() as session:
-            stream = session.get(PublicationStream, stream_key)
-        if stream is None:
-            raise ControlPlaneError("stream_not_found")
-        if stream.enabled:
-            return self.compose(
-                stream_key,
-                season=season,
-                cutoff=cutoff,
-                payload=payload,
-                expected_fence=expected_fence,
-                reason=reason,
-                manifest_id=manifest_id,
-                ledger_provenance=provenance,
-            )
-        return self.compose_inactive_ledger(
-            stream_key,
+        return self.recompose_ledger_batch((LedgerPublicationComposition(
+            stream_key=stream_key,
             season=season,
             cutoff=cutoff,
             payload=payload,
             provenance=provenance,
             reason=reason,
-        )
+            manifest_id=manifest_id,
+            corrected_provenance=(
+                {str(source_id): str(game_id) for source_id, game_id in provenance.items()}
+                if "correction" in reason.lower()
+                else None
+            ),
+        ),))[0]
 
     def recompose_ledger_batch(
         self,
@@ -3095,7 +3180,7 @@ class PublicationService(_SessionService):
         *,
         session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
-        """Validate and advance all enabled ledger streams in one transaction."""
+        """Lock, validate, and compose ledger streams in one transaction."""
         items = tuple(compositions)
         if not items or len({item.stream_key for item in items}) != len(items):
             raise ControlPlaneError("duplicate_publication_stream")
@@ -3103,20 +3188,38 @@ class PublicationService(_SessionService):
         with self._session_scope(session) as session:
             results = []
             for item in sorted(items, key=lambda value: value.stream_key):
-                stream = session.get(PublicationStream, item.stream_key)
-                if stream is None or not stream.enabled:
+                stream = session.scalar(
+                    select(PublicationStream)
+                    .where(PublicationStream.stream_key == item.stream_key)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if stream is None or stream.provider != "ledger":
                     raise ControlPlaneError("stream_unavailable")
                 provenance_ids = self._assert_ledger_provenance(
                     session, season=item.season, cutoff=_aware(item.cutoff),
                     provenance=item.provenance, manifest_id=item.manifest_id,
                 )
-                results.append(self._compose_active_in_session(
-                    session, stream_key=item.stream_key, season=item.season,
-                    cutoff=item.cutoff, encoded=_json(item.payload), payload=item.payload,
-                    expected_fence=None, reason=item.reason,
-                    provenance_ids=provenance_ids, provenance=item.provenance, now=now,
-                    derive_expected_fence_from_lock=True,
-                ))
+                if stream.enabled:
+                    results.append(self._compose_active_in_session(
+                        session, stream_key=item.stream_key, season=item.season,
+                        cutoff=item.cutoff, encoded=_json(item.payload), payload=item.payload,
+                        expected_fence=None, reason=item.reason,
+                        provenance_ids=provenance_ids, provenance=item.provenance, now=now,
+                        derive_expected_fence_from_lock=True,
+                        corrected_provenance=item.corrected_provenance,
+                    ))
+                else:
+                    results.append(self.compose_inactive_ledger(
+                        item.stream_key,
+                        season=item.season,
+                        cutoff=item.cutoff,
+                        payload=item.payload,
+                        provenance=item.provenance,
+                        reason=item.reason,
+                        corrected_provenance=item.corrected_provenance,
+                        session=session,
+                    ))
             return tuple(results)
 
     def compose_inactive_ledger(
@@ -3128,6 +3231,7 @@ class PublicationService(_SessionService):
         payload: Any,
         provenance: Mapping[str, str | None],
         reason: str = "historical ledger rehearsal",
+        corrected_provenance: Mapping[str, str] | None = None,
         session: Session | None = None,
     ) -> PublicationVersion:
         """Persist a non-active governed ledger version with normalized provenance."""
@@ -3135,7 +3239,12 @@ class PublicationService(_SessionService):
         encoded = _json(payload)
         now = self.clock()
         with self._session_scope(session) as session:
-            stream = session.get(PublicationStream, stream_key)
+            stream = session.scalar(
+                select(PublicationStream)
+                .where(PublicationStream.stream_key == stream_key)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             if stream is None or stream.provider != "ledger" or stream.enabled:
                 raise ControlPlaneError("inactive_ledger_stream_required")
             self._assert_ledger_provenance(
@@ -3157,6 +3266,14 @@ class PublicationService(_SessionService):
                     provenance,
                 )
             ):
+                self._invalidate_corrected_ledger_versions(
+                    session,
+                    stream_key=stream_key,
+                    season=season,
+                    corrected_provenance=corrected_provenance,
+                    keep_publication_id=existing.publication_id,
+                    now=now,
+                )
                 return existing
             # A corrected complete ledger envelope is the sole activatable
             # truth for this governed cutoff. Preserve prior versions and
@@ -3194,6 +3311,14 @@ class PublicationService(_SessionService):
                     slice_key=slice_key,
                     created_at=now,
                 ))
+            self._invalidate_corrected_ledger_versions(
+                session,
+                stream_key=stream_key,
+                season=season,
+                corrected_provenance=corrected_provenance,
+                keep_publication_id=publication.publication_id,
+                now=now,
+            )
             session.flush()
         return publication
 

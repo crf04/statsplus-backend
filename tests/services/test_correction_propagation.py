@@ -989,6 +989,27 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
     assert result[0].replaced
     assert result[0].checksum == corrected.checksum
 
+    governance = runtime.governance.read_for_composition(
+        "2025-26", cutoff, "ledger-manifest"
+    )
+    with publications.session() as unauthorized, unauthorized.begin():
+        with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+            matchup_materialization.materialize(
+                "2025-26",
+                as_of=cutoff.date(),
+                cutoff=cutoff,
+                recomposition_reason="correction",
+                affected_team_ids=frozenset({
+                    original.home_team_id,
+                    original.away_team_id,
+                }),
+                trigger_game_ids=frozenset({original.game_id}),
+                expected_game_ids=governance.expected_game_ids,
+                expected_l15_game_ids=governance.expected_l15_game_ids,
+                team_ids=governance.team_ids,
+                session=unauthorized,
+            )
+
     assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
     after_window = query.get_window(scope)
     after_metric = next(
@@ -2802,3 +2823,236 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
             reason="attempt stale activation",
             candidate_publication_id=stale.publication_id,
         )
+
+
+def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_path):
+    engine = _engine(tmp_path, "activation-race.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "activation_race_ledger"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="activation-race-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1000),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="activation-race-manifest",
+            status="active",
+            created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": source_id,
+                "client_observation_id": source_id,
+                "collector_id": "test",
+                "manifest_id": "activation-race-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": checksum,
+                "payload": payload,
+                "payload_bytes": len(payload),
+                "retrieved_at": accepted_at,
+                "accepted_at": accepted_at,
+            }
+            for source_id, checksum, payload, accepted_at in (
+                ("activation-old", "a" * 64, "{}", AS_OF),
+                (
+                    "activation-corrected",
+                    "b" * 64,
+                    '{"corrected":true}',
+                    AS_OF + timedelta(hours=1),
+                ),
+            )
+        ])
+    stale = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=AS_OF,
+        payload={"value": 1},
+        provenance={"activation-old": "game-1"},
+        reason="initial acceptance",
+    )
+    cached_session = publications.session()
+    try:
+        cached_stream = cached_session.get(PublicationStream, stream_key)
+        assert cached_stream is not None and cached_stream.enabled is False
+        cached_session.commit()
+        publications.activate_stream(
+            stream_key,
+            reason="activate prior candidate",
+            candidate_publication_id=stale.publication_id,
+        )
+
+        with cached_session.begin():
+            corrected = publications.recompose_ledger_batch(
+                (LedgerPublicationComposition(
+                    stream_key=stream_key,
+                    season="2025-26",
+                    cutoff=AS_OF,
+                    payload={"value": 2},
+                    provenance={"activation-corrected": "game-1"},
+                    reason="correction",
+                ),),
+                session=cached_session,
+            )[0]
+    finally:
+        cached_session.close()
+
+    with engine.connect() as connection:
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.stream_key == stream_key,
+        )).mappings().one()
+        statuses = dict(connection.execute(select(
+            PublicationVersion.publication_id,
+            PublicationVersion.status,
+        ).where(PublicationVersion.stream_key == stream_key)).all())
+    assert pointer["active_publication_id"] == corrected.publication_id
+    assert statuses == {
+        stale.publication_id: "superseded",
+        corrected.publication_id: "active",
+    }
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=("inactive", "active"))
+def test_correction_invalidates_same_game_candidates_across_cutoffs(
+    tmp_path, enabled,
+):
+    engine = _engine(tmp_path, f"cross-cutoff-{enabled}.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "cross_cutoff_ledger"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    cutoffs = (AS_OF, AS_OF + timedelta(days=1), AS_OF + timedelta(days=2))
+    sources = ("cross-old-1", "cross-old-2", "cross-corrected")
+    with engine.begin() as connection:
+        for index, (cutoff, source_id) in enumerate(zip(cutoffs, sources)):
+            manifest_id = f"cross-manifest-{index}"
+            connection.execute(CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1000),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=manifest_id,
+                status="active" if index == 2 else "superseded",
+                created_at=cutoff,
+            ))
+            connection.execute(CollectionObservation.__table__.insert().values(
+                observation_id=source_id,
+                client_observation_id=source_id,
+                collector_id="test",
+                manifest_id=manifest_id,
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                season="2025-26",
+                cutoff=cutoff,
+                schema_version=1,
+                checksum=str(index + 1) * 64,
+                payload=json.dumps({"revision": index}),
+                payload_bytes=len(json.dumps({"revision": index})),
+                retrieved_at=cutoff,
+                accepted_at=cutoff,
+            ))
+    stale_one = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=cutoffs[0],
+        payload={"value": 1},
+        provenance={sources[0]: "game-1"},
+    )
+    stale_two = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=cutoffs[1],
+        payload={"value": 2},
+        provenance={sources[1]: "game-1"},
+    )
+    publications.activate_stream(
+        stream_key,
+        reason="activate newest prior cutoff",
+        candidate_publication_id=stale_two.publication_id,
+    )
+    if enabled:
+        corrected = publications.recompose_ledger_batch((
+            LedgerPublicationComposition(
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoffs[2],
+                payload={"value": 3},
+                provenance={sources[2]: "game-1"},
+                reason="correction",
+                corrected_provenance={sources[2]: "game-1"},
+            ),
+        ))[0]
+    else:
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            enabled=False,
+        )
+        corrected = publications.compose_inactive_ledger(
+            stream_key,
+            season="2025-26",
+            cutoff=cutoffs[2],
+            payload={"value": 3},
+            provenance={sources[2]: "game-1"},
+            reason="correction",
+            corrected_provenance={sources[2]: "game-1"},
+        )
+
+    with engine.connect() as connection:
+        statuses = dict(connection.execute(select(
+            PublicationVersion.publication_id,
+            PublicationVersion.status,
+        ).where(PublicationVersion.stream_key == stream_key)).all())
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.stream_key == stream_key,
+        )).mappings().one_or_none()
+    assert statuses[stale_one.publication_id] == "superseded"
+    assert statuses[stale_two.publication_id] == "superseded"
+    assert statuses[corrected.publication_id] == (
+        "active" if enabled else "candidate"
+    )
+    if enabled:
+        assert pointer is not None
+        assert pointer["active_publication_id"] == corrected.publication_id
+        assert all(
+            status != "active" or publication_id == pointer["active_publication_id"]
+            for publication_id, status in statuses.items()
+        )
+    else:
+        assert pointer is not None
+        assert pointer["active_publication_id"] is None
+        assert "active" not in statuses.values()

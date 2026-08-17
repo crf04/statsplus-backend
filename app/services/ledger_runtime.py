@@ -464,6 +464,10 @@ class LedgerRuntime:
                             expected_game_ids=governance.expected_game_ids,
                             expected_l15_game_ids=governance.expected_l15_game_ids,
                             team_ids=governance.team_ids,
+                            claimed_job_generations={
+                                str(row["job_id"]): int(row["generation"])
+                                for row in slice_jobs
+                            },
                             session=session,
                         )
                     materialized = self.materialization.compose(

@@ -105,10 +105,7 @@ def build_dependencies(
     from app.services.statistic_catalog import StatisticCatalog
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
-    from app.services.team_matchup_repository import (
-        TeamMatchupRepository,
-        _new_ledger_recomposition_write_capability,
-    )
+    from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
@@ -305,13 +302,9 @@ def build_dependencies(
             write_fence=write_fence,
             publication_reader=publication_reader,
         )
-        ledger_matchup_write_capability = (
-            _new_ledger_recomposition_write_capability()
-        )
         team_matchup_repository = TeamMatchupRepository(
             engine,
             write_fence=write_fence,
-            ledger_write_capability=ledger_matchup_write_capability,
         )
         team_matchup_query_service = TeamMatchupQueryService(
             team_matchup_repository,
@@ -363,7 +356,6 @@ def build_dependencies(
                 LedgerMatchupMaterializationService(
                     canonical_game_ledger_repository,
                     team_matchup_repository,
-                    ledger_write_capability=ledger_matchup_write_capability,
                 )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)

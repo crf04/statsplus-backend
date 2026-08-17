@@ -269,6 +269,16 @@ class LedgerMaterializationService:
                     candidates.append(("assist_locations_l15", assist_l15.teams))
             candidate_versions = {}
             batch = []
+            corrected_provenance = (
+                {
+                    source_observation_id: game_id
+                    for game_id, source_observation_id in (
+                        source_observation_ids_by_game or {}
+                    ).items()
+                }
+                if recomposition_reason == "correction"
+                else None
+            )
             for stream_key, payload in candidates:
                 encoded_payload = json.loads(_payload_json(payload))
                 selected_game_ids = (
@@ -289,23 +299,12 @@ class LedgerMaterializationService:
                 }
                 publication_reason = recomposition_reason or "historical ledger rehearsal"
                 if activate:
-                    composition = LedgerPublicationComposition(
+                    batch.append(LedgerPublicationComposition(
                         stream_key=stream_key, season=canonical_season,
                         cutoff=publication_cutoff, payload=encoded_payload,
                         provenance=provenance, reason=publication_reason,
-                    )
-                    if self.publication_service.stream_enabled(
-                        stream_key,
-                        session=session,
-                    ):
-                        batch.append(composition)
-                    else:
-                        candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
-                            stream_key, season=canonical_season, cutoff=publication_cutoff,
-                            payload=encoded_payload, provenance=provenance,
-                            reason=publication_reason,
-                            session=session,
-                        )
+                        corrected_provenance=corrected_provenance,
+                    ))
                 else:
                     candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                         stream_key,
@@ -314,6 +313,7 @@ class LedgerMaterializationService:
                         payload=encoded_payload,
                         provenance=provenance,
                         reason=publication_reason,
+                        corrected_provenance=corrected_provenance,
                         session=session,
                     )
             if activate and batch:

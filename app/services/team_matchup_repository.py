@@ -20,6 +20,7 @@ from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
+from app.models.collection_control import CompositionJob
 from app.utils.db import is_demo_database_url
 
 
@@ -102,15 +103,6 @@ class StoredTeamMatchupSnapshot:
     observations: tuple[StoredTeamMatchupObservation, ...]
 
 
-class _LedgerRecompositionWriteCapability:
-    """Opaque authority shared only by the production ledger runtime graph."""
-
-
-def _new_ledger_recomposition_write_capability(
-) -> _LedgerRecompositionWriteCapability:
-    return _LedgerRecompositionWriteCapability()
-
-
 class TeamMatchupRepository:
     """Replace or read one season/as-of/window snapshot transactionally."""
 
@@ -119,13 +111,11 @@ class TeamMatchupRepository:
         engine: Engine,
         *,
         write_fence=None,
-        ledger_write_capability: _LedgerRecompositionWriteCapability | None = None,
     ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
-        self._ledger_write_capability = ledger_write_capability
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -173,8 +163,8 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
-        capability: _LedgerRecompositionWriteCapability,
         session: Session,
+        claimed_job_generations: Mapping[str, int],
         affected_team_ids_by_scope: Mapping[
             TeamMatchupSnapshotScope, frozenset[int] | None
         ] | None = None,
@@ -182,11 +172,21 @@ class TeamMatchupRepository:
     ) -> None:
         """Replace ledger-owned surfaces inside an authorized runtime transaction."""
 
-        if (
-            self._ledger_write_capability is None
-            or capability is not self._ledger_write_capability
-            or session is None
-        ):
+        claims = {str(job_id): int(generation) for job_id, generation in (
+            claimed_job_generations or {}
+        ).items()}
+        claimed_rows = session.execute(select(
+            CompositionJob.job_id,
+            CompositionJob.generation,
+            CompositionJob.claimed_generation,
+            CompositionJob.status,
+        ).where(CompositionJob.job_id.in_(claims))).all() if claims else ()
+        if not claims or {
+            str(row.job_id): int(row.generation)
+            for row in claimed_rows
+            if row.status == "running"
+            and int(row.claimed_generation or 0) == int(row.generation)
+        } != claims:
             raise PermissionError("ledger_recomposition_write_not_authorized")
         self._replace_snapshots(
             snapshots,
