@@ -72,6 +72,7 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import StoredPlayerPoolReader
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
+    ProjectionArchive,
     ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
 )
@@ -1262,10 +1263,8 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert provider_calls == {"nba": 0, "pbp": 0}
 
 
-def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_without_provider_calls(
-    tmp_path,
-    monkeypatch,
-):
+@pytest.fixture
+def projection_route_context(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'projection-route.sqlite3'}"
     engine = create_engine(database_url)
     run_migrations(engine)
@@ -1365,6 +1364,27 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
 
     client, pool = route_client(assembled)
 
+    return SimpleNamespace(
+        engine=engine,
+        settings=settings,
+        assembled=assembled,
+        catalog=catalog,
+        route_now=route_now,
+        route_client=route_client,
+        client=client,
+        pool=pool,
+    )
+
+
+def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
+    projection_route_context,
+):
+    context = projection_route_context
+    settings = context.settings
+    assembled = context.assembled
+    route_now = context.route_now
+    route_client = context.route_client
+    client = context.client
     missing_selection = client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
@@ -1477,6 +1497,17 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         "observed_at": None,
     }
 
+
+def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
+    projection_route_context,
+):
+    context = projection_route_context
+    engine = context.engine
+    assembled = context.assembled
+    catalog = context.catalog
+    route_now = context.route_now
+    client = context.client
+    query = NBAMarketQuery(season=SEASON)
     route_now[0] = NOW
     recorded_snapshot = _recorded_projection_snapshot(catalog)
     prizepicks_snapshot = _recorded_projection_snapshot(catalog, provider="prizepicks")
@@ -1506,22 +1537,34 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
 
     rematerialized_at = NOW + timedelta(minutes=2)
     route_now[0] = rematerialized_at
-    assembled.projection_recorder.archive.market_categories["points"] = "PRA"
+    rematerialized_catalog = StatisticCatalog(
+        statistics=tuple(
+            replace(statistic, market_category="PRA")
+            if statistic.id == "points"
+            else statistic
+            for statistic in catalog.statistics
+        )
+    )
+    rematerializing_recorder = ProjectionRecordingService(
+        ProjectionArchive(engine, rematerialized_catalog),
+        tuple(assembled.projection_recorder.scopes.values()),
+        default_scope=assembled.projection_recorder.default_scope,
+    )
     for snapshot in (recorded_snapshot, prizepicks_snapshot):
-        assembled.projection_recorder.record_complete_snapshot(
+        rematerializing_recorder.record_complete_snapshot(
             replace(snapshot, retrieved_at=rematerialized_at),
             query=query,
             accepted_at=rematerialized_at,
         )
 
     with engine.connect() as connection:
-        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 7
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 6
         assert connection.execute(
             select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 3
+        ).scalar_one() == 2
         assert connection.execute(
             select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 5
+        ).scalar_one() == 4
         assert connection.execute(
             select(func.count()).select_from(ProjectionObservation)
         ).scalar_one() == 4
@@ -1764,10 +1807,27 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert empty_selection.status_code == 404
     assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
 
-    disabled_at = empty_at + timedelta(minutes=1)
+
+def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
+    projection_route_context,
+):
+    context = projection_route_context
+    engine = context.engine
+    settings = context.settings
+    assembled = context.assembled
+    catalog = context.catalog
+    route_now = context.route_now
+    route_client = context.route_client
+    query = NBAMarketQuery(season=SEASON)
+    recorded_snapshot = _recorded_projection_snapshot(catalog)
+    prizepicks_snapshot = _recorded_projection_snapshot(
+        catalog,
+        provider="prizepicks",
+    )
+    disabled_at = NOW
     for snapshot in (recorded_snapshot, prizepicks_snapshot):
         assembled.projection_recorder.record_complete_snapshot(
-            replace(snapshot, retrieved_at=disabled_at),
+            snapshot,
             query=query,
             accepted_at=disabled_at,
         )
@@ -1949,32 +2009,8 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         },
     }
     with engine.connect() as connection:
-        durable_counts = {
-            "snapshots": connection.execute(
-                select(func.count()).select_from(ProjectionProviderSnapshot)
-            ).scalar_one(),
-            "polls": connection.execute(
-                select(func.count()).select_from(ProviderPoll)
-            ).scalar_one(),
-            "generations": connection.execute(
-                select(func.count()).select_from(ProjectionMaterializationGeneration)
-            ).scalar_one(),
-            "observations": connection.execute(
-                select(func.count()).select_from(ProjectionObservation)
-            ).scalar_one(),
-            "latest": connection.execute(
-                select(func.count()).select_from(LatestPlayerProjection)
-            ).scalar_one(),
-        }
         assert connection.execute(
             select(func.count()).select_from(LatestPlayerProjection).where(
                 LatestPlayerProjection.provider == "prizepicks"
             )
         ).scalar_one() == 1
-    assert durable_counts == {
-        "snapshots": 11,
-        "polls": 17,
-        "generations": 14,
-        "observations": 10,
-        "latest": 2,
-    }

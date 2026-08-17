@@ -1,5 +1,7 @@
 """Immutable projection evidence and the database-first live read model."""
 
+from enum import StrEnum
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -14,6 +16,30 @@ from sqlalchemy import (
 )
 
 from . import Base
+
+
+class ProviderPollOutcome(StrEnum):
+    """Closed application and persistence vocabulary for provider poll outcomes."""
+
+    CHANGED = "changed"
+    PARTIAL = "partial"
+    REMATERIALIZED = "rematerialized"
+    UNCHANGED = "unchanged"
+    FAILED = "failed"
+
+
+class MaterializationOutcome(StrEnum):
+    """Closed application vocabulary for one fenced Latest-state decision."""
+
+    ADVANCED = "advanced"
+    OLDER_NOT_PROMOTED = "older_not_promoted"
+    SAME_TIME_NOT_PROMOTED = "same_time_not_promoted"
+    UNCHANGED = "unchanged"
+
+
+_POLL_OUTCOME_SQL = ", ".join(
+    f"'{outcome.value}'" for outcome in ProviderPollOutcome
+)
 
 
 class ProjectionArchiveScopeLock(Base):
@@ -51,7 +77,7 @@ class ProviderPoll(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed')",
+            f"outcome IN ({_POLL_OUTCOME_SQL})",
             name="ck_projection_provider_poll_outcome",
         ),
         CheckConstraint(

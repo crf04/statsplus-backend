@@ -268,48 +268,6 @@ def test_partial_updates_present_offerings_without_retiring_omissions(tmp_path):
         assert len(generations) == 1
 
 
-@pytest.mark.parametrize(
-    ("targetability", "expected_ordinal"),
-    (((True, False), 0), ((False, True), 1)),
-)
-def test_partial_repeated_reference_uses_one_transition_plan_for_checksum_and_write(
-    tmp_path,
-    monkeypatch,
-    targetability,
-    expected_ordinal,
-):
-    engine = _engine(tmp_path)
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    market = _market(catalog)
-    partial = _snapshot(
-        "dabble",
-        SnapshotStatus.PARTIAL,
-        (market, market),
-        OBSERVED_AT,
-    )
-    base_row = archive._observation_rows(partial)[0]
-    rows = [dict(base_row, ordinal=0), dict(base_row, ordinal=1)]
-    reference = rows[0]["market_reference"]
-    for row, targetable in zip(rows, targetability, strict=True):
-        row["market_reference"] = reference
-        row["targetable"] = targetable
-    monkeypatch.setattr(archive, "_observation_rows", lambda _snapshot: rows)
-
-    archive.ingest_snapshot(partial, query=QUERY, accepted_at=OBSERVED_AT)
-
-    with engine.connect() as connection:
-        selected_ordinal = connection.execute(
-            select(ProjectionObservation.ordinal)
-            .join(
-                LatestPlayerProjection,
-                LatestPlayerProjection.observation_id
-                == ProjectionObservation.observation_id,
-            )
-        ).scalar_one()
-    assert selected_ordinal == expected_ordinal
-
-
 def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()

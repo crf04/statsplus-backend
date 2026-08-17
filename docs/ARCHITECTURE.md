@@ -2539,9 +2539,10 @@ unauthenticated request is 401 and is recorded as no board request at all.
 *and* `DFS_ENABLED_PROVIDERS` names at least one provider. Both are off by
 default in every environment, so development and tests opt in explicitly.
 Enabling the flag without a registry fails startup with `ConfigurationError`
-rather than exposing a route that can never call a provider; production
-additionally requires a non-empty registry regardless of the flag. An
-unpublished board answers an authenticated request with 404
+rather than exposing a route that can never call a provider. Production always
+requires `DFS_ENABLED_PROVIDERS` to be present; an explicit empty value is the
+supported all-disabled state, while omission is invalid. An unpublished board
+answers an authenticated request with 404
 `dfs_board_disabled` and calls no provider.
 
 **Outcomes.** A read is 200 when at least one provider produced a *readable*
