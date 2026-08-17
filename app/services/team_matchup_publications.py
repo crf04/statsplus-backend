@@ -83,7 +83,10 @@ def validate_publication_rows(
                 raise PublicationValidationError("publication_metric_taxonomy_mismatch")
     if expected_l15_game_ids is not None:
         if {row.team_id for row in rows} != set(expected_l15_game_ids) or any(
-            set(row.game_ids) != set(expected_l15_game_ids[row.team_id]) for row in rows
+            len(row.game_ids) != 15
+            or len(set(row.game_ids)) != 15
+            or set(row.game_ids) != set(expected_l15_game_ids[row.team_id])
+            for row in rows
         ):
             raise PublicationValidationError("publication_game_set_mismatch")
     return expected_keys

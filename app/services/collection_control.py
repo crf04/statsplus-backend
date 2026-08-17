@@ -271,8 +271,17 @@ def _stream_definition(stream: PublicationStream) -> SurfaceDefinition:
     )
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _validate_activation_candidate_payload(
-    stream_key: str, payload: str, *, season: str
+    stream_key: str, payload: str, *, season: str, expected_l15_game_ids=None
 ) -> None:
     """Validate the immutable fact envelope before binding its pointer.
 
@@ -304,7 +313,7 @@ def _validate_activation_candidate_payload(
     if stream_key not in decoder_streams and stream_key not in diet_bases:
         return
     try:
-        document = json.loads(payload)
+        document = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
         from app.services.database_first_activation import (
             decode_player_diet,
             decode_player_game_logs,
@@ -323,7 +332,17 @@ def _validate_activation_candidate_payload(
                 retrieved_at=utcnow(),
             )
         else:
-            decode_team_window(document, stream_key=decoder_streams[stream_key])
+            rows = decode_team_window(document, stream_key=decoder_streams[stream_key])
+            if expected_l15_game_ids is not None:
+                from app.services.team_matchup_publications import (
+                    publication_base_for_stream,
+                    validate_publication_rows,
+                )
+                validate_publication_rows(
+                    publication_base_for_stream(decoder_streams[stream_key]),
+                    rows,
+                    expected_l15_game_ids=expected_l15_game_ids,
+                )
     except Exception as error:
         raise ControlPlaneError("publication_candidate_invalid") from error
 
@@ -2364,6 +2383,7 @@ class PublicationService(_SessionService):
 
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
+                        expected_l15_game_ids=None,
                         parity_artifact_id: str | None = None,
                         candidate_publication_id: str | None = None,
                         actor: str = "operator",
@@ -2461,6 +2481,7 @@ class PublicationService(_SessionService):
                     stream_key,
                     candidate.payload,
                     season=candidate.season,
+                    expected_l15_game_ids=expected_l15_game_ids,
                 )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key

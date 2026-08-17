@@ -45,6 +45,15 @@ class PublicationPayloadError(ValueError):
     """An immutable publication payload is not safe to serve as facts."""
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 class LegacyWriteFenceProtocol(Protocol):
     """Typed seam used by every legacy writer inside its transaction."""
 
@@ -424,11 +433,11 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
         if keys != set(average) or keys != set(sigma) or keys != set(ranks):
             raise PublicationPayloadError(f"{stream_key} publication metric keys are inconsistent")
         numeric = {
-            key: _strict_float(value, field=f"per48.{key}", stream_key=stream_key)
+            key: _strict_float(value, field=f"per48.{key}", stream_key=stream_key, minimum=0)
             for key, value in per48.items()
         }
         avg_numeric = {
-            key: _strict_float(value, field=f"league_average.{key}", stream_key=stream_key)
+            key: _strict_float(value, field=f"league_average.{key}", stream_key=stream_key, minimum=0)
             for key, value in average.items()
         }
         sigma_numeric = {
@@ -907,7 +916,7 @@ class DatabaseFirstPublicationReader:
                 projection_ready=True,
             )
         try:
-            payload = json.loads(publication.payload)
+            payload = json.loads(publication.payload, object_pairs_hook=_reject_duplicate_json_keys)
         except (TypeError, ValueError, json.JSONDecodeError):
             # A corrupt rendered document must never make the read path fall
             # back to a provider or to a partial prior attempt.

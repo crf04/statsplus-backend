@@ -76,10 +76,12 @@ class TeamMatchupQueryService:
         *,
         clock: Callable[[], datetime] | None = None,
         publication_reader=None,
+        expected_l15_game_ids=None,
     ) -> None:
         self.repository = repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._publication_reader = publication_reader
+        self._expected_l15_game_ids_source = expected_l15_game_ids
 
     def get_latest_window(
         self,
@@ -134,7 +136,7 @@ class TeamMatchupQueryService:
             facts=facts,
             observations=observations,
         )
-        expected_l15_game_ids = self._expected_l15_game_ids(facts)
+        expected_l15_game_ids = self._governed_l15_ids(facts)
         return self._database_first_window(
             season,
             cutoff=cutoff,
@@ -154,7 +156,7 @@ class TeamMatchupQueryService:
             facts=snapshot.facts,
             observations=snapshot.observations,
         )
-        expected_l15_game_ids = self._expected_l15_game_ids(snapshot.facts)
+        expected_l15_game_ids = self._governed_l15_ids(snapshot.facts)
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
@@ -447,6 +449,14 @@ class TeamMatchupQueryService:
             if fact.base == "traditional" and fact.game_ids:
                 expected[fact.team_id] = frozenset(fact.game_ids)
         return expected
+
+    def _governed_l15_ids(self, facts):
+        source = self._expected_l15_game_ids_source
+        if callable(source):
+            return source()
+        if source is not None:
+            return source
+        return self._expected_l15_game_ids(facts)
 
     def _build_window(
         self,

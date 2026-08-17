@@ -1542,9 +1542,10 @@ denominator. No PBP or NBA traditional/assist aggregate endpoint is called;
 the service has no provider collaborators at all, so it cannot trigger one.
 Player and team authority follow the approved #113 model unchanged: team facts
 from team-summary rows, player facts from player rows. NBA-owned shot and play
-surfaces are deliberately outside this seam — their independent refresh writes
-the same disposable read model, and a failed or unavailable NBA-owned surface
-cannot prevent the valid ledger-owned surfaces from materializing.
+surfaces are composed through the same injected database-first seam as
+independent publications. Their refresh and validation are separate, so a
+failed or unavailable NBA-owned surface cannot prevent valid ledger-owned
+surfaces from materializing, and ledger facts cannot substitute for it.
 
 The two windows share one cutoff. A Season that is not league complete (fewer
 than 30 governed teams) publishes fact-free
