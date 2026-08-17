@@ -321,20 +321,22 @@ class LedgerRuntime:
                     )
                     if (game := self.repository.get_game(summary.game_id)) is not None
                 )
-                source_observation_ids = {
-                    str(source_observation_id)
-                    for row in slice_jobs
-                    for source_observation_id in _json_list(
-                        row.get("source_observation_ids")
+                if not trigger_game_ids:
+                    source_observation_ids = {
+                        str(source_observation_id)
+                        for row in slice_jobs
+                        for source_observation_id in _json_list(
+                            row.get("source_observation_ids")
+                        )
+                    }
+                    trigger_game_ids = frozenset(
+                        game.game_id
+                        for game in games
+                        if game.source_observation_id in source_observation_ids
                     )
-                }
-                trigger_game_ids = frozenset(
-                    game.game_id
-                    for game in games
-                    if game.source_observation_id in source_observation_ids
-                )
-                if trigger_game_id is not None:
-                    trigger_game_ids = frozenset((*trigger_game_ids, trigger_game_id))
+                    trigger_game_id = next(
+                        iter(sorted(trigger_game_ids)), None
+                    )
                 if self.matchup_materialization is not None:
                     # Publish the disposable ledger-owned matchup read model at
                     # the exact composition cutoff before composing publication

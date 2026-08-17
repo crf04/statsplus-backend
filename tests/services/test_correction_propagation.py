@@ -17,6 +17,7 @@ from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
     PublicationPointer,
+    PublicationObservation,
     PublicationStream,
     PublicationVersion,
     ReconciliationItem,
@@ -870,6 +871,447 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
         corrected_boundary_game.source_observation_id
         in json.loads(job["source_observation_ids"])
         for job in jobs
+    )
+
+
+def test_correction_outside_l15_preserves_l15_publication(tmp_path):
+    """A governed correction outside both teams' L15 leaves that publication active."""
+    engine = _engine(tmp_path, "outside-l15.sqlite3")
+    manifest_id = "outside-l15-manifest"
+    cutoff = AS_OF + timedelta(days=1, hours=5, minutes=22)
+    runtime_now = cutoff + timedelta(hours=18)
+    games = _league_games()
+    original_game = games[0]
+    special_game_id = "outside-l15-special"
+    special_team_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.team_facts
+    )
+    special_game = replace(
+        original_game,
+        game_id=special_game_id,
+        game_date=original_game.game_date + timedelta(days=15),
+        team_facts=special_team_facts,
+        source_observation_id="obs:outside:special",
+        retrieved_at=cutoff + timedelta(hours=1),
+    )
+    special_game = replace(
+        special_game,
+        raw_rows=raw_rows_from_facts(special_game),
+    ).with_checksum()
+
+    def event_values(game):
+        scheduled_at = datetime.combine(game.game_date, datetime.min.time(), UTC)
+        return {
+            "nba_game_id": game.game_id,
+            "season": game.season,
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": scheduled_at,
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": cutoff,
+            "last_seen_at": cutoff,
+        }
+
+    all_games = (*games, special_game)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), [
+            event_values(game) for game in all_games
+        ])
+
+    publications = PublicationService(engine, clock=lambda: runtime_now)
+    publications.register_default_streams()
+    for stream_key, windows in (
+        ("traditional_opponent_season", ("season",)),
+        ("traditional_opponent_l15", ("l15",)),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=windows,
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+
+    queue = LedgerCorrectionQueue(
+        clock=lambda: runtime_now,
+        require_governance=True,
+    )
+    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    ledger.replace_games_atomic(
+        all_games,
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=cutoff, manifest_id=manifest_id
+            )
+            for game in all_games
+        },
+    )
+    matchup = TeamMatchupRepository(engine)
+    matchup_materialization = LedgerMatchupMaterializationService(
+        ledger, matchup, clock=lambda: runtime_now
+    )
+    materialization = LedgerMaterializationService(
+        ledger,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=LegacyParityDiagnosticReader(engine),
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+    governance_reader = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: runtime_now
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=materialization,
+        governance=governance_reader,
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+
+    before_governance = governance_reader.read_for_composition(
+        "2025-26", cutoff, manifest_id
+    )
+    assert len(before_governance.expected_game_ids) == len(all_games)
+    assert original_game.game_id in before_governance.expected_game_ids
+    assert original_game.game_id not in before_governance.expected_l15_game_ids[1]
+    assert original_game.game_id not in before_governance.expected_l15_game_ids[
+        original_game.away_team_id
+    ]
+    assert special_game_id in before_governance.expected_l15_game_ids[1]
+    assert special_game_id in before_governance.expected_l15_game_ids[
+        original_game.away_team_id
+    ]
+    assert 1 in before_governance.team_ids
+    assert original_game.away_team_id in before_governance.team_ids
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+
+    query = TeamMatchupQueryService(matchup, clock=lambda: runtime_now)
+    season_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    l15_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+    before_season = matchup.get_snapshot(season_scope)
+    before_l15 = matchup.get_snapshot(l15_scope)
+    before_season_fact = next(
+        fact
+        for fact in before_season.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    before_l15_fact = next(
+        fact
+        for fact in before_l15.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    before_l15_observation = next(
+        observation
+        for observation in before_l15.observations
+        if observation.surface == "traditional"
+    )
+    before_season_observation = next(
+        observation
+        for observation in before_season.observations
+        if observation.surface == "traditional"
+    )
+    before_l15_window = query.get_window(l15_scope)
+    before_season_window = query.get_window(season_scope)
+    before_l15_metric = next(
+        metric
+        for metric in before_l15_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    before_season_metric = next(
+        metric
+        for metric in before_season_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+
+    streams = (
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+    )
+
+    def active_pointers():
+        with engine.connect() as connection:
+            return {
+                row["stream_key"]: (
+                    row["active_publication_id"],
+                    row["fence"],
+                )
+                for row in connection.execute(
+                    select(PublicationPointer.__table__).where(
+                        PublicationPointer.__table__.c.stream_key.in_(streams)
+                    )
+                ).mappings()
+            }
+
+    def publication_lineage(publication_id):
+        with engine.connect() as connection:
+            return tuple(sorted(
+                row["observation_id"]
+                for row in connection.execute(
+                    select(PublicationObservation.__table__).where(
+                        PublicationObservation.__table__.c.publication_id
+                        == publication_id
+                    )
+                ).mappings()
+            ))
+
+    before_publications = {
+        stream: publications.current(stream) for stream in streams
+    }
+    assert all(publication is not None for publication in before_publications.values())
+    before_pointers = active_pointers()
+    before_publication_lineage = {
+        stream: publication_lineage(publication.publication_id)
+        for stream, publication in before_publications.items()
+    }
+    assert before_pointers["traditional_opponent_season"][0] == (
+        before_publications["traditional_opponent_season"].publication_id
+    )
+    assert before_pointers["traditional_opponent_l15"][0] == (
+        before_publications["traditional_opponent_l15"].publication_id
+    )
+    assert original_game.source_observation_id in before_season_fact.source_observation_ids
+    assert original_game.source_observation_id not in before_l15_fact.source_observation_ids
+    assert special_game.source_observation_id in before_l15_fact.source_observation_ids
+    assert before_l15_fact.game_ids == tuple(
+        sorted(before_governance.expected_l15_game_ids[1])
+    )
+    assert len(before_l15_fact.game_ids) == 15
+    assert before_l15_fact.raw_value == 85
+    assert before_season_fact.raw_value == 90
+    assert before_season_fact.game_set_checksum == (
+        "28914f0b58204e7799fb4d6131bac3c1940d80d952c6b5b4a436c84068f6a019"
+    )
+    assert before_season_fact.ledger_checksum == (
+        "cf729f2d3aa24e1457d2bdd1e46f5ea6c9c7a47adefde6a17402ef5b11017ca4"
+    )
+    assert before_l15_fact.game_set_checksum == (
+        "87a9c816d1bc8d5371d0c8c7bba4948b2297c18c04754a8913dfedbf8d4335d9"
+    )
+    assert before_l15_fact.ledger_checksum == (
+        "c012e844ff5d8039c22e826365f5f61433afffad18c26292dff3554f6b8f5656"
+    )
+    assert before_l15_metric.allowed_per_48 == pytest.approx(85 / 15)
+    assert before_season_metric.allowed_per_48 == pytest.approx(90 / 16)
+    expected_season_publication_ids = tuple(
+        sorted(before_governance.expected_game_ids)
+    )
+    assert before_season_observation.game_ids == expected_season_publication_ids
+    assert before_season_observation.game_set_checksum == (
+        "71283c6f1fa3ee3d325d24c639e80d7aa903fc64d4cc85d554447665b19b65af"
+    )
+    assert before_season_observation.ledger_checksum == (
+        before_season_fact.ledger_checksum
+    )
+    assert original_game.source_observation_id in (
+        before_season_observation.source_observation_ids
+    )
+    expected_l15_publication_ids = tuple(sorted({
+        game_id
+        for game_ids in before_governance.expected_l15_game_ids.values()
+        for game_id in game_ids
+    }))
+    assert before_l15_observation.game_ids == expected_l15_publication_ids
+    assert before_l15_observation.game_set_checksum
+    assert before_l15_observation.ledger_checksum
+    assert before_l15_observation.source_observation_ids == (
+        tuple(sorted(
+            game.source_observation_id
+            for game in all_games
+            if game.game_id in expected_l15_publication_ids
+        ))
+    )
+
+    corrected_team_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.team_facts
+    )
+    corrected_game = replace(
+        original_game,
+        team_facts=corrected_team_facts,
+        source_observation_id="obs:outside:corrected",
+        retrieved_at=cutoff + timedelta(hours=2),
+    )
+    corrected_game = replace(
+        corrected_game,
+        raw_rows=raw_rows_from_facts(corrected_game),
+    ).with_checksum()
+    result = ledger.replace_games_atomic(
+        (corrected_game,),
+        accepted_observations={
+            corrected_game.source_observation_id: _boundary_observation_values(
+                corrected_game, cutoff=cutoff, manifest_id=manifest_id
+            ),
+        },
+    )
+    assert result[0].replaced
+    assert result[0].checksum == corrected_game.checksum
+    assert corrected_game.checksum != original_game.checksum
+
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+    with engine.connect() as connection:
+        corrected_observation = connection.execute(
+            select(CollectionObservation).where(
+                CollectionObservation.observation_id
+                == corrected_game.source_observation_id,
+            )
+        ).mappings().one()
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+    assert corrected_observation["checksum"] == hashlib.sha256(
+        corrected_observation["payload"].encode()
+    ).hexdigest()
+    assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
+    assert all(job["status"] == "succeeded" for job in jobs)
+    after_season = matchup.get_snapshot(season_scope)
+    after_l15 = matchup.get_snapshot(l15_scope)
+    after_season_fact = next(
+        fact
+        for fact in after_season.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    after_l15_fact = next(
+        fact
+        for fact in after_l15.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    after_season_observation = next(
+        observation
+        for observation in after_season.observations
+        if observation.surface == "traditional"
+    )
+    after_l15_observation = next(
+        observation
+        for observation in after_l15.observations
+        if observation.surface == "traditional"
+    )
+    after_l15_window = query.get_window(l15_scope)
+    after_season_window = query.get_window(season_scope)
+    after_l15_metric = next(
+        metric
+        for metric in after_l15_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    after_season_metric = next(
+        metric
+        for metric in after_season_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    after_publications = {
+        stream: publications.current(stream) for stream in streams
+    }
+    after_pointers = active_pointers()
+    after_publication_lineage = {
+        stream: publication_lineage(publication.publication_id)
+        for stream, publication in after_publications.items()
+    }
+
+    after_season_publication = after_publications["traditional_opponent_season"]
+    after_l15_publication = after_publications["traditional_opponent_l15"]
+    before_season_publication = before_publications["traditional_opponent_season"]
+    before_l15_publication = before_publications["traditional_opponent_l15"]
+    assert after_season_publication is not None
+    assert after_l15_publication is not None
+    assert after_season_publication.publication_id != before_season_publication.publication_id
+    assert after_season_publication.reason == "correction"
+    assert after_l15_publication.publication_id == before_l15_publication.publication_id
+    assert after_l15_publication.checksum == before_l15_publication.checksum
+    assert after_pointers["traditional_opponent_season"][0] != before_pointers[
+        "traditional_opponent_season"
+    ][0]
+    assert after_pointers["traditional_opponent_season"][1] == before_pointers[
+        "traditional_opponent_season"
+    ][1] + 1
+    assert after_pointers["traditional_opponent_l15"] == before_pointers[
+        "traditional_opponent_l15"
+    ]
+    assert after_season_fact.raw_value == 100
+    assert after_season_fact.game_ids == before_season_fact.game_ids
+    assert after_season_fact.game_set_checksum == before_season_fact.game_set_checksum
+    assert after_season_fact.game_set_checksum == (
+        "28914f0b58204e7799fb4d6131bac3c1940d80d952c6b5b4a436c84068f6a019"
+    )
+    assert after_season_fact.ledger_checksum == (
+        "2d809ccf7b3be8eee45bce3c4c32d785afe53fd31b2375de37954986080115d5"
+    )
+    assert after_season_fact.ledger_checksum != before_season_fact.ledger_checksum
+    assert corrected_game.source_observation_id in after_season_fact.source_observation_ids
+    assert after_season_observation.ledger_checksum == after_season_fact.ledger_checksum
+    assert after_season_observation.game_ids == expected_season_publication_ids
+    assert after_season_observation.game_set_checksum == (
+        "71283c6f1fa3ee3d325d24c639e80d7aa903fc64d4cc85d554447665b19b65af"
+    )
+    assert corrected_game.source_observation_id in (
+        after_season_observation.source_observation_ids
+    )
+    assert after_season_observation.recomposition_reason == "correction"
+    assert after_season_metric.allowed_per_48 == pytest.approx(100 / 16)
+    assert after_season_metric.allowed_per_48 != before_season_metric.allowed_per_48
+    assert after_l15 == before_l15
+    assert after_l15_fact == before_l15_fact
+    assert after_l15_fact.game_set_checksum == (
+        "87a9c816d1bc8d5371d0c8c7bba4948b2297c18c04754a8913dfedbf8d4335d9"
+    )
+    assert after_l15_fact.ledger_checksum == (
+        "c012e844ff5d8039c22e826365f5f61433afffad18c26292dff3554f6b8f5656"
+    )
+    assert after_l15_observation == before_l15_observation
+    assert after_l15_metric == before_l15_metric
+    assert after_publication_lineage["traditional_opponent_l15"] == (
+        before_publication_lineage["traditional_opponent_l15"]
+    )
+    assert corrected_game.source_observation_id not in (
+        after_l15_fact.source_observation_ids
+    )
+    assert corrected_game.source_observation_id not in (
+        after_l15_observation.source_observation_ids
+    )
+    assert after_publications["traditional_opponent_season"].checksum != (
+        before_publications["traditional_opponent_season"].checksum
+    )
+    assert corrected_game.source_observation_id in (
+        after_publication_lineage["traditional_opponent_season"]
     )
 
 

@@ -404,6 +404,7 @@ class LedgerCorrectionQueue:
         for stream_key in self.STREAMS:
             existing = connection.execute(select(
                 table.c.job_id,
+                table.c.status,
                 table.c.affected_team_ids,
                 table.c.source_observation_ids,
                 table.c.trigger_game_id,
@@ -417,6 +418,7 @@ class LedgerCorrectionQueue:
                 table.c.cutoff == cutoff,
             )).mappings().one_or_none()
             if existing is not None:
+                previously_succeeded = existing["status"] == "succeeded"
                 previous_lineage = LedgerLineage(
                     tuple(_json_values(existing["source_observation_ids"])),
                     tuple(_json_values(existing["trigger_game_ids"] or existing["trigger_game_id"])),
@@ -441,6 +443,18 @@ class LedgerCorrectionQueue:
                     *previous_team_ids,
                     *affected_team_ids,
                 })
+                trigger_game_ids = lineage.game_ids
+                trigger_game_id = (
+                    lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
+                )
+                if previously_succeeded and recomposition_reason == "correction":
+                    # A completed job's lineage describes the publication
+                    # that already ran.  A later correction must invalidate
+                    # only its new game/team target; queued coalescing still
+                    # unions all work that has not been composed yet.
+                    trigger_game_ids = (game.game_id,)
+                    trigger_game_id = game.game_id
+                    merged_team_ids = affected_team_ids
                 connection.execute(
                     update(table).where(table.c.job_id == existing["job_id"]).values(
                         status="queued",
@@ -448,8 +462,10 @@ class LedgerCorrectionQueue:
                         manifest_id=manifest["manifest_id"] if manifest is not None else None,
                         updated_at=now,
                         last_error=None,
-                        trigger_game_ids=lineage.encoded_game_ids(),
-                        trigger_game_id=(lineage.game_ids[0] if len(lineage.game_ids) == 1 else None),
+                        trigger_game_ids=json.dumps(
+                            trigger_game_ids, separators=(",", ":")
+                        ),
+                        trigger_game_id=trigger_game_id,
                         affected_team_ids=json.dumps(merged_team_ids, separators=(",", ":")),
                         source_observation_ids=json.dumps(lineage.source_observation_ids, separators=(",", ":")),
                         recomposition_reason=lineage.recomposition_reason,
