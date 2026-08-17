@@ -9,7 +9,7 @@ import logging
 from typing import Mapping, Protocol
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.models.collection_control import (
@@ -281,78 +281,83 @@ class LedgerRuntime:
             # Claim the complete slice under a row lock.  ``generation`` is
             # lineage versioning, not an attempt count: acceptance can bump it
             # while composition runs and leave the row queued for the next
-            # worker.  Completion below is a compare-and-swap on this claim.
-            with self._session_factory() as claim_session, claim_session.begin():
-                rows = claim_session.scalars(select(CompositionJob).where(
-                    CompositionJob.season == season,
-                    CompositionJob.cutoff == stored_cutoff,
-                    CompositionJob.manifest_id == manifest_id,
-                    CompositionJob.status == "queued",
-                ).with_for_update().order_by(
-                    CompositionJob.created_at,
-                    CompositionJob.job_id,
-                )).all()
-                if not rows:
-                    continue
-                claimed_jobs = tuple(
-                    {
-                        "job_id": str(row.job_id),
-                        "stream_key": str(row.stream_key),
-                        "cutoff": row.cutoff,
-                        "manifest_id": row.manifest_id,
-                        "generation": int(row.generation or 1),
-                        "trigger_game_id": row.trigger_game_id,
-                        "trigger_game_ids": row.trigger_game_ids,
-                        "affected_team_ids": row.affected_team_ids,
-                        "source_observation_ids": row.source_observation_ids,
-                        "recomposition_reason": row.recomposition_reason,
-                    }
-                    for row in rows
-                )
-                for row in rows:
-                    row.status = "running"
-                    row.claimed_generation = int(row.generation or 1)
-                    row.updated_at = self.clock()
-            slice_jobs = claimed_jobs
-            reason = next(
-                (
-                    str(row["recomposition_reason"])
-                    for row in slice_jobs
-                    if row.get("recomposition_reason")
-                ),
-                "scheduled_reconciliation",
-            )
-            affected_team_ids = frozenset(
-                int(team_id)
-                for row in slice_jobs
-                for team_id in _json_list(row.get("affected_team_ids"))
-                if str(team_id).isdigit()
-            )
-            trigger_game_ids = frozenset(
-                str(game_id)
-                for row in slice_jobs
-                for game_id in _json_list(row.get("trigger_game_ids"))
-            )
-            if not trigger_game_ids:
-                trigger_game_ids = frozenset(
-                    str(row["trigger_game_id"])
-                    for row in slice_jobs
-                    if row.get("trigger_game_id")
-                )
-            trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
+            # worker. Keep the claim transaction open through the input
+            # snapshot, every read-model write, and the completion CAS.
+            # PostgreSQL row locks then serialize acceptance behind this
+            # transaction; the final CAS remains a defensive fence for
+            # deployments without row-level locking.
+            slice_jobs = None
             try:
                 with self._session_factory() as session, session.begin():
+                    rows = session.scalars(select(CompositionJob).where(
+                        CompositionJob.season == season,
+                        CompositionJob.cutoff == stored_cutoff,
+                        CompositionJob.manifest_id == manifest_id,
+                        CompositionJob.status == "queued",
+                    ).with_for_update().order_by(
+                        CompositionJob.created_at,
+                        CompositionJob.job_id,
+                    )).all()
+                    if not rows:
+                        continue
+                    slice_jobs = tuple(
+                        {
+                            "job_id": str(row.job_id),
+                            "stream_key": str(row.stream_key),
+                            "cutoff": row.cutoff,
+                            "manifest_id": row.manifest_id,
+                            "generation": int(row.generation or 1),
+                            "trigger_game_id": row.trigger_game_id,
+                            "trigger_game_ids": row.trigger_game_ids,
+                            "affected_team_ids": row.affected_team_ids,
+                            "source_observation_ids": row.source_observation_ids,
+                            "recomposition_reason": row.recomposition_reason,
+                        }
+                        for row in rows
+                    )
+                    reason = next(
+                        (
+                            str(row["recomposition_reason"])
+                            for row in slice_jobs
+                            if row.get("recomposition_reason")
+                        ),
+                        "scheduled_reconciliation",
+                    )
+                    affected_team_ids = frozenset(
+                        int(team_id)
+                        for row in slice_jobs
+                        for team_id in _json_list(row.get("affected_team_ids"))
+                        if str(team_id).isdigit()
+                    )
+                    trigger_game_ids = frozenset(
+                        str(game_id)
+                        for row in slice_jobs
+                        for game_id in _json_list(row.get("trigger_game_ids"))
+                    )
+                    if not trigger_game_ids:
+                        trigger_game_ids = frozenset(
+                            str(row["trigger_game_id"])
+                            for row in slice_jobs
+                            if row.get("trigger_game_id")
+                        )
+                    trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
                     governance = self.governance.read_for_composition(
                         season,
                         cutoff,
                         manifest_id,
                     )
+                    read_connection = session.connection()
                     games = tuple(
                         game
                         for summary in self.repository.list_games(
-                            season, through=cutoff.date()
+                            season,
+                            through=cutoff.date(),
+                            connection=read_connection,
                         )
-                        if (game := self.repository.get_game(summary.game_id)) is not None
+                        if (game := self.repository.get_game(
+                            summary.game_id,
+                            connection=read_connection,
+                        )) is not None
                     )
                     if not trigger_game_ids:
                         source_observation_ids = {
@@ -370,6 +375,14 @@ class LedgerRuntime:
                         trigger_game_id = next(
                             iter(sorted(trigger_game_ids)), None
                         )
+                    # Publish the claim only after the complete input
+                    # snapshot is loaded, avoiding a SQLite writer lock while
+                    # repository reads establish the transaction snapshot.
+                    for row in rows:
+                        row.status = "running"
+                        row.claimed_generation = int(row.generation or 1)
+                        row.updated_at = self.clock()
+                    session.flush()
                     if self.matchup_materialization is not None:
                         # Matchup facts, surface observations, ledger metadata,
                         # candidates, enabled publications, and pointer fences
@@ -416,6 +429,7 @@ class LedgerRuntime:
                             succeeded |= {"assist_locations_season"}
                         if materialized.l15_window.complete:
                             succeeded |= {"assist_locations_l15"}
+                    cas_failed = False
                     for job in slice_jobs:
                         success = job["stream_key"] in succeeded
                         result = session.execute(update(table).where(
@@ -432,17 +446,29 @@ class LedgerRuntime:
                                 else _composition_failure_reason(job["stream_key"], materialized)
                             ),
                         ))
-                        completed += int(result.rowcount == 1 and success)
+                        if result.rowcount != 1:
+                            cas_failed = True
+                        else:
+                            completed += int(success)
+                    if cas_failed:
+                        raise ControlPlaneError("stale_composition_generation")
             except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable):
                 self._mark_slice_failed(
                     season=season,
                     cutoff=stored_cutoff,
                     manifest_id=manifest_id,
-                    jobs=slice_jobs,
+                    jobs=slice_jobs or (),
                     reason="recomposition_failed",
                 )
                 continue
             except Exception:
+                self._mark_slice_failed(
+                    season=season,
+                    cutoff=stored_cutoff,
+                    manifest_id=manifest_id,
+                    jobs=slice_jobs or (),
+                    reason="recomposition_failed",
+                )
                 logger.exception("unexpected ledger recomposition failure", extra={"season": season})
                 raise
         return completed
@@ -470,9 +496,17 @@ class LedgerRuntime:
             for job in jobs:
                 connection.execute(update(table).where(
                     table.c.job_id == job["job_id"],
-                    table.c.status == "running",
                     table.c.generation == job["generation"],
-                    table.c.claimed_generation == job["generation"],
+                    or_(
+                        and_(
+                            table.c.status == "running",
+                            table.c.claimed_generation == job["generation"],
+                        ),
+                        and_(
+                            table.c.status == "queued",
+                            table.c.claimed_generation.is_(None),
+                        ),
+                    ),
                 ).values(
                     status="failed",
                     attempts=table.c.attempts + 1,

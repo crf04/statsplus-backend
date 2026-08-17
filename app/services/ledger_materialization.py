@@ -13,7 +13,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
-from app.models.collection_control import CollectionManifest, CompositionJob
+from app.models.collection_control import CollectionManifest, CollectionObservation, CompositionJob
 from app.services.collection_control import LedgerPublicationComposition
 
 from app.services.canonical_game_ledger import (
@@ -95,7 +95,11 @@ class LedgerMaterializationService:
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
-            self.repository.game_checksums(canonical_season, through=as_of)
+            self.repository.game_checksums(
+                canonical_season,
+                through=as_of,
+                connection=session.connection() if session is not None else None,
+            )
         ) != set(expected_game_ids):
             raise LedgerMaterializationUnavailable(
                 "stored eligible game IDs must exactly equal governed game IDs"
@@ -429,7 +433,7 @@ class LedgerCorrectionQueue:
         else:
             cutoff = manifest["cutoff"]
         for stream_key in self.STREAMS:
-            existing_rows = connection.execute(select(
+            existing_statement = select(
                 table.c.job_id,
                 table.c.status,
                 table.c.generation,
@@ -444,7 +448,10 @@ class LedgerCorrectionQueue:
             ).where(
                 table.c.stream_key == stream_key,
                 table.c.season == game.season,
-            )).mappings().all()
+            )
+            if connection.dialect.name == "postgresql":
+                existing_statement = existing_statement.with_for_update()
+            existing_rows = connection.execute(existing_statement).mappings().all()
             existing = next(
                 (
                     row for row in existing_rows
@@ -472,6 +479,15 @@ class LedgerCorrectionQueue:
                                 if index < len(previous_source_ids)
                                 else ""
                             ),
+                            "accepted_at": (
+                                _observation_accepted_at(
+                                    connection,
+                                    previous_source_ids,
+                                    game_id,
+                                )
+                                if recomposition_reason == "correction"
+                                else None
+                            ),
                         }
                         for index, (game_id, checksum) in enumerate(
                             sorted(previous_evidence.items())
@@ -488,6 +504,18 @@ class LedgerCorrectionQueue:
                     ledger_checksum=game.checksum,
                     cutoff=cutoff,
                     reason=recomposition_reason,
+                    accepted_at=(
+                        (
+                            _observation_accepted_at(
+                                connection,
+                                (str(game.source_observation_id),),
+                                game.game_id,
+                            )
+                            or game.retrieved_at
+                        )
+                        if recomposition_reason == "correction"
+                        else None
+                    ),
                 ))
                 evidence = {
                     item.game_id: item.ledger_checksum for item in lineage.evidence
@@ -567,6 +595,31 @@ class LedgerCorrectionQueue:
                     generation=1,
                     claimed_generation=None,
                 ))
+
+def _observation_accepted_at(
+    connection: Connection,
+    source_observation_ids: Iterable[str],
+    game_id: str,
+) -> datetime | None:
+    ids = tuple(sorted({str(item) for item in source_observation_ids if str(item)}))
+    if not ids:
+        return None
+    rows = connection.execute(select(
+        CollectionObservation.observation_id,
+        CollectionObservation.scope,
+        CollectionObservation.accepted_at,
+        CollectionObservation.retrieved_at,
+    ).where(CollectionObservation.observation_id.in_(ids))).mappings()
+    accepted = []
+    for row in rows:
+        try:
+            scope = json.loads(row["scope"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(scope, Mapping) or str(scope.get("game_id") or "") != str(game_id):
+            continue
+        accepted.append(row["accepted_at"] or row["retrieved_at"])
+    return max(accepted) if accepted else None
 
 
 def _payload_checksum(payload: object) -> str:

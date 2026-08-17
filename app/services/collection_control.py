@@ -2690,20 +2690,19 @@ class PublicationService(_SessionService):
                     source_id = str(observation.observation_id)
                     scope = _safe_json_mapping(observation.scope)
                     game_id = str(scope.get("game_id") or "")
-                    if not source_id or source_id in source_ids:
+                    if not source_id:
                         continue
                     current_game = None
                     if game_id:
                         current_game = session.scalar(select(CanonicalGameLedgerGame).where(
                             CanonicalGameLedgerGame.game_id == game_id,
                         ))
-                        # Source observation IDs are immutable evidence, but a
-                        # correction intentionally replaces the source ID
-                        # while retaining the same game key.  A matching
-                        # current checksum proves that this accepted row is
-                        # already represented by the composed keyed evidence.
-                        if current_game is not None and evidence.get(game_id) == str(current_game.checksum):
-                            source_ids.add(source_id)
+                    if source_id in source_ids:
+                        # A source ID can be retained while its keyed checksum
+                        # is stale (or its raw-only replacement changed).  Do
+                        # not treat the source list alone as proof of a
+                        # composed correction.
+                        if current_game is None or evidence.get(game_id) == str(current_game.checksum):
                             continue
                     uncomposed = True
                     source_ids.add(source_id)

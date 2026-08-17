@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -80,6 +81,18 @@ def test_keyed_lineage_merge_is_commutative_and_replaces_only_corrected_game():
         "obs:a:old", "obs:a:new", "obs:b",
     }
     assert merged.recomposition_reason == "correction"
+    z_correction = LedgerLineage.single(
+        game_id="game-a", source_observation_id="obs:a:z",
+        ledger_checksum="zzz", cutoff=AS_OF,
+        reason="correction", accepted_at=AS_OF + timedelta(hours=1),
+    )
+    a_correction = LedgerLineage.single(
+        game_id="game-a", source_observation_id="obs:a:latest",
+        ledger_checksum="aaa", cutoff=AS_OF,
+        reason="correction", accepted_at=AS_OF + timedelta(hours=2),
+    )
+    assert z_correction.merge(a_correction).ledger_checksums == ("aaa",)
+    assert a_correction.merge(z_correction).ledger_checksums == ("aaa",)
 
 
 def _engine(tmp_path, name: str = "correction.sqlite3"):
@@ -2020,7 +2033,7 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
     def fail_after_real_prewrites(*args, **kwargs):
         calls["count"] += 1
         if calls["count"] == 2:
-            raise LedgerMaterializationUnavailable("injected production failure")
+            raise RuntimeError("injected production failure")
         return original_compose(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -2051,7 +2064,8 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
         publication_service=publications,
         clock=lambda: AS_OF + timedelta(hours=18),
     )
-    assert runtime.compose_queued("2025-26") == 0
+    with pytest.raises(RuntimeError, match="injected production failure"):
+        runtime.compose_queued("2025-26")
     assert calls["count"] == 2
 
     after_snapshot = matchup.get_snapshot(TeamMatchupSnapshotScope(
@@ -2128,20 +2142,32 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
             )()
 
     calls = {"count": 0}
+    accepted = None
 
     class Materialization:
         publication_service = None
 
         def compose(self, games, **kwargs):
+            nonlocal accepted
             calls["count"] += 1
             if calls["count"] == 1:
-                # This is the deterministic acceptance point while the
-                # worker's claimed generation is still being composed.
-                with engine.begin() as connection:
-                    queue(connection, game)
+                # Use the production queue against a separate connection.
+                # SQLite waits for the worker transaction, so this models an
+                # acceptance racing the real durable composition writes.
+                accepted = threading.Thread(
+                    target=lambda: _accept(),
+                    daemon=True,
+                )
+                accepted.start()
+                self.accepted = accepted
             return Materialized()
 
     repository = CanonicalGameLedgerRepository(engine)
+
+    def _accept():
+        with engine.begin() as connection:
+            queue(connection, game)
+
     runtime = LedgerRuntime(
         backfill=None,
         repository=repository,
@@ -2150,7 +2176,10 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
         clock=lambda: cutoff,
     )
 
-    assert runtime.compose_queued(game.season) == 0
+    assert runtime.compose_queued(game.season) == len(LedgerCorrectionQueue.STREAMS)
+    assert accepted is not None
+    accepted.join(timeout=5)
+    assert not accepted.is_alive()
     with engine.connect() as connection:
         queued = connection.execute(select(CompositionJob.__table__)).mappings().all()
     assert len(queued) == len(LedgerCorrectionQueue.STREAMS)
@@ -2273,6 +2302,33 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
             ),
         },
     )
+    # A provider-only/raw correction can retain the typed checksum while
+    # arriving under a new accepted source observation.
+    raw_only_source = "obs:raw-only-revision"
+    raw_only_values = _boundary_observation_values(
+        game, cutoff=cutoff, manifest_id=manifest_id
+    )
+    raw_only_values["observation_id"] = raw_only_source
+    raw_only_values["accepted_at"] = cutoff + timedelta(hours=1)
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id=raw_only_source,
+            client_observation_id=raw_only_source,
+            collector_id=raw_only_values["collector_id"],
+            environment=raw_only_values["environment"],
+            manifest_id=manifest_id,
+            observation_type="canonical_game_ledger",
+            provider="pbp",
+            scope=raw_only_values["scope"],
+            season=game.season,
+            cutoff=cutoff,
+            payload=raw_only_values["payload"],
+            payload_bytes=raw_only_values["payload_bytes"],
+            schema_version=raw_only_values["schema_version"],
+            checksum=hashlib.sha256(raw_only_values["payload"].encode()).hexdigest(),
+            retrieved_at=cutoff + timedelta(hours=1),
+            accepted_at=cutoff + timedelta(hours=1),
+        ))
     publications = PublicationService(engine, clock=lambda: AS_OF)
     publications.register_default_streams()
     with engine.begin() as connection:
@@ -2304,7 +2360,10 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     assert job["status"] == "queued"
     assert job["generation"] == 2
     assert json.loads(job["trigger_game_ids"]) == [game.game_id]
-    assert json.loads(job["source_observation_ids"]) == [game.source_observation_id]
+    assert raw_only_source in json.loads(job["source_observation_ids"])
+    assert set(json.loads(job["source_observation_ids"])) == {
+        game.source_observation_id, raw_only_source,
+    }
     assert json.loads(job["ledger_evidence"]) == {game.game_id: game.checksum}
     assert job["recomposition_reason"] == "correction"
 

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE
@@ -143,7 +144,11 @@ class LedgerMatchupMaterializationService:
         current_date = retrieved_at.astimezone(EASTERN).date()
         if as_of > current_date:
             raise ValueError("future as_of dates cannot be published")
-        games, checksums = self._load_games(canonical_season, as_of)
+        games, checksums = self._load_games(
+            canonical_season,
+            as_of,
+            connection=session.connection() if session is not None else None,
+        )
         self._reject_governance_mismatch(
             games,
             expected_game_ids=expected_game_ids,
@@ -248,15 +253,26 @@ class LedgerMatchupMaterializationService:
         )
 
     def _load_games(
-        self, season: str, as_of: date
+        self,
+        season: str,
+        as_of: date,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[tuple[CanonicalGame, ...], dict[str, str]]:
         """Load the governed Regular Season ledger games through ``as_of``."""
 
-        summaries = self.repository.list_games(season, through=as_of)
+        summaries = self.repository.list_games(
+            season,
+            through=as_of,
+            connection=connection,
+        )
         games = tuple(
             game
             for summary in summaries
-            if (game := self.repository.get_game(summary.game_id)) is not None
+            if (game := self.repository.get_game(
+                summary.game_id,
+                connection=connection,
+            )) is not None
             and game.season_type == REGULAR_SEASON_TYPE
         )
         checksums = {

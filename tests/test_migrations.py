@@ -494,8 +494,9 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
 
 
 def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tmp_path):
-    """A pre-correction 036 row keeps its singular trigger after upgrade."""
+    """A true pre-change 036 row gains empty lineage without fabricated evidence."""
     from app.migrations import MIGRATIONS
+    from app.models.player_game_log import PublicationPlayerGameLog
     from app.services.ledger_materialization import LedgerCorrectionQueue
     from tests.services.test_ledger_derivations import _league_games
 
@@ -507,24 +508,31 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         )
         assert run_migrations(engine).current_version == 35
 
-    migration_036 = next(migration for migration in MIGRATIONS if migration.version == 36)
     with engine.begin() as connection:
-        # Apply the old 036 schema shape, then emulate a row written before
-        # the additive plural columns/evidence backfill was deployed.
-        migration_036.upgrade(connection)
+        # Migration 036 predates correction propagation entirely. Rebuild the
+        # current model-created queue table to the exact deployed old shape,
+        # and create only the old 036 projection before recording version 36.
+        connection.execute(text("ALTER TABLE composition_jobs RENAME TO composition_jobs_pre_correction"))
+        connection.execute(text(
+            "CREATE TABLE composition_jobs ("
+            "job_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, manifest_id VARCHAR(36), "
+            "season VARCHAR(7) NOT NULL, cutoff DATETIME NOT NULL, "
+            "status VARCHAR(16) NOT NULL, attempts INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+            "last_error VARCHAR(64))"
+        ))
+        PublicationPlayerGameLog.__table__.create(connection, checkfirst=True)
         connection.execute(text(
             "INSERT INTO schema_migrations (version, name) "
             "VALUES (36, '036_publication_player_game_log_projection')"
         ))
         connection.execute(text(
             "INSERT INTO composition_jobs "
-            "(job_id, stream_key, season, cutoff, status, attempts, created_at, "
-            "updated_at, trigger_game_id, trigger_game_ids, ledger_checksum, "
-            "ledger_evidence, generation) VALUES "
+            "(job_id, stream_key, season, cutoff, status, attempts, created_at, updated_at) VALUES "
             "('legacy-job', 'player_game_logs', '2025-26', "
-            ":cutoff, 'queued', 0, :cutoff, :cutoff, 'legacy-game', '[]', "
-            ":checksum, '{}', 0)"
-        ), {"checksum": "a" * 64, "cutoff": datetime(2025, 10, 15)})
+            ":cutoff, 'queued', 0, :cutoff, :cutoff)"
+        ), {"cutoff": datetime(2025, 10, 15)})
 
     result = run_migrations(engine)
     assert result.applied == ()
@@ -533,13 +541,14 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
             "SELECT trigger_game_ids, ledger_evidence, game_set_checksum, generation "
             "FROM composition_jobs WHERE job_id = 'legacy-job'"
         )).one()
-    assert json.loads(row.trigger_game_ids) == ["legacy-game"]
-    assert json.loads(row.ledger_evidence) == {"legacy-game": "a" * 64}
-    assert row.game_set_checksum
+    assert json.loads(row.trigger_game_ids) == []
+    assert json.loads(row.ledger_evidence) == {}
+    assert row.game_set_checksum is None
     assert row.generation == 1
 
-    # The first post-upgrade correction must coalesce with (rather than erase)
-    # the recovered trigger.
+    # With no pre-change trigger/checksum columns, the first post-upgrade
+    # acceptance creates only its own keyed evidence; no legacy lineage is
+    # invented from unrelated defaults.
     game = _league_games()[0]
     queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=timezone.utc))
     with engine.begin() as connection:
@@ -548,9 +557,8 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
             "SELECT trigger_game_ids, ledger_evidence FROM composition_jobs "
             "WHERE job_id = 'legacy-job'"
         )).one()
-    assert set(json.loads(row.trigger_game_ids)) == {"legacy-game", game.game_id}
+    assert json.loads(row.trigger_game_ids) == [game.game_id]
     evidence = json.loads(row.ledger_evidence)
-    assert evidence["legacy-game"] == "a" * 64
     assert evidence[game.game_id] == game.checksum
 
 

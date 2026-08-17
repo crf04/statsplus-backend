@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 
@@ -22,11 +22,24 @@ class LedgerEvidence:
     game_id: str
     ledger_checksum: str
     source_observation_id: str = ""
+    accepted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "game_id", str(self.game_id))
         object.__setattr__(self, "ledger_checksum", str(self.ledger_checksum))
         object.__setattr__(self, "source_observation_id", str(self.source_observation_id))
+        if isinstance(self.accepted_at, str):
+            object.__setattr__(
+                self,
+                "accepted_at",
+                datetime.fromisoformat(self.accepted_at.replace("Z", "+00:00")),
+            )
+        if self.accepted_at is not None and self.accepted_at.tzinfo is None:
+            object.__setattr__(
+                self,
+                "accepted_at",
+                self.accepted_at.replace(tzinfo=timezone.utc),
+            )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -106,9 +119,15 @@ class LedgerLineage:
         ledger_checksum: str,
         cutoff: datetime,
         reason: str,
+        accepted_at: datetime | None = None,
     ) -> "LedgerLineage":
         return cls(
-            (LedgerEvidence(game_id, ledger_checksum, source_observation_id),),
+            (LedgerEvidence(
+                game_id,
+                ledger_checksum,
+                source_observation_id,
+                accepted_at,
+            ),),
             cutoff=cutoff,
             recomposition_reason=reason,
         )
@@ -195,9 +214,10 @@ def _coerce_evidence(
             if isinstance(item, Mapping):
                 checksum = item.get("ledger_checksum", item.get("checksum", ""))
                 source = item.get("source_observation_id", "")
+                accepted_at = item.get("accepted_at")
             else:
-                checksum, source = item, ""
-            entries.append(LedgerEvidence(game_id, checksum, source))
+                checksum, source, accepted_at = item, "", None
+            entries.append(LedgerEvidence(game_id, checksum, source, accepted_at))
         return tuple(sorted(_dedupe_evidence(entries), key=lambda item: item.game_id))
     values = tuple(value or ())
     if values and all(isinstance(item, LedgerEvidence) for item in values):
@@ -225,10 +245,7 @@ def _dedupe_evidence(entries: Iterable[LedgerEvidence]) -> tuple[LedgerEvidence,
     by_game: dict[str, LedgerEvidence] = {}
     for item in entries:
         current = by_game.get(item.game_id)
-        if current is None or (item.ledger_checksum, item.source_observation_id) > (
-            current.ledger_checksum,
-            current.source_observation_id,
-        ):
+        if current is None or _evidence_order(item) > _evidence_order(current):
             by_game[item.game_id] = item
     return tuple(by_game.values())
 
@@ -265,10 +282,29 @@ def _prefer_evidence(
     right_rank = _reason_rank(candidate_reason)[0]
     if left_rank != right_rank:
         return left if left_rank > right_rank else right
-    # A correction has no sequence number in the durable contract.  Selecting
-    # the greatest keyed tuple gives a stable commutative result for two
-    # concurrent corrections; replaying the same evidence is a no-op.
-    return max((left, right), key=lambda item: (item.ledger_checksum, item.source_observation_id))
+    # Accepted time, when available from the observation record, is the only
+    # valid recency signal.  The queue supplies it for durable corrections;
+    # equal timestamps use a canonical tie-breaker.  Legacy lineage has no
+    # timestamp, so the candidate side is treated as the latest merge input
+    # rather than inventing recency from checksum bytes.
+    if left.accepted_at is not None or right.accepted_at is not None:
+        if left.accepted_at is None:
+            return right
+        if right.accepted_at is None:
+            return left
+        if left.accepted_at != right.accepted_at:
+            return left if left.accepted_at > right.accepted_at else right
+        return max((left, right), key=lambda item: (item.ledger_checksum, item.source_observation_id))
+    return right
+
+
+def _evidence_order(item: LedgerEvidence) -> tuple:
+    accepted_at = item.accepted_at
+    if accepted_at is None:
+        return (0, datetime.min.replace(tzinfo=timezone.utc), item.ledger_checksum, item.source_observation_id)
+    if accepted_at.tzinfo is None:
+        accepted_at = accepted_at.replace(tzinfo=timezone.utc)
+    return (1, accepted_at.astimezone(timezone.utc), item.ledger_checksum, item.source_observation_id)
 
 
 __all__ = ["LedgerEvidence", "LedgerLineage"]

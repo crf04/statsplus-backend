@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import uuid
+from contextlib import nullcontext
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
@@ -2202,9 +2203,15 @@ class CanonicalGameLedgerRepository:
             len(candidate.player_facts),
         )
 
-    def get_game(self, game_id: str) -> CanonicalGame | None:
+    def get_game(
+        self,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> CanonicalGame | None:
         tables = self._tables()
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             game_row = connection.execute(select(tables["game"]).where(tables["game"].c.game_id == game_id)).mappings().one_or_none()
             if game_row is None:
                 return None
@@ -2216,13 +2223,20 @@ class CanonicalGameLedgerRepository:
             )).mappings().all()
         return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
 
-    def list_games(self, season: str, *, through: date | datetime | None = None) -> tuple[LedgerGameSummary, ...]:
+    def list_games(
+        self,
+        season: str,
+        *,
+        through: date | datetime | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[LedgerGameSummary, ...]:
         canonical_season = validate_canonical_season(season)
         table = CanonicalGameLedgerGame.__table__
         statement = select(table).where(table.c.season == canonical_season).order_by(table.c.game_date.desc(), table.c.game_id.desc())
         if through is not None:
             statement = statement.where(table.c.game_date <= _canonical_date(through))
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             rows = connection.execute(statement).mappings().all()
             summaries = []
             player_table = CanonicalGameLedgerPlayerFact.__table__
@@ -2238,13 +2252,15 @@ class CanonicalGameLedgerRepository:
         season: str,
         *,
         through: date | datetime | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, str]:
         canonical_season = validate_canonical_season(season)
         table = CanonicalGameLedgerGame.__table__
         statement = select(table.c.game_id, table.c.checksum).where(table.c.season == canonical_season)
         if through is not None:
             statement = statement.where(table.c.game_date <= _canonical_date(through))
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             rows = connection.execute(statement).all()
         return {str(game_id): str(checksum) for game_id, checksum in rows}
 
