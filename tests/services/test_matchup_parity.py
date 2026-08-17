@@ -8,12 +8,12 @@ publication, never from author-written JSON.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.publication_integrity import (
@@ -312,7 +312,7 @@ def test_authority_mismatch_is_a_hard_failure():
     )
 
 
-def test_near_tie_rank_flip_is_soft_not_hard():
+def test_near_tie_rank_flip_is_hard_and_not_adjudicable():
     base = _materialization()
     ledger = _replace_fact(base, surface="traditional", team_id=TEAM_A, stat="OPP_REB",
                            raw_value=1.0, denominator_value=1.0)
@@ -321,12 +321,12 @@ def test_near_tie_rank_flip_is_soft_not_hard():
     legacy = _replace_fact(base, surface="traditional", team_id=TEAM_A, stat="OPP_REB",
                            raw_value=1.0, denominator_value=1.0)
     legacy = _replace_fact(legacy, surface="traditional", team_id=TEAM_B, stat="OPP_REB",
-                           raw_value=2.0, denominator_value=2.000000001)
+                           raw_value=2.0, denominator_value=4.0)
 
     report = _compare(legacy=legacy, ledger=ledger)
 
-    assert not report.hard_failure
-    assert report.adjudication_required
+    assert report.hard_failure
+    assert not report.adjudication_required
     assert any(
         d.classification == CLASSIFICATION_RANKING_DIFFERENCE for d in report.differences
     )
@@ -657,15 +657,56 @@ def _runner_world(tmp_path):
 def _write_legacy_facts(engine, *, game_ids_by_team):
     repository = TeamMatchupRepository(engine)
     scope = TeamMatchupSnapshotScope("2025-26", CUTOFF.date())
+    with engine.connect() as connection:
+        authority = connection.execute(
+            select(
+                CollectionManifest.event_catalog_publication_id,
+                CollectionManifest.event_catalog_checksum,
+            ).where(CollectionManifest.manifest_id == MANIFEST)
+        ).mappings().one()
+    provider_identity = json.dumps({
+        "window": "season",
+        "teams": {
+            str(team_id): {
+                "expected_games": len(game_ids_by_team[team_id]),
+                "authority_game_ids": sorted(game_ids_by_team[team_id]),
+            }
+            for team_id in TEAM_IDS
+        },
+    }, sort_keys=True, separators=(",", ":"))
+    facts = tuple(
+        replace(
+            fact,
+            cutoff=CUTOFF,
+            manifest_id=MANIFEST,
+            event_catalog_publication_id=authority["event_catalog_publication_id"],
+            event_catalog_checksum=authority["event_catalog_checksum"],
+            provider_window_identity=provider_identity,
+        )
+        for fact in (
+            *_surface_facts(TEAM_IDS, surface="traditional", provider="nba_stats", game_ids_by_team=game_ids_by_team),
+            *_surface_facts(TEAM_IDS, surface="assist_locations", provider="pbp_stats", game_ids_by_team=game_ids_by_team),
+        )
+    )
+    observations = tuple(
+        replace(
+            observation,
+            cutoff=CUTOFF,
+            manifest_id=MANIFEST,
+            event_catalog_publication_id=authority["event_catalog_publication_id"],
+            event_catalog_checksum=authority["event_catalog_checksum"],
+            provider_window_identity=provider_identity,
+        )
+        for observation in _observations()
+    )
     repository.replace_snapshots(
         (
             (
                 scope,
                 (
-                    *_surface_facts(TEAM_IDS, surface="traditional", provider="nba_stats", game_ids_by_team=game_ids_by_team),
-                    *_surface_facts(TEAM_IDS, surface="assist_locations", provider="pbp_stats", game_ids_by_team=game_ids_by_team),
+                    *facts,
                 ),
-                _observations(),
+                observations,
             ),
         ),
         retrieved_at=CUTOFF,
@@ -720,6 +761,33 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
         assert artifact is not None
         assert artifact.status == "exact"
         assert assume_utc(artifact.cutoff) == CUTOFF
+
+
+def test_stored_legacy_rejects_nullable_date_only_rows(tmp_path):
+    engine, governance, _ = _runner_world(tmp_path)
+    repository = TeamMatchupRepository(engine)
+    repository.replace_snapshots(
+        (
+            (
+                TeamMatchupSnapshotScope("2025-26", CUTOFF.date()),
+                (
+                    *_surface_facts(
+                        TEAM_IDS, surface="traditional", provider="nba_stats",
+                    ),
+                    *_surface_facts(
+                        TEAM_IDS, surface="assist_locations", provider="pbp_stats",
+                    ),
+                ),
+                _observations(),
+            ),
+        ),
+        retrieved_at=CUTOFF,
+    )
+    with pytest.raises(MatchupParityError, match="provenance"):
+        StoredLegacyMatchupSource(repository).produce(
+            season="2025-26", window="season", cutoff=CUTOFF,
+            governance=governance,
+        )
 
 
 def test_runner_rejects_legacy_provenance_mismatch(tmp_path):

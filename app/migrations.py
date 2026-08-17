@@ -349,6 +349,31 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
         _backfill_correction_lineage(connection)
 
 
+def _add_team_matchup_provider_provenance(connection: Connection) -> None:
+    """Add immutable provider-window evidence to legacy matchup rows.
+
+    Existing rows are deliberately not backfilled: a nullable/date-only row
+    cannot prove its original authority or provider window and parity must
+    reject it until a fresh materialization replaces it.
+    """
+    preparer = connection.dialect.identifier_preparer
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        existing = {
+            column["name"] for column in inspect(connection).get_columns(table_name)
+        }
+        table = preparer.quote(table_name)
+        for name, type_sql in {
+            "manifest_id": "VARCHAR(128)",
+            "event_catalog_publication_id": "VARCHAR(128)",
+            "event_catalog_checksum": "VARCHAR(64)",
+            "provider_window_identity": "TEXT",
+        }.items():
+            if name not in existing:
+                connection.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
+                ))
+
+
 def _backfill_correction_lineage(connection: Connection) -> None:
     """Upgrade legacy singular/scalar queue lineage into keyed evidence.
 
@@ -1718,6 +1743,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         41,
         "041_projection_archive_transitions",
         _upgrade_projection_archive_transitions,
+    ),
+    Migration(
+        42,
+        "042_team_matchup_provider_provenance",
+        _add_team_matchup_provider_provenance,
     ),
 )
 

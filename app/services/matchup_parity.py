@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -125,12 +125,12 @@ HARD_CLASSIFICATIONS = frozenset({
     CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
     CLASSIFICATION_AUTHORITY_MISMATCH,
     CLASSIFICATION_INVALID_DENOMINATOR,
+    CLASSIFICATION_RANKING_DIFFERENCE,
 })
 
 SOFT_CLASSIFICATIONS = frozenset({
     CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
     CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
-    CLASSIFICATION_RANKING_DIFFERENCE,
 })
 
 
@@ -163,6 +163,7 @@ class MatchupMaterialization:
     event_catalog_checksum: str | None = None
     publication_id: str | None = None
     payload_checksum: str | None = None
+    provider_window_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +235,16 @@ class MatchupParityReport:
     ledger_publication_id: str | None = None
     ledger_payload_checksum: str | None = None
     differences: tuple[MatchupParityDifference, ...] = ()
+    legacy_game_ids_by_team: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    ledger_game_ids_by_team: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    legacy_game_set_checksum: str | None = None
+    ledger_game_set_checksum: str | None = None
+    legacy_manifest_id: str | None = None
+    legacy_event_catalog_publication_id: str | None = None
+    legacy_event_catalog_checksum: str | None = None
+    ledger_manifest_id: str | None = None
+    ledger_event_catalog_publication_id: str | None = None
+    ledger_event_catalog_checksum: str | None = None
 
     @property
     def hard_failures(self) -> tuple[MatchupParityDifference, ...]:
@@ -294,6 +305,22 @@ class MatchupParityReport:
             "compared_count": self.compared_count,
             "ledger_publication_id": self.ledger_publication_id,
             "ledger_payload_checksum": self.ledger_payload_checksum,
+            "legacy_game_ids_by_team": {
+                str(team_id): sorted(str(game_id) for game_id in game_ids)
+                for team_id, game_ids in sorted(self.legacy_game_ids_by_team.items())
+            },
+            "ledger_game_ids_by_team": {
+                str(team_id): sorted(str(game_id) for game_id in game_ids)
+                for team_id, game_ids in sorted(self.ledger_game_ids_by_team.items())
+            },
+            "legacy_game_set_checksum": self.legacy_game_set_checksum,
+            "ledger_game_set_checksum": self.ledger_game_set_checksum,
+            "legacy_manifest_id": self.legacy_manifest_id,
+            "legacy_event_catalog_publication_id": self.legacy_event_catalog_publication_id,
+            "legacy_event_catalog_checksum": self.legacy_event_catalog_checksum,
+            "ledger_manifest_id": self.ledger_manifest_id,
+            "ledger_event_catalog_publication_id": self.ledger_event_catalog_publication_id,
+            "ledger_event_catalog_checksum": self.ledger_event_catalog_checksum,
             "status": self.status,
             "differences": [difference.to_dict() for difference in self.differences],
         }
@@ -579,14 +606,40 @@ class StoredLegacyMatchupSource:
             observation for observation in snapshot.observations
             if observation.surface in LEDGER_OWNED_SURFACES
         )
-        for item in (*facts, *observations):
-            if item.cutoff is not None:
-                try:
-                    cutoff_matches = _aware(item.cutoff) == _aware(cutoff)
-                except MatchupParityError:
-                    cutoff_matches = False
-                if not cutoff_matches:
-                    raise MatchupParityError("legacy materialization scope mismatch")
+        if not facts or not observations:
+            raise MatchupParityError("legacy materialization provenance unavailable")
+        expected_authority = (
+            governance.manifest_id,
+            governance.event_catalog_publication_id,
+            governance.event_catalog_checksum,
+        )
+        persisted_metadata = {
+            (
+                item.cutoff,
+                item.manifest_id,
+                item.event_catalog_publication_id,
+                item.event_catalog_checksum,
+                item.provider_window_identity,
+            )
+            for item in (*facts, *observations)
+        }
+        if len(persisted_metadata) != 1:
+            raise MatchupParityError("legacy materialization provenance mismatch")
+        persisted_cutoff, manifest_id, catalog_id, catalog_checksum, window_identity = (
+            next(iter(persisted_metadata))
+        )
+        try:
+            cutoff_matches = _aware(persisted_cutoff) == _aware(cutoff)
+        except MatchupParityError:
+            cutoff_matches = False
+        if (
+            not cutoff_matches
+            or (manifest_id, catalog_id, catalog_checksum) != expected_authority
+            or not all(isinstance(value, str) and value.strip() for value in (
+                manifest_id, catalog_id, catalog_checksum, window_identity
+            ))
+        ):
+            raise MatchupParityError("legacy materialization provenance unavailable")
         # Provider rows are the legacy materializer's actual output.  Do not
         # stamp the governed expectation onto them: a provider response that
         # selected the wrong games must fail parity rather than be relabeled
@@ -602,6 +655,27 @@ class StoredLegacyMatchupSource:
             team_id: next(iter(game_sets)) if len(game_sets) == 1 else frozenset()
             for team_id, game_sets in ids_by_team.items()
         }
+        try:
+            identity = json.loads(window_identity)
+            identity_teams = identity["teams"]
+            if identity["window"] != window or not isinstance(identity_teams, dict):
+                raise ValueError
+            actual_ids_by_team = {
+                str(team_id): sorted(str(game_id) for game_id in game_ids)
+                for team_id, game_ids in game_ids_by_team.items()
+            }
+            for team_id, game_ids in actual_ids_by_team.items():
+                evidence = identity_teams[team_id]
+                if (
+                    evidence["expected_games"] != len(game_ids)
+                    or sorted(str(game_id) for game_id in evidence["authority_game_ids"])
+                    != game_ids
+                ):
+                    raise ValueError
+            if set(identity_teams) != set(actual_ids_by_team):
+                raise ValueError
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+            raise MatchupParityError("legacy provider window identity unavailable") from error
         return MatchupMaterialization(
             season=season,
             window=window,
@@ -610,9 +684,10 @@ class StoredLegacyMatchupSource:
             observations=observations,
             game_ids_by_team=game_ids_by_team,
             producer=PRODUCER_LEGACY,
-            manifest_id=governance.manifest_id,
-            event_catalog_publication_id=governance.event_catalog_publication_id,
-            event_catalog_checksum=governance.event_catalog_checksum,
+            manifest_id=manifest_id,
+            event_catalog_publication_id=catalog_id,
+            event_catalog_checksum=catalog_checksum,
+            provider_window_identity=window_identity,
         )
 
 
@@ -755,12 +830,9 @@ def compare_matchup_materializations(
         ledger.event_catalog_checksum,
     )
     if (
-        any(value is not None for value in (*legacy_authority, *ledger_authority))
-        and (
-            legacy_authority != ledger_authority
-            or any(value is None or value == "" for value in legacy_authority)
-            or any(value is None or value == "" for value in ledger_authority)
-        )
+        legacy_authority != ledger_authority
+        or any(value is None or value == "" for value in legacy_authority)
+        or any(value is None or value == "" for value in ledger_authority)
     ):
         differences.append(MatchupParityDifference(
             window, surface, None, "authority",
@@ -886,6 +958,7 @@ def compare_matchup_materializations(
             window, surface, team_id, "game_ids", "present", None,
             CLASSIFICATION_EXTRA_TEAM,
         ))
+    legacy_checksum = ledger_checksum = None
     if legacy.game_ids_by_team and ledger.game_ids_by_team:
         legacy_checksum = LedgerLineage.for_game_ids(
             game_id for ids in legacy.game_ids_by_team.values() for game_id in ids
@@ -1041,6 +1114,22 @@ def compare_matchup_materializations(
         ledger_publication_id=ledger.publication_id,
         ledger_payload_checksum=ledger.payload_checksum,
         differences=tuple(differences),
+        legacy_game_ids_by_team={
+            int(team_id): tuple(sorted(str(game_id) for game_id in game_ids))
+            for team_id, game_ids in legacy.game_ids_by_team.items()
+        },
+        ledger_game_ids_by_team={
+            int(team_id): tuple(sorted(str(game_id) for game_id in game_ids))
+            for team_id, game_ids in ledger.game_ids_by_team.items()
+        },
+        legacy_game_set_checksum=legacy_checksum,
+        ledger_game_set_checksum=ledger_checksum,
+        legacy_manifest_id=legacy.manifest_id,
+        legacy_event_catalog_publication_id=legacy.event_catalog_publication_id,
+        legacy_event_catalog_checksum=legacy.event_catalog_checksum,
+        ledger_manifest_id=ledger.manifest_id,
+        ledger_event_catalog_publication_id=ledger.event_catalog_publication_id,
+        ledger_event_catalog_checksum=ledger.event_catalog_checksum,
     )
 
 

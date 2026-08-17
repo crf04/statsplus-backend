@@ -1343,6 +1343,12 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
 
     slate_response = client.get("/api/games/slate?date=2026-01-15")
     matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    # The route is the authenticated byte-contract seam: it includes the
+    # persisted player-game-log fixture and all matchup surfaces after the
+    # candidate activation/rollback journey.  Repeated reads must remain byte
+    # stable; a checksum-only repository assertion would miss serializer drift.
+    matchup_bytes = matchup_response.data
+    repeated_matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     selection_response = client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
@@ -1356,6 +1362,8 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
 
     assert slate_response.status_code == 200
     assert matchup_response.status_code == 200
+    assert repeated_matchup_response.status_code == 200
+    assert repeated_matchup_response.data == matchup_bytes
     assert selection_response.status_code == 200
     matchup = matchup_response.get_json()
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"

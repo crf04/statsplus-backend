@@ -54,11 +54,11 @@ _MATCHUP_HARD_CLASSIFICATIONS = frozenset({
     "l15_game_count_mismatch",
     "authority_mismatch",
     "invalid_denominator",
+    "ranking_difference",
 })
 _MATCHUP_SOFT_CLASSIFICATIONS = frozenset({
     "denominator_tolerance_exceeded",
     "derived_rate_difference",
-    "ranking_difference",
 })
 
 
@@ -81,6 +81,35 @@ def matchup_parity_artifact_is_activatable(
         return False
     if document.get("status") not in {"exact", "adjudication_required"}:
         return False
+    required_evidence = (
+        "legacy_game_ids_by_team",
+        "ledger_game_ids_by_team",
+        "legacy_game_set_checksum",
+        "ledger_game_set_checksum",
+        "legacy_manifest_id",
+        "legacy_event_catalog_publication_id",
+        "legacy_event_catalog_checksum",
+        "ledger_manifest_id",
+        "ledger_event_catalog_publication_id",
+        "ledger_event_catalog_checksum",
+    )
+    if any(key not in document for key in required_evidence):
+        return False
+    if (
+        document.get("ledger_publication_id") != artifact.publication_id
+        or document.get("ledger_payload_checksum") != artifact.payload_checksum
+        or not all(
+            isinstance(document.get(key), str) and document.get(key).strip()
+            for key in (
+                "legacy_game_set_checksum", "ledger_game_set_checksum",
+                "legacy_manifest_id", "legacy_event_catalog_publication_id",
+                "legacy_event_catalog_checksum", "ledger_manifest_id",
+                "ledger_event_catalog_publication_id", "ledger_event_catalog_checksum",
+            )
+        )
+        or document["legacy_game_ids_by_team"] != document["ledger_game_ids_by_team"]
+    ):
+        return False
     differences = document.get("differences", ())
     if not isinstance(differences, list):
         return False
@@ -100,6 +129,63 @@ def matchup_parity_artifact_is_activatable(
         classification in _MATCHUP_HARD_CLASSIFICATIONS
         for classification in classifications
     )
+
+
+def matchup_parity_cohort_is_activatable(
+    session: Session,
+    *,
+    season: str,
+    cutoff,
+    candidate_publication_id: str,
+    artifact_id: str,
+) -> bool:
+    """Require one exact Season+L15, traditional+assist evidence cohort."""
+    required = _MATCHUP_STREAMS
+    rows = session.scalars(select(LedgerParityArtifact).where(
+        LedgerParityArtifact.season == season,
+        LedgerParityArtifact.cutoff == assume_utc(cutoff),
+        LedgerParityArtifact.stream_key.in_(required),
+    )).all()
+    by_stream = {row.stream_key: row for row in rows}
+    if len(rows) != len(required) or set(by_stream) != required:
+        return False
+    for stream_key in required:
+        artifact = by_stream[stream_key]
+        if not matchup_parity_artifact_is_activatable(artifact, stream_key=stream_key):
+            return False
+        if artifact.status != "exact" and artifact.decision != "approved":
+            return False
+        publication = session.get(PublicationVersion, artifact.publication_id)
+        if publication is None or publication.status not in {"candidate", "active"}:
+            return False
+        if artifact.payload_checksum != publication.checksum:
+            return False
+        try:
+            document = json.loads(artifact.report)
+            authority = verify_publication_authority(session, publication)
+            if (
+                document.get("ledger_manifest_id") != authority.manifest_id
+                or document.get("ledger_event_catalog_publication_id")
+                != authority.event_catalog_publication_id
+                or document.get("ledger_event_catalog_checksum")
+                != authority.event_catalog_checksum
+            ):
+                return False
+            from app.services.matchup_parity import _decode_ledger_rows
+
+            rows = _decode_ledger_rows(publication.payload, stream_key=stream_key)
+            expected_ids = {
+                str(row.team_id): sorted(row.game_ids) for row in rows
+            }
+            if document.get("ledger_game_ids_by_team") != expected_ids:
+                return False
+        except (PublicationGovernanceUnavailable, TypeError, ValueError, KeyError,
+                json.JSONDecodeError):
+            return False
+        if stream_key == artifact.stream_key and artifact.artifact_id == artifact_id:
+            if artifact.publication_id != candidate_publication_id:
+                return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +350,7 @@ class LedgerParityArtifactRepository:
             self._check_matchup_candidate(
                 publication, stream_key, report, payload_checksum
             )
-            self._verify_matchup_authority(session, publication)
+            self._verify_matchup_report_authority(session, publication, report)
             return
         if connection is not None:
             with Session(bind=connection) as authority_session:
@@ -272,21 +358,39 @@ class LedgerParityArtifactRepository:
                 self._check_matchup_candidate(
                     publication, stream_key, report, payload_checksum
                 )
-                self._verify_matchup_authority(authority_session, publication)
+                self._verify_matchup_report_authority(
+                    authority_session, publication, report
+                )
             return
         with Session(self.engine) as owned_session:
             publication = owned_session.get(PublicationVersion, publication_id)
             self._check_matchup_candidate(
                 publication, stream_key, report, payload_checksum
             )
-            self._verify_matchup_authority(owned_session, publication)
+            self._verify_matchup_report_authority(owned_session, publication, report)
 
     @staticmethod
-    def _verify_matchup_authority(session, publication) -> None:
+    def _verify_matchup_authority(session, publication):
         try:
-            verify_publication_authority(session, publication)
+            return verify_publication_authority(session, publication)
         except PublicationGovernanceUnavailable as error:
             raise ValueError("matchup parity candidate authority is not exact") from error
+
+    @classmethod
+    def _verify_matchup_report_authority(cls, session, publication, report) -> None:
+        authority = cls._verify_matchup_authority(session, publication)
+        expected = (
+            authority.manifest_id,
+            authority.event_catalog_publication_id,
+            authority.event_catalog_checksum,
+        )
+        actual = (
+            getattr(report, "ledger_manifest_id", None),
+            getattr(report, "ledger_event_catalog_publication_id", None),
+            getattr(report, "ledger_event_catalog_checksum", None),
+        )
+        if actual != expected:
+            raise ValueError("matchup parity report authority is not exact")
 
     @staticmethod
     def _check_matchup_candidate(
@@ -766,6 +870,7 @@ def _season_traditional_opponent(
 __all__ = [
     "LedgerParityArtifactRepository",
     "matchup_parity_artifact_is_activatable",
+    "matchup_parity_cohort_is_activatable",
     "LegacyParityDiagnosticReader",
     "LedgerParityReport",
     "SemanticDifference",

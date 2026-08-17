@@ -24,11 +24,14 @@ exact Season/L15 game sets, and the same contracted counts.
 
 Run the legacy provider aggregate refresh and the ledger materializer through
 their normal write seams. The parity command reads the legacy writer's stored
-facts (including its source-selected game IDs) and the immutable candidate
-`PublicationVersion` rows; it does not accept caller-authored materialization
-JSON. The `cutoff` must be the exact aware immutable manifest cutoff, never a
-fabricated midnight: it is the same cutoff both materializers ran at, and it is
-what the artifacts are bound to.
+facts and their persisted immutable provider-window evidence, plus the
+immutable candidate `PublicationVersion` rows; it does not accept
+caller-authored materialization JSON. Legacy rows must carry a non-null exact
+cutoff, manifest/Event Catalog publication ID and checksum, and provider
+window identity. The provider aggregate's returned count is verified against
+the authority before its game IDs are retained. The `cutoff` must be the exact
+aware immutable manifest cutoff, never a fabricated midnight: it is the same
+cutoff both materializers ran at, and it is what the artifacts are bound to.
 
 ## Bounded dual-run
 
@@ -66,16 +69,23 @@ checksums), whether the two cutoffs align, whether deterministic rankings
 Integer counts compare exactly. Only floating denominators (effective team
 minutes, with seconds normalized to minutes) and the per-48 rates recomputed
 from counts and denominators use the single documented tolerance
-(`MATCHUP_PARITY_TOLERANCE`, `1e-6`). A missing surface, a single missing
+(`MATCHUP_PARITY_TOLERANCE`, `1e-6`). Reports retain exact legacy and ledger
+game-ID maps/checksums and both sides' manifest/Event Catalog identities;
+activation validates these fields against the candidate rather than trusting a
+boolean status. A missing surface, a single missing
 metric, an unavailable observation, an authority/scope/cutoff mismatch, an
 integer or game-set failure, or a byte-contract failure is `failed` and cannot
 be adjudicated. Only the documented floating semantic differences may be
 `adjudication_required`; they are the sole differences an operator may approve.
+Ranking differences are hard failures under deterministic #117 rankings.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,
-publication, and payload checksum. An L15 artifact can never authorize a Season
-stream, and both `assist_locations_*` streams are parity-required for
-activation exactly like the traditional and per-36 streams.
+publication, payload checksum, and exact game-set/authority evidence. An L15
+artifact can never authorize a Season stream. Activation requires all four
+aligned Season+L15 traditional+assist artifacts at the same governed cutoff;
+a one-window CLI run or one-stream activation attempt is rejected. Both
+`assist_locations_*` streams are parity-required for activation exactly like
+the traditional and per-36 streams.
 
 ## Adjudication
 

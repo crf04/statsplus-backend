@@ -1785,11 +1785,15 @@ evidence degrades only the `assist_locations` surface
 surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
-`team_matchup_surface_observations`; provider-collected legacy rows carry the
-actual Event Catalog-selected game IDs for the traditional and assist parity
-surfaces, while their ledger-only checksum columns remain NULL. The existing
-authenticated Matchups and player-game-log HTTP contracts are unchanged and
-remain provider-free at request time.
+`team_matchup_surface_observations`; provider-collected legacy rows keep their
+ledger-only checksum columns NULL. Migration 040 adds immutable legacy
+`manifest_id`, Event Catalog publication ID/checksum, and
+`provider_window_identity` evidence. A fresh parity-bearing provider write
+must verify each aggregate's returned window/game count against that exact
+authority before storing its game IDs; old nullable/date-only rows are not
+backfilled and are rejected by `StoredLegacyMatchupSource`. The existing
+authenticated Matchups and player-game-log HTTP contracts remain provider-free
+at request time.
 Correction propagation adds nullable source-observation lineage, exact
 game-set checksum, cutoff, and recomposition reason to those read-model rows.
 Composition jobs retain the correction game, affected teams, source lineage,
@@ -1856,6 +1860,9 @@ Season stream. The runner records one artifact per ledger-owned stream
 to its exact Publication and payload checksum. Both `assist_locations_*`
 streams are parity-required for activation, exactly like the traditional and
 per-36 streams.
+Activation requires the complete aligned four-stream Season+L15 cohort at one
+exact cutoff; a one-window CLI run or one-stream artifact cannot activate by
+itself.
 
 The comparison rules match the parent's parity contract exactly. Team identity
 sets must be exactly equal and League Complete (the governed 30-team roster),
@@ -1880,7 +1887,8 @@ vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
 `invalid_denominator`). Hard classifications produce `failed` evidence that
 cannot be manually approved; only the documented floating semantic
-differences may be `adjudication_required`.
+differences may be `adjudication_required`; ranking differences are hard and
+never manually adjudicable.
 
 `scripts/matchup_parity.py compare` reads the actual stored legacy facts and
 the candidate publication IDs plus the exact aware cutoff, runs the

@@ -3116,12 +3116,21 @@ class PublicationService(_SessionService):
                 }:
                     from app.services.ledger_parity import (
                         matchup_parity_artifact_is_activatable,
+                        matchup_parity_cohort_is_activatable,
                     )
 
                     if not matchup_parity_artifact_is_activatable(
                         artifact, stream_key=parity_stream
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
+                    if not matchup_parity_cohort_is_activatable(
+                        session,
+                        season=season,
+                        cutoff=cutoff,
+                        candidate_publication_id=candidate_publication_id,
+                        artifact_id=parity_artifact_id,
+                    ):
+                        raise ControlPlaneError("ledger_parity_cohort_incomplete")
             if candidate is not None and row.provider == "ledger":
                 lineage_rows = session.execute(select(
                     PublicationObservation.observation_id,
