@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from app.domain.utc import assume_utc
 from app.models.team_matchup import (
@@ -131,6 +133,7 @@ class TeamMatchupRepository:
         retrieved_at: datetime,
         affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
         affected_team_ids: frozenset[int] | None = None,
+        session: Session | None = None,
     ) -> None:
         """Replace related windows in one transaction after collection."""
 
@@ -156,7 +159,7 @@ class TeamMatchupRepository:
         )
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with self.engine.begin() as connection:
+        with self._connection_scope(session) as connection:
             scoped_changes = []
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
                 existing_observations = {
@@ -338,6 +341,36 @@ class TeamMatchupRepository:
                             for fact in changed_fact_rows
                         ],
                     )
+                if target_team_ids is not None and target_team_ids:
+                    # A targeted rebuild replaces values only for affected
+                    # teams, but the surface observation is one atomic
+                    # publication. Refresh the lineage metadata on retained
+                    # teams as well so a query can never pair a new surface
+                    # provenance row with stale fact provenance. Values and
+                    # identities remain untouched.
+                    metadata_by_team = {}
+                    for fact in fact_rows:
+                        if fact.team_id in target_team_ids:
+                            continue
+                        metadata_by_team.setdefault((fact.team_id, fact.base), fact)
+                    for (team_id, base), fact in metadata_by_team.items():
+                        connection.execute(
+                            TeamMatchupFactRow.__table__.update().where(
+                                *self._scope(fact_table, scope),
+                                fact_table.c.base == base,
+                                fact_table.c.team_id == team_id,
+                            ).values(
+                                retrieved_at=observed_at,
+                                game_ids=_game_ids_json(fact.game_ids),
+                                ledger_checksum=fact.ledger_checksum,
+                                source_observation_ids=_source_observation_ids_json(
+                                    fact.source_observation_ids
+                                ),
+                                game_set_checksum=fact.game_set_checksum,
+                                cutoff=fact.cutoff,
+                                recomposition_reason=fact.recomposition_reason,
+                            )
+                        )
                 changed_observations = tuple(
                     observation
                     for observation in observation_rows
@@ -365,6 +398,14 @@ class TeamMatchupRepository:
                             for observation in changed_observations
                         ],
                     )
+
+    @contextmanager
+    def _connection_scope(self, session: Session | None):
+        if session is not None:
+            yield session.connection()
+            return
+        with self.engine.begin() as connection:
+            yield connection
 
     @staticmethod
     def _fact_signature(row) -> tuple:

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
+from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.utc import assume_utc
@@ -118,6 +119,7 @@ class LedgerMatchupMaterializationService:
         affected_team_ids: frozenset[int] | None = None,
         trigger_game_id: str | None = None,
         trigger_game_ids: frozenset[str] | None = None,
+        session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
@@ -230,10 +232,14 @@ class LedgerMatchupMaterializationService:
             )
         else:
             snapshots.append((l15_scope, l15_facts, l15_observations))
-        self.matchup_repository.replace_snapshots(
-            snapshots,
-            **snapshot_kwargs,
-        )
+        if session is None:
+            self.matchup_repository.replace_snapshots(snapshots, **snapshot_kwargs)
+        else:
+            self.matchup_repository.replace_snapshots(
+                snapshots,
+                **snapshot_kwargs,
+                session=session,
+            )
         return LedgerMatchupMaterialization(
             season=canonical_season,
             as_of=as_of,

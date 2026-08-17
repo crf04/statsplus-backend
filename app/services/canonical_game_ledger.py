@@ -2312,17 +2312,27 @@ class CanonicalGameLedgerRepository:
             last_error=row["last_error"],
         )
 
-    def publish_metadata(self, publication: LedgerPublicationRecord) -> None:
-        self.publish_metadata_batch((publication,))
+    def publish_metadata(
+        self,
+        publication: LedgerPublicationRecord,
+        *,
+        connection: Connection | None = None,
+    ) -> None:
+        self.publish_metadata_batch((publication,), connection=connection)
 
-    def publish_metadata_batch(self, publications: Iterable[LedgerPublicationRecord]) -> None:
+    def publish_metadata_batch(
+        self,
+        publications: Iterable[LedgerPublicationRecord],
+        *,
+        connection: Connection | None = None,
+    ) -> None:
         """Replace one materialization's metadata rows in one transaction."""
 
         records = tuple(publications)
         if not records:
             return
         table = LedgerPublication.__table__
-        with self.engine.begin() as connection:
+        if connection is not None:
             for publication in records:
                 values = asdict(publication)
                 values["retrieved_at"] = assume_utc(publication.retrieved_at)
@@ -2334,6 +2344,9 @@ class CanonicalGameLedgerRepository:
                     table.c.as_of == publication.as_of,
                 ))
                 connection.execute(insert(table).values(values))
+            return
+        with self.engine.begin() as owned_connection:
+            self.publish_metadata_batch(records, connection=owned_connection)
 
     def get_publication(
         self,

@@ -10,6 +10,7 @@ from typing import Mapping, Protocol
 from uuid import uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import sessionmaker
 
 from app.models.collection_control import (
     ActiveSeason,
@@ -262,13 +263,13 @@ class LedgerRuntime:
     def compose_queued(self, season: str) -> int:
         table = CompositionJob.__table__
         with self.repository.engine.connect() as connection:
-            jobs = connection.execute(select(table).where(
+            queued = connection.execute(select(table).where(
                 table.c.season == season,
                 table.c.status == "queued",
             ).order_by(table.c.cutoff, table.c.created_at)).mappings().all()
         slices = sorted({
             (row["cutoff"], row["manifest_id"])
-            for row in jobs
+            for row in queued
         }, key=lambda item: (item[0], item[1] or ""))
         completed = 0
         for stored_cutoff, manifest_id in slices:
@@ -277,11 +278,42 @@ class LedgerRuntime:
                 if stored_cutoff.tzinfo is None
                 else stored_cutoff
             )
-            slice_jobs = tuple(
-                row for row in jobs
-                if row["cutoff"] == stored_cutoff
-                and row["manifest_id"] == manifest_id
-            )
+            # Claim the complete slice under a row lock.  ``generation`` is
+            # lineage versioning, not an attempt count: acceptance can bump it
+            # while composition runs and leave the row queued for the next
+            # worker.  Completion below is a compare-and-swap on this claim.
+            with self._session_factory() as claim_session, claim_session.begin():
+                rows = claim_session.scalars(select(CompositionJob).where(
+                    CompositionJob.season == season,
+                    CompositionJob.cutoff == stored_cutoff,
+                    CompositionJob.manifest_id == manifest_id,
+                    CompositionJob.status == "queued",
+                ).with_for_update().order_by(
+                    CompositionJob.created_at,
+                    CompositionJob.job_id,
+                )).all()
+                if not rows:
+                    continue
+                claimed_jobs = tuple(
+                    {
+                        "job_id": str(row.job_id),
+                        "stream_key": str(row.stream_key),
+                        "cutoff": row.cutoff,
+                        "manifest_id": row.manifest_id,
+                        "generation": int(row.generation or 1),
+                        "trigger_game_id": row.trigger_game_id,
+                        "trigger_game_ids": row.trigger_game_ids,
+                        "affected_team_ids": row.affected_team_ids,
+                        "source_observation_ids": row.source_observation_ids,
+                        "recomposition_reason": row.recomposition_reason,
+                    }
+                    for row in rows
+                )
+                for row in rows:
+                    row.status = "running"
+                    row.claimed_generation = int(row.generation or 1)
+                    row.updated_at = self.clock()
+            slice_jobs = claimed_jobs
             reason = next(
                 (
                     str(row["recomposition_reason"])
@@ -309,62 +341,98 @@ class LedgerRuntime:
                 )
             trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
             try:
-                governance = self.governance.read_for_composition(
-                    season,
-                    cutoff,
-                    manifest_id,
-                )
-                games = tuple(
-                    game
-                    for summary in self.repository.list_games(
-                        season, through=cutoff.date()
-                    )
-                    if (game := self.repository.get_game(summary.game_id)) is not None
-                )
-                if not trigger_game_ids:
-                    source_observation_ids = {
-                        str(source_observation_id)
-                        for row in slice_jobs
-                        for source_observation_id in _json_list(
-                            row.get("source_observation_ids")
-                        )
-                    }
-                    trigger_game_ids = frozenset(
-                        game.game_id
-                        for game in games
-                        if game.source_observation_id in source_observation_ids
-                    )
-                    trigger_game_id = next(
-                        iter(sorted(trigger_game_ids)), None
-                    )
-                if self.matchup_materialization is not None:
-                    # Publish the disposable ledger-owned matchup read model at
-                    # the exact composition cutoff before composing publication
-                    # streams.  Target metadata lets the repository retain
-                    # unaffected team facts in place.
-                    self.matchup_materialization.materialize(
+                with self._session_factory() as session, session.begin():
+                    governance = self.governance.read_for_composition(
                         season,
+                        cutoff,
+                        manifest_id,
+                    )
+                    games = tuple(
+                        game
+                        for summary in self.repository.list_games(
+                            season, through=cutoff.date()
+                        )
+                        if (game := self.repository.get_game(summary.game_id)) is not None
+                    )
+                    if not trigger_game_ids:
+                        source_observation_ids = {
+                            str(source_observation_id)
+                            for row in slice_jobs
+                            for source_observation_id in _json_list(
+                                row.get("source_observation_ids")
+                            )
+                        }
+                        trigger_game_ids = frozenset(
+                            game.game_id
+                            for game in games
+                            if game.source_observation_id in source_observation_ids
+                        )
+                        trigger_game_id = next(
+                            iter(sorted(trigger_game_ids)), None
+                        )
+                    if self.matchup_materialization is not None:
+                        # Matchup facts, surface observations, ledger metadata,
+                        # candidates, enabled publications, and pointer fences
+                        # all use this same session transaction.
+                        self.matchup_materialization.materialize(
+                            season,
+                            as_of=cutoff.date(),
+                            cutoff=cutoff,
+                            recomposition_reason=reason,
+                            affected_team_ids=(affected_team_ids or None),
+                            trigger_game_id=trigger_game_id,
+                            trigger_game_ids=(trigger_game_ids or None),
+                            expected_game_ids=governance.expected_game_ids,
+                            expected_l15_game_ids=governance.expected_l15_game_ids,
+                            team_ids=governance.team_ids,
+                            session=session,
+                        )
+                    materialized = self.materialization.compose(
+                        games,
+                        season=season,
                         as_of=cutoff.date(),
                         cutoff=cutoff,
-                        recomposition_reason=reason,
-                        affected_team_ids=(affected_team_ids or None),
-                        trigger_game_id=trigger_game_id,
-                        trigger_game_ids=(trigger_game_ids or None),
                         expected_game_ids=governance.expected_game_ids,
                         expected_l15_game_ids=governance.expected_l15_game_ids,
                         team_ids=governance.team_ids,
+                        activate=self.publication_service is not None,
+                        recomposition_reason=reason,
+                        session=session,
                     )
-                materialized = self.materialization.compose(
-                    games,
-                    season=season,
-                    as_of=cutoff.date(),
-                    cutoff=cutoff,
-                    expected_game_ids=governance.expected_game_ids,
-                    expected_l15_game_ids=governance.expected_l15_game_ids,
-                    team_ids=governance.team_ids,
-                    activate=self.publication_service is not None,
-                    recomposition_reason=reason,
-                )
+                    succeeded = set()
+                    if materialized.season_window.complete:
+                        succeeded |= {
+                            "player_game_logs",
+                            "traditional_opponent_season",
+                            "player_per36",
+                        }
+                    if materialized.l15_window.complete:
+                        succeeded |= {"traditional_opponent_l15"}
+                    if (
+                        materialized.assist_location_season is not None
+                        and materialized.assist_location_l15 is not None
+                    ):
+                        if materialized.season_window.complete:
+                            succeeded |= {"assist_locations_season"}
+                        if materialized.l15_window.complete:
+                            succeeded |= {"assist_locations_l15"}
+                    for job in slice_jobs:
+                        success = job["stream_key"] in succeeded
+                        result = session.execute(update(table).where(
+                            table.c.job_id == job["job_id"],
+                            table.c.status == "running",
+                            table.c.generation == job["generation"],
+                            table.c.claimed_generation == job["generation"],
+                        ).values(
+                            status="succeeded" if success else "failed",
+                            updated_at=self.clock(),
+                            claimed_generation=None,
+                            last_error=(
+                                None if success
+                                else _composition_failure_reason(job["stream_key"], materialized)
+                            ),
+                        ))
+                        completed += int(result.rowcount == 1 and success)
             except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable):
                 self._mark_slice_failed(
                     season=season,
@@ -377,38 +445,13 @@ class LedgerRuntime:
             except Exception:
                 logger.exception("unexpected ledger recomposition failure", extra={"season": season})
                 raise
-            succeeded = set()
-            if materialized.season_window.complete:
-                succeeded |= {
-                    "player_game_logs",
-                    "traditional_opponent_season",
-                    "player_per36",
-                }
-            if materialized.l15_window.complete:
-                succeeded |= {"traditional_opponent_l15"}
-            if (
-                materialized.assist_location_season is not None
-                and materialized.assist_location_l15 is not None
-            ):
-                if materialized.season_window.complete:
-                    succeeded |= {"assist_locations_season"}
-                if materialized.l15_window.complete:
-                    succeeded |= {"assist_locations_l15"}
-            with self.repository.engine.begin() as connection:
-                for job in slice_jobs:
-                    success = job["stream_key"] in succeeded
-                    connection.execute(update(table).where(
-                        table.c.job_id == job["job_id"],
-                    ).values(
-                        status="succeeded" if success else "failed",
-                        updated_at=self.clock(),
-                        last_error=(
-                            None if success
-                            else _composition_failure_reason(job["stream_key"], materialized)
-                        ),
-                    ))
-                    completed += int(success)
         return completed
+
+    def _session_factory(self):
+        publication_service = self.publication_service
+        if publication_service is not None:
+            return publication_service.session()
+        return sessionmaker(bind=self.repository.engine, expire_on_commit=False)()
 
     def _mark_slice_failed(
         self,
@@ -427,6 +470,9 @@ class LedgerRuntime:
             for job in jobs:
                 connection.execute(update(table).where(
                     table.c.job_id == job["job_id"],
+                    table.c.status == "running",
+                    table.c.generation == job["generation"],
+                    table.c.claimed_generation == job["generation"],
                 ).values(
                     status="failed",
                     attempts=table.c.attempts + 1,
@@ -469,7 +515,11 @@ def _json_list(value) -> tuple[object, ...]:
         parsed = json.loads(value)
     except (TypeError, ValueError):
         return ()
-    return tuple(parsed) if isinstance(parsed, list) else ()
+    if isinstance(parsed, list):
+        return tuple(parsed)
+    if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+        return (parsed,)
+    return ()
 
 
 __all__ = [

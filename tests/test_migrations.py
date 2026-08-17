@@ -493,6 +493,67 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
     assert json.loads(projected.row_payload) == row
 
 
+def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tmp_path):
+    """A pre-correction 036 row keeps its singular trigger after upgrade."""
+    from app.migrations import MIGRATIONS
+    from app.services.ledger_materialization import LedgerCorrectionQueue
+    from tests.services.test_ledger_derivations import _league_games
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old-036.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 35),
+        )
+        assert run_migrations(engine).current_version == 35
+
+    migration_036 = next(migration for migration in MIGRATIONS if migration.version == 36)
+    with engine.begin() as connection:
+        # Apply the old 036 schema shape, then emulate a row written before
+        # the additive plural columns/evidence backfill was deployed.
+        migration_036.upgrade(connection)
+        connection.execute(text(
+            "INSERT INTO schema_migrations (version, name) "
+            "VALUES (36, '036_publication_player_game_log_projection')"
+        ))
+        connection.execute(text(
+            "INSERT INTO composition_jobs "
+            "(job_id, stream_key, season, cutoff, status, attempts, created_at, "
+            "updated_at, trigger_game_id, trigger_game_ids, ledger_checksum, "
+            "ledger_evidence, generation) VALUES "
+            "('legacy-job', 'player_game_logs', '2025-26', "
+            ":cutoff, 'queued', 0, :cutoff, :cutoff, 'legacy-game', '[]', "
+            ":checksum, '{}', 0)"
+        ), {"checksum": "a" * 64, "cutoff": datetime(2025, 10, 15)})
+
+    result = run_migrations(engine)
+    assert result.applied == ()
+    with engine.connect() as connection:
+        row = connection.execute(text(
+            "SELECT trigger_game_ids, ledger_evidence, game_set_checksum, generation "
+            "FROM composition_jobs WHERE job_id = 'legacy-job'"
+        )).one()
+    assert json.loads(row.trigger_game_ids) == ["legacy-game"]
+    assert json.loads(row.ledger_evidence) == {"legacy-game": "a" * 64}
+    assert row.game_set_checksum
+    assert row.generation == 1
+
+    # The first post-upgrade correction must coalesce with (rather than erase)
+    # the recovered trigger.
+    game = _league_games()[0]
+    queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=timezone.utc))
+    with engine.begin() as connection:
+        queue(connection, game)
+        row = connection.execute(text(
+            "SELECT trigger_game_ids, ledger_evidence FROM composition_jobs "
+            "WHERE job_id = 'legacy-job'"
+        )).one()
+    assert set(json.loads(row.trigger_game_ids)) == {"legacy-game", game.game_id}
+    evidence = json.loads(row.ledger_evidence)
+    assert evidence["legacy-game"] == "a" * 64
+    assert evidence[game.game_id] == game.checksum
+
+
 def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger-drift.sqlite3'}")
     ledger_tables = (

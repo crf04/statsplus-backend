@@ -307,6 +307,8 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
             "ledger_checksum": "VARCHAR(64)",
             "game_set_checksum": "VARCHAR(64)",
             "ledger_evidence": "TEXT NOT NULL DEFAULT '{}'",
+            "generation": "INTEGER NOT NULL DEFAULT 1",
+            "claimed_generation": "INTEGER",
         },
         "team_matchup_facts": {
             "source_observation_ids": "TEXT",
@@ -333,6 +335,105 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
             connection.execute(text(
                 f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
             ))
+
+    _backfill_correction_lineage(connection)
+
+
+def _backfill_correction_lineage(connection: Connection) -> None:
+    """Upgrade legacy singular/scalar queue lineage into keyed evidence.
+
+    The additive columns intentionally had harmless defaults so old writes
+    could continue during a rolling deploy.  A default ``[]``/``{}`` is not
+    evidence, though: once the writer is upgraded, old queued rows must retain
+    their singular trigger and checksum rather than silently becoming an
+    unrelated empty job.
+    """
+
+    import hashlib
+    import json
+
+    table = Table("composition_jobs", MetaData(), autoload_with=connection)
+
+    def parsed_list(value) -> list[str]:
+        if value is None or value == "":
+            return []
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if isinstance(parsed, list):
+            return [
+                str(item) for item in parsed
+                if isinstance(item, (str, int)) and str(item)
+            ]
+        if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+            return [str(parsed)]
+        return []
+
+    def parsed_mapping(value) -> dict[str, str]:
+        if value is None or value == "":
+            return {}
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(game_id): str(checksum)
+            for game_id, checksum in parsed.items()
+            if isinstance(game_id, (str, int))
+            and isinstance(checksum, (str, int))
+            and str(game_id)
+            and str(checksum)
+        }
+
+    rows = connection.execute(select(table)).mappings().all()
+    for row in rows:
+        trigger_ids = parsed_list(row.get("trigger_game_ids"))
+        legacy_trigger = row.get("trigger_game_id")
+        if not trigger_ids and legacy_trigger:
+            trigger_ids = [str(legacy_trigger)]
+        evidence = parsed_mapping(row.get("ledger_evidence"))
+        if not evidence and trigger_ids and row.get("ledger_checksum"):
+            # Legacy rows had only one checksum, so it can safely be bound to
+            # the singular trigger.  For malformed multi-trigger legacy rows,
+            # retain the evidence as one deterministic fallback rather than
+            # inventing a checksum for an unknown game.
+            if len(trigger_ids) == 1:
+                evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
+        if not trigger_ids and evidence:
+            trigger_ids = sorted(evidence)
+        if not trigger_ids and not evidence and not row.get("trigger_game_id"):
+            # There is no legacy evidence to recover; normalize only the
+            # generation so future claims are still versioned.
+            values = {"generation": max(int(row.get("generation") or 0), 1)}
+            if row.get("claimed_generation") is not None:
+                values["claimed_generation"] = None
+            connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
+            continue
+        trigger_ids = sorted(set(trigger_ids) | set(evidence))
+        if evidence:
+            encoded_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
+            if len(evidence) == 1:
+                checksum = next(iter(evidence.values()))
+            else:
+                checksum = hashlib.sha256(encoded_evidence.encode()).hexdigest()
+        else:
+            encoded_evidence = "{}"
+            checksum = row.get("ledger_checksum")
+        encoded_ids = json.dumps(trigger_ids, separators=(",", ":"))
+        values = {
+            "trigger_game_ids": encoded_ids,
+            "trigger_game_id": trigger_ids[0] if len(trigger_ids) == 1 else None,
+            "ledger_evidence": encoded_evidence,
+            "ledger_checksum": checksum,
+            "game_set_checksum": hashlib.sha256(
+                json.dumps(trigger_ids, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "generation": max(int(row.get("generation") or 0), 1),
+        }
+        connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
 
 
 def _backfill_governed_catalog_freshness(connection: Connection) -> None:

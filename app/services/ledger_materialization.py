@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session
 
 from app.models.collection_control import CollectionManifest, CompositionJob
 from app.services.collection_control import LedgerPublicationComposition
@@ -90,6 +91,7 @@ class LedgerMaterializationService:
         require_assist_locations: bool = False,
         activate: bool = False,
         recomposition_reason: str | None = None,
+        session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
@@ -234,7 +236,10 @@ class LedgerMaterializationService:
             )
             for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
-        self.repository.publish_metadata_batch(publications)
+        self.repository.publish_metadata_batch(
+            publications,
+            connection=session.connection() if session is not None else None,
+        )
         publication_cutoff = cutoff or datetime.combine(
             as_of, datetime.min.time(), timezone.utc
         )
@@ -278,13 +283,17 @@ class LedgerMaterializationService:
                         cutoff=publication_cutoff, payload=encoded_payload,
                         provenance=provenance, reason=publication_reason,
                     )
-                    if self.publication_service.stream_enabled(stream_key):
+                    if self.publication_service.stream_enabled(
+                        stream_key,
+                        session=session,
+                    ):
                         batch.append(composition)
                     else:
                         candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                             stream_key, season=canonical_season, cutoff=publication_cutoff,
                             payload=encoded_payload, provenance=provenance,
                             reason=publication_reason,
+                            session=session,
                         )
                 else:
                     candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
@@ -294,11 +303,15 @@ class LedgerMaterializationService:
                         payload=encoded_payload,
                         provenance=provenance,
                         reason=publication_reason,
+                        session=session,
                     )
             if activate and batch:
                 candidate_versions.update({
                     publication.stream_key: publication
-                    for publication in self.publication_service.recompose_ledger_batch(batch)
+                    for publication in self.publication_service.recompose_ledger_batch(
+                        batch,
+                        session=session,
+                    )
                 })
             parity_specs = (
                 (
@@ -331,7 +344,19 @@ class LedgerMaterializationService:
                     )
                 else:
                     try:
-                        diagnostic_rows = self.parity_reader.read(diagnostic_key)
+                        try:
+                            diagnostic_rows = self.parity_reader.read(
+                                diagnostic_key,
+                                session=session,
+                            )
+                        except TypeError as error:
+                            # Small injected diagnostic readers from older
+                            # callers only accept the stream key.  Preserve
+                            # that seam while the production reader uses the
+                            # enclosing transaction's connection.
+                            if "session" not in str(error):
+                                raise
+                            diagnostic_rows = self.parity_reader.read(diagnostic_key)
                         if comparison_key == "legacy_rows":
                             report = compare_ledger_to_legacy(
                                 eligible,
@@ -352,13 +377,15 @@ class LedgerMaterializationService:
                             diagnostic_key,
                             error,
                         )
-                self.parity_repository.record(
-                    candidate_key,
-                    cutoff=publication_cutoff,
-                    report=report,
-                    publication_id=candidate.publication_id,
-                    payload_checksum=candidate.checksum,
-                )
+                record_kwargs = {
+                    "cutoff": publication_cutoff,
+                    "report": report,
+                    "publication_id": candidate.publication_id,
+                    "payload_checksum": candidate.checksum,
+                }
+                if session is not None:
+                    record_kwargs["session"] = session
+                self.parity_repository.record(candidate_key, **record_kwargs)
         return result
 
 
@@ -402,9 +429,11 @@ class LedgerCorrectionQueue:
         else:
             cutoff = manifest["cutoff"]
         for stream_key in self.STREAMS:
-            existing = connection.execute(select(
+            existing_rows = connection.execute(select(
                 table.c.job_id,
                 table.c.status,
+                table.c.generation,
+                table.c.cutoff,
                 table.c.affected_team_ids,
                 table.c.source_observation_ids,
                 table.c.trigger_game_id,
@@ -415,15 +444,43 @@ class LedgerCorrectionQueue:
             ).where(
                 table.c.stream_key == stream_key,
                 table.c.season == game.season,
-                table.c.cutoff == cutoff,
-            )).mappings().one_or_none()
+            )).mappings().all()
+            existing = next(
+                (
+                    row for row in existing_rows
+                    if _cutoffs_equal(row["cutoff"], cutoff)
+                ),
+                None,
+            )
             if existing is not None:
                 previously_succeeded = existing["status"] == "succeeded"
+                previous_game_ids = _stored_trigger_game_ids(
+                    existing["trigger_game_ids"], existing["trigger_game_id"]
+                )
+                previous_source_ids = _json_values(existing["source_observation_ids"])
+                previous_evidence = _stored_evidence(
+                    existing["ledger_evidence"],
+                    game_ids=previous_game_ids,
+                    fallback_checksum=existing["ledger_checksum"],
+                )
                 previous_lineage = LedgerLineage(
-                    tuple(_json_values(existing["source_observation_ids"])),
-                    tuple(_json_values(existing["trigger_game_ids"] or existing["trigger_game_id"])),
-                    tuple(json.loads(existing["ledger_evidence"] or "{}").values()) or (str(existing["ledger_checksum"]),), cutoff,
-                    str(existing["recomposition_reason"] or "initial_acceptance"),
+                    {
+                        game_id: {
+                            "checksum": checksum,
+                            "source_observation_id": (
+                                previous_source_ids[index]
+                                if index < len(previous_source_ids)
+                                else ""
+                            ),
+                        }
+                        for index, (game_id, checksum) in enumerate(
+                            sorted(previous_evidence.items())
+                        )
+                    },
+                    cutoff=cutoff,
+                    recomposition_reason=str(
+                        existing["recomposition_reason"] or "initial_acceptance"
+                    ),
                 )
                 lineage = previous_lineage.merge(LedgerLineage.single(
                     game_id=game.game_id,
@@ -432,8 +489,9 @@ class LedgerCorrectionQueue:
                     cutoff=cutoff,
                     reason=recomposition_reason,
                 ))
-                evidence = dict(json.loads(existing["ledger_evidence"] or "{}"))
-                evidence[game.game_id] = game.checksum
+                evidence = {
+                    item.game_id: item.ledger_checksum for item in lineage.evidence
+                }
                 previous_team_ids = {
                     int(team_id)
                     for team_id in _json_values(existing["affected_team_ids"])
@@ -476,6 +534,8 @@ class LedgerCorrectionQueue:
                             dict(sorted(evidence.items())),
                             sort_keys=True, separators=(",", ":"),
                         ),
+                        generation=(table.c.generation + 1),
+                        claimed_generation=None,
                     )
                 )
             else:
@@ -504,6 +564,8 @@ class LedgerCorrectionQueue:
                         reason=recomposition_reason,
                     ).game_set_checksum,
                     ledger_evidence=json.dumps({game.game_id: game.checksum}, separators=(",", ":")),
+                    generation=1,
+                    claimed_generation=None,
                 ))
 
 
@@ -537,9 +599,75 @@ def _json_values(value: str | None) -> tuple[str, ...]:
         parsed = json.loads(value)
     except (TypeError, ValueError):
         return ()
-    if not isinstance(parsed, list):
-        return ()
-    return tuple(str(item) for item in parsed)
+    if isinstance(parsed, list):
+        return tuple(
+            str(item) for item in parsed
+            if isinstance(item, (str, int))
+            and not isinstance(item, bool)
+            and str(item)
+        )
+    if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+        return (str(parsed),)
+    return ()
+
+
+def _stored_trigger_game_ids(
+    plural_value: str | None,
+    singular_value: str | None,
+) -> tuple[str, ...]:
+    """Read plural lineage while safely falling back to legacy singular data."""
+
+    plural = _json_values(plural_value)
+    if plural:
+        return tuple(sorted(set(plural)))
+    singular = str(singular_value) if singular_value else ""
+    return (singular,) if singular else ()
+
+
+def _stored_evidence(
+    value: str | None,
+    *,
+    game_ids: tuple[str, ...],
+    fallback_checksum: str | None,
+) -> dict[str, str]:
+    """Decode keyed evidence and recover one old scalar checksum safely."""
+
+    try:
+        parsed = json.loads(value) if value else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = {}
+    if isinstance(parsed, Mapping):
+        evidence = {
+            str(game_id): str(checksum)
+            for game_id, checksum in parsed.items()
+            if isinstance(game_id, (str, int))
+            and isinstance(checksum, (str, int))
+            and str(game_id)
+            and str(checksum)
+        }
+        if evidence:
+            return dict(sorted(evidence.items()))
+    if len(game_ids) == 1 and fallback_checksum:
+        return {game_ids[0]: str(fallback_checksum)}
+    return {}
+
+
+def _cutoffs_equal(left, right: datetime) -> bool:
+    """Compare typed and legacy SQLite timestamp encodings equivalently."""
+
+    def normalize(value):
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return value
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        return value
+
+    return normalize(left) == normalize(right)
 
 
 def _json_default(value: object) -> object:

@@ -60,7 +60,12 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    CanonicalGameLedgerTeamFact,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.services.player_game_log_projection import (
     write_player_game_log_projection,
 )
@@ -400,6 +405,37 @@ def _bootstrap_dict(row: BootstrapRequest) -> dict[str, Any]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _safe_json_values(value: Any) -> tuple[str, ...]:
+    """Decode legacy JSON list/scalar fields without throwing on old rows."""
+
+    if value is None or value == "":
+        return ()
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if isinstance(parsed, list):
+        return tuple(
+            str(item) for item in parsed
+            if isinstance(item, (str, int))
+            and not isinstance(item, bool)
+            and str(item)
+        )
+    if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+        return (str(parsed),)
+    return ()
+
+
+def _safe_json_mapping(value: Any) -> dict[str, Any]:
+    if value is None or value == "":
+        return {}
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
 def _write_publication_projection(
@@ -2329,8 +2365,8 @@ class ObservationIngestionService(_SessionService):
 class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
-    def stream_enabled(self, stream_key: str) -> bool:
-        with self.session() as session:
+    def stream_enabled(self, stream_key: str, *, session: Session | None = None) -> bool:
+        with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
             if stream is None:
                 raise ControlPlaneError("stream_not_found")
@@ -2576,11 +2612,18 @@ class PublicationService(_SessionService):
         return row
 
     def reconcile_pending(self, *, season: str, cutoff: datetime, limit: int = 100) -> int:
-        """Scheduled backstop that enqueues accepted observations lacking a job."""
+        """Queue accepted lineage that has not reached a composition yet.
+
+        A succeeded job is not proof that every later accepted correction was
+        composed.  Compare each accepted canonical-game observation with the
+        job's keyed source/game evidence and requeue the same durable row when
+        a newer observation is absent.  The generation bump gives a running
+        worker the same CAS protection as the ingestion correction sink.
+        """
         cutoff = _aware(cutoff)
-        with self.session() as session:
+        with self.session() as session, session.begin():
             streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
-            candidates: set[tuple[str, str, str]] = set()
+            candidates: list[tuple[str, str]] = []
             for stream in streams:
                 required = set(json.loads(stream.required_observations))
                 if not required:
@@ -2594,29 +2637,109 @@ class PublicationService(_SessionService):
                     CollectionObservation.provider == observation_provider,
                     CollectionObservation.manifest_id.is_not(None),
                 )).all()
-                for manifest_id in {row.manifest_id for row in observations
-                                    if row.observation_type in required and row.manifest_id}:
-                    candidates.add((stream.stream_key, season, manifest_id))
-        count = 0
-        for stream_key, selected_season, manifest_id in sorted(candidates):
-            if count >= min(max(limit, 1), 1000):
-                break
-            job = self.enqueue(
-                stream_key,
-                season=selected_season,
-                cutoff=cutoff,
-                manifest_id=manifest_id,
-            )
-            if job.status == "failed":
-                with self.session() as session, session.begin():
-                    retryable = session.get(CompositionJob, job.job_id)
-                    if retryable is not None:
-                        retryable.status = "queued"
-                        retryable.attempts = int(retryable.attempts or 0) + 1
-                        retryable.updated_at = self.clock()
-                        retryable.last_error = None
-            count += 1
-        return count
+                for manifest_id in sorted({row.manifest_id for row in observations
+                                            if row.observation_type in required and row.manifest_id}):
+                    candidates.append((stream.stream_key, str(manifest_id)))
+            count = 0
+            for stream_key, manifest_id in sorted(candidates):
+                if count >= min(max(limit, 1), 1000):
+                    break
+                stream = session.get(PublicationStream, stream_key)
+                if stream is None:
+                    continue
+                required_observations = json.loads(stream.required_observations)
+                observation_provider = (
+                    "pbp" if stream.provider == "ledger" else stream.provider
+                )
+                matching = [
+                    row for row in session.scalars(select(CollectionObservation).where(
+                        CollectionObservation.season == season,
+                        CollectionObservation.cutoff == cutoff,
+                        CollectionObservation.manifest_id == manifest_id,
+                        CollectionObservation.observation_type.in_(required_observations),
+                    )).all()
+                    if row.provider == observation_provider
+                ]
+                created = False
+                job = session.scalar(select(CompositionJob).where(
+                    CompositionJob.stream_key == stream_key,
+                    CompositionJob.season == season,
+                    CompositionJob.cutoff == cutoff,
+                ).with_for_update())
+                if job is None:
+                    now = self.clock()
+                    job = CompositionJob(
+                        job_id=_uuid(), stream_key=stream_key, manifest_id=manifest_id,
+                        season=season, cutoff=cutoff, status="queued", attempts=0,
+                        created_at=now, updated_at=now, generation=1,
+                    )
+                    session.add(job)
+                    session.flush()
+                    created = True
+                was_failed = job.status == "failed"
+                represented_sources = set(_safe_json_values(job.source_observation_ids))
+                represented_games = set(_safe_json_values(job.trigger_game_ids))
+                if not represented_games and job.trigger_game_id:
+                    represented_games.add(str(job.trigger_game_id))
+                evidence = _safe_json_mapping(job.ledger_evidence)
+                source_ids = set(represented_sources)
+                trigger_ids = set(represented_games)
+                affected_team_ids = set(_safe_json_values(job.affected_team_ids))
+                uncomposed = False
+                for observation in matching:
+                    source_id = str(observation.observation_id)
+                    scope = _safe_json_mapping(observation.scope)
+                    game_id = str(scope.get("game_id") or "")
+                    if not source_id or source_id in source_ids:
+                        continue
+                    current_game = None
+                    if game_id:
+                        current_game = session.scalar(select(CanonicalGameLedgerGame).where(
+                            CanonicalGameLedgerGame.game_id == game_id,
+                        ))
+                        # Source observation IDs are immutable evidence, but a
+                        # correction intentionally replaces the source ID
+                        # while retaining the same game key.  A matching
+                        # current checksum proves that this accepted row is
+                        # already represented by the composed keyed evidence.
+                        if current_game is not None and evidence.get(game_id) == str(current_game.checksum):
+                            source_ids.add(source_id)
+                            continue
+                    uncomposed = True
+                    source_ids.add(source_id)
+                    if game_id:
+                        trigger_ids.add(game_id)
+                        if current_game is not None:
+                            evidence[game_id] = str(current_game.checksum)
+                            team_ids = session.scalars(select(CanonicalGameLedgerTeamFact.team_id).where(
+                                CanonicalGameLedgerTeamFact.game_id == game_id,
+                            )).all()
+                            affected_team_ids.update(str(team_id) for team_id in team_ids)
+                if job.status == "failed" or uncomposed:
+                    now = self.clock()
+                    job.status = "queued"
+                    job.attempts = int(job.attempts or 0) + int(was_failed)
+                    job.updated_at = now
+                    job.last_error = None
+                    job.manifest_id = manifest_id
+                    job.trigger_game_ids = json.dumps(sorted(trigger_ids), separators=(",", ":"))
+                    job.trigger_game_id = next(iter(sorted(trigger_ids)), None) if len(trigger_ids) == 1 else None
+                    job.affected_team_ids = json.dumps(sorted(affected_team_ids), separators=(",", ":"))
+                    job.source_observation_ids = json.dumps(sorted(source_ids), separators=(",", ":"))
+                    job.ledger_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
+                    job.ledger_checksum = (
+                        next(iter(evidence.values())) if len(evidence) == 1
+                        else _checksum(job.ledger_evidence) if evidence else job.ledger_checksum
+                    )
+                    job.game_set_checksum = _checksum(
+                        json.dumps(sorted(trigger_ids), separators=(",", ":"))
+                    ) if trigger_ids else job.game_set_checksum
+                    job.recomposition_reason = "correction" if uncomposed else (job.recomposition_reason or "scheduled_reconciliation")
+                    if not created:
+                        job.generation = int(job.generation or 1) + 1
+                    job.claimed_generation = None
+                count += 1
+            return count
 
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
@@ -2762,14 +2885,17 @@ class PublicationService(_SessionService):
         )
 
     def recompose_ledger_batch(
-        self, compositions: Sequence[LedgerPublicationComposition],
+        self,
+        compositions: Sequence[LedgerPublicationComposition],
+        *,
+        session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
         """Validate and advance all enabled ledger streams in one transaction."""
         items = tuple(compositions)
         if not items or len({item.stream_key for item in items}) != len(items):
             raise ControlPlaneError("duplicate_publication_stream")
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             results = []
             for item in sorted(items, key=lambda value: value.stream_key):
                 stream = session.get(PublicationStream, item.stream_key)
@@ -2797,12 +2923,13 @@ class PublicationService(_SessionService):
         payload: Any,
         provenance: Mapping[str, str | None],
         reason: str = "historical ledger rehearsal",
+        session: Session | None = None,
     ) -> PublicationVersion:
         """Persist a non-active governed ledger version with normalized provenance."""
 
         encoded = _json(payload)
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
             if stream is None or stream.provider != "ledger" or stream.enabled:
                 raise ControlPlaneError("inactive_ledger_stream_required")

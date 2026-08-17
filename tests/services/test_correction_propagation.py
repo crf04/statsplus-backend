@@ -23,6 +23,7 @@ from app.models.collection_control import (
     ReconciliationItem,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
 from app.services.collection_control import PublicationService
 from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
@@ -34,9 +35,14 @@ from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
+from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository, LegacyParityDiagnosticReader
-from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader, LedgerRuntime
+from app.services.ledger_runtime import (
+    ActiveManifestLedgerGovernanceReader,
+    LedgerGovernance,
+    LedgerRuntime,
+)
 from app.services.team_matchup_repository import TeamMatchupRepository, TeamMatchupSnapshotScope
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
@@ -44,6 +50,36 @@ from tests.services.test_ledger_derivations import _league_games
 
 UTC = timezone.utc
 AS_OF = datetime(2025, 10, 15, tzinfo=UTC)
+
+
+def test_keyed_lineage_merge_is_commutative_and_replaces_only_corrected_game():
+    baseline_a = LedgerLineage.single(
+        game_id="game-a", source_observation_id="obs:a:old",
+        ledger_checksum="checksum:a:old", cutoff=AS_OF,
+        reason="initial_acceptance",
+    )
+    baseline_b = LedgerLineage.single(
+        game_id="game-b", source_observation_id="obs:b",
+        ledger_checksum="checksum:b", cutoff=AS_OF,
+        reason="initial_acceptance",
+    )
+    correction_a = LedgerLineage.single(
+        game_id="game-a", source_observation_id="obs:a:new",
+        ledger_checksum="checksum:a:new", cutoff=AS_OF,
+        reason="correction",
+    )
+
+    merged = baseline_a.merge(baseline_b).merge(correction_a)
+    reverse = correction_a.merge(baseline_b.merge(baseline_a))
+    repeated = merged.merge(correction_a)
+
+    assert merged == reverse == repeated
+    assert merged.game_ids == ("game-a", "game-b")
+    assert merged.ledger_checksums == ("checksum:a:new", "checksum:b")
+    assert set(merged.source_observation_ids) == {
+        "obs:a:old", "obs:a:new", "obs:b",
+    }
+    assert merged.recomposition_reason == "correction"
 
 
 def _engine(tmp_path, name: str = "correction.sqlite3"):
@@ -640,7 +676,35 @@ def test_targeted_recomposition_retains_unaffected_team_facts(tmp_path):
         (fact.team_id, fact.base, fact.slice_key, fact.stat_key): fact
         for fact in after.facts if fact.team_id not in affected
     }
-    assert before_unaffected == after_unaffected
+    # Values remain untouched for unaffected teams, while their lineage is
+    # atomically refreshed with the surface observation.  Keeping the whole
+    # dataclass equal here would accept the mixed-provenance bug this test is
+    # intended to guard against.
+    assert {
+        key: (
+            fact.raw_value,
+            fact.denominator_value,
+            fact.game_ids,
+            fact.game_set_checksum,
+        )
+        for key, fact in before_unaffected.items()
+    } == {
+        key: (
+            fact.raw_value,
+            fact.denominator_value,
+            fact.game_ids,
+            fact.game_set_checksum,
+        )
+        for key, fact in after_unaffected.items()
+    }
+    l15_observation_by_surface = {
+        observation.surface: observation for observation in after.observations
+    }
+    for fact in after_unaffected.values():
+        observation = l15_observation_by_surface[fact.base]
+        assert fact.ledger_checksum == observation.ledger_checksum
+        assert fact.cutoff == observation.cutoff
+        assert fact.recomposition_reason == observation.recomposition_reason
     assert any(
         fact.team_id in affected and fact.recomposition_reason == "correction"
         for fact in after.facts
@@ -1769,6 +1833,341 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
     assert all(job["last_error"] == "recomposition_failed" for job in jobs)
 
 
+def test_production_materializer_failure_rolls_back_all_read_models_and_candidates(
+    tmp_path, monkeypatch
+):
+    """A failure after real prewrites leaves the last-good publication intact."""
+    engine = _engine(tmp_path, "atomic-production.sqlite3")
+    games = _league_games()
+    queue = LedgerCorrectionQueue(
+        clock=lambda: AS_OF + timedelta(hours=18),
+    )
+    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    publications = PublicationService(engine, clock=lambda: AS_OF + timedelta(hours=18))
+    publications.register_default_streams()
+    for stream_key in ("player_game_logs", "traditional_opponent_season"):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=("season",),
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+    manifest_id = "atomic-manifest"
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=30),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=manifest_id,
+            status="active",
+            created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": game.source_observation_id,
+                "client_observation_id": game.source_observation_id,
+                "collector_id": "test",
+                "manifest_id": manifest_id,
+                "environment": "server",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "surface": "canonical_game_ledger",
+                    "game_id": game.game_id,
+                }),
+                "season": game.season,
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": game.checksum,
+                "payload": "{}",
+                "payload_bytes": 2,
+                "retrieved_at": game.retrieved_at,
+                "accepted_at": game.retrieved_at,
+            }
+            for game in games
+        ])
+    ledger.replace_games_atomic(games)
+    matchup = TeamMatchupRepository(engine)
+    matchup_materialization = LedgerMatchupMaterializationService(
+        ledger,
+        matchup,
+        clock=lambda: AS_OF + timedelta(hours=18),
+    )
+
+    class Parity:
+        def read(self, stream_key, **kwargs):
+            return ()
+
+    materialization = LedgerMaterializationService(
+        ledger,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=Parity(),
+        publication_service=publications,
+        clock=lambda: AS_OF + timedelta(hours=18),
+    )
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id
+            for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    # Establish a real last-good read model and publication before the
+    # correction worker is exercised.
+    materialization.compose(
+        games,
+        season="2025-26",
+        as_of=AS_OF.date(),
+        cutoff=AS_OF,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_l15,
+        team_ids=frozenset(range(1, 31)),
+        activate=True,
+        recomposition_reason="initial_acceptance",
+    )
+    matchup_materialization.materialize(
+        "2025-26",
+        as_of=AS_OF.date(),
+        cutoff=AS_OF,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_l15,
+        team_ids=frozenset(range(1, 31)),
+        recomposition_reason="initial_acceptance",
+    )
+    before_snapshot = matchup.get_snapshot(TeamMatchupSnapshotScope(
+        "2025-26", AS_OF.date(), 15
+    ))
+    with engine.connect() as connection:
+        before_pointers = {
+            row["stream_key"]: (
+                row["active_publication_id"],
+                row["previous_publication_id"],
+                row["fence"],
+            )
+            for row in connection.execute(select(PublicationPointer.__table__)).mappings()
+            if row["stream_key"] in {"player_game_logs", "traditional_opponent_season"}
+        }
+        before_metadata = tuple(
+            connection.execute(select(LedgerPublication.__table__)).mappings().all()
+        )
+        before_versions = tuple(
+            connection.execute(select(PublicationVersion.__table__)).mappings().all()
+        )
+        before_parity = tuple(
+            connection.execute(select(LedgerParityArtifact.__table__)).mappings().all()
+        )
+
+    original_game = games[0]
+    corrected_game = replace(
+        original_game,
+        team_facts=tuple(
+            replace(
+                fact,
+                defensive_rebounds=fact.defensive_rebounds + 3,
+                rebounds=fact.rebounds + 3,
+            )
+            if fact.team_id == original_game.home_team_id
+            else fact
+            for fact in original_game.team_facts
+        ),
+        source_observation_id="obs:atomic:correction",
+        retrieved_at=AS_OF + timedelta(hours=1),
+    )
+    corrected_game = replace(
+        corrected_game,
+        raw_rows=raw_rows_from_facts(corrected_game),
+    ).with_checksum()
+    correction_observation = {
+        "observation_id": corrected_game.source_observation_id,
+        "client_observation_id": corrected_game.source_observation_id,
+        "collector_id": "test",
+        "manifest_id": manifest_id,
+        "environment": "server",
+        "provider": "pbp",
+        "observation_type": "canonical_game_ledger",
+        "scope": json.dumps({
+            "surface": "canonical_game_ledger",
+            "game_id": corrected_game.game_id,
+        }),
+        "season": corrected_game.season,
+        "cutoff": AS_OF,
+        "schema_version": 1,
+        "checksum": corrected_game.checksum,
+        "payload": "{}",
+        "payload_bytes": 2,
+        "retrieved_at": corrected_game.retrieved_at,
+        "accepted_at": corrected_game.retrieved_at,
+    }
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            **correction_observation
+        ))
+    ledger.replace_game(corrected_game)
+
+    calls = {"count": 0}
+    original_compose = publications._compose_active_in_session
+
+    def fail_after_real_prewrites(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise LedgerMaterializationUnavailable("injected production failure")
+        return original_compose(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publications,
+        "_compose_active_in_session",
+        fail_after_real_prewrites,
+    )
+
+    governance = LedgerGovernance(
+        season="2025-26",
+        cutoff=AS_OF,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_l15,
+        team_ids=frozenset(range(1, 31)),
+        manifest_id=manifest_id,
+    )
+
+    class Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            return governance
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=materialization,
+        governance=Governance(),
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: AS_OF + timedelta(hours=18),
+    )
+    assert runtime.compose_queued("2025-26") == 0
+    assert calls["count"] == 2
+
+    after_snapshot = matchup.get_snapshot(TeamMatchupSnapshotScope(
+        "2025-26", AS_OF.date(), 15
+    ))
+    assert after_snapshot == before_snapshot
+    with engine.connect() as connection:
+        after_pointers = {
+            row["stream_key"]: (
+                row["active_publication_id"],
+                row["previous_publication_id"],
+                row["fence"],
+            )
+            for row in connection.execute(select(PublicationPointer.__table__)).mappings()
+            if row["stream_key"] in {"player_game_logs", "traditional_opponent_season"}
+        }
+        after_metadata = tuple(connection.execute(select(LedgerPublication.__table__)).mappings().all())
+        after_versions = tuple(connection.execute(select(PublicationVersion.__table__)).mappings().all())
+        after_parity = tuple(connection.execute(select(LedgerParityArtifact.__table__)).mappings().all())
+        jobs = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert after_pointers == before_pointers
+    assert after_metadata == before_metadata
+    assert after_versions == before_versions
+    assert after_parity == before_parity
+    assert all(job["status"] == "failed" for job in jobs)
+    assert all(job["last_error"] == "recomposition_failed" for job in jobs)
+
+
+def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass(
+    tmp_path,
+):
+    """A running worker cannot acknowledge a newer queued lineage generation."""
+    engine = _engine(tmp_path, "concurrent-generation.sqlite3")
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
+    game = _league_games()[0]
+    queue = LedgerCorrectionQueue(clock=lambda: cutoff)
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [
+            {
+                "job_id": f"generation-job-{stream_key}",
+                "stream_key": stream_key,
+                "season": game.season,
+                "cutoff": cutoff,
+                "status": "queued",
+                "attempts": 0,
+                "created_at": cutoff,
+                "updated_at": cutoff,
+                "generation": 1,
+                "claimed_generation": None,
+            }
+            for stream_key in LedgerCorrectionQueue.STREAMS
+        ])
+
+    class Window:
+        complete = True
+        reason = None
+
+    class Materialized:
+        season_window = Window()
+        l15_window = Window()
+        assist_location_season = Window()
+        assist_location_l15 = Window()
+
+    class Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            return type(
+                "Governance",
+                (),
+                {
+                    "expected_game_ids": frozenset(),
+                    "expected_l15_game_ids": {},
+                    "team_ids": frozenset(),
+                },
+            )()
+
+    calls = {"count": 0}
+
+    class Materialization:
+        publication_service = None
+
+        def compose(self, games, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                # This is the deterministic acceptance point while the
+                # worker's claimed generation is still being composed.
+                with engine.begin() as connection:
+                    queue(connection, game)
+            return Materialized()
+
+    repository = CanonicalGameLedgerRepository(engine)
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=Materialization(),
+        governance=Governance(),
+        clock=lambda: cutoff,
+    )
+
+    assert runtime.compose_queued(game.season) == 0
+    with engine.connect() as connection:
+        queued = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert len(queued) == len(LedgerCorrectionQueue.STREAMS)
+    assert all(row["status"] == "queued" for row in queued)
+    assert all(row["generation"] == 2 for row in queued)
+    assert all(json.loads(row["trigger_game_ids"]) == [game.game_id] for row in queued)
+
+    # The next worker pass claims generation 2 and is the only one allowed to
+    # acknowledge the accepted correction.
+    assert runtime.compose_queued(game.season) == len(LedgerCorrectionQueue.STREAMS)
+    with engine.connect() as connection:
+        completed = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert all(row["status"] == "succeeded" for row in completed)
+    assert all(row["generation"] == 2 for row in completed)
+    assert all(row["claimed_generation"] is None for row in completed)
+
+
 def test_recomposition_failure_records_retryable_state_without_reconciliation_loss(tmp_path):
     engine = _engine(tmp_path, "failure.sqlite3")
     with engine.begin() as connection:
@@ -1843,6 +2242,71 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
     assert job["status"] == "queued"
     assert job["attempts"] == 2
     assert job["last_error"] is None
+
+
+def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success(
+    tmp_path,
+):
+    """Reconciliation finds accepted evidence even when the prior job succeeded."""
+    engine = _engine(tmp_path, "reconcile-lineage.sqlite3")
+    game = _league_games()[0]
+    cutoff = AS_OF
+    manifest_id = "reconcile-lineage-manifest"
+    ledger = CanonicalGameLedgerRepository(engine)
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id,
+            season=game.season,
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=30),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=manifest_id,
+            status="active",
+            created_at=cutoff,
+        ))
+    ledger.replace_games_atomic(
+        (game,),
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=cutoff, manifest_id=manifest_id
+            ),
+        },
+    )
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    publications.register_default_streams()
+    with engine.begin() as connection:
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key == "traditional_opponent_season",
+        ).values(enabled=True))
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="successful-but-unrepresented",
+            stream_key="traditional_opponent_season",
+            manifest_id=manifest_id,
+            season=game.season,
+            cutoff=cutoff,
+            status="succeeded",
+            attempts=0,
+            created_at=cutoff,
+            updated_at=cutoff,
+            trigger_game_ids="[]",
+            source_observation_ids="[]",
+            ledger_evidence="{}",
+            generation=1,
+        ))
+
+    assert publications.reconcile_pending(
+        season=game.season,
+        cutoff=cutoff,
+    ) == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+    assert job["status"] == "queued"
+    assert job["generation"] == 2
+    assert json.loads(job["trigger_game_ids"]) == [game.game_id]
+    assert json.loads(job["source_observation_ids"]) == [game.source_observation_id]
+    assert json.loads(job["ledger_evidence"]) == {game.game_id: game.checksum}
+    assert job["recomposition_reason"] == "correction"
 
 
 def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_path):
