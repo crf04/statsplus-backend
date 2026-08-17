@@ -594,6 +594,41 @@ def test_coalesced_correction_union_keeps_all_trigger_and_source_lineage(tmp_pat
     assert row["recomposition_reason"] == "correction"
     assert row["game_set_checksum"]
 
+
+def test_completed_lineage_is_not_reintroduced_into_later_pending_triggers(tmp_path):
+    engine = _engine(tmp_path, "completed-lineage.sqlite3")
+    queue = LedgerCorrectionQueue(clock=lambda: AS_OF)
+    repository = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    first, second = _league_games()[:2]
+    repository.replace_games_atomic((first, second))
+    with engine.begin() as connection:
+        connection.execute(update(CompositionJob.__table__).values(
+            status="succeeded",
+            trigger_game_ids=json.dumps([first.game_id, second.game_id]),
+            trigger_game_id=None,
+            ledger_evidence=json.dumps({
+                first.game_id: first.checksum,
+                second.game_id: second.checksum,
+            }),
+        ))
+    corrected_first = replace(
+        first,
+        team_facts=tuple(replace(fact, points=fact.points + 1) for fact in first.team_facts),
+    )
+    corrected_first = replace(corrected_first, raw_rows=raw_rows_from_facts(corrected_first)).with_checksum()
+    repository.replace_game(corrected_first)
+    with engine.begin() as connection:
+        connection.execute(update(CompositionJob.__table__).values(status="succeeded"))
+    corrected_second = replace(
+        second,
+        team_facts=tuple(replace(fact, points=fact.points + 1) for fact in second.team_facts),
+    )
+    corrected_second = replace(corrected_second, raw_rows=raw_rows_from_facts(corrected_second)).with_checksum()
+    repository.replace_game(corrected_second)
+    with engine.connect() as connection:
+        rows = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert all(json.loads(row["trigger_game_ids"]) == [second.game_id] for row in rows)
+
 def test_matchup_lineage_persists_cutoff_reason_and_exact_game_set(tmp_path):
     engine = _engine(tmp_path, "matchup.sqlite3")
     games = _league_games()
