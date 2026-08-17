@@ -86,6 +86,7 @@ from .player_game_log import (  # noqa: E402
     PlayerGameLog,
     PlayerGameLogRefresh,
     PlayerGameLogSync,
+    PublicationPlayerGameLog,
 )
 from .canonical_game_ledger import (  # noqa: E402
     CanonicalGameLedgerGame,
@@ -154,6 +155,7 @@ __all__ = [
     'PlayerGameLog',
     'PlayerGameLogRefresh',
     'PlayerGameLogSync',
+    'PublicationPlayerGameLog',
     'CanonicalGameLedgerGame',
     'CanonicalGameLedgerTeamFact',
     'CanonicalGameLedgerPlayerFact',

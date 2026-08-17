@@ -28,6 +28,7 @@ from app.models.player_game_log import (
     PlayerGameLog,
     PlayerGameLogRefresh,
     PlayerGameLogSync,
+    PublicationPlayerGameLog,
 )
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.player_game_log_values import (
@@ -42,6 +43,9 @@ from app.services.stats_freshness_repository import (
 from app.services.database_first_activation import (
     PublicationPayloadError,
     decode_player_game_logs,
+)
+from app.services.player_game_log_projection import (
+    decode_player_game_log_projection,
 )
 
 
@@ -324,6 +328,14 @@ class PlayerGameLogRepository:
         self, season: str, player_id: int, *, publication_snapshot: Any | None = None
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                return self._projected_player_rows(
+                    read.publication_id,
+                    canonical_season,
+                    player_id,
+                )
         publication_rows = self._publication_rows(
             canonical_season, publication_snapshot=publication_snapshot
         )
@@ -346,6 +358,38 @@ class PlayerGameLogRepository:
                 .order_by(log_table.c.game_date.desc(), log_table.c.game_id.desc())
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
+    def _projected_player_rows(
+        self,
+        publication_id: str | None,
+        season: str,
+        player_id: int,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Read only one player's immutable rows from the active projection."""
+
+        if publication_id is None:
+            return ()
+        projection = PublicationPlayerGameLog.__table__
+        with self.engine.connect() as connection:
+            payloads = connection.execute(
+                select(projection.c.row_payload)
+                .where(
+                    projection.c.publication_id == publication_id,
+                    projection.c.player_id == player_id,
+                )
+                .order_by(
+                    projection.c.game_date.desc(),
+                    projection.c.game_id.desc(),
+                )
+            ).scalars().all()
+        try:
+            return tuple(
+                decode_player_game_log_projection(payloads, season=season)
+            )
+        except PublicationPayloadError:
+            # A corrupt immutable projection fails closed and never falls back
+            # to a different legacy generation.
+            return ()
 
     def get_freshness(self, season: str) -> PlayerGameLogFreshness:
         canonical_season = validate_canonical_season(season)
@@ -640,6 +684,16 @@ class PlayerGameLogRepository:
         canonical_season = validate_canonical_season(season)
         if self._publication_reader is None:
             return None
+        projected_snapshot = getattr(
+            self._publication_reader,
+            "snapshot_player_game_logs",
+            None,
+        )
+        if callable(projected_snapshot):
+            try:
+                return projected_snapshot(season=canonical_season)
+            except SQLAlchemyError:
+                return None
         snapshot = getattr(self._publication_reader, "snapshot", None)
         if not callable(snapshot):
             snapshot = getattr(self._publication_reader, "read_snapshot", None)

@@ -7,22 +7,31 @@ database-first, and live and stored documents compare strictly.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import timedelta
+import json
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, insert, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.migrations import run_migrations
+from app.models.collection_control import (
+    PublicationPointer,
+    PublicationStream,
+    PublicationVersion,
+)
 from app.models.game_logs import GameLogQuery
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COLUMNS
 from app.services.athlete_catalog_service import AthleteCatalogService
 from app.services.database_first_activation import (
+    DatabaseFirstPublicationReader,
     PublicationRead,
     PublicationReadSnapshot,
 )
+from app.services import database_first_activation
 from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import (
     DatabaseFirstGameLogsSource,
@@ -400,6 +409,136 @@ def test_game_service_reads_an_active_player_log_publication_once(
     assert next_team is None
     assert reader.snapshot_calls == 1
     assert reader.read_calls == 0
+
+
+def test_active_player_log_read_uses_indexed_publication_projection(
+    tmp_path, monkeypatch
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projected-read.sqlite3'}")
+    run_migrations(engine)
+    records = (
+        _record(),
+        _record(player_id=202, game_id="0022500002"),
+    )
+    payload_rows = []
+    for record in records:
+        row = asdict(record)
+        row["game_date"] = record.game_date.isoformat()
+        payload_rows.append(row)
+    encoded = json.dumps({"rows": payload_rows}, sort_keys=True)
+
+    with engine.begin() as connection:
+        connection.execute(insert(PublicationStream).values(
+            stream_key="player_game_logs",
+            provider="ledger",
+            owner="railway",
+            required_observations="[]",
+            publication_strategy="ledger_compose",
+            supported_windows='["season"]',
+            schema_versions="[1]",
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+            enabled=True,
+            created_at=RETRIEVED_AT,
+        ))
+        connection.execute(insert(PublicationVersion).values(
+            publication_id="publication-1",
+            stream_key="player_game_logs",
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            version=1,
+            status="active",
+            checksum="a" * 64,
+            payload=encoded,
+            created_at=RETRIEVED_AT,
+            reason="projection regression",
+            fence=1,
+        ))
+        connection.execute(insert(PublicationPointer).values(
+            stream_key="player_game_logs",
+            active_publication_id="publication-1",
+            previous_publication_id=None,
+            fence=1,
+            updated_at=RETRIEVED_AT,
+        ))
+        connection.execute(
+            text(
+                "INSERT INTO publication_player_game_logs "
+                "(publication_id, player_id, game_id, game_date, "
+                "opponent_team_id, row_payload) "
+                "VALUES (:publication_id, :player_id, :game_id, :game_date, "
+                ":opponent_team_id, :row_payload)"
+            ),
+            [
+                {
+                    "publication_id": "publication-1",
+                    "player_id": row["player_id"],
+                    "game_id": row["game_id"],
+                    "game_date": row["game_date"],
+                    "opponent_team_id": row["opponent_team_id"],
+                    "row_payload": json.dumps(row, sort_keys=True),
+                }
+                for row in payload_rows
+            ],
+        )
+
+    reader = DatabaseFirstPublicationReader(
+        engine, clock=lambda: RETRIEVED_AT
+    )
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: RETRIEVED_AT,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+
+    original_decoder = database_first_activation.decode_player_game_logs
+    decoded_batch_sizes = []
+
+    def record_decode_size(payload, **kwargs):
+        payload_rows = payload.get("rows") if isinstance(payload, dict) else payload
+        decoded_batch_sizes.append(len(payload_rows))
+        return original_decoder(payload, **kwargs)
+
+    monkeypatch.setattr(
+        database_first_activation,
+        "decode_player_game_logs",
+        record_decode_size,
+    )
+    statements = []
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (
+            statements.append(statement)
+        ),
+    )
+
+    snapshot = repository.read_publication_snapshot(SEASON)
+    rows = repository.list_player_rows(
+        SEASON, 101, publication_snapshot=snapshot
+    )
+
+    assert [row.player_id for row in rows] == [101]
+    assert decoded_batch_sizes == [1]
+    assert any("publication_player_game_logs" in statement for statement in statements)
+    assert not any(
+        "publication_versions.payload" in statement for statement in statements
+    )
+    with engine.connect() as connection:
+        plan = connection.exec_driver_sql(
+            "EXPLAIN QUERY PLAN "
+            "SELECT row_payload FROM publication_player_game_logs "
+            "WHERE publication_id = ? AND player_id = ? "
+            "ORDER BY game_date DESC, game_id DESC",
+            ("publication-1", 101),
+        ).all()
+    assert any(
+        "ix_publication_player_game_logs_player_date" in str(step)
+        for step in plan
+    )
 
 
 def test_database_first_router_falls_back_to_live_before_complete_publication(

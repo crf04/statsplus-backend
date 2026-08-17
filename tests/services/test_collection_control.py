@@ -27,6 +27,7 @@ from app.models.collection_control import (
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
+from app.models.player_game_log import PublicationPlayerGameLog
 
 from app.migrations import run_migrations
 from app.services.collection_control import (
@@ -42,6 +43,40 @@ from app.services.collection_control import (
 
 
 UTC = timezone.utc
+
+
+def _player_log_payload(*, points=25):
+    return {
+        "rows": [{
+            "season": "2025-26",
+            "season_type": "Regular Season",
+            "player_id": 2544,
+            "game_id": "game-1",
+            "player_name": "LeBron James",
+            "game_date": "2026-01-02",
+            "team_id": 1,
+            "team_tricode": "LAL",
+            "opponent_team_id": 2,
+            "opponent_team_tricode": "SAS",
+            "is_home": True,
+            "minutes": 35.0,
+            "points": points,
+            "rebounds": 8,
+            "assists": 7,
+            "field_goals_made": 9,
+            "field_goals_attempted": 18,
+            "three_pointers_made": 3,
+            "three_pointers_attempted": 7,
+            "free_throws_made": 4,
+            "free_throws_attempted": 5,
+            "offensive_rebounds": 1,
+            "defensive_rebounds": 7,
+            "turnovers": 3,
+            "steals": 1,
+            "blocks": 1,
+            "personal_fouls": 2,
+        }]
+    }
 
 
 def _catalog_payload(kind, *, future=False):
@@ -124,6 +159,109 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         ("pbp:game-1", "game-1"),
         ("pbp:game-2", "game-2"),
     }
+
+
+def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="player-log-manifest",
+            season="2025-26",
+            cutoff=now,
+            collect_before=now + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="player-log-manifest",
+            status="active",
+            created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:game-1",
+            client_observation_id="pbp:game-1",
+            collector_id="test",
+            manifest_id="player-log-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "game-1",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=now,
+            schema_version=1,
+            checksum="a" * 64,
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
+
+    candidate = publications.compose_inactive_ledger(
+        "player_game_logs",
+        season="2025-26",
+        cutoff=now,
+        payload=_player_log_payload(),
+        provenance={"pbp:game-1": "game-1"},
+    )
+
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationStream.__table__.update()
+            .where(PublicationStream.stream_key == "player_game_logs")
+            .values(enabled=True)
+        )
+        connection.execute(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == candidate.publication_id)
+            .values(status="superseded")
+        )
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="current-player-logs",
+            stream_key="player_game_logs",
+            season="2025-26",
+            cutoff=now,
+            version=2,
+            status="active",
+            checksum="b" * 64,
+            payload=json.dumps(_player_log_payload(points=30)),
+            created_at=now,
+            reason="current",
+            fence=2,
+        ))
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key="player_game_logs",
+            active_publication_id="current-player-logs",
+            previous_publication_id=candidate.publication_id,
+            fence=2,
+            updated_at=now,
+        ))
+
+    rollback = publications.rollback(
+        "player_game_logs",
+        reason="restore prior player logs",
+        expected_fence=2,
+    )
+
+    with control_db.connect() as connection:
+        projected = connection.execute(
+            select(
+                PublicationPlayerGameLog.publication_id,
+                PublicationPlayerGameLog.row_payload,
+            ).where(
+                PublicationPlayerGameLog.publication_id.in_((
+                    candidate.publication_id,
+                    rollback.publication_id,
+                ))
+            ).order_by(PublicationPlayerGameLog.publication_id)
+        ).all()
+    assert {row.publication_id for row in projected} == {
+        candidate.publication_id,
+        rollback.publication_id,
+    }
+    assert {json.loads(row.row_payload)["points"] for row in projected} == {25}
 
 
 def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_db):

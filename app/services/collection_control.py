@@ -61,6 +61,9 @@ from app.models.collection_control import (
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
+from app.services.player_game_log_projection import (
+    write_player_game_log_projection,
+)
 
 
 UTC = timezone.utc
@@ -397,6 +400,26 @@ def _bootstrap_dict(row: BootstrapRequest) -> dict[str, Any]:
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _write_publication_projection(
+    session: Session,
+    publication: PublicationVersion,
+    payload: Any,
+) -> None:
+    """Keep immutable query projections atomic with their publication."""
+
+    if publication.stream_key != "player_game_logs":
+        return
+    try:
+        write_player_game_log_projection(
+            session,
+            publication.publication_id,
+            payload,
+            season=publication.season,
+        )
+    except ValueError as error:
+        raise ControlPlaneError("publication_payload_invalid") from error
 
 
 def _add_audit(session: Session, *, actor: str, action: str, resource: str,
@@ -2597,6 +2620,7 @@ class PublicationService(_SessionService):
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
             session.flush()
+            _write_publication_projection(session, publication, payload)
             for observation_id in sorted(provenance_ids):
                 session.add(PublicationObservation(
                     publication_id=publication.publication_id,
@@ -2692,6 +2716,7 @@ class PublicationService(_SessionService):
             )
             session.add(publication)
             session.flush()
+            _write_publication_projection(session, publication, payload)
             for observation_id, slice_key in sorted(provenance.items()):
                 session.add(PublicationObservation(
                     publication_id=publication.publication_id,
@@ -2862,6 +2887,7 @@ class PublicationService(_SessionService):
                 payload=prior.payload, created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
             session.add(version)
             session.flush()
+            _write_publication_projection(session, version, prior.payload)
             source_refs = session.scalars(select(PublicationObservation).where(
                 PublicationObservation.publication_id == prior.publication_id,
             )).all()

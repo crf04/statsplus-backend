@@ -7,9 +7,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
+    Text,
 )
 
 from . import Base
@@ -132,8 +134,43 @@ class PlayerGameLogSync(Base):
     )
 
 
+class PublicationPlayerGameLog(Base):
+    """One indexed row from an immutable player-game-log publication."""
+
+    __tablename__ = "publication_player_game_logs"
+
+    publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    player_id = Column(Integer, primary_key=True)
+    game_id = Column(String(32), primary_key=True)
+    game_date = Column(Date, nullable=False)
+    opponent_team_id = Column(Integer, nullable=False)
+    row_payload = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_publication_player_game_logs_player_date",
+            "publication_id",
+            "player_id",
+            "game_date",
+            "game_id",
+        ),
+        Index(
+            "ix_publication_player_game_logs_opponent",
+            "publication_id",
+            "opponent_team_id",
+            "player_id",
+            "game_date",
+        ),
+    )
+
+
 __all__ = [
     "PlayerGameLog",
     "PlayerGameLogRefresh",
     "PlayerGameLogSync",
+    "PublicationPlayerGameLog",
 ]
