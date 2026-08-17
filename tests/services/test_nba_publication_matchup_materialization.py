@@ -9,7 +9,7 @@ import json
 from statistics import fmean, pstdev
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, select
 
 from app.migrations import run_migrations
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -20,6 +20,7 @@ from app.services.database_first_activation import (
     PublicationRead,
     PublicationReadSnapshot,
     PublicationTeamWindowRow,
+    LegacyWriteFence,
 )
 from app.services.collection_control import PublicationService
 from app.services.collection_control import CollectionOperationsService, ControlPlaneError
@@ -759,8 +760,40 @@ def test_prior_season_unavailable_nba_lineage_does_not_rollback_ledger_facts(
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
+    publications = PublicationService(engine)
+    for template in NBA_PUBLICATION_STREAMS.values():
+        for window in ("season", "l15"):
+            publications.register_stream(
+                template.format(window=window),
+                provider="nba",
+                owner="residential_collector",
+                required_observations=(),
+                publication_strategy="snapshot_replace",
+                supported_windows=(window,),
+                enabled=not (
+                    template.startswith("synergy_") and window == "l15"
+                ),
+            )
+    for stream_key in (
+        "traditional_opponent",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations",
+        "assist_locations_season",
+        "assist_locations_l15",
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="pbp_stats",
+            owner="ledger",
+            required_observations=(),
+            publication_strategy="snapshot_replace",
+            enabled=False,
+        )
     repository = TeamMatchupRepository(
-        engine, publication_write_capability=create_publication_write_capability(engine)
+        engine,
+        write_fence=LegacyWriteFence(engine),
+        publication_write_capability=create_publication_write_capability(engine),
     )
     unavailable = frozenset(
         template.format(window=window)
@@ -1568,16 +1601,81 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
         write_fence=Fence(),
         publication_write_capability=create_publication_write_capability(engine),
     )
-    repository.replace_governed_publication_snapshots(
-        snapshots,
-        retrieved_at=RETRIEVED_AT,
-    )
+    authorization_queries = []
+
+    def count_authorization_queries(
+        connection, cursor, statement, parameters, context, executemany
+    ):
+        lowered = statement.lower()
+        if "publication_versions" in lowered or "publication_pointers" in lowered:
+            authorization_queries.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_authorization_queries)
+    try:
+        repository.replace_governed_publication_snapshots(
+            snapshots,
+            retrieved_at=RETRIEVED_AT,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_authorization_queries)
+    assert len(authorization_queries) == 2
     assert repository.get_snapshot(
         TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
     ).facts
 
     scope, facts, observations = snapshots[0]
-    invented = (replace(facts[0], raw_value=999), *facts[1:])
+    with engine.begin() as connection:
+        encoded = connection.execute(
+            select(PublicationVersion.payload).where(
+                PublicationVersion.publication_id == candidate_id
+            )
+        ).scalar_one()
+        payload = json.loads(encoded)
+        for row in payload["rows"]:
+            row["per48"] = {key: 0.007 for key in row["per48"]}
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == candidate_id
+            ).values(
+                payload=encoded,
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            )
+        )
+    transported = tuple(replace(fact, raw_value=0.007) for fact in facts)
+    repository.replace_governed_publication_snapshots(
+        ((scope, transported, observations),),
+        retrieved_at=RETRIEVED_AT,
+    )
+
+    alternate_id = "alternate-valid-publication"
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=alternate_id,
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=cutoff,
+            version=2,
+            status="candidate",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=cutoff,
+            fence=0,
+        ))
+    alternate_lineage = PublicationLineage(
+        alternate_id, cutoff.isoformat(), "fresh", 2
+    )
+    mixed = (
+        replace(transported[0], publication=alternate_lineage),
+        *transported[1:],
+    )
+    with pytest.raises(ValueError, match="publication_write_context_invalid"):
+        repository.replace_governed_publication_snapshots(
+            ((scope, mixed, observations),),
+            retrieved_at=RETRIEVED_AT,
+        )
+
+    invented = (replace(transported[0], raw_value=999), *transported[1:])
     with pytest.raises(ValueError, match="publication_write_context_invalid"):
         repository.replace_governed_publication_snapshots(
             ((scope, invented, observations),),

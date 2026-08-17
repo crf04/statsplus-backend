@@ -253,11 +253,8 @@ class LedgerMatchupMaterializationService:
             (l15_scope, l15_facts, l15_observations),
         )
         publication_backed = any(
-            item.publication is not None
-            and (
-                not hasattr(item, "status")
-                or item.status == "available"
-            )
+            (item.base if hasattr(item, "base") else item.surface)
+            in NBA_PUBLICATION_STREAMS
             for _, facts, observations in snapshots
             for item in (*facts, *observations)
         )
