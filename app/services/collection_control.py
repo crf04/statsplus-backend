@@ -34,7 +34,12 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
-from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
+from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPES,
+    SHOT_TYPE_DISPLAY_TO_STORED,
+    SHOT_ZONE_SLICES,
+)
+from app.models.catalogs import SHOOTING_TYPES
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     publication_base_for_stream,
@@ -117,11 +122,8 @@ STREAM_BASES: dict[str, frozenset[str]] = {
 }
 STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset(PLAY_TYPES),
-    "grouped_shot_types": frozenset(SHOOTING_TYPES),
-    "exact_shot_zones": frozenset({
-        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
-        "Corner 3", "Above the Break 3",
-    }),
+    "grouped_shot_types": frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
+    "exact_shot_zones": frozenset(SHOT_ZONE_SLICES),
     "assist_locations": frozenset({
         "Arc3Assists", "Corner3Assists", "AtRimAssists",
         "ShortMidRangeAssists", "LongMidRangeAssists",

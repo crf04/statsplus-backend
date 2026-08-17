@@ -56,6 +56,12 @@ class PublicationWriteCapability:
                 if surface not in NBA_PUBLICATION_BASES:
                     continue
                 if publication is None or not publication.publication_id:
+                    if getattr(item, "status", None) != "available":
+                        # An unavailable NBA publication is still part of a
+                        # governed snapshot, but it has no immutable version
+                        # to authorize.  Its absence must not block the
+                        # ledger-owned surfaces in the same transaction.
+                        continue
                     raise ValueError("publication_write_capability_required")
                 stream_key = publication_stream(surface, window)
                 version = connection.execute(
@@ -273,12 +279,12 @@ class TeamMatchupRepository:
             if governed_publication:
                 capability = capability or self._publication_write_capability
                 if capability is None:
-                    if self._write_fence is not None:
-                        raise ValueError("publication_write_capability_required")
-                else:
-                    if capability.engine is not self.engine:
-                        raise ValueError("publication_write_capability_required")
-                    capability.verify(connection, received)
+                    raise ValueError("publication_write_capability_required")
+                if not isinstance(capability, PublicationWriteCapability):
+                    raise ValueError("publication_write_capability_required")
+                if capability.engine is not self.engine:
+                    raise ValueError("publication_write_capability_required")
+                capability.verify(connection, received)
             scoped_changes = []
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
                 existing_observations = {

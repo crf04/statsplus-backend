@@ -6,52 +6,22 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from collections.abc import Mapping
 
-from app.models.catalogs import PLAY_TYPES
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-
-
-NBA_PUBLICATION_STREAMS = {
-    "play_types": "synergy_play_types_opponent_{window}",
-    "shot_types": "grouped_shot_types_opponent_{window}",
-    "shot_zones": "exact_shot_zones_opponent_{window}",
-}
-NBA_PUBLICATION_WINDOWS = ("season", "l15")
-NBA_PUBLICATION_BASES = frozenset(NBA_PUBLICATION_STREAMS)
-NBA_PUBLICATION_STREAM_KEYS = frozenset(
-    template.format(window=window)
-    for template in NBA_PUBLICATION_STREAMS.values()
-    for window in NBA_PUBLICATION_WINDOWS
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_BASES,
+    NBA_PUBLICATION_STREAM_KEYS,
+    NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_METRIC_KEYS,
+    NBA_PUBLICATION_TAXONOMY,
+    NBA_PUBLICATION_WINDOWS,
+    PLAY_TYPE_STATS,
+    SHOT_TYPE_DISPLAY_TO_STORED,
+    SHOT_TYPE_SLICES,
+    SHOT_TYPE_STATS,
+    SHOT_TYPE_STORED_TO_DISPLAY,
+    SHOT_ZONE_SLICES,
+    SHOT_ZONE_STATS,
 )
-SHOT_TYPE_DISPLAY_TO_STORED = {
-    "Catch and Shoot": "catch_and_shoot",
-    "Pullups": "pullups",
-    "Less Than 10 ft": "less_than_10_ft",
-}
-SHOT_TYPE_STORED_TO_DISPLAY = {
-    stored: display for display, stored in SHOT_TYPE_DISPLAY_TO_STORED.items()
-}
-SHOT_TYPE_SLICES = tuple(SHOT_TYPE_DISPLAY_TO_STORED.values())
-SHOT_TYPE_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
-SHOT_ZONE_SLICES = (
-    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3",
-    "Above the Break 3",
-)
-SHOT_ZONE_STATS = ("FGM", "FGA")
-PLAY_TYPE_STATS = ("PTS", "POSS")
-_PUBLICATION_TAXONOMY = {
-    "play_types": tuple(
-        f"{slice_key}_{stat_key}" for slice_key in PLAY_TYPES for stat_key in PLAY_TYPE_STATS
-    ),
-    "shot_types": tuple(
-        f"{slice_key}_{stat_key}" for slice_key in SHOT_TYPE_SLICES for stat_key in SHOT_TYPE_STATS
-    ),
-    "shot_zones": tuple(
-        f"{slice_key}_{stat_key}" for slice_key in SHOT_ZONE_SLICES for stat_key in SHOT_ZONE_STATS
-    ),
-}
-NBA_PUBLICATION_TAXONOMY = {
-    base: frozenset(keys) for base, keys in _PUBLICATION_TAXONOMY.items()
-}
 
 
 class PublicationValidationError(ValueError):
@@ -81,7 +51,7 @@ def validate_publication_rows(
     accepted publication only after the payload has already proved the exact
     canonical NBA identity set.
     """
-    expected_keys = tuple(sorted(_PUBLICATION_TAXONOMY[base]))
+    expected_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
     canonical_team_ids = set(NBA_TEAM_ID_TO_TRICODE)
     row_team_ids = [row.team_id for row in rows]
     if len(rows) != len(canonical_team_ids) or len(row_team_ids) != len(set(row_team_ids)):
@@ -166,9 +136,12 @@ class PublicationLineage:
     version: int | None
 
 
-def publication_lineage(read) -> PublicationLineage:
+def publication_lineage(read) -> PublicationLineage | None:
+    publication_id = getattr(read, "publication_id", None)
+    if not publication_id:
+        return None
     return PublicationLineage(
-        publication_id=getattr(read, "publication_id", None),
+        publication_id=publication_id,
         cutoff=publication_cutoff(read),
         freshness=getattr(read, "freshness", None),
         version=getattr(read, "version", None),
@@ -219,7 +192,7 @@ def publication_stream(base: str, window: str) -> str:
 
 
 def publication_metric_keys(base: str) -> tuple[str, ...]:
-    return _PUBLICATION_TAXONOMY[base]
+    return NBA_PUBLICATION_METRIC_KEYS[base]
 
 
 __all__ = [

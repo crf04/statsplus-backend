@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
+from statistics import fmean, pstdev
 
 import pytest
 from sqlalchemy import create_engine
@@ -22,7 +23,12 @@ from app.services.database_first_activation import (
 )
 from app.services.collection_control import PublicationService
 from app.services.collection_control import CollectionOperationsService, ControlPlaneError
-from app.models.collection_control import PublicationVersion
+from app.services.collection_control import STREAM_REQUIRED_SLICES
+from app.domain.team_matchup_taxonomy import (
+    SHOT_TYPE_DISPLAY_TO_STORED,
+    SHOT_ZONE_SLICES,
+)
+from app.models.collection_control import PublicationPointer, PublicationVersion
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
@@ -110,6 +116,36 @@ def _canonical_league_games():
 def _engine(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nba-publications.sqlite3'}")
     run_migrations(engine)
+    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        for stream_key in (
+            "synergy_play_types_opponent_season",
+            "synergy_play_types_opponent_l15",
+            "grouped_shot_types_opponent_season",
+            "grouped_shot_types_opponent_l15",
+            "exact_shot_zones_opponent_season",
+            "exact_shot_zones_opponent_l15",
+        ):
+            publication_id = f"publication-{stream_key}"
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=2,
+                status="active",
+                checksum="0" * 64,
+                payload="{}",
+                created_at=cutoff,
+                fence=1,
+            ))
+            connection.execute(PublicationPointer.__table__.insert().values(
+                stream_key=stream_key,
+                active_publication_id=publication_id,
+                previous_publication_id=None,
+                fence=1,
+                updated_at=cutoff,
+            ))
     return engine
 
 
@@ -143,6 +179,18 @@ def _candidate_payload(expected_l15, *, mode="valid"):
     elif mode == "duplicate_ids":
         rows.append(dict(rows[0]))
     return {"rows": rows}
+
+
+def test_collection_registry_and_publication_contract_share_canonical_taxonomy():
+    assert STREAM_REQUIRED_SLICES["grouped_shot_types"] == frozenset(
+        SHOT_TYPE_DISPLAY_TO_STORED
+    )
+    assert STREAM_REQUIRED_SLICES["exact_shot_zones"] == frozenset(SHOT_ZONE_SLICES)
+    assert set(NBA_PUBLICATION_TAXONOMY["shot_types"]) == {
+        f"{slice_key}_{stat_key}"
+        for slice_key in SHOT_TYPE_DISPLAY_TO_STORED.values()
+        for stat_key in ("FG2M", "FG2A", "FG3M", "FG3A")
+    }
 
 
 def _operator_activation_fixture(tmp_path, *, mode="valid"):
@@ -264,6 +312,7 @@ def _reader(
     cutoff_by_stream: dict[str, str] | None = None,
     freshness_by_stream: dict[str, str] | None = None,
     game_ids_by_stream: dict[str, dict[int, tuple[str, ...]]] | None = None,
+    contradict_statistics: bool = False,
 ):
     stream_bases = {
         template.format(window=window): base
@@ -293,6 +342,22 @@ def _reader(
                 ),
             )
             continue
+        decoded = _rows(
+            (metric_keys_by_stream or {}).get(
+                stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+            ),
+            (game_ids_by_stream or {}).get(stream_key),
+        )
+        if contradict_statistics:
+            decoded = tuple(
+                replace(
+                    row,
+                    league_average={key: 999.0 for key in row.per48},
+                    population_sigma={key: 999.0 for key in row.per48},
+                    competition_rank={key: 99 for key in row.per48},
+                )
+                for row in decoded
+            )
         reads[stream_key] = PublicationRead(
             stream_key=stream_key,
             publication_id=f"publication-{stream_key}",
@@ -306,12 +371,7 @@ def _reader(
             age_seconds=90000,
             payload={"rows": []},
             retrieved_at=RETRIEVED_AT,
-            decoded=_rows(
-                (metric_keys_by_stream or {}).get(
-                    stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
-                ),
-                (game_ids_by_stream or {}).get(stream_key),
-            ),
+            decoded=decoded,
         )
     for stream_key in (
         "traditional_opponent_season",
@@ -357,7 +417,9 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     repository.replace_snapshots(
         (
             (
@@ -437,7 +499,9 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     service = LedgerMatchupMaterializationService(
         ledger,
         repository,
@@ -484,7 +548,9 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
     l15_game_ids = {
         team_id: tuple(sorted(game_ids))
@@ -534,7 +600,10 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
     wrong_engine = _engine(wrong_path)
     wrong_ledger = CanonicalGameLedgerRepository(wrong_engine)
     wrong_ledger.replace_games_atomic(games)
-    wrong_repository = TeamMatchupRepository(wrong_engine)
+    wrong_repository = TeamMatchupRepository(
+        wrong_engine,
+        publication_write_capability=create_publication_write_capability(wrong_engine),
+    )
     wrong_service = LedgerMatchupMaterializationService(
         wrong_ledger,
         wrong_repository,
@@ -572,7 +641,9 @@ def test_publication_requires_exact_registered_metric_taxonomy(tmp_path, metric_
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     service = LedgerMatchupMaterializationService(
         ledger,
         repository,
@@ -606,7 +677,9 @@ def test_publication_rejects_normalized_alias_for_registered_key(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     service = LedgerMatchupMaterializationService(
         ledger, repository,
         publication_reader=_reader(metric_keys_by_stream={
@@ -649,7 +722,9 @@ def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     repository.replace_snapshots(
         (
             (
@@ -695,6 +770,7 @@ def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):
     ))
     window = query.get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
     assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
+    assert any(metric.base == "traditional" for metric in window.league_metrics)
     observation = next(
         item for item in window.observations if item.surface == "shot_zones"
     )
@@ -713,7 +789,9 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     reader = _reader(
         cutoff_by_stream={
             "grouped_shot_types_opponent_season": "2025-10-14T00:00:00+00:00",
@@ -724,6 +802,13 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
             "exact_shot_zones_opponent_season": "stale",
         },
     )
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id
+                == "publication-grouped_shot_types_opponent_season"
+            ).values(cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc))
+        )
     service = LedgerMatchupMaterializationService(
         ledger, repository, publication_reader=reader, clock=lambda: RETRIEVED_AT
     )
@@ -755,7 +840,9 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
 
 def test_nba_publication_reads_remain_available_when_ledger_surface_is_missing(tmp_path):
     engine = _engine(tmp_path)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     scope = TeamMatchupSnapshotScope("2025-26", AS_OF)
     repository.replace_snapshots(
         (
@@ -786,7 +873,9 @@ def test_nba_publication_reads_remain_available_when_ledger_surface_is_missing(t
 
 def test_direct_l15_query_uses_governed_nba_publication_without_ledger_window(tmp_path):
     engine = _engine(tmp_path)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
@@ -815,9 +904,77 @@ def test_direct_l15_query_uses_governed_nba_publication_without_ledger_window(tm
     assert not any(metric.base == "traditional" for metric in window.league_metrics)
 
 
-def test_l15_query_without_governance_fails_closed(tmp_path):
+def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(engine)
+    expected = {
+        team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
+        for team_id in CANONICAL_TEAM_IDS
+    }
+    reader = _reader(
+        game_ids_by_stream={
+            stream_key: {
+                team_id: tuple(game_ids)
+                for team_id, game_ids in expected.items()
+            }
+            for stream_key in (
+                "synergy_play_types_opponent_l15",
+                "grouped_shot_types_opponent_l15",
+                "exact_shot_zones_opponent_l15",
+            )
+        }
+    )
+    window = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+        publication_reader=reader,
+        l15_expectation_resolver=lambda season, cutoff: expected,
+    ).get_latest_window("2025-26", window_games=15)
+
+    assert window is not None
+    assert any(metric.base == "shot_zones" for metric in window.league_metrics)
+    assert next(
+        item for item in window.observations if item.surface == "shot_zones"
+    ).status == "available"
+
+
+def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    window = TeamMatchupQueryService(
+        repository,
+        publication_reader=_reader(contradict_statistics=True),
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+
+    metric = next(
+        item
+        for item in window.league_metrics
+        if (item.base, item.slice_key, item.stat_key)
+        == ("shot_zones", "Restricted Area", "FGM")
+    )
+    expected_average = fmean(CANONICAL_TEAM_IDS)
+    expected_sigma = pstdev(CANONICAL_TEAM_IDS)
+    assert metric.average_allowed_per_48 == expected_average
+    assert metric.sigma == expected_sigma
+    team_metric = next(
+        item
+        for item in window.team_metrics[CANONICAL_TEAM_IDS[0]]
+        if (item.base, item.slice_key, item.stat_key)
+        == ("shot_zones", "Restricted Area", "FGM")
+    )
+    assert team_metric.rank == 1
+    assert team_metric.sigma_deviation == (
+        (CANONICAL_TEAM_IDS[0] - expected_average) / expected_sigma
+    )
+
+
+def test_l15_query_without_governance_fails_closed(tmp_path):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     window = TeamMatchupQueryService(
         repository,
         publication_reader=_reader(),
@@ -840,7 +997,9 @@ def test_l15_query_without_governance_fails_closed(tmp_path):
 
 def test_l15_query_preserves_publication_game_set_failure_and_lineage(tmp_path):
     engine = _engine(tmp_path)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
@@ -884,7 +1043,9 @@ def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
     games = _canonical_league_games()
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     service = LedgerMatchupMaterializationService(
         ledger,
         repository,
@@ -1024,6 +1185,13 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
     unguarded_repository = TeamMatchupRepository(engine, write_fence=Fence())
     with pytest.raises(ValueError, match="publication_write_capability_required"):
         unguarded_repository.replace_governed_publication_snapshots(
+            snapshots,
+            retrieved_at=RETRIEVED_AT,
+        )
+
+    read_only_repository = TeamMatchupRepository(engine)
+    with pytest.raises(ValueError, match="publication_write_capability_required"):
+        read_only_repository.replace_governed_publication_snapshots(
             snapshots,
             retrieved_at=RETRIEVED_AT,
         )

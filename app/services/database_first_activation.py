@@ -21,6 +21,11 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import defer, sessionmaker
 
+from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPES,
+    SHOT_TYPE_SLICES,
+    SHOT_ZONE_SLICES,
+)
 from app.models.collection_control import (
     PublicationPointer,
     PublicationStream,
@@ -243,7 +248,6 @@ def decode_player_diet(
 ) -> tuple[Any, ...]:
     """Decode one governed player-Diet stream without filling defaults."""
 
-    from app.models.catalogs import PLAY_TYPES
     from app.services.player_diet import PlayerDietFact, PLAYER_DIET_BASES
 
     stream_key = {
@@ -272,14 +276,8 @@ def decode_player_diet(
     }
     allowed_slices = {
         "play_types": set(PLAY_TYPES),
-        "shot_types": {"catch_and_shoot", "pullups", "less_than_10_ft"},
-        "shot_zones": {
-            "Restricted Area",
-            "In The Paint (Non-RA)",
-            "Mid-Range",
-            "Corner 3",
-            "Above the Break 3",
-        },
+        "shot_types": set(SHOT_TYPE_SLICES),
+        "shot_zones": set(SHOT_ZONE_SLICES),
         "assist_locations": {
             "Arc3Assists",
             "Corner3Assists",

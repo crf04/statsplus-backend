@@ -106,12 +106,19 @@ class TeamMatchupQueryService:
             season, window_games=window_games, as_of=cutoff
         )
         if observation_scope is None:
+            expected_l15_game_ids = self._governed_l15_ids(
+                season, cutoff, (), required=window_games is not None
+            )
             return self._database_first_window(
                 season,
                 cutoff=cutoff,
                 window_games=window_games,
                 legacy=None,
                 publication_snapshot=publication_snapshot,
+                expected_l15_game_ids=expected_l15_game_ids,
+                expected_team_ids=(
+                    set(expected_l15_game_ids) if expected_l15_game_ids else None
+                ),
             )
         observation_snapshot = self.repository.get_snapshot(observation_scope)
         observations = observation_snapshot.observations
@@ -420,27 +427,42 @@ class TeamMatchupQueryService:
                 (display_key, display_key, metric_key)
                 for display_key, metric_key in stat_names.items()
             )
-        league_by_key = rows[0].league_average
-        sigma_by_key = rows[0].population_sigma
+        values_by_key = {
+            metric_key: tuple(float(row.per48[metric_key]) for row in rows)
+            for _slice_key, _stat_key, metric_key in identities
+            if metric_key in rows[0].per48
+        }
+        statistics_by_key = {
+            metric_key: (fmean(values), pstdev(values))
+            for metric_key, values in values_by_key.items()
+        }
         league_metrics = []
         for slice_key, stat_key, metric_key in identities:
-            if metric_key not in league_by_key:
+            values = values_by_key.get(metric_key)
+            if values is None:
                 continue
+            average, sigma = statistics_by_key[metric_key]
             league_metrics.append(LeagueMatchupMetric(
                 base=base,
                 slice_key=slice_key,
                 stat_key=stat_key,
-                average_allowed_per_48=league_by_key[metric_key],
-                sigma=sigma_by_key[metric_key],
+                average_allowed_per_48=average,
+                sigma=sigma,
                 team_count=len(rows),
             ))
         team_metrics = defaultdict(list)
+        ranks_by_key = {}
+        for metric_key, values in values_by_key.items():
+            ranks = {}
+            for index, value in enumerate(sorted(values)):
+                ranks.setdefault(value, index + 1)
+            ranks_by_key[metric_key] = ranks
         for row in rows:
             for slice_key, stat_key, metric_key in identities:
                 if metric_key not in row.per48:
                     continue
-                average = row.league_average[metric_key]
                 value = row.per48[metric_key]
+                average, sigma = statistics_by_key[metric_key]
                 team_metrics[row.team_id].append(TeamMatchupMetric(
                     base=base,
                     slice_key=slice_key,
@@ -450,10 +472,9 @@ class TeamMatchupQueryService:
                         (value / average - 1) * 100 if average else None
                     ),
                     sigma_deviation=(
-                        (value - average) / row.population_sigma[metric_key]
-                        if row.population_sigma[metric_key] else 0.0
+                        (value - average) / sigma if sigma else 0.0
                     ),
-                    rank=row.competition_rank[metric_key],
+                    rank=ranks_by_key[metric_key][value],
                 ))
         scope = TeamMatchupSnapshotScope(
             season=season, as_of=cutoff, window_games=window_games
@@ -536,6 +557,14 @@ class TeamMatchupQueryService:
                 and observation.status != "available"
                 and (
                     observation.publication is not None
+                    or (
+                        observation.unavailable_reason is not None
+                        and (
+                            observation.unavailable_reason.startswith("publication_")
+                            or observation.unavailable_reason
+                            == "provider_window_unsupported"
+                        )
+                    )
                 )
             )
         }

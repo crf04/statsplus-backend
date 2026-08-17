@@ -602,8 +602,9 @@ translation into API `retrieved_at` and freshness status. Railway runs
 PBP-backed player-game-log ingestion path, reads the governed Event and Athlete
 Catalogs from Postgres, and never constructs or calls the NBA Stats adapter.
 A failure is retried once and preserves the prior complete game-log
-publication. NBA-owned catalogs and statistical surfaces remain
-residential-collector work.
+publication. NBA-owned catalogs and statistical surfaces remain residential
+collector inputs; their governed team-window publications are later consumed
+by the database-first ledger materialization seam described below.
 
 The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog
@@ -1435,7 +1436,7 @@ window crossing those phases is retained as canonical evidence but published
 unavailable because the approved aggregate providers cannot represent that
 exact mixed game set in one request.
 
-NBA Stats surfaces are queried per team with `LastNGames=15`, `TeamID`, the
+The legacy provider refresh path queries NBA Stats surfaces per team with `LastNGames=15`, `TeamID`, the
 team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
 the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
 responses must identify the requested team and report exactly 15 games; the
