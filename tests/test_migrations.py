@@ -203,8 +203,11 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         upgraded = run_migrations(engine)
         repeated = run_migrations(engine)
 
-    assert upgraded.applied == ("041_projection_archive_transitions",)
-    assert upgraded.current_version == 41
+    assert upgraded.applied == (
+        "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
+    )
+    assert upgraded.current_version == 42
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -464,6 +467,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -657,6 +661,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     with engine.connect() as connection:
         rows = {
@@ -891,6 +896,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (39, "039_bind_publication_versions_to_manifest_authority"),
             (40, "040_projection_archive"),
             (41, "041_projection_archive_transitions"),
+            (42, "042_team_matchup_provider_provenance"),
         ]
 
 
@@ -944,6 +950,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1022,6 +1029,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1084,6 +1092,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1144,7 +1153,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 41
+    assert repaired.current_version == 42
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1185,8 +1194,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
-    assert upgraded.current_version == 41
+    assert upgraded.current_version == 42
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1260,8 +1270,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
-    assert upgraded.current_version == 41
+    assert upgraded.current_version == 42
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1336,6 +1347,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1392,8 +1404,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
-    assert upgraded.current_version == 41
+    assert upgraded.current_version == 42
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1487,6 +1500,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
 
 
@@ -1529,7 +1543,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 41
+    assert result.current_version == 42
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1814,6 +1828,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1876,10 +1891,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
-    assert upgraded.current_version == 41
+    assert upgraded.current_version == 42
     assert repeated.applied == ()
-    assert repeated.current_version == 41
+    assert repeated.current_version == 42
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -1951,6 +1967,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "039_bind_publication_versions_to_manifest_authority",
         "040_projection_archive",
         "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -1959,3 +1976,87 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
     )
     assert evidence.raw_payload == [{"ID": "1"}]
     assert evidence.source_entries == ()
+
+
+def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp_path):
+    """Migration 042 adds evidence columns but cannot invent old authority."""
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'provider-provenance.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 39),
+        )
+        assert run_migrations(engine).current_version == 39
+
+    provenance_columns = (
+        "manifest_id",
+        "event_catalog_publication_id",
+        "event_catalog_checksum",
+        "provider_window_identity",
+    )
+    with engine.begin() as connection:
+        for table_name in (
+            "team_matchup_facts",
+            "team_matchup_surface_observations",
+        ):
+            for column_name in provenance_columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"DROP COLUMN {column_name}"
+                    )
+                )
+        connection.execute(text(
+            "INSERT INTO team_matchup_facts ("
+            "season, as_of_date, window_kind, window_games, team_id, base, "
+            "slice_key, stat_key, raw_value, denominator_value, denominator_unit, "
+            "provider, window_end_date, retrieved_at"
+            ") VALUES ("
+            "'2025-26', '2026-08-15', 'season', 0, 1, 'traditional', 'all', "
+            "'points', 1.0, 1.0, 'minutes', 'nba', '2026-08-15', "
+            "'2026-08-15 12:00:00'"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO team_matchup_surface_observations ("
+            "season, as_of_date, window_kind, window_games, surface, status, "
+            "retrieved_at"
+            ") VALUES ("
+            "'2025-26', '2026-08-15', 'season', 0, 'traditional', 'available', "
+            "'2026-08-15 12:00:00'"
+            ")"
+        ))
+
+    upgraded = run_migrations(engine)
+    assert upgraded.applied == (
+        "040_projection_archive",
+        "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
+    )
+    assert upgraded.current_version == 42
+
+    for table_name in (
+        "team_matchup_facts",
+        "team_matchup_surface_observations",
+    ):
+        columns = {
+            column["name"] for column in inspect(engine).get_columns(table_name)
+        }
+        assert set(provenance_columns) <= columns
+
+    with engine.connect() as connection:
+        fact = connection.execute(text(
+            "SELECT manifest_id, event_catalog_publication_id, "
+            "event_catalog_checksum, provider_window_identity "
+            "FROM team_matchup_facts"
+        )).one()
+        observation = connection.execute(text(
+            "SELECT manifest_id, event_catalog_publication_id, "
+            "event_catalog_checksum, provider_window_identity "
+            "FROM team_matchup_surface_observations"
+        )).one()
+
+    assert tuple(fact) == (None, None, None, None)
+    assert tuple(observation) == (None, None, None, None)
