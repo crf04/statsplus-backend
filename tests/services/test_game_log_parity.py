@@ -19,6 +19,10 @@ from app.migrations import run_migrations
 from app.models.game_logs import GameLogQuery
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COLUMNS
 from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.database_first_activation import (
+    PublicationRead,
+    PublicationReadSnapshot,
+)
 from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import (
     DatabaseFirstGameLogsSource,
@@ -32,6 +36,7 @@ from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_player_game_logs import (
     RETRIEVED_AT,
     SEASON,
+    _record,
     _seed_completed_playoff_event,
     _seed_identities,
 )
@@ -321,6 +326,80 @@ def test_database_first_router_serves_complete_season_from_storage(durable_world
     frame = router.get_player_logs(101, SEASON)
     assert len(frame) == 2
     assert frame.iloc[0]["GAME_ID"] == "0022500004"  # newest first
+
+
+def test_game_service_reads_an_active_player_log_publication_once(
+    tmp_path, monkeypatch
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'single-read.sqlite3'}")
+    run_migrations(engine)
+    publication = PublicationRead(
+        stream_key="player_game_logs",
+        publication_id="publication-1",
+        season=SEASON,
+        cutoff=RETRIEVED_AT.isoformat(),
+        version=1,
+        status="active",
+        freshness="fresh",
+        age_seconds=0,
+        payload={"rows": []},
+        retrieved_at=RETRIEVED_AT,
+        checksum="a" * 64,
+        fence=1,
+        decoded=(_record(),),
+    )
+    snapshot = PublicationReadSnapshot(
+        season=SEASON,
+        reads={"player_game_logs": publication},
+        generation=(("player_game_logs", "publication-1", 1, 1),),
+    )
+
+    class CountingPublicationReader:
+        def __init__(self):
+            self.read_calls = 0
+            self.snapshot_calls = 0
+
+        def read(self, stream_key, *, season):
+            assert stream_key == "player_game_logs"
+            assert season == SEASON
+            self.read_calls += 1
+            return publication
+
+        def snapshot(self, stream_keys, *, season):
+            assert tuple(stream_keys) == ("player_game_logs",)
+            assert season == SEASON
+            self.snapshot_calls += 1
+            return snapshot
+
+    reader = CountingPublicationReader()
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: RETRIEVED_AT,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+
+    class NeverLiveSource:
+        def get_player_logs(self, player_id, season, *, cache_status):
+            raise AssertionError("an active publication must not call the provider")
+
+        def record_cache_hit(self, operation):
+            raise AssertionError("an active publication must not use Redis")
+
+    source = DatabaseFirstGameLogsSource(
+        NeverLiveSource(), StoredGameLogsSource(repository), repository
+    )
+    service = _service(engine, source)
+    monkeypatch.setattr(service, "get_player_id", lambda _name: 101)
+
+    frame, next_team = service._get_game_logs("Player 101", SEASON)
+
+    assert len(frame) == 1
+    assert next_team is None
+    assert reader.snapshot_calls == 1
+    assert reader.read_calls == 0
 
 
 def test_database_first_router_falls_back_to_live_before_complete_publication(

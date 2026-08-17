@@ -196,15 +196,23 @@ class GameService:
     def _get_game_logs(self, player_name, season=None):
         """Get game logs with daily caching - only hits the source once per day"""
         season = season or self.settings.nba.current_season
-        if self.game_logs_source is not None and not self.game_logs_source.cached(
-            season
-        ):
+        game_logs_plan = None
+        source_is_cacheable = True
+        if self.game_logs_source is not None:
+            prepare = getattr(type(self.game_logs_source), "prepare", None)
+            if callable(prepare):
+                game_logs_plan = prepare(self.game_logs_source, season)
+                source_is_cacheable = game_logs_plan.cacheable
+            else:
+                source_is_cacheable = self.game_logs_source.cached(season)
+        if self.game_logs_source is not None and not source_is_cacheable:
             # A durably complete season is served straight from the database;
             # Redis caching would only shadow the fresher stored facts.
             return self._fetch_game_logs_from_api(
                 player_name,
                 season,
                 cache_status=CACHE_DISABLED,
+                game_logs_plan=game_logs_plan,
             )
         cache_status = (
             CACHE_DISABLED
@@ -248,7 +256,10 @@ class GameService:
             # Cache miss - make provider call
             logger.info(f"Cache miss for player logs: {player_name}, {season} - making provider call")
             result = self._fetch_game_logs_from_api(
-                player_name, season, cache_status=CACHE_MISS
+                player_name,
+                season,
+                cache_status=CACHE_MISS,
+                game_logs_plan=game_logs_plan,
             )
 
             # Cache the result with 1 AM CST expiry for current season data
@@ -269,16 +280,28 @@ class GameService:
         else:
             # No cache - direct API call
             return self._fetch_game_logs_from_api(
-                player_name, season, cache_status=cache_status
+                player_name,
+                season,
+                cache_status=cache_status,
+                game_logs_plan=game_logs_plan,
             )
 
     def _fetch_game_logs_from_api(
-        self, player_name, season=None, *, cache_status=CACHE_DISABLED
+        self,
+        player_name,
+        season=None,
+        *,
+        cache_status=CACHE_DISABLED,
+        game_logs_plan=None,
     ):
         season = season or self.settings.nba.current_season
         player_id = int(self.get_player_id(player_name))
 
         if self.game_logs_source is not None:
+            if game_logs_plan is not None:
+                return game_logs_plan.get_player_logs(
+                    player_id, season, cache_status=cache_status
+                ), None
             return self.game_logs_source.get_player_logs(
                 player_id, season, cache_status=cache_status
             ), None
