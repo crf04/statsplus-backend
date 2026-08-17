@@ -379,6 +379,7 @@ def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path
     "provider_row",
     (
         {"TEAM_ID": BOS, "GP": 14},
+        {"TEAM_ID": BOS, "GP": 15},
         {"TEAM_ID": BOS, "GP": 15, "GAME_IDS": ["stale-game"]},
     ),
 )
@@ -388,6 +389,7 @@ def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
             pd.DataFrame([provider_row]),
             expected_game_counts={BOS: 15},
             expected_game_ids_by_team={BOS: tuple(f"game-{index}" for index in range(15))},
+            require_game_ids=True,
         )
 
 

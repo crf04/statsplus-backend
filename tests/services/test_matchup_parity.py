@@ -27,10 +27,12 @@ from app.models.collection_control import (
     CollectionManifest,
     PublicationVersion,
 )
+from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
     matchup_parity_artifact_is_activatable,
+    matchup_parity_cohort_is_activatable,
 )
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
@@ -654,9 +656,11 @@ def _runner_world(tmp_path):
     return engine, governance, binding
 
 
-def _write_legacy_facts(engine, *, game_ids_by_team):
+def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
     repository = TeamMatchupRepository(engine)
-    scope = TeamMatchupSnapshotScope("2025-26", CUTOFF.date())
+    scope = TeamMatchupSnapshotScope(
+        "2025-26", CUTOFF.date(), 15 if window == "l15" else None
+    )
     with engine.connect() as connection:
         authority = connection.execute(
             select(
@@ -665,11 +669,12 @@ def _write_legacy_facts(engine, *, game_ids_by_team):
             ).where(CollectionManifest.manifest_id == MANIFEST)
         ).mappings().one()
     provider_identity = json.dumps({
-        "window": "season",
+        "window": window,
         "teams": {
             str(team_id): {
                 "expected_games": len(game_ids_by_team[team_id]),
                 "authority_game_ids": sorted(game_ids_by_team[team_id]),
+                "provider_game_ids": sorted(game_ids_by_team[team_id]),
             }
             for team_id in TEAM_IDS
         },
@@ -713,20 +718,23 @@ def _write_legacy_facts(engine, *, game_ids_by_team):
     )
 
 
-def _insert_runner_publication(engine, *, stream_key, surface, window, game_ids_by_team, binding):
+def _insert_runner_publication(
+    engine, *, stream_key, surface, window, game_ids_by_team, binding,
+    publication_suffix="", created_at=CUTOFF,
+):
     payload = _publication_payload(game_ids_by_team, surface=surface)
     checksum = publication_payload_checksum(payload)
     with engine.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id=f"pub-{stream_key}", stream_key=stream_key,
+            publication_id=f"pub-{stream_key}{publication_suffix}", stream_key=stream_key,
             season="2025-26", cutoff=CUTOFF, version=1, status="candidate",
             checksum=checksum, payload=payload,
             manifest_id=MANIFEST,
             event_catalog_publication_id=binding["event_catalog_publication_id"],
             event_catalog_checksum=binding["event_catalog_checksum"],
-            created_at=CUTOFF, fence=0,
+            created_at=created_at, fence=0,
         ))
-    return f"pub-{stream_key}"
+    return f"pub-{stream_key}{publication_suffix}"
 
 
 def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
@@ -761,6 +769,181 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
         assert artifact is not None
         assert artifact.status == "exact"
         assert assume_utc(artifact.cutoff) == CUTOFF
+
+
+def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):
+    engine, governance, binding = _runner_world(tmp_path)
+    season_ids = governance.expected_season_game_ids
+    l15_ids = governance.expected_l15_game_ids
+    _write_legacy_facts(engine, game_ids_by_team=season_ids, window="season")
+    season_publications = {
+        stream: _insert_runner_publication(
+            engine,
+            stream_key=stream,
+            surface=("traditional" if stream.startswith("traditional") else "assist_locations"),
+            window="season",
+            game_ids_by_team=season_ids,
+            binding=binding,
+        )
+        for stream in (
+            "traditional_opponent_season", "assist_locations_season",
+        )
+    }
+    runner = MatchupParityRunner(
+        engine,
+        governance=ActiveManifestLedgerGovernanceReader(engine),
+        legacy_source=StoredLegacyMatchupSource(TeamMatchupRepository(engine)),
+    )
+    runner.run("2025-26", "season", cutoff=CUTOFF, publications=season_publications)
+
+    _write_legacy_facts(engine, game_ids_by_team=l15_ids, window="l15")
+    l15_publications = {
+        stream: _insert_runner_publication(
+            engine,
+            stream_key=stream,
+            surface=("traditional" if stream.startswith("traditional") else "assist_locations"),
+            window="l15",
+            game_ids_by_team=l15_ids,
+            binding=binding,
+            publication_suffix="-l15",
+        )
+        for stream in (
+            "traditional_opponent_l15", "assist_locations_l15",
+        )
+    }
+    runner.run("2025-26", "l15", cutoff=CUTOFF, publications=l15_publications)
+
+    # A fifth artifact is the newest valid traditional Season rerun.  The
+    # cohort must choose it, while a newer rejected historical row is ignored.
+    _write_legacy_facts(engine, game_ids_by_team=season_ids, window="season")
+    rerun_publication = _insert_runner_publication(
+        engine,
+        stream_key="traditional_opponent_season",
+        surface="traditional",
+        window="season",
+        game_ids_by_team=season_ids,
+        binding=binding,
+        publication_suffix="-rerun",
+        created_at=CUTOFF + timedelta(minutes=5),
+    )
+    runner.run(
+        "2025-26", "season", cutoff=CUTOFF,
+        publications={
+            "traditional_opponent_season": rerun_publication,
+            "assist_locations_season": season_publications["assist_locations_season"],
+        },
+    )
+    with create_session(engine) as session:
+        latest = session.scalar(select(LedgerParityArtifact).where(
+            LedgerParityArtifact.publication_id == rerun_publication,
+        ))
+        assert latest is not None
+        session.add(LedgerParityArtifact(
+            artifact_id="rejected-newer-history",
+            publication_id=rerun_publication,
+            payload_checksum=latest.payload_checksum,
+            stream_key=latest.stream_key,
+            season=latest.season,
+            cutoff=latest.cutoff,
+            status="pending_adjudication",
+            decision="rejected",
+            report="{}",
+            created_at=CUTOFF + timedelta(minutes=6),
+        ))
+        session.commit()
+        assert matchup_parity_cohort_is_activatable(
+            session,
+            season="2025-26",
+            cutoff=CUTOFF,
+            candidate_publication_id=rerun_publication,
+            artifact_id=latest.artifact_id,
+        )
+
+        # Bind one otherwise-valid selected artifact to a second immutable
+        # catalog/manifest authority.  The cohort must fail closed rather than
+        # mixing authority generations across its four streams.
+        assist_l15 = session.scalar(select(LedgerParityArtifact).where(
+            LedgerParityArtifact.stream_key == "assist_locations_l15",
+            LedgerParityArtifact.season == "2025-26",
+        ))
+        assert assist_l15 is not None
+        publication = session.get(PublicationVersion, assist_l15.publication_id)
+        assert publication is not None
+        document = json.loads(assist_l15.report)
+        document.update({
+            "ledger_publication_id": "pub-assist-l15-mixed",
+            "ledger_manifest_id": "mixed-manifest",
+            "ledger_event_catalog_publication_id": "mixed-catalog",
+            "legacy_manifest_id": "mixed-manifest",
+            "legacy_event_catalog_publication_id": "mixed-catalog",
+        })
+        catalog = session.get(CatalogPublication, binding["event_catalog_publication_id"])
+        assert catalog is not None
+        session.add(CatalogPublication(
+            publication_id="mixed-catalog",
+            season=catalog.season,
+            catalog_type=catalog.catalog_type,
+            cutoff=catalog.cutoff,
+            version=catalog.version,
+            checksum=catalog.checksum,
+            payload=catalog.payload,
+            complete=True,
+            published_at=catalog.published_at,
+            expires_at=catalog.expires_at,
+        ))
+        session.flush()
+        session.add(CollectionManifest(
+            manifest_id="mixed-manifest",
+            season="2025-26",
+            cutoff=CUTOFF,
+            collect_before=CUTOFF + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="mixed-manifest-checksum",
+            event_catalog_publication_id="mixed-catalog",
+            event_catalog_checksum=binding["event_catalog_checksum"],
+            status="active",
+            created_at=CUTOFF,
+        ))
+        session.flush()
+        session.add(PublicationVersion(
+            publication_id="pub-assist-l15-mixed",
+            stream_key=publication.stream_key,
+            season=publication.season,
+            cutoff=publication.cutoff,
+            version=2,
+            status="candidate",
+            checksum=publication.checksum,
+            payload=publication.payload,
+            manifest_id="mixed-manifest",
+            event_catalog_publication_id="mixed-catalog",
+            event_catalog_checksum=catalog.checksum,
+            created_at=datetime.now(timezone.utc) + timedelta(minutes=7),
+            fence=0,
+        ))
+        session.flush()
+        session.add(LedgerParityArtifact(
+            artifact_id="mixed-authority-artifact",
+            publication_id="pub-assist-l15-mixed",
+            payload_checksum=publication.checksum,
+            stream_key=assist_l15.stream_key,
+            season=assist_l15.season,
+            cutoff=assist_l15.cutoff,
+            status="exact",
+            report=json.dumps(document, sort_keys=True),
+            created_at=datetime.now(timezone.utc) + timedelta(minutes=8),
+        ))
+        session.commit()
+        mixed = session.get(LedgerParityArtifact, "mixed-authority-artifact")
+        assert mixed is not None
+        assert matchup_parity_artifact_is_activatable(mixed)
+        assert not matchup_parity_cohort_is_activatable(
+            session,
+            season="2025-26",
+            cutoff=CUTOFF,
+            candidate_publication_id=rerun_publication,
+            artifact_id=latest.artifact_id,
+        )
 
 
 def test_stored_legacy_rejects_nullable_date_only_rows(tmp_path):

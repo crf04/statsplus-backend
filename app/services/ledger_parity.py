@@ -16,6 +16,11 @@ from sqlalchemy.orm import Session
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import AuditEvent, PublicationVersion
 
+from app.domain.matchup_parity_contract import (
+    HARD_CLASSIFICATIONS,
+    MATCHUP_REQUIRED_STREAMS,
+    SOFT_CLASSIFICATIONS,
+)
 from app.domain.team_matchup_taxonomy import matchup_stream_key
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.utc import assume_utc
@@ -30,36 +35,9 @@ from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 
 
-_MATCHUP_STREAMS = frozenset({
-    "traditional_opponent_season",
-    "traditional_opponent_l15",
-    "assist_locations_season",
-    "assist_locations_l15",
-})
-_MATCHUP_HARD_CLASSIFICATIONS = frozenset({
-    "league_incomplete",
-    "missing_legacy_team",
-    "missing_ledger_team",
-    "extra_team",
-    "game_set_mismatch",
-    "integer_count_difference",
-    "non_integer_count",
-    "availability_difference",
-    "cutoff_mismatch",
-    "scope_mismatch",
-    "missing_surface",
-    "missing_metric",
-    "extra_metric",
-    "duplicate_metric",
-    "l15_game_count_mismatch",
-    "authority_mismatch",
-    "invalid_denominator",
-    "ranking_difference",
-})
-_MATCHUP_SOFT_CLASSIFICATIONS = frozenset({
-    "denominator_tolerance_exceeded",
-    "derived_rate_difference",
-})
+_MATCHUP_STREAMS = MATCHUP_REQUIRED_STREAMS
+_MATCHUP_HARD_CLASSIFICATIONS = HARD_CLASSIFICATIONS
+_MATCHUP_SOFT_CLASSIFICATIONS = SOFT_CLASSIFICATIONS
 
 
 def matchup_parity_artifact_is_activatable(
@@ -139,29 +117,28 @@ def matchup_parity_cohort_is_activatable(
     candidate_publication_id: str,
     artifact_id: str,
 ) -> bool:
-    """Require one exact Season+L15, traditional+assist evidence cohort."""
-    required = _MATCHUP_STREAMS
-    rows = session.scalars(select(LedgerParityArtifact).where(
-        LedgerParityArtifact.season == season,
-        LedgerParityArtifact.cutoff == assume_utc(cutoff),
-        LedgerParityArtifact.stream_key.in_(required),
-    )).all()
-    by_stream = {row.stream_key: row for row in rows}
-    if len(rows) != len(required) or set(by_stream) != required:
-        return False
-    for stream_key in required:
-        artifact = by_stream[stream_key]
-        if not matchup_parity_artifact_is_activatable(artifact, stream_key=stream_key):
-            return False
-        if artifact.status != "exact" and artifact.decision != "approved":
-            return False
-        publication = session.get(PublicationVersion, artifact.publication_id)
-        if publication is None or publication.status not in {"candidate", "active"}:
-            return False
-        if artifact.payload_checksum != publication.checksum:
-            return False
+    """Require one exact Season+L15, traditional+assist evidence cohort.
+
+    Artifact history is append-only: rejected, superseded, or failed reruns
+    must not make an otherwise valid cohort unusable.  Select the newest
+    *fully validated* artifact per stream by creation time and ID, then bind
+    the activation request to that exact selected member.
+    """
+
+    def validated(row: LedgerParityArtifact, stream_key: str):
+        if not matchup_parity_artifact_is_activatable(row, stream_key=stream_key):
+            return None
+        if row.status != "exact" and row.decision != "approved":
+            return None
+        publication = session.get(PublicationVersion, row.publication_id)
+        if (
+            publication is None
+            or publication.status not in {"candidate", "active"}
+            or row.payload_checksum != publication.checksum
+        ):
+            return None
         try:
-            document = json.loads(artifact.report)
+            document = json.loads(row.report)
             authority = verify_publication_authority(session, publication)
             if (
                 document.get("ledger_manifest_id") != authority.manifest_id
@@ -169,23 +146,86 @@ def matchup_parity_cohort_is_activatable(
                 != authority.event_catalog_publication_id
                 or document.get("ledger_event_catalog_checksum")
                 != authority.event_catalog_checksum
+                or document.get("legacy_manifest_id") != authority.manifest_id
+                or document.get("legacy_event_catalog_publication_id")
+                != authority.event_catalog_publication_id
+                or document.get("legacy_event_catalog_checksum")
+                != authority.event_catalog_checksum
             ):
-                return False
+                return None
+            if (
+                not isinstance(document.get("cutoff"), str)
+                or assume_utc(datetime.fromisoformat(document["cutoff"]))
+                != assume_utc(row.cutoff)
+            ):
+                return None
             from app.services.matchup_parity import _decode_ledger_rows
 
-            rows = _decode_ledger_rows(publication.payload, stream_key=stream_key)
+            ledger_rows = _decode_ledger_rows(
+                publication.payload, stream_key=stream_key
+            )
             expected_ids = {
-                str(row.team_id): sorted(row.game_ids) for row in rows
+                str(ledger_row.team_id): sorted(ledger_row.game_ids)
+                for ledger_row in ledger_rows
             }
             if document.get("ledger_game_ids_by_team") != expected_ids:
-                return False
-        except (PublicationGovernanceUnavailable, TypeError, ValueError, KeyError,
-                json.JSONDecodeError):
-            return False
-        if stream_key == artifact.stream_key and artifact.artifact_id == artifact_id:
-            if artifact.publication_id != candidate_publication_id:
-                return False
-    return True
+                return None
+        except (
+            PublicationGovernanceUnavailable,
+            TypeError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+        ):
+            return None
+        return authority
+
+    target_cutoff = assume_utc(cutoff)
+    all_rows = session.scalars(select(LedgerParityArtifact).where(
+        LedgerParityArtifact.season == season,
+        LedgerParityArtifact.stream_key.in_(_MATCHUP_STREAMS),
+    )).all()
+    rows_by_stream: dict[str, list[LedgerParityArtifact]] = {
+        stream_key: sorted(
+            (
+                row for row in all_rows
+                if row.stream_key == stream_key
+                and assume_utc(row.cutoff) == target_cutoff
+            ),
+            key=lambda row: (assume_utc(row.created_at), row.artifact_id),
+            reverse=True,
+        )
+        for stream_key in _MATCHUP_STREAMS
+    }
+    selected: dict[str, tuple[LedgerParityArtifact, object]] = {}
+    for stream_key, candidates in rows_by_stream.items():
+        for row in candidates:
+            authority = validated(row, stream_key)
+            if authority is not None:
+                selected[stream_key] = (row, authority)
+                break
+    if set(selected) != _MATCHUP_STREAMS:
+        return False
+
+    authorities = {
+        (
+            authority.manifest_id,
+            authority.event_catalog_publication_id,
+            authority.event_catalog_checksum,
+        )
+        for _, authority in selected.values()
+    }
+    if len(authorities) != 1:
+        return False
+
+    supplied = session.get(LedgerParityArtifact, artifact_id)
+    if supplied is None or supplied.stream_key not in _MATCHUP_STREAMS:
+        return False
+    selected_row, _ = selected[supplied.stream_key]
+    return (
+        selected_row.artifact_id == supplied.artifact_id
+        and supplied.publication_id == candidate_publication_id
+    )
 
 
 @dataclass(frozen=True, slots=True)

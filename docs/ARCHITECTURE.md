@@ -1665,7 +1665,11 @@ team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
 the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
 responses must identify the requested team and report exactly 15 games; the
 shot-zone aggregate must identify the team (that endpoint exposes no game
-count). A surface that cannot prove its requested aggregate is discarded and
+count). For parity-bearing traditional and assist surfaces, the provider
+response must additionally return exact game IDs that match the immutable
+Event Catalog authority; a missing-ID aggregate is unavailable even when its
+GP count matches, and catalog IDs are never copied into the provider row. A
+surface that cannot prove its requested aggregate is discarded and
 observed as `unavailable/provider_window_unverified`, never mislabeled
 Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
 ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
@@ -1861,8 +1865,11 @@ to its exact Publication and payload checksum. Both `assist_locations_*`
 streams are parity-required for activation, exactly like the traditional and
 per-36 streams.
 Activation requires the complete aligned four-stream Season+L15 cohort at one
-exact cutoff; a one-window CLI run or one-stream artifact cannot activate by
-itself.
+exact cutoff; activation selects the newest fully valid artifact per stream,
+ignores rejected/superseded historical reruns, and verifies that the supplied
+candidate/artifact is the selected member. All four selected artifacts must
+share one exact manifest/Event Catalog/cutoff authority, so a one-window CLI
+run or one-stream artifact cannot activate by itself.
 
 The comparison rules match the parent's parity contract exactly. Team identity
 sets must be exactly equal and League Complete (the governed 30-team roster),

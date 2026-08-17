@@ -62,6 +62,8 @@ from app.services.database_first_activation import (
 from app.services.collection_control import CollectionOperationsService, PublicationService
 from app.services.matchup import MatchupService
 from app.services.matchup_selection import MatchupSelectionService
+from app.services.game_service import GameService
+from app.services.game_logs_source import StoredGameLogsSource
 from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
@@ -1027,6 +1029,7 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
 
 def test_authenticated_slate_matchup_selection_journey_uses_one_activated_generation(
     tmp_path,
+    monkeypatch,
 ):
     """Exercise the public chain with activated, rollback, mixed, and L15 states."""
 
@@ -1034,7 +1037,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     run_migrations(engine)
     settings = RuntimeSettings(
         environment="testing",
-        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        # This journey must traverse the real Bearer-token path.  The Firebase
+        # SDK boundary is patched below with a deterministic verified fixture.
+        auth=AuthenticationSettings(firebase_admin_disabled=False),
         cache=CacheSettings(enabled=False),
         nba=NBASeasonSettings(current_season=SEASON),
     )
@@ -1306,6 +1311,13 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         settings=settings,
         publication_reader=reader,
     )
+    game_service = GameService(
+        engine,
+        settings=settings,
+        nba_stats_adapter=_NoProvider(),
+        game_logs_source=StoredGameLogsSource(player_logs),
+    )
+    game_service.get_player_id = lambda _player_name: 2544
     provider_calls = {"nba": 0, "pbp": 0}
 
     class ProviderCounter:
@@ -1316,12 +1328,25 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
             provider_calls[self.name] += 1
             raise AssertionError(f"unexpected {self.name}.{operation} request")
 
+    monkeypatch.setattr("app.utils.auth.get_firebase_app", lambda: object())
+    monkeypatch.setattr(
+        "app.utils.auth.verify_firebase_token",
+        lambda token: {
+            "uid": "fixture-user",
+            "email": "fixture@example.com",
+            "email_verified": True,
+            "admin": False,
+            "token": token,
+        },
+    )
+
     app = create_app(
         {
             "TESTING": True,
             "RUNTIME_SETTINGS": settings,
             "DEPENDENCIES": SimpleNamespace(
                 settings=settings,
+                game_service=game_service,
                 slate_service=SlateService(
                     event_catalog,
                     settings=settings,
@@ -1340,17 +1365,31 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         }
     )
     client = app.test_client()
+    auth_headers = {"Authorization": "Bearer authenticated-fixture-token"}
 
-    slate_response = client.get("/api/games/slate?date=2026-01-15")
-    matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
+    matchup_response = client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
+    )
     # The route is the authenticated byte-contract seam: it includes the
     # persisted player-game-log fixture and all matchup surfaces after the
     # candidate activation/rollback journey.  Repeated reads must remain byte
     # stable; a checksum-only repository assertion would miss serializer drift.
     matchup_bytes = matchup_response.data
-    repeated_matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    repeated_matchup_response = client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
+    )
     selection_response = client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544",
+        headers=auth_headers,
+    )
+    player_game_log_response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26",
+        headers=auth_headers,
+    )
+    repeated_player_game_log_response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26",
+        headers=auth_headers,
     )
 
     restored_snapshot = reader.snapshot(
@@ -1365,6 +1404,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert repeated_matchup_response.status_code == 200
     assert repeated_matchup_response.data == matchup_bytes
     assert selection_response.status_code == 200
+    assert player_game_log_response.status_code == 200
+    assert repeated_player_game_log_response.status_code == 200
+    assert repeated_player_game_log_response.data == player_game_log_response.data
     matchup = matchup_response.get_json()
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
     assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
@@ -1377,6 +1419,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         "unavailable_reason": "provider_window_unsupported",
     }
     assert selection_response.get_json()["h2h"]["rows"]
+    assert player_game_log_response.get_json()["game_logs"][0]["PTS"] == 25
     assert provider_calls == {"nba": 0, "pbp": 0}
 
 

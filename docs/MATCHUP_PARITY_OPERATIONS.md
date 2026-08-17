@@ -28,10 +28,16 @@ facts and their persisted immutable provider-window evidence, plus the
 immutable candidate `PublicationVersion` rows; it does not accept
 caller-authored materialization JSON. Legacy rows must carry a non-null exact
 cutoff, manifest/Event Catalog publication ID and checksum, and provider
-window identity. The provider aggregate's returned count is verified against
-the authority before its game IDs are retained. The `cutoff` must be the exact
+window identity. The provider aggregate must return exact game IDs; those IDs
+are independently compared with the immutable authority (game-point equality
+alone is insufficient) before they are retained. The `cutoff` must be the exact
 aware immutable manifest cutoff, never a fabricated midnight: it is the same
 cutoff both materializers ran at, and it is what the artifacts are bound to.
+The refresh locks and snapshots the active manifest, `collect_before`,
+`canonical_game_ledger` scope/schema-v1, Event Catalog identity/checksum, and
+canonical-ledger pointer before provider I/O, then revalidates the same rows
+after collection; any authority, status, cutoff, or pointer drift fails the
+window closed.
 
 ## Bounded dual-run
 
@@ -81,9 +87,13 @@ Ranking differences are hard failures under deterministic #117 rankings.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,
 publication, payload checksum, and exact game-set/authority evidence. An L15
-artifact can never authorize a Season stream. Activation requires all four
-aligned Season+L15 traditional+assist artifacts at the same governed cutoff;
-a one-window CLI run or one-stream activation attempt is rejected. Both
+artifact can never authorize a Season stream. Activation deterministically
+selects the newest fully valid artifact per required stream, ignoring
+rejected/superseded historical reruns. All four selected Season+L15
+traditional+assist artifacts must share one exact manifest/Event Catalog/cutoff
+authority, and the candidate/artifact supplied for activation must be that
+selected member; a one-window CLI run or one-stream activation attempt is
+rejected. Both
 `assist_locations_*` streams are parity-required for activation exactly like
 the traditional and per-36 streams.
 

@@ -39,6 +39,30 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.matchup_parity_contract import (
+    CLASSIFICATION_AUTHORITY_MISMATCH,
+    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
+    CLASSIFICATION_CUTOFF_MISMATCH,
+    CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
+    CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
+    CLASSIFICATION_DUPLICATE_METRIC,
+    CLASSIFICATION_EXTRA_METRIC,
+    CLASSIFICATION_EXTRA_TEAM,
+    CLASSIFICATION_GAME_SET_MISMATCH,
+    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
+    CLASSIFICATION_INVALID_DENOMINATOR,
+    CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
+    CLASSIFICATION_LEAGUE_INCOMPLETE,
+    CLASSIFICATION_MISSING_LEGACY_TEAM,
+    CLASSIFICATION_MISSING_LEDGER_TEAM,
+    CLASSIFICATION_MISSING_METRIC,
+    CLASSIFICATION_MISSING_SURFACE,
+    CLASSIFICATION_NON_INTEGER_COUNT,
+    CLASSIFICATION_RANKING_DIFFERENCE,
+    CLASSIFICATION_SCOPE_MISMATCH,
+    HARD_CLASSIFICATIONS,
+    SOFT_CLASSIFICATIONS,
+)
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc
 from app.domain.team_matchup_taxonomy import (
@@ -82,57 +106,6 @@ PRODUCER_LEDGER = "ledger_publication"
 
 #: Per-48 scaling shared by both materializers.
 _PER48 = 48.0
-
-# Non-adjudicable hard failures.  Manual approval must never authorize these.
-CLASSIFICATION_LEAGUE_INCOMPLETE = "league_incomplete"
-CLASSIFICATION_MISSING_LEGACY_TEAM = "missing_legacy_team"
-CLASSIFICATION_MISSING_LEDGER_TEAM = "missing_ledger_team"
-CLASSIFICATION_EXTRA_TEAM = "extra_team"
-CLASSIFICATION_GAME_SET_MISMATCH = "game_set_mismatch"
-CLASSIFICATION_INTEGER_COUNT_DIFFERENCE = "integer_count_difference"
-CLASSIFICATION_NON_INTEGER_COUNT = "non_integer_count"
-CLASSIFICATION_AVAILABILITY_DIFFERENCE = "availability_difference"
-CLASSIFICATION_CUTOFF_MISMATCH = "cutoff_mismatch"
-CLASSIFICATION_SCOPE_MISMATCH = "scope_mismatch"
-CLASSIFICATION_MISSING_SURFACE = "missing_surface"
-CLASSIFICATION_MISSING_METRIC = "missing_metric"
-CLASSIFICATION_EXTRA_METRIC = "extra_metric"
-CLASSIFICATION_DUPLICATE_METRIC = "duplicate_metric"
-CLASSIFICATION_L15_GAME_COUNT_MISMATCH = "l15_game_count_mismatch"
-CLASSIFICATION_AUTHORITY_MISMATCH = "authority_mismatch"
-CLASSIFICATION_INVALID_DENOMINATOR = "invalid_denominator"
-
-# Adjudicable semantic differences: documented floating tolerance only.
-CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED = "denominator_tolerance_exceeded"
-CLASSIFICATION_DERIVED_RATE_DIFFERENCE = "derived_rate_difference"
-CLASSIFICATION_RANKING_DIFFERENCE = "ranking_difference"
-
-HARD_CLASSIFICATIONS = frozenset({
-    CLASSIFICATION_LEAGUE_INCOMPLETE,
-    CLASSIFICATION_MISSING_LEGACY_TEAM,
-    CLASSIFICATION_MISSING_LEDGER_TEAM,
-    CLASSIFICATION_EXTRA_TEAM,
-    CLASSIFICATION_GAME_SET_MISMATCH,
-    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
-    CLASSIFICATION_NON_INTEGER_COUNT,
-    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
-    CLASSIFICATION_CUTOFF_MISMATCH,
-    CLASSIFICATION_SCOPE_MISMATCH,
-    CLASSIFICATION_MISSING_SURFACE,
-    CLASSIFICATION_MISSING_METRIC,
-    CLASSIFICATION_EXTRA_METRIC,
-    CLASSIFICATION_DUPLICATE_METRIC,
-    CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
-    CLASSIFICATION_AUTHORITY_MISMATCH,
-    CLASSIFICATION_INVALID_DENOMINATOR,
-    CLASSIFICATION_RANKING_DIFFERENCE,
-})
-
-SOFT_CLASSIFICATIONS = frozenset({
-    CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
-    CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
-})
-
 
 def matchup_surface_stream_keys(window: str) -> tuple[str, ...]:
     """Return every ledger-owned stream key for one governed window."""
@@ -669,6 +642,8 @@ class StoredLegacyMatchupSource:
                 if (
                     evidence["expected_games"] != len(game_ids)
                     or sorted(str(game_id) for game_id in evidence["authority_game_ids"])
+                    != game_ids
+                    or sorted(str(game_id) for game_id in evidence["provider_game_ids"])
                     != game_ids
                 ):
                     raise ValueError
