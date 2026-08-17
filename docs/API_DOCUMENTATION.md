@@ -737,9 +737,13 @@ unresolved-team telemetry instead of disappearing silently.
 `freshness` retains the existing `schedule`, `pool`, `stats`, and `injuries`
 surfaces and additionally reports `player_game_logs`, per-Base
 `player_diets.surfaces`, and Season/Last-15
-`team_matchups[window].surfaces`. Every stored observation carries its actual
-timezone-aware `retrieved_at`; missing observations carry null. Pool freshness
-and per-provider status are passed through from the selected stored snapshot.
+`team_matchups[window].surfaces`. Team-window surface timestamps are the
+request's database snapshot time so switching between equivalent legacy and
+ledger sources does not change the public byte contract; immutable source
+retrieval timestamps remain available in the database-first reader and
+activation audit. Missing observations carry null. Pool freshness and
+per-provider status are passed through from the selected stored snapshot.
+Other stored observations carry their actual timezone-aware `retrieved_at`.
 When the projection-archive reader is activated, this block additionally
 contains `state: live | missing` and `observed_at`; the Matchup `game` header
 does not duplicate the Slate-only `projection_state` block.
@@ -1184,8 +1188,13 @@ calls. Injury
 Reports retain their existing live/snapshot contract; statistical activation
 does not change injury behavior. Existing fields remain
 backward compatible. Additive `provenance` stream entries identify the exact
-Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state;
-inactive streams explicitly report `legacy_database` fallback. Additive
+Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state for
+player and diet streams. Team-window entries intentionally expose only
+source-independent availability/status in the public Matchups response so an
+equivalent legacy-to-ledger cutover is byte-compatible; their exact
+Publication ID, authority, and cutoff remain available from the
+database-first reader and activation audit. Inactive streams explicitly
+report `legacy_database` fallback. Additive
 `coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
 when one contributor is older or unavailable. A stale active Publication is
 served as the last good fact with its real age; a failed partial attempt never

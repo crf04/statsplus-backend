@@ -68,7 +68,7 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
 )
 from app.services.collection_control import CollectionOperationsService, PublicationService
-from app.services.matchup import MatchupService, _PUBLICATION_STREAM_KEYS
+from app.services.matchup import MatchupService
 from app.services.matchup_selection import MatchupSelectionService
 from app.services.game_service import GameService
 from app.services.game_logs_source import StoredGameLogsSource
@@ -1576,17 +1576,6 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         first_log_payload, sort_keys=True, separators=(",", ":")
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    legacy_http_snapshot = reader.snapshot(
-        _PUBLICATION_STREAM_KEYS,
-        season=SEASON,
-    )
-
-    class LegacyHTTPPublicationReader:
-        """Freeze one pre-cutover generation for the public byte contract."""
-
-        def snapshot(self, *_args, **_kwargs):
-            return legacy_http_snapshot
-
     player_logs._publication_reader = reader
     player_diets.repository._publication_reader = reader
     team_matchups._publication_reader = reader
@@ -1602,7 +1591,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         settings=settings,
         injuries=None,
         clock=lambda: NOW,
-        publication_reader=LegacyHTTPPublicationReader(),
+        publication_reader=reader,
     )
     selection_service = MatchupSelectionService(
         event_catalog=event_catalog,
@@ -1670,6 +1659,20 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     auth_headers = {"Authorization": "Bearer authenticated-fixture-token"}
 
     # Capture authenticated legacy bytes before any ledger pointer changes.
+    legacy_snapshot = reader.snapshot(
+        tuple(
+            stream_key
+            for publications in matchup_publications.values()
+            for stream_key in publications
+        ),
+        season=SEASON,
+    )
+    assert all(
+        read.source == "legacy_database"
+        and read.status == "inactive"
+        and read.publication_id is None
+        for read in legacy_snapshot.reads.values()
+    )
     pre_matchup_response = client.get(
         f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
     )
@@ -1694,6 +1697,28 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                 parity_artifact_id=matchup_artifacts[stream_key],
                 candidate_publication_id=publication_id,
             )
+    activated_snapshot = reader.snapshot(
+        tuple(
+            stream_key
+            for publications in matchup_publications.values()
+            for stream_key in publications
+        ),
+        season=SEASON,
+    )
+    assert {
+        stream_key: activated_snapshot.read(stream_key).publication_id
+        for publications in matchup_publications.values()
+        for stream_key in publications
+    } == {
+        stream_key: publication_id
+        for publications in matchup_publications.values()
+        for stream_key, publication_id in publications.items()
+    }
+    assert all(
+        activated_snapshot.read(stream_key).status in {"active", "rollback"}
+        for publications in matchup_publications.values()
+        for stream_key in publications
+    )
 
     slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
     matchup_response = client.get(

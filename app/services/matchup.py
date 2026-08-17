@@ -172,6 +172,12 @@ _PUBLICATION_STREAM_KEYS = (
     "synergy:l15",
     *sorted(NBA_PUBLICATION_STREAM_KEYS),
 )
+_TEAM_MATCHUP_PUBLICATION_WINDOWS = {
+    "traditional_opponent_season": ("traditional", "season"),
+    "traditional_opponent_l15": ("traditional", "last_15"),
+    "assist_locations_season": ("assist_locations", "season"),
+    "assist_locations_l15": ("assist_locations", "last_15"),
+}
 
 
 class EventCatalogReader(Protocol):
@@ -404,6 +410,7 @@ class MatchupService:
                             base: availability[base][name]
                             for base in DEFENSE_BASES
                         },
+                        observed_at=observed_at,
                     )
                     for name, window in windows.items()
                 },
@@ -411,7 +418,11 @@ class MatchupService:
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
             },
-            **self._publication_metadata(season, publication_snapshot),
+            **self._publication_metadata(
+                season,
+                publication_snapshot,
+                availability=availability,
+            ),
         }
 
     def _publication_snapshot(self, season: str):
@@ -444,9 +455,21 @@ class MatchupService:
         return method(*args, **kwargs)
 
     def _publication_metadata(
-        self, season: str, publication_snapshot=None
+        self,
+        season: str,
+        publication_snapshot=None,
+        *,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
     ) -> dict[str, Any]:
-        """Add additive provenance without collapsing independent clocks."""
+        """Add public provenance without exposing source-specific cutovers.
+
+        Team-window publications are an implementation source for the same
+        Matchups contract as the legacy read model.  Their immutable
+        publication IDs and authority remain available from the database-first
+        reader and activation audit, but are not public response identity: a
+        source cutover must not change otherwise byte-compatible Matchups
+        responses.
+        """
 
         if publication_snapshot is not None:
             metadata = publication_snapshot.metadata()
@@ -464,12 +487,55 @@ class MatchupService:
                 "mixed_freshness": False,
                 "coverage_cutoffs": [],
             }
+        streams = dict(metadata["streams"])
+        if availability is not None and (
+            publication_snapshot is not None or self.publication_reader is not None
+        ):
+            for stream_key, (base, window) in _TEAM_MATCHUP_PUBLICATION_WINDOWS.items():
+                state = availability[base][window]
+                streams[stream_key] = {
+                    "age_seconds": None,
+                    "coverage_cutoff": None,
+                    "event_catalog_checksum": None,
+                    "event_catalog_publication_id": None,
+                    "fence": None,
+                    "freshness": "request_snapshot",
+                    "legacy_fallback_allowed": True,
+                    "manifest_id": None,
+                    "payload_checksum": None,
+                    "publication_id": None,
+                    "retrieved_at": None,
+                    "season": season,
+                    "source": "team_matchups",
+                    "status": state["status"],
+                    "stream_key": stream_key,
+                    "unavailable_reason": state["unavailable_reason"],
+                    "version": None,
+                }
+        cutoff_states = {
+            (
+                read.get("coverage_cutoff")
+                if read.get("coverage_cutoff") is not None
+                and read.get("status") in {"active", "rollback", "stale"}
+                else f"status:{read.get('status')}"
+            )
+            for read in streams.values()
+        }
+        freshness_states = {
+            f"{read.get('freshness')}:{read.get('status')}"
+            for read in streams.values()
+        }
+        cutoffs = sorted({
+            read["coverage_cutoff"]
+            for read in streams.values()
+            if read.get("coverage_cutoff")
+        })
         return {
-            "provenance": metadata["streams"],
+            "provenance": streams,
             "coverage": {
-                "mixed_cutoff": bool(metadata["mixed_cutoff"]),
-                "mixed_freshness": bool(metadata["mixed_freshness"]),
-                "coverage_cutoffs": list(metadata["coverage_cutoffs"]),
+                "mixed_cutoff": len(cutoff_states) > 1,
+                "mixed_freshness": len(freshness_states) > 1,
+                "coverage_cutoffs": cutoffs,
                 "source": "database",
             },
         }
@@ -1443,11 +1509,13 @@ class MatchupService:
         cls,
         window: TeamMatchupWindow | None,
         availability: Mapping[str, Mapping[str, Any]],
+        *,
+        observed_at: datetime,
     ) -> dict[str, Any]:
         surfaces = {
             base: {
                 **availability[base],
-                "retrieved_at": cls._observation_time(window, base),
+                "retrieved_at": assume_utc(observed_at).isoformat(),
             }
             for base in DEFENSE_BASES
         }
@@ -1468,19 +1536,6 @@ class MatchupService:
             "retrieved_at": retrieved[0] if retrieved else None,
             "surfaces": surfaces,
         }
-
-    @staticmethod
-    def _observation_time(window: TeamMatchupWindow | None, base: str) -> str | None:
-        if not window:
-            return None
-        observation = next(
-            (item for item in window.observations if item.surface == base), None
-        )
-        return (
-            None
-            if observation is None
-            else assume_utc(observation.retrieved_at).isoformat()
-        )
 
     @staticmethod
     def _diet_freshness(diets: PlayerDietResult) -> dict[str, Any]:
