@@ -7,12 +7,31 @@ from app.domain.nba_events import (
     canonical_event_kind,
     is_all_star_kind,
     is_final_event,
+    l15_game_ids_by_team,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
     player_game_log_season_type,
     resolve_stored_event_classification,
 )
+
+
+def test_l15_game_selection_uses_the_latest_fifteen_chronological_events():
+    events = tuple(
+        {
+            "nba_game_id": f"game-{index:02d}",
+            "home_team_id": 1,
+            "away_team_id": index + 2,
+        }
+        for index in range(16)
+    )
+
+    selected = l15_game_ids_by_team(events)
+
+    assert selected[1] == frozenset(
+        f"game-{index:02d}" for index in range(1, 16)
+    )
+    assert selected[2] == frozenset({"game-00"})
 
 
 @pytest.mark.parametrize(

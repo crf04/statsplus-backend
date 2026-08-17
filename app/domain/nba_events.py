@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 import re
@@ -76,6 +76,24 @@ def is_final_event(event: Mapping[str, object]) -> bool:
         event.get("status_code") == NBAGameStatus.FINAL
         or str(event.get("status_text", "")).casefold().startswith("final")
     )
+
+
+def l15_game_ids_by_team(
+    chronological_events: Iterable[Mapping[str, object]],
+) -> dict[int, frozenset[str]]:
+    """Select each team's latest 15 game IDs from governed chronological events."""
+
+    selected: dict[int, list[str]] = {}
+    for event in reversed(tuple(chronological_events)):
+        game_id = str(event["nba_game_id"])
+        for team_id in (int(event["home_team_id"]), int(event["away_team_id"])):
+            game_ids = selected.setdefault(team_id, [])
+            if len(game_ids) < 15:
+                game_ids.append(game_id)
+    return {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in selected.items()
+    }
 
 
 def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
@@ -185,6 +203,7 @@ __all__ = [
     "display_event_classification",
     "is_all_star_kind",
     "is_final_event",
+    "l15_game_ids_by_team",
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",

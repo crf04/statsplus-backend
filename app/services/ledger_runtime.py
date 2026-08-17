@@ -19,7 +19,11 @@ from app.models.collection_control import (
     ReconciliationItem,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.domain.nba_events import is_final_event, is_postponed_event
+from app.domain.nba_events import (
+    is_final_event,
+    is_postponed_event,
+    l15_game_ids_by_team,
+)
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
@@ -134,23 +138,12 @@ class ActiveManifestLedgerGovernanceReader:
             for team_id in (event["home_team_id"], event["away_team_id"])
         )
         expected = frozenset(str(event["nba_game_id"]) for event in events)
-        by_team = {
-            team_id: tuple(
-                str(event["nba_game_id"])
-                for event in reversed(events)
-                if team_id in {event["home_team_id"], event["away_team_id"]}
-            )
-            for team_id in team_ids
-        }
         return LedgerGovernance(
             season=season,
             cutoff=cutoff,
             expected_game_ids=expected,
             team_ids=team_ids,
-            expected_l15_game_ids={
-                team_id: frozenset(game_ids[:15])
-                for team_id, game_ids in by_team.items()
-            },
+            expected_l15_game_ids=l15_game_ids_by_team(events),
             events=events,
             manifest_id=str(manifest["manifest_id"]),
             collect_before=(

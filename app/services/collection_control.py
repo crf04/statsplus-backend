@@ -29,6 +29,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
+from app.domain.nba_events import (
+    is_final_event,
+    is_postponed_event,
+    l15_game_ids_by_team,
+)
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 
@@ -436,6 +441,96 @@ def _safe_json_mapping(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _governed_l15_game_ids(
+    session: Session,
+    *,
+    season: str,
+    cutoff: datetime,
+) -> frozenset[str]:
+    """Return the exact Event Catalog game union selected by every team L15."""
+
+    events = session.execute(select(EventCatalogEntry.__table__).where(
+        EventCatalogEntry.season == season,
+        EventCatalogEntry.classification == "Regular Season",
+        EventCatalogEntry.scheduled_at <= cutoff,
+    ).order_by(
+        EventCatalogEntry.scheduled_at,
+        EventCatalogEntry.nba_game_id,
+    )).mappings().all()
+    selected_by_team = l15_game_ids_by_team(
+        event
+        for event in events
+        if is_final_event(event) and not is_postponed_event(event)
+    )
+    return frozenset(
+        game_id
+        for selected in selected_by_team.values()
+        for game_id in selected
+    )
+
+
+def _completed_ledger_l15_game_ids(
+    session: Session,
+    *,
+    stream: PublicationStream,
+    season: str,
+    cutoff: datetime,
+) -> frozenset[str] | None:
+    """Return a proven completed L15 selection, or ``None`` if it is uncertain."""
+
+    if (
+        stream.provider != "ledger"
+        or set(json.loads(stream.supported_windows)) != {"l15"}
+    ):
+        return None
+    governed_game_ids = _governed_l15_game_ids(
+        session,
+        season=season,
+        cutoff=cutoff,
+    )
+    pointer = session.get(PublicationPointer, stream.stream_key)
+    publication = (
+        session.get(PublicationVersion, pointer.active_publication_id)
+        if pointer is not None and pointer.active_publication_id
+        else None
+    )
+    if (
+        publication is None
+        or publication.season != season
+        or _aware(publication.cutoff) != cutoff
+    ):
+        publication = session.scalar(select(PublicationVersion).where(
+            PublicationVersion.stream_key == stream.stream_key,
+            PublicationVersion.season == season,
+            PublicationVersion.cutoff == cutoff,
+            PublicationVersion.status.in_(("active", "candidate")),
+        ).order_by(PublicationVersion.version.desc()).limit(1))
+    if publication is None:
+        return None
+    publication_game_ids = frozenset(
+        game_id
+        for observation in session.scalars(select(
+            CollectionObservation,
+        ).join(
+            PublicationObservation,
+            PublicationObservation.observation_id
+            == CollectionObservation.observation_id,
+        ).where(
+            PublicationObservation.publication_id == publication.publication_id,
+        ))
+        if (
+            game_id := str(
+                _safe_json_mapping(observation.scope).get("game_id") or ""
+            )
+        )
+    )
+    # Publication provenance is the durable proof that this exact governed
+    # L15 selection completed.  A mismatch must fail open to reconciliation.
+    if governed_game_ids and publication_game_ids == governed_game_ids:
+        return governed_game_ids
+    return None
 
 
 def _write_publication_projection(
@@ -2702,12 +2797,32 @@ class PublicationService(_SessionService):
                     ):
                         latest_matching[identity] = observation
                 matching = tuple(latest_matching.values())
+                selected_game_ids = _completed_ledger_l15_game_ids(
+                    session,
+                    stream=stream,
+                    season=season,
+                    cutoff=cutoff,
+                )
+                if selected_game_ids is not None:
+                    matching = tuple(
+                        observation
+                        for observation in matching
+                        if not (
+                            game_id := str(
+                                _safe_json_mapping(observation.scope).get("game_id")
+                                or ""
+                            )
+                        )
+                        or game_id in selected_game_ids
+                    )
                 created = False
                 job = session.scalar(select(CompositionJob).where(
                     CompositionJob.stream_key == stream_key,
                     CompositionJob.season == season,
                     CompositionJob.cutoff == cutoff,
                 ).with_for_update())
+                if job is None and selected_game_ids is not None and not matching:
+                    continue
                 if job is None:
                     now = self.clock()
                     job = CompositionJob(
@@ -2739,8 +2854,13 @@ class PublicationService(_SessionService):
                 }
                 if (
                     job.status == "succeeded"
-                    and latest_source_ids
-                    and latest_source_ids <= composed_source_ids
+                    and (
+                        (selected_game_ids is not None and not latest_source_ids)
+                        or (
+                            latest_source_ids
+                            and latest_source_ids <= composed_source_ids
+                        )
+                    )
                 ):
                     continue
                 was_failed = job.status == "failed"

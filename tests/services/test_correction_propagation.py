@@ -1800,6 +1800,44 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         after_publication_lineage["traditional_opponent_season"]
     )
 
+    completed_jobs = {
+        job["stream_key"]: job for job in jobs
+        if job["stream_key"] in streams
+    }
+    completed_generations = {
+        stream: int(completed_jobs[stream]["generation"])
+        for stream in streams
+    }
+    assert publications.reconcile_pending(
+        season="2025-26", cutoff=cutoff
+    ) == 0
+    assert publications.reconcile_pending(
+        season="2025-26", cutoff=cutoff
+    ) == 0
+    with engine.connect() as connection:
+        reconciled_jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob)).mappings()
+            if row["stream_key"] in streams
+        }
+    assert {
+        stream: int(reconciled_jobs[stream]["generation"])
+        for stream in streams
+    } == completed_generations
+    assert all(reconciled_jobs[stream]["status"] == "succeeded" for stream in streams)
+    assert all(
+        json.loads(reconciled_jobs[stream]["trigger_game_ids"]) == []
+        and json.loads(reconciled_jobs[stream]["source_observation_ids"]) == []
+        and json.loads(reconciled_jobs[stream]["ledger_evidence"]) == {}
+        for stream in streams
+    )
+    assert publications.current("traditional_opponent_season").publication_id == (
+        after_season_publication.publication_id
+    )
+    assert publications.current("traditional_opponent_l15").publication_id == (
+        after_l15_publication.publication_id
+    )
+
 
 def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_path, monkeypatch):
     engine = _engine(tmp_path, "atomic-runtime.sqlite3")
