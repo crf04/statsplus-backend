@@ -43,6 +43,14 @@ class ProviderPoll(Base):
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
+    generation_id = Column(
+        String(72),
+        ForeignKey(
+            "projection_materialization_generations.generation_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
     observation_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
@@ -102,6 +110,14 @@ class ProjectionObservation(Base):
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=False,
     )
+    generation_id = Column(
+        String(72),
+        ForeignKey(
+            "projection_materialization_generations.generation_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
@@ -120,9 +136,9 @@ class ProjectionObservation(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "snapshot_id",
+            "generation_id",
             "ordinal",
-            name="uq_projection_observations_snapshot_ordinal",
+            name="uq_projection_observations_generation_ordinal",
         ),
         Index(
             "ix_projection_observations_governed_identity",
@@ -148,12 +164,16 @@ class ProjectionMaterializationGeneration(Base):
         nullable=False,
     )
     created_at = Column(DateTime(timezone=True), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    materialization_checksum = Column(String(64), nullable=False)
     outcome = Column(String(32), nullable=False)
 
     __table_args__ = (
         UniqueConstraint(
             "snapshot_id",
-            name="uq_projection_materialization_generation_snapshot",
+            "materialization_checksum",
+            "retrieved_at",
+            name="uq_projection_materialization_generation_identity",
         ),
     )
 

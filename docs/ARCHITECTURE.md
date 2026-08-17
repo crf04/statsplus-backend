@@ -345,11 +345,19 @@ one materialization generation atomically. The evidence checksum covers the
 entire canonical document, including `retrieved_at`, for later verification. A
 separate query-scoped content checksum excludes only that retrieval timestamp,
 so a later poll confirming identical markets and coverage records an unchanged
-poll without duplicating the snapshot, observations, or generation. A caller
+poll without duplicating the snapshot, observations, or generation when its
+governed mapping inputs are also unchanged. Each generation additionally stores
+a deterministic materialization checksum over resolved canonical identities,
+category authority, targetability, and the other governed fields used by the
+read model. If provider content is unchanged but that checksum changes, the
+poll outcome is `rematerialized`: no Provider Snapshot is duplicated, while a
+new immutable mapped-observation set and generation atomically replace Latest.
+A caller
 may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,
-and the acceptance time is the completion time. Poll outcomes are `changed` or
-`unchanged`; unchanged evidence points at the existing immutable snapshot.
+and the acceptance time is the completion time. Poll outcomes are `changed`,
+`rematerialized`, or `unchanged`; unchanged evidence points at the existing
+immutable snapshot and generation.
 The attempt identity is the exact evidence document, optional start, and
 completion time: replaying that recorded attempt returns its persisted result
 without adding a poll, while a different start, retrieval, or completion time

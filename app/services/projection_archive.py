@@ -94,6 +94,24 @@ def _snapshot_content_checksum(query_key: str, document: str) -> str:
     return _snapshot_checksum(query_key, canonical_content)
 
 
+def _materialization_checksum(rows: list[dict[str, Any]]) -> str:
+    governed_fields = (
+        "ordinal",
+        "market_reference",
+        "canonical_game_id",
+        "canonical_player_id",
+        "canonical_player_name",
+        "canonical_team_id",
+        "canonical_statistic_id",
+        "market_category",
+        "targetable",
+    )
+    payload = [{field: row[field] for field in governed_fields} for row in rows]
+    return sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     """Remove derived statistic matches from the immutable source document."""
 
@@ -157,11 +175,12 @@ class ProjectionArchive:
         document = serialize_provider_snapshot(source, query)
         checksum = _snapshot_checksum(query_key, document)
         content_checksum = _snapshot_content_checksum(query_key, document)
-        snapshot_id = f"psn_{checksum}"
-        generation_id = _digest("gen", snapshot_id)
+        evidence_snapshot_id = f"psn_{checksum}"
+        observation_rows = self._observation_rows(snapshot)
+        materialization_checksum = _materialization_checksum(observation_rows)
         poll_id = _digest(
             "poll",
-            snapshot_id,
+            evidence_snapshot_id,
             "" if poll_started is None else poll_started.isoformat(),
             accepted.isoformat(),
         )
@@ -183,7 +202,11 @@ class ProjectionArchive:
                 season=query.season,
                 query_key=query_key,
             )
-            if current is not None and current["content_checksum"] == content_checksum:
+            if (
+                current is not None
+                and current["content_checksum"] == content_checksum
+                and current["materialization_checksum"] == materialization_checksum
+            ):
                 self._record_poll(
                     connection,
                     poll_id=poll_id,
@@ -194,6 +217,7 @@ class ProjectionArchive:
                     completed_at=accepted,
                     outcome="unchanged",
                     snapshot_id=str(current["snapshot_id"]),
+                    generation_id=str(current["generation_id"]),
                     observation_count=observation_count,
                 )
                 return ProjectionArchiveResult(
@@ -204,12 +228,31 @@ class ProjectionArchive:
                     materialization_outcome="unchanged",
                 )
 
+            provider_content_unchanged = (
+                current is not None and current["content_checksum"] == content_checksum
+            )
             existing = connection.execute(
                 select(snapshot_table.c.snapshot_id).where(
                     snapshot_table.c.checksum == checksum
                 )
             ).scalar_one_or_none()
-            if existing is not None:
+            snapshot_id = (
+                str(current["snapshot_id"])
+                if provider_content_unchanged
+                else str(existing or evidence_snapshot_id)
+            )
+            generation_id = _digest(
+                "gen",
+                snapshot_id,
+                materialization_checksum,
+                assume_utc(snapshot.retrieved_at).isoformat(),
+            )
+            existing_generation = connection.execute(
+                select(ProjectionMaterializationGeneration.outcome).where(
+                    ProjectionMaterializationGeneration.generation_id == generation_id
+                )
+            ).scalar_one_or_none()
+            if existing_generation is not None:
                 self._record_poll(
                     connection,
                     poll_id=poll_id,
@@ -219,11 +262,12 @@ class ProjectionArchive:
                     started_at=poll_started,
                     completed_at=accepted,
                     outcome="unchanged",
-                    snapshot_id=str(existing),
+                    snapshot_id=snapshot_id,
+                    generation_id=generation_id,
                     observation_count=observation_count,
                 )
                 return ProjectionArchiveResult(
-                    snapshot_id=str(existing),
+                    snapshot_id=snapshot_id,
                     generation_id=generation_id,
                     changed=False,
                     observation_count=observation_count,
@@ -235,8 +279,8 @@ class ProjectionArchive:
                 incoming_retrieved_at=snapshot.retrieved_at,
             )
 
-            connection.execute(
-                insert(snapshot_table).values(
+            if existing is None and not provider_content_unchanged:
+                connection.execute(insert(snapshot_table).values(
                     snapshot_id=snapshot_id,
                     provider=snapshot.provider,
                     season=query.season,
@@ -248,12 +292,12 @@ class ProjectionArchive:
                     checksum=checksum,
                     content_checksum=content_checksum,
                     evidence_document=document,
-                )
-            )
-            observation_rows = self._observation_rows(snapshot, snapshot_id)
-            if observation_rows:
-                connection.execute(
-                    insert(ProjectionObservation.__table__), observation_rows
+                ))
+            for row in observation_rows:
+                row["snapshot_id"] = snapshot_id
+                row["generation_id"] = generation_id
+                row["observation_id"] = _digest(
+                    "obs", generation_id, row["ordinal"], row["market_reference"]
                 )
             connection.execute(
                 insert(ProjectionMaterializationGeneration.__table__).values(
@@ -263,9 +307,15 @@ class ProjectionArchive:
                     query_key=query_key,
                     snapshot_id=snapshot_id,
                     created_at=accepted,
+                    retrieved_at=snapshot.retrieved_at,
+                    materialization_checksum=materialization_checksum,
                     outcome=materialization_outcome,
                 )
             )
+            if observation_rows:
+                connection.execute(
+                    insert(ProjectionObservation.__table__), observation_rows
+                )
             if materialization_outcome == "advanced":
                 self._advance_latest(
                     connection,
@@ -283,15 +333,16 @@ class ProjectionArchive:
                 query_key=query_key,
                 started_at=poll_started,
                 completed_at=accepted,
-                outcome="changed",
+                outcome=("rematerialized" if provider_content_unchanged else "changed"),
                 snapshot_id=snapshot_id,
+                generation_id=generation_id,
                 observation_count=observation_count,
             )
 
         return ProjectionArchiveResult(
             snapshot_id=snapshot_id,
             generation_id=generation_id,
-            changed=True,
+            changed=not provider_content_unchanged,
             observation_count=observation_count,
             materialization_outcome=materialization_outcome,
         )
@@ -357,6 +408,7 @@ class ProjectionArchive:
             connection.execute(
                 select(
                     poll_table.c.snapshot_id,
+                    poll_table.c.generation_id,
                     poll_table.c.outcome,
                     poll_table.c.observation_count,
                 ).where(poll_table.c.poll_id == poll_id)
@@ -372,7 +424,9 @@ class ProjectionArchive:
                 select(
                     generation_table.c.generation_id,
                     generation_table.c.outcome,
-                ).where(generation_table.c.snapshot_id == snapshot_id)
+                ).where(
+                    generation_table.c.generation_id == poll["generation_id"]
+                )
             )
             .mappings()
             .one()
@@ -384,7 +438,9 @@ class ProjectionArchive:
             changed=changed,
             observation_count=int(poll["observation_count"]),
             materialization_outcome=(
-                str(generation["outcome"]) if changed else "unchanged"
+                str(generation["outcome"])
+                if poll["outcome"] in {"changed", "rematerialized"}
+                else "unchanged"
             ),
         )
 
@@ -427,7 +483,8 @@ class ProjectionArchive:
                 select(
                     generation_table.c.generation_id,
                     snapshot_table.c.snapshot_id,
-                    snapshot_table.c.retrieved_at,
+                    generation_table.c.retrieved_at,
+                    generation_table.c.materialization_checksum,
                     snapshot_table.c.content_checksum,
                 )
                 .select_from(
@@ -442,7 +499,7 @@ class ProjectionArchive:
                     generation_table.c.query_key == query_key,
                     generation_table.c.outcome == "advanced",
                 )
-                .order_by(snapshot_table.c.retrieved_at.desc())
+                .order_by(generation_table.c.retrieved_at.desc())
                 .limit(1)
             )
             .mappings()
@@ -477,6 +534,7 @@ class ProjectionArchive:
         completed_at: datetime,
         outcome: str,
         snapshot_id: str,
+        generation_id: str,
         observation_count: int,
     ) -> None:
         connection.execute(
@@ -490,13 +548,12 @@ class ProjectionArchive:
                 retrieved_at=snapshot.retrieved_at,
                 outcome=outcome,
                 snapshot_id=snapshot_id,
+                generation_id=generation_id,
                 observation_count=observation_count,
             )
         )
 
-    def _observation_rows(
-        self, snapshot: ProviderSnapshot, snapshot_id: str
-    ) -> list[dict[str, Any]]:
+    def _observation_rows(self, snapshot: ProviderSnapshot) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for ordinal, market in enumerate(snapshot.markets):
             reference = market_reference(market)
@@ -529,8 +586,6 @@ class ProjectionArchive:
             )
             rows.append(
                 {
-                    "observation_id": _digest("obs", snapshot_id, ordinal, reference),
-                    "snapshot_id": snapshot_id,
                     "ordinal": ordinal,
                     "provider": snapshot.provider,
                     "provider_market_id": market.market_id,

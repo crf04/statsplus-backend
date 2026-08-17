@@ -305,8 +305,10 @@ selects one database-only reader for Slate, Matchup, and Matchup Selection.
 Each Slate game then adds `projection_state` with `state: live | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
-`live`; they remain current until a newer Complete provider/query snapshot
-replaces them. Only absent current evidence produces `missing` with zero
+`live`; they remain current until a newer Complete provider/query snapshot or
+governed rematerialization replaces them. Changes to canonical statistic
+resolution or category authority can retire or add eligible Latest rows without
+duplicating unchanged provider evidence. Only absent current evidence produces `missing` with zero
 targetable players. For a multi-game request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`

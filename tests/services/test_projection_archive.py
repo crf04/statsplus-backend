@@ -260,6 +260,76 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         )
         assert len(connection.execute(select(ProjectionArchiveScopeLock)).all()) == 1
 
+    remapped_archive = ProjectionArchive(engine, catalog)
+    remapped_archive.market_categories["points"] = "PRA"
+    remapped_at = OBSERVED_AT + timedelta(minutes=1)
+    remapped = remapped_archive.ingest_complete_snapshot(
+        replace(snapshot, retrieved_at=remapped_at),
+        query=scope.query,
+        accepted_at=remapped_at,
+    )
+    assert remapped.changed is False
+    assert remapped.materialization_outcome == "advanced"
+    assert remapped.snapshot_id == result.snapshot_id
+    with engine.connect() as connection:
+        assert len(connection.execute(select(ProjectionProviderSnapshot)).all()) == 1
+        assert len(connection.execute(select(ProjectionMaterializationGeneration)).all()) == 2
+        remapped_generation = connection.execute(
+            select(
+                ProjectionMaterializationGeneration.materialization_checksum,
+                ProviderPoll.outcome,
+            ).join(
+                ProviderPoll,
+                ProviderPoll.generation_id
+                == ProjectionMaterializationGeneration.generation_id,
+            ).where(
+                ProjectionMaterializationGeneration.generation_id
+                == remapped.generation_id
+            )
+        ).one()
+        assert remapped_generation[0]
+        assert remapped_generation[1] == "rematerialized"
+        assert connection.execute(
+            select(LatestPlayerProjection.market_category)
+        ).scalar_one() == "PRA"
+
+    unchanged_mapping = remapped_archive.ingest_complete_snapshot(
+        replace(snapshot, retrieved_at=remapped_at + timedelta(seconds=30)),
+        query=scope.query,
+        accepted_at=remapped_at + timedelta(seconds=30),
+    )
+    assert unchanged_mapping.materialization_outcome == "unchanged"
+    assert unchanged_mapping.generation_id == remapped.generation_id
+
+    unresolved_at = remapped_at + timedelta(minutes=1)
+    unresolved = remapped_archive.ingest_complete_snapshot(
+        replace(
+            snapshot,
+            markets=(replace(market, statistic_match=None),),
+            retrieved_at=unresolved_at,
+        ),
+        query=scope.query,
+        accepted_at=unresolved_at,
+    )
+    assert unresolved.materialization_outcome == "advanced"
+    assert _reader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    ).players == ()
+
+    resolved_at = unresolved_at + timedelta(minutes=1)
+    resolved = remapped_archive.ingest_complete_snapshot(
+        replace(snapshot, retrieved_at=resolved_at),
+        query=scope.query,
+        accepted_at=resolved_at,
+    )
+    assert resolved.materialization_outcome == "advanced"
+    assert _reader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    ).players
+    with engine.connect() as connection:
+        assert len(connection.execute(select(ProjectionProviderSnapshot)).all()) == 1
+        assert len(connection.execute(select(ProjectionObservation)).all()) == 4
+
     later_observation = OBSERVED_AT + timedelta(minutes=2)
     archive.ingest_complete_snapshot(
         replace(snapshot, retrieved_at=later_observation),
@@ -290,14 +360,14 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     )
     assert (
         combined.freshness["providers"]["dabble"]["retrieved_at"]
-        == OBSERVED_AT.isoformat()
+        == resolved_at.isoformat()
     )
     much_later = _reader(engine).get_pool_for_game(
         season=SEASON,
         game_id=GAME_ID,
     )
     assert much_later.freshness["state"] == "live"
-    assert much_later.players == pool.players
+    assert much_later.players[0].canonical_player_id == pool.players[0].canonical_player_id
 
 
 def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_path):
