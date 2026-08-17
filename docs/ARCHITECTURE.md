@@ -386,7 +386,10 @@ remain immutable health evidence, but they cannot lower an offering's
 confirmation time or mask an intervening provider failure. The temporal
 promotion fence includes the newest completed failed attempt in the same
 provider/query scope, using its actual poll start when supplied and otherwise
-its honest completion time. Evidence retrieved before that attempt remains
+its honest completion time. The archive reads this chronology only after it
+owns the durable scope fence; it does not discard a failure merely because that
+failure committed after the waiting ingestion captured its acceptance time.
+Evidence retrieved before that attempt remains
 auditable as `older_not_promoted`, even when it arrives later, and cannot retire
 Latest rows or clear the six-hour failure fallback. Evidence genuinely retrieved
 after the failed attempt may promote and restore successful health. Read health

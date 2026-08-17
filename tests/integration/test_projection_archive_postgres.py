@@ -20,6 +20,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+from app.dependencies import build_dependencies
 from app.models import Base
 from app.migrations import run_migrations
 from app.models.projection_archive import (
@@ -48,8 +49,13 @@ from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
+    ProjectionSelectionPlayerPoolReader,
 )
+from app.services.matchup import MatchupService
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.slate_service import SlateService
+from app.services.stats_freshness_repository import StatsFreshness
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -560,6 +566,410 @@ def test_postgres_failure_attempt_fences_late_evidence_until_recovery(
     ]
 
 
+@pytest.mark.parametrize("late_empty", [False, True], ids=("changed", "complete-empty"))
+def test_postgres_committed_failure_fences_waiting_preaccepted_evidence(
+    projection_pg_engine,
+    late_empty,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    initial = ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    failure_engine = create_engine(database_url)
+    ingestion_engine = create_engine(database_url)
+    failure_insert_reached = Event()
+    release_failure = Event()
+    ingestion_fence_attempted = Event()
+
+    @event.listens_for(failure_engine, "before_cursor_execute")
+    def pause_failed_poll(_conn, _cursor, statement, _parameters, _context, _many):
+        if "INSERT INTO projection_provider_polls" not in statement:
+            return
+        failure_insert_reached.set()
+        assert release_failure.wait(timeout=10)
+
+    @event.listens_for(ingestion_engine, "before_cursor_execute")
+    def observe_ingestion_fence(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ):
+        if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
+            ingestion_fence_attempted.set()
+
+    failure_archive = ProjectionArchive(failure_engine, catalog)
+    ingestion_archive = ProjectionArchive(ingestion_engine, catalog)
+    failure_started_at = OBSERVED_AT + timedelta(minutes=19)
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
+    late_retrieved_at = OBSERVED_AT + timedelta(minutes=10)
+    late_accepted_at = OBSERVED_AT + timedelta(minutes=19, seconds=30)
+    late_snapshot = _snapshot(catalog, late_retrieved_at, "21.5")
+    if late_empty:
+        late_snapshot = replace(
+            late_snapshot,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            failed = executor.submit(
+                failure_archive.record_failed_poll,
+                provider="dabble",
+                query=query,
+                poll_started_at=failure_started_at,
+                completed_at=failure_completed_at,
+                failure_reason="access_denied",
+            )
+            assert failure_insert_reached.wait(timeout=10)
+            ingested = executor.submit(
+                ingestion_archive.ingest_snapshot,
+                late_snapshot,
+                query=query,
+                accepted_at=late_accepted_at,
+            )
+            assert ingestion_fence_attempted.wait(timeout=10)
+            release_failure.set()
+            failed.result(timeout=10)
+            late = ingested.result(timeout=10)
+
+        assert late.materialization_outcome == "older_not_promoted"
+        reader = LatestProjectionPlayerPoolReader(
+            projection_pg_engine,
+            ProjectionArchiveReadScope(provider="dabble", query=query),
+            clock=lambda: failure_completed_at,
+        )
+        pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+        assert pool.freshness["status"] == "stale-served"
+        assert [player.canonical_player_id for player in pool.players] == [7]
+        with projection_pg_engine.connect() as connection:
+            latest = connection.execute(
+                select(
+                    LatestPlayerProjection.generation_id,
+                    LatestPlayerProjection.canonical_player_id,
+                )
+            ).one()
+            promoted = connection.execute(
+                select(func.count()).select_from(ProviderPoll).where(
+                    ProviderPoll.promoted.is_(True)
+                )
+            ).scalar_one()
+        assert latest == (initial.generation_id, 7)
+        assert promoted == 1
+    finally:
+        event.remove(failure_engine, "before_cursor_execute", pause_failed_poll)
+        event.remove(ingestion_engine, "before_cursor_execute", observe_ingestion_fence)
+        failure_engine.dispose()
+        ingestion_engine.dispose()
+
+
+class _PostgresRouteEventCatalog:
+    def __init__(self, clock):
+        self.clock = clock
+
+    @staticmethod
+    def count_events(season):
+        assert season == SEASON
+        return 1
+
+    @staticmethod
+    def _event():
+        return {
+            "nba_game_id": GAME_ID,
+            "scheduled_at": "2026-01-02T23:00:00+00:00",
+            "status_text": "Scheduled",
+            "status_code": 1,
+            "classification": "Regular Season",
+            "away_team_id": 10,
+            "away_team_tricode": "AWY",
+            "away_team_name": "Away",
+            "home_team_id": 20,
+            "home_team_tricode": "HME",
+            "home_team_name": "Home",
+            "away_team": {"id": 10, "tricode": "AWY", "name": "Away"},
+            "home_team": {"id": 20, "tricode": "HME", "name": "Home"},
+        }
+
+    def get_freshness(self, season, *, now):
+        assert season == SEASON
+        assert now == self.clock()
+        return {"last_success_at": OBSERVED_AT.isoformat()}
+
+    def get_events(self, season):
+        assert season == SEASON
+        return (self._event(),)
+
+    def get_events_between(self, season, start, end):
+        assert season == SEASON
+        assert start < end
+        return (self._event(),)
+
+
+class _EmptyPlayerLogs:
+    @staticmethod
+    def get_player_summaries(_season, _player_ids, **_kwargs):
+        return {}
+
+    @staticmethod
+    def get_read_freshness(_season, **_kwargs):
+        return PlayerGameLogReadFreshness("missing", None)
+
+    @staticmethod
+    def get_season_rate(_season, _player_id, **_kwargs):
+        return None
+
+    @staticmethod
+    def list_h2h_rows(_season, _player_id, _opponent_team_id, **_kwargs):
+        return ()
+
+    @staticmethod
+    def list_archetype_rows(_season, _peer_ids, _opponent_team_id, **_kwargs):
+        return ()
+
+
+class _MissingStatsFreshness:
+    @staticmethod
+    def get():
+        return StatsFreshness(None)
+
+
+class _EmptyArchetypes:
+    @staticmethod
+    def list_peer_ids(_player_id):
+        return ()
+
+
+@pytest.fixture
+def authenticated_postgres_projection_routes(
+    projection_pg_engine,
+    authenticate,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.utils.db.get_engine", lambda _settings=None: projection_pg_engine
+    )
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    route_now = [OBSERVED_AT]
+    event_catalog = _PostgresRouteEventCatalog(lambda: route_now[0])
+    player_logs = _EmptyPlayerLogs()
+
+    def build_route_graph(enabled_providers=("dabble",)):
+        settings = RuntimeSettings(
+            environment="testing",
+            auth=AuthenticationSettings(firebase_admin_disabled=False),
+            cache=CacheSettings(enabled=False),
+            database={"url": str(projection_pg_engine.url)},
+            features=FeatureSettings(projection_archive_read_enabled=True),
+            providers=ProviderSettings(
+                dfs_enabled_providers=tuple(enabled_providers),
+            ),
+            nba=NBASeasonSettings(current_season=SEASON),
+        )
+        assembled = build_dependencies(settings)
+        template = assembled.projection_player_pool_reader
+        reader = LatestProjectionPlayerPoolReader(
+            projection_pg_engine,
+            template.scopes,
+            clock=lambda: route_now[0],
+            required_providers=template.required_providers,
+        )
+        dependencies = replace(
+            assembled,
+            projection_player_pool_reader=reader,
+            slate_service=SlateService(
+                event_catalog,
+                settings=settings,
+                player_pool=reader,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_service=MatchupService(
+                event_catalog=event_catalog,
+                player_pool=reader,
+                player_logs=player_logs,
+                player_diets=None,
+                team_matchups=None,
+                stats_freshness=_MissingStatsFreshness(),
+                settings=settings,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_selection_service=MatchupSelectionService(
+                event_catalog=event_catalog,
+                player_pool=ProjectionSelectionPlayerPoolReader(reader),
+                player_logs=player_logs,
+                archetypes=_EmptyArchetypes(),
+                statistic_catalog=catalog,
+                settings=settings,
+                publication_reader=None,
+            ),
+        )
+        app = create_app(
+            {
+                "TESTING": True,
+                "RUNTIME_SETTINGS": settings,
+                "DEPENDENCIES": dependencies,
+                "SKIP_FIREBASE_INIT": True,
+                "SKIP_TABLE_CREATE": True,
+            }
+        )
+        return SimpleNamespace(
+            assembled=assembled,
+            client=app.test_client(),
+            reader=reader,
+            settings=settings,
+        )
+
+    graph = build_route_graph()
+    return SimpleNamespace(
+        archive=graph.assembled.projection_archive,
+        build_route_graph=build_route_graph,
+        catalog=catalog,
+        client=graph.client,
+        headers=authenticate(),
+        query=query,
+        route_now=route_now,
+    )
+
+
+def test_postgres_projection_routes_require_authentication(
+    authenticated_postgres_projection_routes,
+):
+    client = authenticated_postgres_projection_routes.client
+    assert client.get("/api/games/slate?date=2026-01-02").status_code == 401
+    assert client.get(f"/api/games/matchup?game_id={GAME_ID}").status_code == 401
+    assert client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7"
+    ).status_code == 401
+
+
+def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empty(
+    authenticated_postgres_projection_routes,
+):
+    context = authenticated_postgres_projection_routes
+    archive = context.archive
+    complete = _snapshot(context.catalog, OBSERVED_AT, "20.5")
+    archive.ingest_snapshot(complete, query=context.query, accepted_at=OBSERVED_AT)
+    headers = context.headers
+
+    slate = context.client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
+    )
+    selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
+        headers=headers,
+    )
+    assert slate.status_code == matchup.status_code == selection.status_code == 200
+    assert matchup.get_json()["freshness"]["pool"]["state"] == "live"
+    assert selection.get_json()["player_id"] == 7
+
+    partial_at = OBSERVED_AT + timedelta(minutes=1)
+    partial = replace(
+        _snapshot(context.catalog, partial_at, "21.5"),
+        status=SnapshotStatus.PARTIAL,
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=2,
+        ),
+    )
+    partial_result = archive.ingest_snapshot(
+        partial, query=context.query, accepted_at=partial_at
+    )
+    unchanged_at = partial_at + timedelta(minutes=1)
+    unchanged = archive.ingest_snapshot(
+        replace(partial, retrieved_at=unchanged_at),
+        query=context.query,
+        accepted_at=unchanged_at,
+    )
+    context.route_now[0] = unchanged_at
+    assert partial_result.materialization_outcome == "advanced"
+    assert unchanged.materialization_outcome == "unchanged"
+    partial_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
+    )
+    assert partial_matchup.status_code == 200
+    assert partial_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
+        "status": "fresh",
+        "retrieved_at": unchanged_at.isoformat(),
+    }
+
+    empty_at = unchanged_at + timedelta(minutes=1)
+    complete_empty = replace(
+        complete,
+        retrieved_at=empty_at,
+        markets=(),
+        coverage=CoverageEvidence(
+            fetched_count=0,
+            eligible_count=0,
+            normalized_count=0,
+            expected_total=0,
+        ),
+    )
+    archive.ingest_snapshot(
+        complete_empty,
+        query=context.query,
+        accepted_at=empty_at,
+    )
+    context.route_now[0] = empty_at
+    empty_slate = context.client.get(
+        "/api/games/slate?date=2026-01-02", headers=headers
+    )
+    empty_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
+    )
+    empty_selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
+        headers=headers,
+    )
+    assert empty_slate.status_code == empty_matchup.status_code == 200
+    assert empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": empty_at.isoformat(),
+    }
+    assert empty_matchup.get_json()["players"] == []
+    assert empty_selection.status_code == 404
+
+
+def test_authenticated_postgres_routes_expire_disabled_provider_history(
+    authenticated_postgres_projection_routes,
+):
+    context = authenticated_postgres_projection_routes
+    context.archive.ingest_snapshot(
+        _snapshot(context.catalog, OBSERVED_AT, "20.5"),
+        query=context.query,
+        accepted_at=OBSERVED_AT,
+    )
+    disabled = context.build_route_graph(())
+    before_expiry = disabled.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    assert before_expiry.status_code == 200
+    assert before_expiry.get_json()["freshness"]["pool"]["state"] == "live"
+
+    context.route_now[0] = OBSERVED_AT + timedelta(minutes=15, seconds=1)
+    expired = disabled.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    expired_selection = disabled.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
+        headers=context.headers,
+    )
+    assert expired.status_code == 200
+    assert expired.get_json()["freshness"]["pool"]["state"] == "missing"
+    assert expired_selection.status_code == 503
+
+
 def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fences(
     projection_pg_engine,
     authenticate,
@@ -643,7 +1053,6 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
     client = app.test_client()
     headers = authenticate()
 
-    assert client.get("/api/games/slate?date=2026-01-02").status_code == 401
     archive.ingest_snapshot(
         _snapshot(catalog, OBSERVED_AT, "20.5"),
         query=query,

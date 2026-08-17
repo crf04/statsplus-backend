@@ -427,207 +427,216 @@ class ProjectionArchive:
             prepared.query.season,
             prepared.query_key,
         ) as connection:
-            snapshot = prepared.snapshot
-            query = prepared.query
-            accepted = prepared.accepted_at
-            poll_started = prepared.poll_started_at
-            query_key = prepared.query_key
-            observation_count = prepared.observation_count
-            document = prepared.evidence_document
-            checksum = prepared.evidence_checksum
-            content_checksum = prepared.content_checksum
-            evidence_snapshot_id = prepared.evidence_snapshot_id
-            observation_rows = prepared.observation_rows
-            poll_id = prepared.poll_id
-            snapshot_table = ProjectionProviderSnapshot.__table__
-
             replayed = self._replayed_result(
                 connection,
-                poll_id,
-                provider=snapshot.provider,
-                season=query.season,
-                query_key=query_key,
-                evidence_checksum=checksum,
+                prepared.poll_id,
+                provider=prepared.snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                evidence_checksum=prepared.evidence_checksum,
             )
             if replayed is not None:
                 return replayed
             plan = self._plan_transition(connection, prepared)
-            current = plan.current
-            partial_transition = plan.partial_transition
-            materialization_checksum = plan.materialization_checksum
-            materialization_outcome = plan.outcome
-            if (
-                current is not None
-                and current["content_checksum"] == content_checksum
-                and current["materialization_checksum"] == materialization_checksum
-            ):
-                self._record_poll(
-                    connection,
-                    poll_id=poll_id,
-                    snapshot=snapshot,
-                    season=query.season,
-                    query_key=query_key,
-                    started_at=poll_started,
-                    completed_at=accepted,
-                    outcome=ProviderPollOutcome.UNCHANGED,
-                    promoted=materialization_outcome is MaterializationOutcome.ADVANCED,
-                    snapshot_id=str(current["snapshot_id"]),
-                    generation_id=str(current["generation_id"]),
-                    observation_count=observation_count,
-                )
-                if materialization_outcome is MaterializationOutcome.ADVANCED:
-                    self._confirm_latest(
-                        connection,
-                        observation_rows,
-                        provider=snapshot.provider,
-                        season=query.season,
-                        query_key=query_key,
-                        confirmed_at=snapshot.retrieved_at,
-                        complete=snapshot.status is SnapshotStatus.COMPLETE,
-                    )
-                return ProjectionArchiveResult(
-                    snapshot_id=str(current["snapshot_id"]),
-                    generation_id=str(current["generation_id"]),
-                    changed=False,
-                    observation_count=observation_count,
-                    materialization_outcome=MaterializationOutcome.UNCHANGED,
-                )
+            unchanged = self._record_current_confirmation(connection, prepared, plan)
+            if unchanged is not None:
+                return unchanged
+            return self._persist_transition(connection, prepared, plan)
 
-            provider_content_unchanged = (
-                current is not None and current["content_checksum"] == content_checksum
+    def _record_current_confirmation(
+        self,
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        plan: _ProjectionTransitionPlan,
+    ) -> ProjectionArchiveResult | None:
+        current = plan.current
+        if (
+            current is None
+            or current["content_checksum"] != prepared.content_checksum
+            or current["materialization_checksum"] != plan.materialization_checksum
+        ):
+            return None
+        snapshot = prepared.snapshot
+        promoted = plan.outcome is MaterializationOutcome.ADVANCED
+        self._record_poll(
+            connection,
+            poll_id=prepared.poll_id,
+            snapshot=snapshot,
+            season=prepared.query.season,
+            query_key=prepared.query_key,
+            started_at=prepared.poll_started_at,
+            completed_at=prepared.accepted_at,
+            outcome=ProviderPollOutcome.UNCHANGED,
+            promoted=promoted,
+            snapshot_id=str(current["snapshot_id"]),
+            generation_id=str(current["generation_id"]),
+            observation_count=prepared.observation_count,
+        )
+        if promoted:
+            self._confirm_latest(
+                connection,
+                prepared.observation_rows,
+                provider=snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                confirmed_at=snapshot.retrieved_at,
+                complete=snapshot.status is SnapshotStatus.COMPLETE,
             )
-            existing = connection.execute(
-                select(snapshot_table.c.snapshot_id).where(
-                    snapshot_table.c.checksum == checksum
-                )
-            ).scalar_one_or_none()
-            snapshot_id = (
-                str(current["snapshot_id"])
-                if provider_content_unchanged
-                else str(existing or evidence_snapshot_id)
-            )
-            generation_id = _digest(
-                "gen",
-                snapshot_id,
-                materialization_checksum,
-                assume_utc(snapshot.retrieved_at).isoformat(),
-            )
-            existing_generation = connection.execute(
-                select(ProjectionMaterializationGeneration.outcome).where(
-                    ProjectionMaterializationGeneration.generation_id == generation_id
-                )
-            ).scalar_one_or_none()
-            if existing_generation is not None:
-                self._record_poll(
-                    connection,
-                    poll_id=poll_id,
-                    snapshot=snapshot,
-                    season=query.season,
-                    query_key=query_key,
-                    started_at=poll_started,
-                    completed_at=accepted,
-                    outcome=ProviderPollOutcome.UNCHANGED,
-                    promoted=False,
-                    snapshot_id=snapshot_id,
-                    generation_id=generation_id,
-                    observation_count=observation_count,
-                )
-                return ProjectionArchiveResult(
-                    snapshot_id=snapshot_id,
-                    generation_id=generation_id,
-                    changed=False,
-                    observation_count=observation_count,
-                    materialization_outcome=MaterializationOutcome.UNCHANGED,
-                )
+        return ProjectionArchiveResult(
+            snapshot_id=str(current["snapshot_id"]),
+            generation_id=str(current["generation_id"]),
+            changed=False,
+            observation_count=prepared.observation_count,
+            materialization_outcome=MaterializationOutcome.UNCHANGED,
+        )
 
-            if existing is None and not provider_content_unchanged:
-                connection.execute(insert(snapshot_table).values(
-                    snapshot_id=snapshot_id,
-                    provider=snapshot.provider,
-                    season=query.season,
-                    query_key=query_key,
-                    contract_version=snapshot.contract_version,
-                    snapshot_status=snapshot.status.value,
-                    retrieved_at=snapshot.retrieved_at,
-                    accepted_at=accepted,
-                    checksum=checksum,
-                    content_checksum=content_checksum,
-                    evidence_document=document,
-                ))
-            for row in observation_rows:
-                row["snapshot_id"] = snapshot_id
-                row["generation_id"] = generation_id
-                row["source_poll_id"] = poll_id
-                row["observation_id"] = _digest(
-                    "obs", generation_id, row["ordinal"], row["market_reference"]
-                )
+    def _persist_transition(
+        self,
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        plan: _ProjectionTransitionPlan,
+    ) -> ProjectionArchiveResult:
+        """Persist one planned non-current transition inside the caller's fence."""
+
+        snapshot = prepared.snapshot
+        current = plan.current
+        provider_content_unchanged = (
+            current is not None
+            and current["content_checksum"] == prepared.content_checksum
+        )
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        existing = connection.execute(
+            select(snapshot_table.c.snapshot_id).where(
+                snapshot_table.c.checksum == prepared.evidence_checksum
+            )
+        ).scalar_one_or_none()
+        snapshot_id = (
+            str(current["snapshot_id"])
+            if provider_content_unchanged
+            else str(existing or prepared.evidence_snapshot_id)
+        )
+        generation_id = _digest(
+            "gen",
+            snapshot_id,
+            plan.materialization_checksum,
+            assume_utc(snapshot.retrieved_at).isoformat(),
+        )
+        if connection.execute(
+            select(ProjectionMaterializationGeneration.outcome).where(
+                ProjectionMaterializationGeneration.generation_id == generation_id
+            )
+        ).scalar_one_or_none() is not None:
             self._record_poll(
                 connection,
-                poll_id=poll_id,
+                poll_id=prepared.poll_id,
                 snapshot=snapshot,
-                season=query.season,
-                query_key=query_key,
-                started_at=poll_started,
-                completed_at=accepted,
-                outcome=(
-                    ProviderPollOutcome.REMATERIALIZED
-                    if provider_content_unchanged
-                    else (
-                        ProviderPollOutcome.PARTIAL
-                        if snapshot.status is SnapshotStatus.PARTIAL
-                        else ProviderPollOutcome.CHANGED
-                    )
-                ),
-                promoted=materialization_outcome is MaterializationOutcome.ADVANCED,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                started_at=prepared.poll_started_at,
+                completed_at=prepared.accepted_at,
+                outcome=ProviderPollOutcome.UNCHANGED,
+                promoted=False,
                 snapshot_id=snapshot_id,
                 generation_id=generation_id,
-                observation_count=observation_count,
+                observation_count=prepared.observation_count,
             )
-            connection.execute(
-                insert(ProjectionMaterializationGeneration.__table__).values(
-                    generation_id=generation_id,
-                    provider=snapshot.provider,
-                    season=query.season,
-                    query_key=query_key,
-                    snapshot_id=snapshot_id,
-                    source_poll_id=poll_id,
-                    created_at=accepted,
-                    retrieved_at=snapshot.retrieved_at,
-                    materialization_checksum=materialization_checksum,
-                    outcome=materialization_outcome.value,
-                )
-            )
-            if observation_rows:
-                connection.execute(
-                    insert(ProjectionObservation.__table__), observation_rows
-                )
-            if materialization_outcome is MaterializationOutcome.ADVANCED:
-                if snapshot.status is SnapshotStatus.COMPLETE:
-                    self._advance_latest(
-                        connection,
-                        observation_rows,
-                        provider=snapshot.provider,
-                        season=query.season,
-                        query_key=query_key,
-                        generation_id=generation_id,
-                    )
-                else:
-                    assert partial_transition is not None
-                    self._apply_partial_transition(
-                        connection,
-                        partial_transition,
-                        provider=snapshot.provider,
-                        season=query.season,
-                        query_key=query_key,
-                        generation_id=generation_id,
-                    )
             return ProjectionArchiveResult(
                 snapshot_id=snapshot_id,
                 generation_id=generation_id,
-                changed=not provider_content_unchanged,
-                observation_count=observation_count,
-                materialization_outcome=materialization_outcome,
+                changed=False,
+                observation_count=prepared.observation_count,
+                materialization_outcome=MaterializationOutcome.UNCHANGED,
             )
+
+        if existing is None and not provider_content_unchanged:
+            connection.execute(insert(snapshot_table).values(
+                snapshot_id=snapshot_id,
+                provider=snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                contract_version=snapshot.contract_version,
+                snapshot_status=snapshot.status.value,
+                retrieved_at=snapshot.retrieved_at,
+                accepted_at=prepared.accepted_at,
+                checksum=prepared.evidence_checksum,
+                content_checksum=prepared.content_checksum,
+                evidence_document=prepared.evidence_document,
+            ))
+        for row in prepared.observation_rows:
+            row["snapshot_id"] = snapshot_id
+            row["generation_id"] = generation_id
+            row["source_poll_id"] = prepared.poll_id
+            row["observation_id"] = _digest(
+                "obs", generation_id, row["ordinal"], row["market_reference"]
+            )
+        poll_outcome = (
+            ProviderPollOutcome.REMATERIALIZED
+            if provider_content_unchanged
+            else (
+                ProviderPollOutcome.PARTIAL
+                if snapshot.status is SnapshotStatus.PARTIAL
+                else ProviderPollOutcome.CHANGED
+            )
+        )
+        self._record_poll(
+            connection,
+            poll_id=prepared.poll_id,
+            snapshot=snapshot,
+            season=prepared.query.season,
+            query_key=prepared.query_key,
+            started_at=prepared.poll_started_at,
+            completed_at=prepared.accepted_at,
+            outcome=poll_outcome,
+            promoted=plan.outcome is MaterializationOutcome.ADVANCED,
+            snapshot_id=snapshot_id,
+            generation_id=generation_id,
+            observation_count=prepared.observation_count,
+        )
+        connection.execute(
+            insert(ProjectionMaterializationGeneration.__table__).values(
+                generation_id=generation_id,
+                provider=snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                snapshot_id=snapshot_id,
+                source_poll_id=prepared.poll_id,
+                created_at=prepared.accepted_at,
+                retrieved_at=snapshot.retrieved_at,
+                materialization_checksum=plan.materialization_checksum,
+                outcome=plan.outcome.value,
+            )
+        )
+        if prepared.observation_rows:
+            connection.execute(
+                insert(ProjectionObservation.__table__), prepared.observation_rows
+            )
+        if plan.outcome is MaterializationOutcome.ADVANCED:
+            if snapshot.status is SnapshotStatus.COMPLETE:
+                self._advance_latest(
+                    connection,
+                    prepared.observation_rows,
+                    provider=snapshot.provider,
+                    season=prepared.query.season,
+                    query_key=prepared.query_key,
+                    generation_id=generation_id,
+                )
+            else:
+                assert plan.partial_transition is not None
+                self._apply_partial_transition(
+                    connection,
+                    plan.partial_transition,
+                    provider=snapshot.provider,
+                    season=prepared.query.season,
+                    query_key=prepared.query_key,
+                    generation_id=generation_id,
+                )
+        return ProjectionArchiveResult(
+            snapshot_id=snapshot_id,
+            generation_id=generation_id,
+            changed=not provider_content_unchanged,
+            observation_count=prepared.observation_count,
+            materialization_outcome=plan.outcome,
+        )
 
     def _plan_transition(
         self,
@@ -654,7 +663,6 @@ class ProjectionArchive:
             provider=snapshot.provider,
             season=prepared.query.season,
             query_key=prepared.query_key,
-            accepted_at=prepared.accepted_at,
         )
         partial_transition = None
         materialization_checksum = prepared.materialization_checksum
@@ -994,7 +1002,6 @@ class ProjectionArchive:
         provider: str,
         season: str,
         query_key: str,
-        accepted_at: datetime,
     ) -> datetime | None:
         table = ProviderPoll.__table__
         return connection.execute(
@@ -1003,7 +1010,6 @@ class ProjectionArchive:
                 table.c.season == season,
                 table.c.query_key == query_key,
                 table.c.outcome == ProviderPollOutcome.FAILED.value,
-                table.c.completed_at <= accepted_at,
             )
         ).scalar_one()
 
@@ -1135,24 +1141,41 @@ class ProjectionArchive:
             if reference in materialized_references:
                 continue
             materialized_references.add(reference)
-            connection.execute(
-                insert(table).values(
-                    provider=row["provider"],
-                    season=season,
-                    query_key=query_key,
-                    canonical_game_id=row["canonical_game_id"],
-                    canonical_player_id=row["canonical_player_id"],
-                    market_reference=row["market_reference"],
-                    observation_id=row["observation_id"],
-                    generation_id=generation_id,
-                    canonical_team_id=row["canonical_team_id"],
-                    canonical_player_name=row["canonical_player_name"],
-                    canonical_statistic_id=row["canonical_statistic_id"],
-                    market_category=row["market_category"],
-                    observed_at=row["observed_at"],
-                    confirmed_at=row["observed_at"],
-                )
+            ProjectionArchive._insert_latest_row(
+                connection,
+                row,
+                season=season,
+                query_key=query_key,
+                generation_id=generation_id,
             )
+
+    @staticmethod
+    def _insert_latest_row(
+        connection: Any,
+        row: dict[str, Any],
+        *,
+        season: str,
+        query_key: str,
+        generation_id: str,
+    ) -> None:
+        connection.execute(
+            insert(LatestPlayerProjection.__table__).values(
+                provider=row["provider"],
+                season=season,
+                query_key=query_key,
+                canonical_game_id=row["canonical_game_id"],
+                canonical_player_id=row["canonical_player_id"],
+                market_reference=row["market_reference"],
+                observation_id=row["observation_id"],
+                generation_id=generation_id,
+                canonical_team_id=row["canonical_team_id"],
+                canonical_player_name=row["canonical_player_name"],
+                canonical_statistic_id=row["canonical_statistic_id"],
+                market_category=row["market_category"],
+                observed_at=row["observed_at"],
+                confirmed_at=row["observed_at"],
+            )
+        )
 
     @staticmethod
     def _plan_partial_transition(
@@ -1244,23 +1267,12 @@ class ProjectionArchive:
             )
         connection.execute(update(table).where(*scope).values(generation_id=generation_id))
         for row in transition.selected_rows:
-            connection.execute(
-                insert(table).values(
-                    provider=row["provider"],
-                    season=season,
-                    query_key=query_key,
-                    canonical_game_id=row["canonical_game_id"],
-                    canonical_player_id=row["canonical_player_id"],
-                    market_reference=row["market_reference"],
-                    observation_id=row["observation_id"],
-                    generation_id=generation_id,
-                    canonical_team_id=row["canonical_team_id"],
-                    canonical_player_name=row["canonical_player_name"],
-                    canonical_statistic_id=row["canonical_statistic_id"],
-                    market_category=row["market_category"],
-                    observed_at=row["observed_at"],
-                    confirmed_at=row["observed_at"],
-                )
+            ProjectionArchive._insert_latest_row(
+                connection,
+                row,
+                season=season,
+                query_key=query_key,
+                generation_id=generation_id,
             )
 
 

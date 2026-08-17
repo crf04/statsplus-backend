@@ -1,10 +1,12 @@
 """Truthful provider-scoped projection transition behavior (#105)."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 
 from app.config.settings import ConfigurationError, ProviderSettings
 from app.domain.comparisons import market_reference
@@ -743,6 +745,117 @@ def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
         "advanced",
     ]
     assert initial_result.generation_id != recovery.generation_id
+
+
+@pytest.mark.parametrize("late_empty", [False, True], ids=("changed", "complete-empty"))
+def test_committed_failure_fences_evidence_that_captured_acceptance_before_lock(
+    tmp_path,
+    late_empty,
+):
+    database_url = f"sqlite:///{tmp_path / f'failure-race-{late_empty}.sqlite3'}"
+    setup_engine = create_engine(database_url)
+    failure_engine = create_engine(database_url)
+    ingestion_engine = create_engine(database_url)
+    run_migrations(setup_engine)
+    catalog = StatisticCatalog.load_default()
+    setup_archive = ProjectionArchive(setup_engine, catalog)
+    initial = setup_archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, market_id="initial", player_id=7),),
+            OBSERVED_AT,
+        ),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    failure_insert_reached = Event()
+    release_failure = Event()
+    ingestion_lock_attempted = Event()
+
+    @event.listens_for(failure_engine, "before_cursor_execute")
+    def pause_failed_poll(_conn, _cursor, statement, _parameters, _context, _many):
+        if "INSERT INTO projection_provider_polls" not in statement:
+            return
+        failure_insert_reached.set()
+        assert release_failure.wait(timeout=10)
+
+    @event.listens_for(ingestion_engine, "before_cursor_execute")
+    def observe_ingestion_lock(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ):
+        if statement.strip().upper() == "BEGIN IMMEDIATE":
+            ingestion_lock_attempted.set()
+
+    failure_archive = ProjectionArchive(failure_engine, catalog)
+    ingestion_archive = ProjectionArchive(ingestion_engine, catalog)
+    failure_started_at = OBSERVED_AT + timedelta(minutes=19)
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
+    late_retrieved_at = OBSERVED_AT + timedelta(minutes=10)
+    late_accepted_at = OBSERVED_AT + timedelta(minutes=19, seconds=30)
+    late_markets = () if late_empty else (
+        _market(catalog, market_id="late", player_id=8),
+    )
+
+    def record_failure():
+        return failure_archive.record_failed_poll(
+            provider="dabble",
+            query=QUERY,
+            poll_started_at=failure_started_at,
+            completed_at=failure_completed_at,
+            failure_reason="access_denied",
+        )
+
+    def ingest_late_evidence():
+        return ingestion_archive.ingest_snapshot(
+            _snapshot(
+                "dabble",
+                SnapshotStatus.COMPLETE,
+                late_markets,
+                late_retrieved_at,
+            ),
+            query=QUERY,
+            accepted_at=late_accepted_at,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            failed = executor.submit(record_failure)
+            assert failure_insert_reached.wait(timeout=10)
+            ingested = executor.submit(ingest_late_evidence)
+            assert ingestion_lock_attempted.wait(timeout=10)
+            release_failure.set()
+            failed.result(timeout=10)
+            late = ingested.result(timeout=10)
+
+        assert late.materialization_outcome == "older_not_promoted"
+        pool = _reader(
+            setup_engine,
+            ("dabble",),
+            failure_completed_at,
+        ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+        assert pool.freshness["status"] == "stale-served"
+        assert [player.canonical_player_id for player in pool.players] == [7]
+        with setup_engine.connect() as connection:
+            latest = connection.execute(
+                select(
+                    LatestPlayerProjection.generation_id,
+                    LatestPlayerProjection.canonical_player_id,
+                )
+            ).one()
+            promoted = connection.execute(
+                select(func.count()).select_from(ProviderPoll).where(
+                    ProviderPoll.promoted.is_(True)
+                )
+            ).scalar_one()
+        assert latest == (initial.generation_id, 7)
+        assert promoted == 1
+    finally:
+        event.remove(failure_engine, "before_cursor_execute", pause_failed_poll)
+        event.remove(ingestion_engine, "before_cursor_execute", observe_ingestion_lock)
+        setup_engine.dispose()
+        failure_engine.dispose()
+        ingestion_engine.dispose()
 
 
 def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
