@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import pandas as pd
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, delete, select, update
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -182,7 +182,7 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
         pd.DataFrame([{
             "TEAM_ID": 1610612737,
             "GENERAL_RANGE": "Catch and Shoot",
-            "GP": 15,
+            "GP": 15, "MIN": 725,
             "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
         }]),
         season="2025-26", cutoff=NOW, team_id=1610612737,
@@ -196,7 +196,7 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
     with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
         normalize_opponent_grouped_shot_response(
             pd.DataFrame([{
-                "TEAM_ID": 1610612738, "GP": 15,
+                "TEAM_ID": 1610612738, "GP": 15, "MIN": 725,
                 "GENERAL_RANGE": "Catch and Shoot",
                 "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
             }]),
@@ -236,11 +236,12 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
         pd.DataFrame(
             [values], columns=pd.MultiIndex.from_tuples(columns)
         ).drop(columns=[("", "GP")]),
-        pd.DataFrame([{"TEAM_ID": 1610612737, "GP": 15}]),
+        pd.DataFrame([{"TEAM_ID": 1610612737, "GP": 15, "MIN": 725}]),
         team_id=1610612737,
     )
     assert bound["TEAM_ID"].tolist() == [1610612737]
     assert bound["GP"].tolist() == [15]
+    assert bound["MIN"].tolist() == [725]
     with pytest.raises(ProviderContractError, match="provider_schema_changed"):
         normalize_opponent_zone_response(
             pd.DataFrame(
@@ -379,10 +380,20 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     team_scoped = [item for item in opponent if "team_id" in item["parameters"]]
     assert {str(item["parameters"]["team_id"]) for item in team_scoped} == NBA_TEAM_IDS
     assert {item["parameters"]["window"] for item in team_scoped} == {"season", "l15"}
-    assert {item["parameters"]["date_to"] for item in team_scoped} == {NOW.date().isoformat()}
+    assert {item["parameters"]["date_to"] for item in team_scoped} == {"08/13/2026"}
     assert all(item["parameters"]["date_from"] is None for item in team_scoped)
-    assert {item["parameters"]["per_mode"] for item in team_scoped} == {"Per48"}
-    assert {item["parameters"]["value_mode"] for item in team_scoped} == {"per48"}
+    assert {
+        item["parameters"]["per_mode"] for item in team_scoped
+        if item["scope"] == "shot_types_opponent"
+    } == {"Totals"}
+    assert {
+        item["parameters"]["value_mode"] for item in team_scoped
+        if item["scope"] == "shot_types_opponent"
+    } == {"totals_with_minutes"}
+    assert {
+        item["parameters"]["per_mode"] for item in team_scoped
+        if item["scope"] == "shot_zones_opponent"
+    } == {"Per48"}
     synergy = [item for item in opponent if item["scope"] == "synergy_opponent"]
     assert len(synergy) == 11
     assert {item["parameters"]["window"] for item in synergy} == {"season"}
@@ -405,7 +416,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
         item["parameters"]["date_to"]
         for item in prior_slate
         if item["parameters"].get("subject") == "opponent"
-    } == {"2025-11-01"}
+    } == {"11/01/2025"}
 
 
 @pytest.mark.parametrize(
@@ -413,6 +424,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     (
         ("complete", 5), ("partial", 4), ("tampered", 4), ("gp14", 4),
         ("permuted", 1), ("projection_failure", 5),
+        ("mixed_projection_failure", 2),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -487,11 +499,13 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             return rows[:1] if evidence_mode == "partial" and category == "Transition" else rows
 
         def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
-            assert kwargs["per_mode_simple"] == "Per48"
+            assert kwargs["per_mode_simple"] == "Totals"
+            assert kwargs["date_to"] == "08/12/2026"
             return [{
                 "team_id": kwargs["team_id"], "category": category,
                 "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
-                "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
+                "MIN": 725,
+                "FG2M": 40, "FG2A": 80, "FG3M": 20, "FG3A": 60,
             }]
 
         def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
@@ -563,6 +577,17 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     ingestion = ObservationIngestionService(
         control_db, publication_service=publications, clock=lambda: NOW
     )
+    replayed_cutoff = json.loads(json.dumps(next(
+        document for document in uploaded
+        if document["observation_type"] == "shot_types_opponent"
+    )))
+    replayed_cutoff["client_observation_id"] += "-wrong-cutoff"
+    replayed_cutoff["scope"]["endpoint_window"]["date_to"] = "08/11/2026"
+    replayed_payload = json.dumps(
+        replayed_cutoff.pop("payload"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ControlPlaneError, match="manifest_scope_mismatch"):
+        ingestion.ingest(claims, replayed_cutoff, replayed_payload)
     for observation_type in ("shot_types_opponent", "shot_zones_opponent"):
         mismatched = json.loads(json.dumps(next(
             document
@@ -590,6 +615,21 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             document.pop("payload"), sort_keys=True, separators=(",", ":")
         ).encode()
         ingestion.ingest(claims, document, payload)
+    queued_streams = set(publication_streams)
+    if evidence_mode == "mixed_projection_failure":
+        nba_stream = "grouped_shot_types_opponent_season"
+        with control_db.begin() as connection:
+            connection.execute(delete(CompositionJob).where(
+                CompositionJob.stream_key != nba_stream
+            ))
+            connection.execute(CompositionJob.__table__.insert().values(
+                job_id="mixed-ledger-job",
+                stream_key="traditional_opponent_season",
+                manifest_id=manifest.manifest_id,
+                season="2025-26", cutoff=cutoff, status="queued",
+                attempts=0, created_at=NOW, updated_at=NOW,
+            ))
+        queued_streams = {nba_stream, "traditional_opponent_season"}
     if evidence_mode == "tampered":
         with control_db.begin() as connection:
             observations = connection.execute(select(CollectionObservation).where(
@@ -624,7 +664,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         assert {
             row.stream_key
             for row in connection.execute(select(CompositionJob))
-        } == publication_streams
+        } == queued_streams
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.compose(
@@ -655,13 +695,33 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         retrieved_at=cutoff,
     )
     class FailOnceMaterialization(LedgerMatchupMaterializationService):
-        fail_once = evidence_mode == "projection_failure"
+        fail_once = evidence_mode in {
+            "projection_failure", "mixed_projection_failure",
+        }
 
         def refresh_publication_surfaces(self, *args, **kwargs):
             if self.fail_once:
                 self.fail_once = False
                 raise RuntimeError("injected matchup projection failure")
             return super().refresh_publication_surfaces(*args, **kwargs)
+
+        def materialize(self, season, *, as_of, **kwargs):
+            if evidence_mode != "mixed_projection_failure":
+                return super().materialize(season, as_of=as_of, **kwargs)
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("injected mixed matchup projection failure")
+            governed = governance.read_for_composition(
+                season, cutoff, manifest.manifest_id
+            )
+            return self.refresh_publication_surfaces(
+                season,
+                as_of=as_of,
+                expected_game_ids_by_team=governed.expected_season_game_ids,
+                expected_l15_game_ids=governed.expected_l15_game_ids,
+                team_ids=governed.team_ids,
+                session=kwargs.get("session"),
+            )
 
     matchup_materialization = FailOnceMaterialization(
         CanonicalGameLedgerRepository(control_db),
@@ -672,16 +732,37 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         l15_expectation_resolver=governance,
         clock=lambda: NOW,
     )
+    ledger_window = SimpleNamespace(complete=True, reason=None)
+    ledger_l15_window = SimpleNamespace(
+        complete=False, reason="insufficient governed games"
+    )
+    ledger_materialization = SimpleNamespace(compose=lambda *args, **kwargs: (
+        SimpleNamespace(
+            season_window=ledger_window,
+            l15_window=ledger_l15_window,
+            assist_location_season=None,
+            assist_location_l15=None,
+        )
+    ))
+    runtime_repository = SimpleNamespace(
+        engine=control_db,
+        list_games=lambda *args, **kwargs: (),
+        get_game=lambda *args, **kwargs: None,
+    )
     runtime = LedgerRuntime(
         backfill=None,
-        repository=SimpleNamespace(engine=control_db),
-        materialization=None,
+        repository=runtime_repository,
+        materialization=(
+            ledger_materialization
+            if evidence_mode == "mixed_projection_failure"
+            else None
+        ),
         governance=governance,
         matchup_materialization=matchup_materialization,
         publication_service=publications,
         clock=lambda: NOW,
     )
-    if evidence_mode == "projection_failure":
+    if evidence_mode in {"projection_failure", "mixed_projection_failure"}:
         assert runtime.compose_queued("2025-26") == 0
         with control_db.connect() as connection:
             assert {
@@ -723,7 +804,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             )
             else "succeeded"
         )
-        for stream_key in publication_streams
+        for stream_key in queued_streams
     }
     if evidence_mode == "projection_failure":
         with control_db.connect() as connection:
@@ -731,8 +812,8 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     reader = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW)
     expected_values = {
         "synergy_play_types_opponent_season": ("Transition_PTS", 12 * 48 / 750),
-        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 4),
-        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 4),
+        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 40 * 48 / 725),
+        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 40 * 48 / 725),
         "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4),
         "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4),
     }
@@ -755,6 +836,12 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         expected_values = {
             "synergy_play_types_opponent_season": (
                 "Transition_PTS", 12 * 48 / 750,
+            )
+        }
+    if evidence_mode == "mixed_projection_failure":
+        expected_values = {
+            "grouped_shot_types_opponent_season": (
+                "catch_and_shoot_FG2M", 40 * 48 / 725,
             )
         }
     for stream_key, (metric, expected) in expected_values.items():

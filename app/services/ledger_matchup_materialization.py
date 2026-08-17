@@ -134,6 +134,7 @@ class LedgerMatchupMaterializationService:
         expected_game_ids: frozenset[str],
         expected_l15_game_ids: Mapping[int, frozenset[str]],
         team_ids: frozenset[int],
+        session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
@@ -227,6 +228,7 @@ class LedgerMatchupMaterializationService:
                     for base in NBA_PUBLICATION_STREAMS
                 ),
                 canonical_season,
+                session=session,
             )
             season_publication_facts, season_publication_observations = (
                 self._publication_read_model(
@@ -272,11 +274,19 @@ class LedgerMatchupMaterializationService:
             self.matchup_repository.replace_governed_publication_snapshots(
                 snapshots,
                 retrieved_at=retrieved_at,
+                **(
+                    {} if session is None
+                    else {"connection": session.connection()}
+                ),
             )
         else:
             self.matchup_repository.replace_snapshots(
                 snapshots,
                 retrieved_at=retrieved_at,
+                **(
+                    {} if session is None
+                    else {"connection": session.connection()}
+                ),
             )
         return LedgerMatchupMaterialization(
             season=canonical_season,
@@ -487,7 +497,7 @@ class LedgerMatchupMaterializationService:
                             read, "event_catalog_checksum", None
                         ),
                     )
-            except Exception:
+            except (TypeError, ValueError):
                 return (), TeamMatchupObservation(
                     surface=base,
                     status="unavailable",

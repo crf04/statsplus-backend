@@ -15,6 +15,7 @@ import json
 import math
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -2310,14 +2311,23 @@ class CanonicalGameLedgerRepository:
     def publish_metadata(self, publication: LedgerPublicationRecord) -> None:
         self.publish_metadata_batch((publication,))
 
-    def publish_metadata_batch(self, publications: Iterable[LedgerPublicationRecord]) -> None:
+    def publish_metadata_batch(
+        self,
+        publications: Iterable[LedgerPublicationRecord],
+        *,
+        connection: Connection | None = None,
+    ) -> None:
         """Replace one materialization's metadata rows in one transaction."""
 
         records = tuple(publications)
         if not records:
             return
         table = LedgerPublication.__table__
-        with self.engine.begin() as connection:
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else self.engine.begin()
+        ) as connection:
             for publication in records:
                 values = asdict(publication)
                 values["retrieved_at"] = assume_utc(publication.retrieved_at)

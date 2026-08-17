@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session
 
 from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CompositionJob
@@ -87,6 +88,7 @@ class LedgerMaterializationService:
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None = None,
         team_ids: frozenset[int] | None = None,
         require_assist_locations: bool = False,
+        session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
@@ -231,7 +233,10 @@ class LedgerMaterializationService:
             )
             for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
-        self.repository.publish_metadata_batch(publications)
+        self.repository.publish_metadata_batch(
+            publications,
+            connection=session.connection() if session is not None else None,
+        )
         publication_cutoff = cutoff or datetime.combine(
             as_of, datetime.min.time(), timezone.utc
         )
@@ -269,6 +274,7 @@ class LedgerMaterializationService:
                     cutoff=publication_cutoff,
                     payload=json.loads(_payload_json(payload)),
                     provenance=provenance,
+                    **({} if session is None else {"session": session}),
                 )
             parity_specs = (
                 (
@@ -328,6 +334,10 @@ class LedgerMaterializationService:
                     report=report,
                     publication_id=candidate.publication_id,
                     payload_checksum=candidate.checksum,
+                    **(
+                        {} if session is None
+                        else {"connection": session.connection()}
+                    ),
                 )
         return result
 

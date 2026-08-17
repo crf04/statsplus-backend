@@ -356,10 +356,13 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
+        connection: Connection | None = None,
     ) -> None:
         """Replace legacy/provider snapshots behind the normal write fence."""
 
-        return self._replace_snapshots(snapshots, retrieved_at=retrieved_at)
+        return self._replace_snapshots(
+            snapshots, retrieved_at=retrieved_at, connection=connection
+        )
 
     def replace_governed_publication_snapshots(
         self,

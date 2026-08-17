@@ -60,6 +60,7 @@ class SanitizedFixtureProvider:
         return [{
             "team_id": parameters["team_id"], "category": general_range,
             "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+            "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
             "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
         }]
 

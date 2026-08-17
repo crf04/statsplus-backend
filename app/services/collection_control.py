@@ -270,7 +270,7 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
             "subject_code": "T", "type_grouping": "Defensive",
             "per_mode": "Totals", "value_mode": "totals_with_minutes",
         }} for category in PLAY_TYPES)
-    date_to = slate_date_for_instant(_aware(cutoff)).isoformat()
+    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             governed = {"window": window, "subject": "opponent", "team_id": team_id,
@@ -279,6 +279,8 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
             if opponent_shots and window in shot_stream_windows:
                 descriptors.extend({"scope": opponent_shots, "parameters": {
                     **governed, "general_range": category,
+                    "per_mode": "Totals",
+                    "value_mode": "totals_with_minutes",
                 }} for category in SHOOTING_TYPES)
             if opponent_zones and window in zone_stream_windows:
                 descriptors.append({"scope": opponent_zones, "parameters": dict(governed)})
@@ -471,7 +473,9 @@ def _compose_nba_observation_payload(
         ):
             raise ValueError("publication observation integrity mismatch")
         expected_value_mode = (
-            "totals_with_minutes" if base == "play_types" else "per48"
+            "totals_with_minutes"
+            if base in {"play_types", "shot_types"}
+            else "per48"
         )
         if scope.get("value_mode") != expected_value_mode:
             raise ValueError("publication value mode unverified")
@@ -481,7 +485,10 @@ def _compose_nba_observation_payload(
                 not isinstance(endpoint_window, Mapping)
                 or int(endpoint_window.get("last_n_games", -1))
                 != (15 if window == "l15" else 0)
-                or not endpoint_window.get("date_to")
+                or endpoint_window.get("date_to")
+                != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+                or scope.get("season") != season
+                or scope.get("season_type") != "Regular Season"
             ):
                 raise ValueError("provider_window_unverified")
         records = document.get("records")
@@ -519,7 +526,7 @@ def _compose_nba_observation_payload(
                     or int(games_played) != len(expected_game_ids_by_team[team_id])
                 ):
                     raise ValueError("publication games played mismatch")
-            if base == "play_types":
+            if base in {"play_types", "shot_types"}:
                 minutes = record.get("minutes")
                 if isinstance(minutes, bool):
                     raise ValueError("publication minutes invalid")
@@ -565,7 +572,7 @@ def _compose_nba_observation_payload(
             "per48": {
                 metric: (
                     values[team_id][metric] * 48.0 / minutes_by_team[team_id]
-                    if base == "play_types"
+                    if base in {"play_types", "shot_types"}
                     else values[team_id][metric]
                 )
                 for metric in sorted(expected_metrics)
@@ -2534,6 +2541,12 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("schema_unsupported")
                 if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
                     raise ControlPlaneError("manifest_scope_mismatch")
+                _validate_opponent_window_scope(
+                    scope_value,
+                    observation_type=observation_type,
+                    season=str(envelope["season"]),
+                    cutoff=_aware(manifest.cutoff),
+                )
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
                     raise ControlPlaneError("scope_denied")
@@ -3120,12 +3133,13 @@ class PublicationService(_SessionService):
         payload: Any,
         provenance: Mapping[str, str | None],
         reason: str = "historical ledger rehearsal",
+        session: Session | None = None,
     ) -> PublicationVersion:
         """Persist a non-active governed ledger version with normalized provenance."""
 
         encoded = _json(payload)
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
             if stream is None or stream.provider != "ledger" or stream.enabled:
                 raise ControlPlaneError("inactive_ledger_stream_required")
@@ -4443,6 +4457,42 @@ def _validate_observation_scope_identity(
             raise ValueError("opponent observation team invalid") from error
         if team_id != scoped_team_id:
             raise ValueError("opponent observation team mismatch")
+
+
+def _validate_opponent_window_scope(
+    scope: Any,
+    *,
+    observation_type: str,
+    season: str,
+    cutoff: datetime,
+) -> None:
+    """Bind team-window observations to the exact issued endpoint window."""
+
+    if observation_type not in {"shot_types_opponent", "shot_zones_opponent"}:
+        return
+    if not isinstance(scope, Mapping):
+        raise ControlPlaneError("manifest_scope_mismatch")
+    window = str(scope.get("window", "")).casefold()
+    endpoint_window = scope.get("endpoint_window")
+    expected_last_n = 15 if window == "l15" else 0 if window == "season" else None
+    expected_date_to = slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+    expected_value_mode = (
+        "totals_with_minutes"
+        if observation_type == "shot_types_opponent"
+        else "per48"
+    )
+    if (
+        expected_last_n is None
+        or scope.get("season") != season
+        or scope.get("season_type") != "Regular Season"
+        or scope.get("phase") != "Regular Season"
+        or scope.get("value_mode") != expected_value_mode
+        or not isinstance(endpoint_window, Mapping)
+        or endpoint_window.get("last_n_games") != expected_last_n
+        or endpoint_window.get("date_from") is not None
+        or endpoint_window.get("date_to") != expected_date_to
+    ):
+        raise ControlPlaneError("manifest_scope_mismatch")
 
 
 def _validate_observation_payload(value: Any, *, observation_type: str,

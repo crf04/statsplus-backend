@@ -574,13 +574,14 @@ def normalize_grouped_shot_response(
 def normalize_opponent_grouped_shot_response(
     response: Any, *, season: str, cutoff: datetime | str,
     team_id: int, window: str = "season", category: str | None = None,
-    value_mode: str = "per48",
+    value_mode: str = "totals_with_minutes",
     endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
     scope = {
         "window": window, "subject": "opponent", "team_id": team_id,
         "phase": "Regular Season", "value_mode": value_mode,
+        "season": _canonical_season(season), "season_type": "Regular Season",
         "endpoint_window": dict(endpoint_window or {}),
     }
     if category is not None:
@@ -595,6 +596,7 @@ def normalize_opponent_grouped_shot_response(
     )
     _require_opponent_contract(
         observation, scoped_team_id=team_id, require_games_played=True,
+        require_minutes=True,
     )
     return observation
 
@@ -706,6 +708,7 @@ def normalize_opponent_zone_response(
     scope = {
         "window": window, "subject": "opponent", "team_id": team_id,
         "phase": "Regular Season", "value_mode": value_mode,
+        "season": _canonical_season(season), "season_type": "Regular Season",
         "endpoint_window": dict(endpoint_window or {}),
     }
     observation = _zone_response(

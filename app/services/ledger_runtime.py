@@ -400,6 +400,29 @@ def _composition_failure_reason(
     return reason
 
 
+def _succeeded_ledger_streams(
+    materialization: LedgerMaterialization,
+) -> set[str]:
+    succeeded = set()
+    if materialization.season_window.complete:
+        succeeded |= {
+            "player_game_logs",
+            "traditional_opponent_season",
+            "player_per36",
+        }
+    if materialization.l15_window.complete:
+        succeeded.add("traditional_opponent_l15")
+    if (
+        materialization.assist_location_season is not None
+        and materialization.assist_location_l15 is not None
+    ):
+        if materialization.season_window.complete:
+            succeeded.add("assist_locations_season")
+        if materialization.l15_window.complete:
+            succeeded.add("assist_locations_l15")
+    return succeeded
+
+
 class LedgerRuntime:
     """Run one resumable collection pass and queued materialization work."""
 
@@ -469,23 +492,23 @@ class LedgerRuntime:
                 row for row in slice_jobs
                 if row["stream_key"] in NBA_PUBLICATION_STREAM_KEYS
             ]
-            publication_service = self.publication_service
-            if nba_jobs and publication_service is None:
-                publication_service = PublicationService(
-                    self.repository.engine,
-                    l15_expectation_resolver=self.governance,
-                )
             ledger_jobs = [
                 row for row in slice_jobs
                 if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
             ]
+            publication_service = self.publication_service
+            if (nba_jobs or ledger_jobs) and publication_service is None:
+                publication_service = PublicationService(
+                    self.repository.engine,
+                    l15_expectation_resolver=self.governance,
+                )
             if (
-                nba_jobs
-                and not ledger_jobs
+                (nba_jobs or ledger_jobs)
                 and self.matchup_materialization is not None
             ):
                 succeeded_jobs = []
                 failed_jobs = {}
+                succeeded_ledger_jobs = []
                 try:
                     with publication_service.session() as session, session.begin():
                         # Establish the outer write transaction before SQLite
@@ -494,7 +517,7 @@ class LedgerRuntime:
                         # rollback.
                         session.execute(update(table).where(
                             table.c.job_id.in_([
-                                job["job_id"] for job in nba_jobs
+                                job["job_id"] for job in slice_jobs
                             ]),
                         ).values(updated_at=self.clock()))
                         for job in nba_jobs:
@@ -513,10 +536,58 @@ class LedgerRuntime:
                                 failed_jobs[job["job_id"]] = str(error)[:255]
                             else:
                                 succeeded_jobs.append(job)
-                        if succeeded_jobs:
+                        if succeeded_jobs or ledger_jobs:
                             governance = self.governance.read_for_composition(
                                 season, cutoff, manifest_id,
                             )
+                        if ledger_jobs:
+                            slate_date = slate_date_for_instant(cutoff)
+                            self.matchup_materialization.materialize(
+                                season,
+                                as_of=slate_date,
+                                expected_game_ids=governance.expected_game_ids,
+                                expected_l15_game_ids=(
+                                    governance.expected_l15_game_ids
+                                ),
+                                team_ids=governance.team_ids,
+                                session=session,
+                            )
+                            games = tuple(
+                                game
+                                for summary in self.repository.list_games(
+                                    season, through=slate_date
+                                )
+                                if (
+                                    game := self.repository.get_game(
+                                        summary.game_id
+                                    )
+                                ) is not None
+                            )
+                            materialized = self.materialization.compose(
+                                games,
+                                season=season,
+                                as_of=slate_date,
+                                cutoff=cutoff,
+                                expected_game_ids=governance.expected_game_ids,
+                                expected_l15_game_ids=(
+                                    governance.expected_l15_game_ids
+                                ),
+                                team_ids=governance.team_ids,
+                                session=session,
+                            )
+                            succeeded_streams = _succeeded_ledger_streams(
+                                materialized
+                            )
+                            for job in ledger_jobs:
+                                if job["stream_key"] in succeeded_streams:
+                                    succeeded_ledger_jobs.append(job)
+                                else:
+                                    failed_jobs[job["job_id"]] = (
+                                        _composition_failure_reason(
+                                            job["stream_key"], materialized
+                                        )
+                                    )
+                        elif succeeded_jobs:
                             self.matchup_materialization.refresh_publication_surfaces(
                                 season,
                                 as_of=slate_date_for_instant(cutoff),
@@ -530,10 +601,13 @@ class LedgerRuntime:
                                 session=session,
                             )
                         now = self.clock()
-                        if succeeded_jobs:
+                        successful_jobs = [
+                            *succeeded_jobs, *succeeded_ledger_jobs,
+                        ]
+                        if successful_jobs:
                             session.execute(update(table).where(
                                 table.c.job_id.in_([
-                                    job["job_id"] for job in succeeded_jobs
+                                    job["job_id"] for job in successful_jobs
                                 ]),
                             ).values(
                                 status="succeeded", updated_at=now,
@@ -551,10 +625,11 @@ class LedgerRuntime:
                     # rolled back together.  Keep successfully composed jobs
                     # queued so the existing unique job can be retried.
                     with self.repository.engine.begin() as connection:
-                        if succeeded_jobs:
+                        retryable_jobs = [*succeeded_jobs, *ledger_jobs]
+                        if retryable_jobs:
                             connection.execute(update(table).where(
                                 table.c.job_id.in_([
-                                    job["job_id"] for job in succeeded_jobs
+                                    job["job_id"] for job in retryable_jobs
                                 ]),
                             ).values(
                                 status="queued", updated_at=self.clock(),
@@ -568,7 +643,7 @@ class LedgerRuntime:
                                 last_error=last_error,
                             ))
                 else:
-                    completed += len(succeeded_jobs)
+                    completed += len(succeeded_jobs) + len(succeeded_ledger_jobs)
                 continue
             nba_succeeded = False
             for job in nba_jobs:
@@ -639,23 +714,7 @@ class LedgerRuntime:
                 expected_l15_game_ids=governance.expected_l15_game_ids,
                 team_ids=governance.team_ids,
             )
-            succeeded = set()
-            if materialized.season_window.complete:
-                succeeded |= {
-                    "player_game_logs",
-                    "traditional_opponent_season",
-                    "player_per36",
-                }
-            if materialized.l15_window.complete:
-                succeeded |= {"traditional_opponent_l15"}
-            if (
-                materialized.assist_location_season is not None
-                and materialized.assist_location_l15 is not None
-            ):
-                if materialized.season_window.complete:
-                    succeeded |= {"assist_locations_season"}
-                if materialized.l15_window.complete:
-                    succeeded |= {"assist_locations_l15"}
+            succeeded = _succeeded_ledger_streams(materialized)
             with self.repository.engine.begin() as connection:
                 for job in ledger_jobs:
                     success = job["stream_key"] in succeeded

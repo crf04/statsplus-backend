@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+import math
 import os
 from typing import Any, Iterator, Protocol
 
@@ -181,12 +182,14 @@ class ResidentialScopeExecutor:
                         parameters.get("date_from"), date_to=parameters.get("date_to"),
                         season=work.season, season_type="Regular Season",
                         team_id=int(team_id), last_n_games=15 if window == "l15" else None,
-                        per_mode_simple=str(parameters.get("per_mode", "Per48")),
+                        per_mode_simple=str(parameters.get("per_mode", "Totals")),
                     )
                     yield normalize_opponent_grouped_shot_response(
                         raw, season=work.season, cutoff=work.cutoff,
                         team_id=int(team_id), window=window, category=category,
-                        value_mode=str(parameters.get("value_mode", "per48")),
+                        value_mode=str(parameters.get(
+                            "value_mode", "totals_with_minutes"
+                        )),
                         endpoint_window={
                             "last_n_games": 15 if window == "l15" else 0,
                             "date_from": parameters.get("date_from"),
@@ -281,16 +284,22 @@ class _StandaloneNBAProvider:
         try:
             frame = _flatten_frame_columns(frame)
             evidence = _flatten_frame_columns(evidence)
-            rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP"]]
+            rows = evidence.loc[
+                evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP", "MIN"]
+            ]
             if len(rows.index) != 1:
                 raise ProviderContractError("provider_window_unverified")
             expected_gp = int(rows.iloc[0]["GP"])
+            expected_minutes = float(rows.iloc[0]["MIN"])
+            if not math.isfinite(expected_minutes) or expected_minutes <= 0:
+                raise ProviderContractError("provider_window_unverified")
             merged = frame.copy()
             if "TEAM_ID" not in merged or not (merged["TEAM_ID"] == team_id).all():
                 raise ProviderContractError("provider_window_unverified")
             if "GP" in merged and not (merged["GP"] == expected_gp).all():
                 raise ProviderContractError("provider_window_unverified")
             merged["GP"] = expected_gp
+            merged["MIN"] = expected_minutes
             return merged
         except (KeyError, TypeError, AttributeError, ValueError) as error:
             raise ProviderContractError("provider_window_unverified") from error
@@ -389,7 +398,7 @@ class _StandaloneNBAProvider:
     def fetch_opponent_shot_chart(
         self, general_range: str, date_from: str | None, *, date_to: str | None = None,
         season: str, season_type: str, team_id: int, last_n_games: int | None,
-        per_mode_simple: str = "Per48",
+        per_mode_simple: str = "Totals",
     ) -> Any:
         from nba_api.stats import endpoints
         frame = self._request(lambda: endpoints.LeagueDashOppPtShot(

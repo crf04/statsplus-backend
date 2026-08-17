@@ -2799,6 +2799,78 @@ def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
     assert not any(fact.base == "play_types" for fact in snapshot.facts)
 
 
+def test_materialization_propagates_unexpected_governance_failure_but_degrades_expected(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine,
+        publication_write_capability=create_publication_write_capability(engine),
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    initial = LedgerMatchupMaterializationService(
+        ledger, repository, publication_reader=_reader(), clock=lambda: RETRIEVED_AT
+    )
+    initial.materialize(
+        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+    )
+    prior = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    )
+
+    class InfrastructureFailure:
+        def resolve_team_game_ids(self, *args, **kwargs):
+            raise RuntimeError("governance database unavailable")
+
+    broken = LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=_reader(),
+        l15_expectation_resolver=InfrastructureFailure(),
+        clock=lambda: RETRIEVED_AT + timedelta(minutes=1),
+    )
+    with pytest.raises(RuntimeError, match="governance database unavailable"):
+        broken.materialize(
+            "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+        )
+    assert repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    ) == prior
+
+    class ExpectedUnavailable:
+        def resolve_team_game_ids(self, *args, **kwargs):
+            raise ValueError("publication_governance_unavailable")
+
+    degraded = LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=_reader(),
+        l15_expectation_resolver=ExpectedUnavailable(),
+        clock=lambda: RETRIEVED_AT + timedelta(minutes=2),
+    )
+    degraded.materialize(
+        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+    )
+    publication_observations = {
+        item.surface: item
+        for item in repository.get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", AS_OF)
+        ).observations
+        if item.surface in {"play_types", "shot_types", "shot_zones"}
+    }
+    assert all(
+        item.status == "unavailable"
+        and item.unavailable_reason == "publication_governance_unavailable"
+        for item in publication_observations.values()
+    )
+
+
 def test_database_reader_never_marks_nba_surface_as_legacy_fallback(tmp_path):
     engine = _engine(tmp_path)
     publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
