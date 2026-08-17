@@ -328,6 +328,36 @@ counted separately, while a governed event on another Slate is irrelevant and
 not counted. Aggregate pool `retrieved_at` is the oldest usable contributor
 snapshot.
 
+#### Projection archive expansion path
+
+Migration 037 adds the durable projection evidence path without replacing the
+legacy Player Pool reader. `ProjectionArchive.ingest_complete_snapshot()` is
+the single write interface for this first vertical slice. It accepts one
+Complete normalized `ProviderSnapshot` and its canonical season query, writes
+one checksummed source-evidence document, immutable market observations, and
+one materialization generation atomically, then advances eligible
+provider/game/player/market references in `latest_player_projections`.
+Thresholds, selections, modifiers, prices, provider labels, and source
+identity round-trip through the existing strict Provider Snapshot codec; raw
+upstream payloads are never stored. Governed identities and targetability are
+relational fields beside that immutable evidence. Valid unresolved and
+non-targetable markets stay in the archive but do not enter the live read
+model. Provider market IDs use the established deterministic market-reference
+authority, including its content-derived fallback when an ID is absent.
+
+`LatestProjectionPlayerPoolReader` is the database-only read interface. It
+unions fresh Latest Player Projections by canonical player, category, and
+provider without holding a DFS Board or provider registry. A game with fresh
+evidence reports `state: live` and its oldest included `observed_at`; a game
+without fresh evidence reports `state: missing` and `observed_at: null`.
+`PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
+is enabled, dependency assembly gives the same archive reader to Slate,
+Matchup, and Matchup Selection; one request never combines archive and legacy
+facts. The legacy collection/reader behavior above remains selected while the
+gate is off. Scheduled collection, complete/partial omission transitions,
+mapping replay, closing sets, and final cutover remain later slices of the
+projection-archive parent contract.
+
 ### Matchup injury snapshots
 
 `MatchupInjuryService` owns injury collection and Player Pool overrides. The

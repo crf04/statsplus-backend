@@ -60,6 +60,8 @@ class ApplicationDependencies:
     ledger_backfill_service: Any | None = None
     ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
+    projection_archive: Any | None = None
+    projection_player_pool_reader: Any | None = None
 
 
 def build_dependencies(
@@ -93,6 +95,10 @@ def build_dependencies(
     from app.services.player_service import PlayerService
     from app.services.player_diet import PlayerDietService
     from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
+    )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -412,10 +418,21 @@ def build_dependencies(
         statistic_catalog,
         snapshot_repository=player_pool_snapshot_repository,
     )
+    projection_archive = (
+        None if demo_database else ProjectionArchive(engine, statistic_catalog)
+    )
+    projection_player_pool_reader = (
+        None if demo_database else LatestProjectionPlayerPoolReader(engine)
+    )
+    slate_player_pool = (
+        projection_player_pool_reader
+        if settings.features.projection_archive_read_enabled
+        else player_pool_service
+    )
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
-        player_pool=player_pool_service,
+        player_pool=slate_player_pool,
         injuries=matchup_injury_service,
     )
     from app.domain.freshness import time_window_timedelta
@@ -463,9 +480,14 @@ def build_dependencies(
         if player_pool_snapshot_repository is not None
         else None
     )
+    matchup_player_pool_reader = (
+        projection_player_pool_reader
+        if settings.features.projection_archive_read_enabled
+        else stored_player_pool_reader
+    )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
-        player_pool=stored_player_pool_reader,
+        player_pool=matchup_player_pool_reader,
         player_logs=player_game_log_repository,
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,
@@ -474,7 +496,7 @@ def build_dependencies(
     )
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
-        player_pool=stored_player_pool_reader,
+        player_pool=matchup_player_pool_reader,
         player_logs=player_game_log_repository,
         player_diets=player_diet_service,
         team_matchups=team_matchup_query_service,
@@ -527,6 +549,8 @@ def build_dependencies(
         ledger_backfill_service=ledger_backfill_service,
         ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
+        projection_archive=projection_archive,
+        projection_player_pool_reader=projection_player_pool_reader,
     )
 
 

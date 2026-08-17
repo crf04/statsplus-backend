@@ -961,6 +961,27 @@ def _create_publication_player_game_log_projection(
             continue
 
 
+def _create_projection_archive_tables(connection: Connection) -> None:
+    """Create immutable projection evidence and its live read model."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProjectionProviderSnapshot,
+        ProviderPoll,
+    )
+
+    # Foreign-key dependencies determine the portable creation order.
+    ProjectionProviderSnapshot.__table__.create(connection, checkfirst=True)
+    ProviderPoll.__table__.create(connection, checkfirst=True)
+    ProjectionObservation.__table__.create(connection, checkfirst=True)
+    ProjectionMaterializationGeneration.__table__.create(
+        connection, checkfirst=True
+    )
+    LatestPlayerProjection.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -1013,6 +1034,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "036_publication_player_game_log_projection",
         _create_publication_player_game_log_projection,
     ),
+    Migration(37, "037_projection_archive", _create_projection_archive_tables),
 )
 
 

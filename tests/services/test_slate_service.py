@@ -338,6 +338,41 @@ def test_slate_uses_live_pool_counts_and_provider_freshness():
     assert pool.calls == [("2025-26", {"0022500001"})]
 
 
+def test_slate_exposes_each_database_projection_state_without_recomputing_it():
+    observed_at = "2026-01-02T14:59:00+00:00"
+    pool = RecordedPlayerPool(
+        PlayerPool(
+            players=(),
+            team_counts={},
+            freshness={
+                "status": "fresh",
+                "state": "live",
+                "observed_at": observed_at,
+                "retrieved_at": observed_at,
+                "providers": {},
+            },
+            game_states={
+                "0022500001": {"state": "live", "observed_at": observed_at},
+                "0022500002": {"state": "missing", "observed_at": None},
+            },
+        )
+    )
+    service = _service(
+        [
+            _event("0022500001", "2026-01-03T00:00:00+00:00"),
+            _event("0022500002", "2026-01-03T01:00:00+00:00"),
+        ],
+        player_pool=pool,
+    )
+
+    games = service.get_slate("2026-01-02")["games"]
+
+    assert [game["projection_state"] for game in games] == [
+        {"state": "live", "observed_at": observed_at},
+        {"state": "missing", "observed_at": None},
+    ]
+
+
 def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup():
     players = (
         PoolPlayer(10, "Out Away", 1, ("PTS",), {"dabble": ("PTS",)}),

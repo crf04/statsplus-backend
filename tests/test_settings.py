@@ -876,6 +876,17 @@ def test_dfs_board_feature_flag_is_off_by_default(monkeypatch):
     assert settings.features.dfs_board_enabled is False
 
 
+def test_projection_archive_reader_is_activation_gated(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.delenv("PROJECTION_ARCHIVE_READ_ENABLED", raising=False)
+
+    assert load_settings().features.projection_archive_read_enabled is False
+
+    monkeypatch.setenv("PROJECTION_ARCHIVE_READ_ENABLED", "true")
+
+    assert load_settings().features.projection_archive_read_enabled is True
+
+
 def test_dfs_board_feature_flag_opts_in_explicitly(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("DFS_BOARD_ENABLED", "true")

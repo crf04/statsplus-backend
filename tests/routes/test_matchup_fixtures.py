@@ -26,6 +26,20 @@ from app.models.collection_control import (
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+from app.providers.dfs import (
+    AthleteEvidence,
+    CoverageEvidence,
+    EventEvidence,
+    MarketStatus,
+    MarketVariant,
+    NBAMarketQuery,
+    PlayerProjectionMarket,
+    ProviderSnapshot,
+    SnapshotStatus,
+    StatisticEvidence,
+    TeamEvidence,
+)
 from app.services.event_catalog_service import EventCatalogService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
@@ -46,6 +60,10 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRepository,
 )
 from app.services.player_pool import StoredPlayerPoolReader
+from app.services.projection_archive import (
+    LatestProjectionPlayerPoolReader,
+    ProjectionArchive,
+)
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolSnapshotRepository,
     PlayerPoolSnapshotScope,
@@ -85,6 +103,55 @@ COMMON_POSTED_MARKETS = (
     "BLK",
     "STKS",
 )
+
+
+def _recorded_projection_snapshot(catalog):
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(
+        provider_id="pts",
+        canonical_id=statistic.id,
+        label="Points",
+        components=statistic.components,
+    )
+    return ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(
+            PlayerProjectionMarket(
+                provider="dabble",
+                market_id="fixture-market-points",
+                athlete=AthleteEvidence(
+                    provider_id="fixture-lebron",
+                    canonical_id=2544,
+                    name="LeBron James",
+                    team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+                ),
+                event=EventEvidence(
+                    provider_id="fixture-event",
+                    canonical_id=GAME_ID,
+                ),
+                team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+                statistic=evidence,
+                statistic_match=StatisticMatch(
+                    state=MatchState.CANONICAL,
+                    evidence=evidence,
+                    scoring_period=ScoringPeriod.FULL_GAME,
+                    canonical=statistic,
+                    provider="dabble",
+                ),
+                status=MarketStatus.AVAILABLE,
+                variant=MarketVariant.STANDARD,
+                scoring_period=ScoringPeriod.FULL_GAME,
+            ),
+        ),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=NOW,
+    )
 
 
 class _NoProvider:
@@ -1182,3 +1249,84 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     }
     assert selection_response.get_json()["h2h"]["rows"]
     assert provider_calls == {"nba": 0, "pbp": 0}
+
+
+def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_without_provider_calls(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-route.sqlite3'}")
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(engine, catalog).ingest_complete_snapshot(
+        _recorded_projection_snapshot(catalog),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=NOW,
+    )
+    pool = LatestProjectionPlayerPoolReader(engine, clock=lambda: NOW)
+    event_catalog = _event_catalog(engine, settings)
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    matchup_service = MatchupService(
+        event_catalog=event_catalog,
+        player_pool=pool,
+        player_logs=_player_logs(engine, catalog),
+        player_diets=_player_diets(engine),
+        team_matchups=_team_matchups(engine),
+        stats_freshness=stats_freshness,
+        settings=settings,
+        injuries=None,
+        clock=lambda: NOW,
+    )
+    providers = {"nba": _NoProvider(), "pbp": _NoProvider(), "dfs": _NoProvider()}
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(
+                settings=settings,
+                slate_service=SlateService(
+                    event_catalog,
+                    settings=settings,
+                    player_pool=pool,
+                    injuries=None,
+                    clock=lambda: NOW,
+                ),
+                matchup_service=matchup_service,
+                nba_stats_provider=providers["nba"],
+                pbp_stats_provider=providers["pbp"],
+                dfs_providers={"dabble": providers["dfs"]},
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
+            ),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    client = app.test_client()
+
+    slate = client.get("/api/games/slate?date=2026-01-15")
+    matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert slate.status_code == 200
+    assert matchup.status_code == 200
+    assert slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": NOW.isoformat(),
+    }
+    assert matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": NOW.isoformat(),
+        "retrieved_at": NOW.isoformat(),
+        "providers": {
+            "dabble": {"status": "fresh", "retrieved_at": NOW.isoformat()}
+        },
+    }
+    assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [
+        2544
+    ]

@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.config.settings import RuntimeSettings
+from app.config.settings import FeatureSettings, RuntimeSettings
 from app.domain.freshness import time_window_timedelta
 
 
@@ -189,6 +189,35 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert board.statistic_catalog is dependencies.statistic_catalog
     assert isinstance(board.statistic_resolver, StatisticResolver)
     assert board.statistic_resolver.catalog is dependencies.statistic_catalog
+
+
+def test_projection_archive_gate_selects_one_database_reader_for_every_request(monkeypatch):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.projection_archive import LatestProjectionPlayerPoolReader
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        features=FeatureSettings(projection_archive_read_enabled=True),
+    )
+
+    dependencies = build_dependencies(settings)
+    reader = dependencies.projection_player_pool_reader
+
+    assert isinstance(reader, LatestProjectionPlayerPoolReader)
+    assert dependencies.slate_service.player_pool is reader
+    assert dependencies.matchup_service.player_pool is reader
+    assert dependencies.matchup_selection_service.player_pool is reader
+    assert not hasattr(reader, "board_service")
+    assert not hasattr(reader, "provider_registry")
 
 
 def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):

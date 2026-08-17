@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 import logging
@@ -91,6 +91,7 @@ class PlayerPool:
     players: tuple[PoolPlayer, ...]
     team_counts: Mapping[int, int]
     freshness: Mapping[str, Any]
+    game_states: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def unavailable_freshness() -> dict[str, Any]:

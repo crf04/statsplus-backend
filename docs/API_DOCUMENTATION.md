@@ -203,6 +203,8 @@ time, then `game_id`.
       "retrieved_at": "2026-01-02T10:00:00+00:00"
     },
     "pool": {
+      "state": "live",
+      "observed_at": "2026-01-02T10:04:00+00:00",
       "retrieved_at": "2026-01-02T10:04:00+00:00",
       "providers": {
         "prizepicks": {
@@ -232,6 +234,10 @@ time, then `game_id`.
         "targetable_player_count": 3
       },
       "scheduled_at": "2026-01-03T00:00:00+00:00",
+      "projection_state": {
+        "state": "live",
+        "observed_at": "2026-01-02T10:04:00+00:00"
+      },
       "status": {
         "state": "scheduled",
         "label": "7:00 pm ET"
@@ -293,6 +299,16 @@ is served through six hours with aggregate and contributing-provider status
 synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union.
+
+During projection-archive expansion, `PROJECTION_ARCHIVE_READ_ENABLED=true`
+selects one database-only reader for Slate, Matchup, and Matchup Selection.
+Each Slate game then adds `projection_state` with `state: live | missing` and a
+timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
+`observed_at` fields. Fresh archived Latest Player Projections produce `live`;
+absent or expired evidence produces `missing` with zero targetable players.
+The request does not fall back to the legacy Player Pool or call a projection
+provider. With the gate left at its default `false`, the existing response and
+legacy reader remain unchanged during expansion.
 
 A stale but populated schedule remains a `200` with
 `freshness.schedule.status: "stale"`. Stored
@@ -678,6 +694,9 @@ surfaces and additionally reports `player_game_logs`, per-Base
 `team_matchups[window].surfaces`. Every stored observation carries its actual
 timezone-aware `retrieved_at`; missing observations carry null. Pool freshness
 and per-provider status are passed through from the selected stored snapshot.
+When the projection-archive reader is activated, this block additionally
+contains `state: live | missing` and `observed_at`; the Matchup `game` header
+does not duplicate the Slate-only `projection_state` block.
 The stats-table surface is `stale` when its last successful publication
 predates the newest completed, non-postponed stored game; it is `missing` when
 no successful publication exists. Team facts for a started or past game are
@@ -703,6 +722,8 @@ are refused rather than ignored.
   "freshness": {
     "player_pool": {
       "status": "fresh",
+      "state": "live",
+      "observed_at": "2026-01-05T18:00:00+00:00",
       "retrieved_at": "2026-01-05T18:00:00+00:00",
       "providers": {}
     },
