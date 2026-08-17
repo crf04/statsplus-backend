@@ -109,6 +109,53 @@ class LedgerParityArtifactRepository:
                 connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
         return row
 
+    def record_matchup_parity(
+        self,
+        stream_key: str,
+        *,
+        cutoff: datetime,
+        report,
+        publication_id: str,
+        payload_checksum: str,
+        session: Session | None = None,
+        connection: Connection | None = None,
+    ) -> LedgerParityArtifact:
+        """Persist one matchup materializer dual-run report as parity evidence.
+
+        The matchup report shares the ``ledger_parity_artifacts`` sink with the
+        semantic player-log/per-36/traditional reports: both are mandatory,
+        activation-facing parity evidence bound to an exact inactive
+        Publication.  The report's own ``to_dict`` shape is retained verbatim.
+        """
+
+        if not publication_id or len(payload_checksum) != 64:
+            raise ValueError("candidate publication and payload checksum are required")
+        row = LedgerParityArtifact(
+            artifact_id=str(uuid4()),
+            publication_id=publication_id,
+            payload_checksum=payload_checksum,
+            stream_key=stream_key,
+            season=report.season,
+            cutoff=cutoff,
+            status="pending_adjudication" if report.adjudication_required else "exact",
+            report=json.dumps(report.to_dict(), sort_keys=True, default=str),
+            created_at=self.clock(),
+        )
+        values = {
+            column.name: getattr(row, column.name)
+            for column in LedgerParityArtifact.__table__.columns
+        }
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
+        if session is not None:
+            session.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        elif connection is not None:
+            connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        else:
+            with self.engine.begin() as connection:
+                connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        return row
+
     def latest(self, stream_key: str, season: str) -> LedgerParityArtifact | None:
         with Session(self.engine) as session:
             return session.scalar(
