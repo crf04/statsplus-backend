@@ -544,7 +544,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         accepted_at=replacement_time + timedelta(minutes=2),
     )
     assert same_time_result.changed is True
-    assert same_time_result.materialization_outcome == "advanced"
+    assert same_time_result.materialization_outcome == "same_time_not_promoted"
     assert archive.load_source_snapshot(same_time_result.snapshot_id) is not None
     with engine.connect() as connection:
         generation_outcome = connection.execute(
@@ -553,7 +553,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
                 == same_time_result.generation_id
             )
         ).scalar_one()
-    assert generation_outcome == "advanced"
+    assert generation_outcome == "same_time_not_promoted"
 
     newest_time = replacement_time + timedelta(minutes=3)
     newest_result = archive.ingest_complete_snapshot(

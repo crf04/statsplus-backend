@@ -183,8 +183,10 @@ def test_concurrent_postgres_ingestion_has_one_temporal_winner_and_no_mixed_gene
     }
 
 
-def test_equal_retrieval_time_postgres_writers_have_one_deterministic_latest_generation(
+@pytest.mark.parametrize("winner_index", (0, 1))
+def test_first_fenced_equal_time_postgres_writer_is_the_only_promoted_generation(
     projection_pg_engine,
+    winner_index,
 ):
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)
@@ -236,9 +238,9 @@ def test_equal_retrieval_time_postgres_writers_have_one_deterministic_latest_gen
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        winner = executor.submit(ingest, winner_engine, snapshots[0])
+        winner = executor.submit(ingest, winner_engine, snapshots[winner_index])
         assert winner_locked.wait(timeout=10)
-        loser = executor.submit(ingest, loser_engine, snapshots[1])
+        loser = executor.submit(ingest, loser_engine, snapshots[1 - winner_index])
         results = (winner.result(timeout=10), loser.result(timeout=10))
 
     with projection_pg_engine.connect() as connection:
@@ -252,14 +254,20 @@ def test_equal_retrieval_time_postgres_writers_have_one_deterministic_latest_gen
         promoted = connection.execute(
             select(ProviderPoll.promoted).order_by(ProviderPoll.poll_id)
         ).scalars().all()
+        generation_outcomes = connection.execute(
+            select(ProjectionMaterializationGeneration.outcome)
+        ).scalars().all()
     assert len({row.generation_id for row in latest}) == 1
-    assert tuple(row.canonical_player_id for row in latest) == (7, 8)
+    assert tuple(row.canonical_player_id for row in latest) == (
+        (7, 8) if winner_index == 0 else (9, 10)
+    )
     assert len({row.market_reference for row in latest}) == 2
     assert tuple(result.materialization_outcome for result in results) == (
         "advanced",
         "same_time_not_promoted",
     )
     assert sorted(promoted) == [False, True]
+    assert sorted(generation_outcomes) == ["advanced", "same_time_not_promoted"]
     event.remove(winner_engine, "after_cursor_execute", hold_winner_lock)
     event.remove(loser_engine, "before_cursor_execute", observe_loser_attempt)
     winner_engine.dispose()

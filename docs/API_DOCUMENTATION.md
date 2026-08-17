@@ -312,7 +312,13 @@ After a failed provider poll, prior confirmed offerings may be served as
 `stale-served` only through the inclusive six-hour fallback. Partial polls
 update and confirm only included references; omissions retain their prior
 evidence and confirmation. Complete empty snapshots retire only the same
-provider/query scope. Changes to canonical statistic
+provider/query scope and remain fresh successful provider evidence. When every
+required provider is current and Complete-empty, the database-first pool is
+`live`/`fresh` with zero players rather than unavailable. A direct Matchup
+Selection request for a player outside that derived empty pool returns the
+existing `404 resource_not_found`; never-polled or failed-without-successful-
+evidence scopes remain missing and keep the documented `503 provider_unavailable`.
+Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
 duplicating unchanged provider evidence. The response `observed_at` comes from
 the accepted poll linked to that generation, not necessarily the older

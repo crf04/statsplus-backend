@@ -33,6 +33,7 @@ from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
+    ProjectionSelectionPlayerPoolReader,
 )
 from app.services.statistic_catalog import StatisticCatalog
 
@@ -323,7 +324,7 @@ def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
     ]
 
 
-def test_equal_time_conflicting_snapshots_choose_the_same_winner_in_any_order(tmp_path):
+def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
     catalog = StatisticCatalog.load_default()
     first = _snapshot(
         "dabble",
@@ -339,12 +340,19 @@ def test_equal_time_conflicting_snapshots_choose_the_same_winner_in_any_order(tm
     )
     winners = []
     promoted_counts = []
+    outcomes = []
     for index, snapshots in enumerate(((first, second), (second, first))):
         engine = create_engine(f"sqlite:///{tmp_path / f'equal-time-{index}.sqlite3'}")
         run_migrations(engine)
         archive = ProjectionArchive(engine, catalog)
-        for snapshot in snapshots:
-            archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
+        outcomes.append(
+            tuple(
+                archive.ingest_snapshot(
+                    snapshot, query=QUERY, accepted_at=OBSERVED_AT
+                ).materialization_outcome
+                for snapshot in snapshots
+            )
+        )
         pool = _reader(engine, ("dabble",), OBSERVED_AT).get_pool_for_game(
             season=SEASON, game_id=GAME_ID
         )
@@ -358,8 +366,12 @@ def test_equal_time_conflicting_snapshots_choose_the_same_winner_in_any_order(tm
                 ).scalar_one()
             )
 
-    assert winners[0] == winners[1]
-    assert sorted(promoted_counts) == [1, 2]
+    assert winners == [(7,), (8,)]
+    assert promoted_counts == [1, 1]
+    assert outcomes == [
+        ("advanced", "same_time_not_promoted"),
+        ("advanced", "same_time_not_promoted"),
+    ]
 
 
 def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tmp_path):
@@ -546,6 +558,22 @@ def test_complete_empty_retires_only_its_provider_scope(tmp_path):
         season=SEASON, game_id=GAME_ID
     )
     assert [player.canonical_player_id for player in pool.players] == [8]
+    assert pool.freshness == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": OBSERVED_AT.isoformat(),
+        "retrieved_at": OBSERVED_AT.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": empty_at.isoformat(),
+            },
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": OBSERVED_AT.isoformat(),
+            },
+        },
+    }
     with engine.connect() as connection:
         assert connection.execute(
             select(func.count()).select_from(LatestPlayerProjection).where(
@@ -557,3 +585,68 @@ def test_complete_empty_retires_only_its_provider_scope(tmp_path):
                 ProjectionObservation.provider == "dabble"
             )
         ).scalar_one() == 1
+
+
+def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot("dabble", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    reader = _reader(engine, ("dabble",), OBSERVED_AT)
+
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.players == ()
+    assert pool.team_counts == {}
+    assert pool.freshness == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": OBSERVED_AT.isoformat(),
+        "retrieved_at": OBSERVED_AT.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": OBSERVED_AT.isoformat(),
+            }
+        },
+    }
+    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+        season=SEASON,
+        game_id=GAME_ID,
+    ) is not None
+
+
+def test_failed_poll_without_successful_evidence_remains_missing(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    reader = _reader(engine, ("dabble",), OBSERVED_AT)
+    assert reader.get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    ).freshness["state"] == "missing"
+
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        completed_at=OBSERVED_AT,
+        failure_reason="access_denied",
+    )
+    failed_pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert failed_pool.freshness == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {
+            "dabble": {"status": "missing", "retrieved_at": None}
+        },
+    }
+    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+        season=SEASON,
+        game_id=GAME_ID,
+    ) is None

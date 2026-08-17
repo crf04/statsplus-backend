@@ -391,11 +391,10 @@ omitted offerings keep their prior immutable observation and are carried into
 the new atomic state generation. Failed polls change no Latest pointers. An
 older snapshot remains immutable evidence but cannot move Latest backward. An
 identical snapshot at the same observation time is idempotent. Conflicting
-documents at the same provider/query observation time use their canonical
-content and materialization checksums as a stable tie-break, so arrival order
-cannot choose different final Latest rows. Only the deterministic winner
-remains in Latest; a conflicting document evaluated after that winner is
-retained as `same_time_not_promoted` evidence.
+documents at the same provider/query observation time use one auditable fence:
+the first snapshot accepted while holding the durable scope lock is the sole
+promoted generation for that instant. Every later equal-time conflict is
+retained as `same_time_not_promoted` evidence and cannot replace Latest.
 `older_not_promoted` records the corresponding older-snapshot decision.
 Every write first enters a provider/season/query scope transaction. PostgreSQL
 serializes both the initial unique scope-lock row insertion race and subsequent
@@ -440,7 +439,11 @@ promotion-aware poll health are read in one database snapshot. PostgreSQL uses
 committing between those queries therefore cannot pair old Latest state with
 new poll health. Every required provider is seeded into the public freshness
 document. If it has no eligible row, its entry is `missing` with a null
-retrieval time. Mixed provider states omit aggregate `status`; `partial` remains
+retrieval time, except that a promoted Complete-empty poll is fresh successful
+evidence with its actual retrieval time. A pool backed only by current
+Complete-empty evidence is therefore live/fresh with zero players; its
+game-specific state remains missing because it has no targetable row. Mixed
+provider states omit aggregate `status`; `partial` remains
 reserved for a multi-game archive read containing both live and missing game
 states.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it

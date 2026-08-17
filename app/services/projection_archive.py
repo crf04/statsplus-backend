@@ -316,8 +316,6 @@ class ProjectionArchive:
                 current,
                 incoming_retrieved_at=snapshot.retrieved_at,
                 promoted_through=promoted_through,
-                incoming_content_checksum=content_checksum,
-                incoming_materialization_checksum=materialization_checksum,
             )
             if (
                 current is not None
@@ -711,11 +709,7 @@ class ProjectionArchive:
                     generation_table.c.query_key == query_key,
                     generation_table.c.outcome == "advanced",
                 )
-                .order_by(
-                    generation_table.c.retrieved_at.desc(),
-                    snapshot_table.c.content_checksum.desc(),
-                    generation_table.c.materialization_checksum.desc(),
-                )
+                .order_by(generation_table.c.retrieved_at.desc())
                 .limit(1)
             )
             .mappings()
@@ -728,8 +722,6 @@ class ProjectionArchive:
         *,
         incoming_retrieved_at: datetime,
         promoted_through: datetime | None = None,
-        incoming_content_checksum: str,
-        incoming_materialization_checksum: str,
     ) -> str:
         if current is None and promoted_through is None:
             return "advanced"
@@ -743,14 +735,6 @@ class ProjectionArchive:
         if incoming > current_retrieved_at:
             return "advanced"
         if incoming == current_retrieved_at:
-            if current is not None and (
-                incoming_content_checksum,
-                incoming_materialization_checksum,
-            ) > (
-                str(current["content_checksum"]),
-                str(current["materialization_checksum"]),
-            ):
-                return "advanced"
             return "same_time_not_promoted"
         return "older_not_promoted"
 
@@ -1109,6 +1093,7 @@ class LatestProjectionPlayerPoolReader:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
         table = LatestPlayerProjection.__table__
         poll_table = ProviderPoll.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
         providers_in_scope = tuple(item.provider for item in self.scopes)
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "postgresql":
@@ -1135,11 +1120,22 @@ class LatestProjectionPlayerPoolReader:
                 polls = (
                     connection.execute(
                         select(
+                            poll_table.c.poll_id,
                             poll_table.c.provider,
                             poll_table.c.outcome,
                             poll_table.c.promoted,
                             poll_table.c.completed_at,
-                        ).where(
+                            poll_table.c.retrieved_at,
+                            poll_table.c.observation_count,
+                            snapshot_table.c.snapshot_status,
+                        )
+                        .select_from(
+                            poll_table.outerjoin(
+                                snapshot_table,
+                                poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                            )
+                        )
+                        .where(
                             poll_table.c.season == season,
                             poll_table.c.provider.in_(providers_in_scope),
                             poll_table.c.query_key == self.scope.query_key,
@@ -1153,12 +1149,17 @@ class LatestProjectionPlayerPoolReader:
                     .all()
                 )
 
-        latest_outcomes: dict[str, str] = {}
+        latest_health: dict[str, Any] = {}
+        latest_empty_success: dict[str, Any] = {}
         for poll in polls:
             if poll["outcome"] == "failed" or poll["promoted"]:
-                latest_outcomes.setdefault(
-                    str(poll["provider"]), str(poll["outcome"])
-                )
+                latest_health.setdefault(str(poll["provider"]), poll)
+            if (
+                poll["promoted"]
+                and poll["observation_count"] == 0
+                and poll["snapshot_status"] == SnapshotStatus.COMPLETE.value
+            ):
+                latest_empty_success.setdefault(str(poll["provider"]), poll)
         now = (
             assume_utc(self.clock())
             if self.clock is not None
@@ -1171,7 +1172,8 @@ class LatestProjectionPlayerPoolReader:
         eligible_rows: list[Any] = []
         for row in rows:
             provider = str(row["provider"])
-            outcome = latest_outcomes.get(provider)
+            health = latest_health.get(provider)
+            outcome = None if health is None else str(health["outcome"])
             age = now - assume_utc(row["confirmed_at"])
             status = None
             if outcome == "failed":
@@ -1189,13 +1191,36 @@ class LatestProjectionPlayerPoolReader:
                 eligible_rows.append(row)
         rows = eligible_rows
 
+        empty_provider_observed_at: dict[str, datetime] = {}
+        for provider, empty_poll in latest_empty_success.items():
+            health = latest_health.get(provider)
+            if health is None:
+                continue
+            empty_retrieved_at = assume_utc(empty_poll["retrieved_at"])
+            age = now - empty_retrieved_at
+            status = None
+            if health["outcome"] == "failed":
+                failure_age = (
+                    self.failure_fallback_max_age
+                    if provider in self.required_providers
+                    else self.live_max_age
+                )
+                if timedelta(0) <= age <= failure_age:
+                    status = "stale-served"
+            elif health["poll_id"] == empty_poll["poll_id"]:
+                if timedelta(0) <= age <= self.live_max_age:
+                    status = "fresh"
+            if status is not None:
+                provider_statuses[provider] = status
+                empty_provider_observed_at[provider] = empty_retrieved_at
+
         game_states = {
             game_id: self._state_for_rows(
                 [row for row in rows if row["canonical_game_id"] == game_id]
             )
             for game_id in requested_games
         }
-        if not rows:
+        if not rows and not empty_provider_observed_at:
             missing_freshness = PlayerPool.missing_projection_freshness()
             missing_freshness["providers"] = {
                 provider: {"status": "missing", "retrieved_at": None}
@@ -1246,8 +1271,7 @@ class LatestProjectionPlayerPoolReader:
         team_counts: dict[int, int] = {}
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
-        observed_at = min(assume_utc(row["confirmed_at"]) for row in rows)
-        provider_observed_at: dict[str, datetime] = {}
+        provider_observed_at = dict(empty_provider_observed_at)
         for row in rows:
             provider = str(row["provider"])
             row_observed_at = assume_utc(row["confirmed_at"])
@@ -1255,6 +1279,7 @@ class LatestProjectionPlayerPoolReader:
                 provider_observed_at.get(provider, row_observed_at),
                 row_observed_at,
             )
+        observed_at = min(provider_observed_at.values())
         providers = {
             provider: {
                 "status": provider_statuses[provider],
@@ -1272,8 +1297,10 @@ class LatestProjectionPlayerPoolReader:
             "retrieved_at": observed_at.isoformat(),
             "providers": providers,
         }
-        if len(requested_games) > 1 and any(
-            state["state"] == "missing" for state in game_states.values()
+        if (
+            len(requested_games) > 1
+            and any(state["state"] == "live" for state in game_states.values())
+            and any(state["state"] == "missing" for state in game_states.values())
         ):
             freshness["status"] = "partial"
         elif statuses == {"stale-served"}:
@@ -1349,7 +1376,28 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
     ) -> ProjectionArchiveResult:
+        return self._record_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=accepted_at,
+            poll_started_at=poll_started_at,
+            require_complete=False,
+        )
+
+    def _record_snapshot(
+        self,
+        snapshot: ProviderSnapshot,
+        *,
+        query: NBAMarketQuery,
+        accepted_at: datetime | None,
+        poll_started_at: datetime | None,
+        require_complete: bool,
+    ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
+        if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
+            raise ValueError(
+                "only complete provider snapshots may enter this archive path"
+            )
         self._scope_for(snapshot.provider, query)
         return self.archive.ingest_snapshot(
             snapshot,
@@ -1366,16 +1414,12 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
     ) -> ProjectionArchiveResult:
-        require_projection_archive_schema(self.archive.engine)
-        if snapshot.status is not SnapshotStatus.COMPLETE:
-            raise ValueError(
-                "only complete provider snapshots may enter this archive path"
-            )
-        return self.record_snapshot(
+        return self._record_snapshot(
             snapshot,
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            require_complete=True,
         )
 
     def record_failed_poll(

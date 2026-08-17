@@ -1528,42 +1528,63 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
 
     empty_at = failed_at + timedelta(minutes=1)
-    assembled.projection_recorder.record_complete_snapshot(
-        ProviderSnapshot(
-            provider="dabble",
-            status=SnapshotStatus.COMPLETE,
-            markets=(),
-            coverage=CoverageEvidence(
-                fetched_count=0,
-                eligible_count=0,
-                normalized_count=0,
-                expected_total=0,
+    for provider in ("dabble", "prizepicks"):
+        assembled.projection_recorder.record_complete_snapshot(
+            ProviderSnapshot(
+                provider=provider,
+                status=SnapshotStatus.COMPLETE,
+                markets=(),
+                coverage=CoverageEvidence(
+                    fetched_count=0,
+                    eligible_count=0,
+                    normalized_count=0,
+                    expected_total=0,
+                ),
+                retrieved_at=empty_at,
             ),
-            retrieved_at=empty_at,
-        ),
-        query=query,
-        accepted_at=empty_at,
-    )
+            query=query,
+            accepted_at=empty_at,
+        )
     pool.clock = lambda: empty_at
-    empty_slate = client.get("/api/games/slate?date=2026-01-15")
-    assert empty_slate.get_json()["games"][0]["projection_state"] == {
-        "state": "missing",
-        "observed_at": None,
+    empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert empty_matchup.status_code == 200
+    assert empty_matchup.get_json()["players"] == []
+    assert empty_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": empty_at.isoformat(),
+        "retrieved_at": empty_at.isoformat(),
+        "providers": {
+            provider: {
+                "status": "fresh",
+                "retrieved_at": empty_at.isoformat(),
+            }
+            for provider in ("dabble", "prizepicks")
+        },
     }
-    assert client.get(
+    empty_selection = client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    ).status_code == 503
+    )
+    assert empty_selection.status_code == 404
+    assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
 
     disabled_at = empty_at + timedelta(minutes=1)
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        assembled.projection_recorder.record_complete_snapshot(
+            replace(snapshot, retrieved_at=disabled_at),
+            query=query,
+            accepted_at=disabled_at,
+        )
+    expired_at = disabled_at + timedelta(minutes=16)
     assembled.projection_recorder.record_complete_snapshot(
-        replace(recorded_snapshot, retrieved_at=disabled_at),
+        replace(recorded_snapshot, retrieved_at=expired_at),
         query=query,
-        accepted_at=disabled_at,
+        accepted_at=expired_at,
     )
     disabled_pool = LatestProjectionPlayerPoolReader(
         engine,
         pool.scopes,
-        clock=lambda: disabled_at,
+        clock=lambda: expired_at,
         required_providers=("dabble",),
     )
     route_dependencies = app.extensions["dependencies"]
@@ -1574,12 +1595,12 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert disabled_matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",
         "state": "live",
-        "observed_at": disabled_at.isoformat(),
-        "retrieved_at": disabled_at.isoformat(),
+        "observed_at": expired_at.isoformat(),
+        "retrieved_at": expired_at.isoformat(),
         "providers": {
             "dabble": {
                 "status": "fresh",
-                "retrieved_at": disabled_at.isoformat(),
+                "retrieved_at": expired_at.isoformat(),
             }
         },
     }
@@ -1607,9 +1628,9 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             )
         ).scalar_one() == 1
     assert durable_counts == {
-        "snapshots": 6,
-        "polls": 11,
-        "generations": 8,
-        "observations": 7,
+        "snapshots": 8,
+        "polls": 14,
+        "generations": 10,
+        "observations": 8,
         "latest": 2,
     }
