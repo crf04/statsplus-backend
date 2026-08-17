@@ -27,6 +27,7 @@ from app.config.settings import (
 )
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     PublicationObservation,
@@ -73,6 +74,9 @@ from app.services.matchup_selection import MatchupSelectionService
 from app.services.game_service import GameService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.ledger_matchup_materialization import (
+    LedgerMatchupMaterializationService,
+)
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
@@ -103,6 +107,10 @@ from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
 from app.services.slate_service import SlateService
 from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.team_matchup_refresh import (
+    TeamMatchupProvenance,
+    TeamMatchupRefreshService,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -191,7 +199,12 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
 
 
 def _source_independent_matchup_contract(response):
-    """Compare public matchup facts while retaining provenance separately."""
+    """Compare documented source-independent fields.
+
+    Provenance, additive coverage, and team-matchup freshness are source
+    metadata; the journey asserts those envelopes explicitly at each side of
+    the transition before excluding them from the byte-compatible contract.
+    """
 
     payload = json.loads(response.data)
     payload.pop("provenance", None)
@@ -212,6 +225,10 @@ def _route_ledger_games(governance):
     source_games = _league_games()
     events = governance.events
     assert len(source_games) == len(events)
+    provider_values = {
+        int(row["team_id"]): int(row["allowed"])
+        for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
+    }
     games = []
     for source, event in zip(source_games, events):
         team_map = {
@@ -229,14 +246,42 @@ def _route_ledger_games(governance):
                 team_tricode=tricode_map[fact.team_id],
                 opponent_team_id=team_map[fact.opponent_team_id],
                 opponent_team_tricode=tricode_map[fact.opponent_team_id],
+                offensive_rebounds=provider_values[team_map[fact.opponent_team_id]],
+                defensive_rebounds=0,
+                rebounds=provider_values[team_map[fact.opponent_team_id]],
+                turnovers=provider_values[team_map[fact.opponent_team_id]],
+                steals=provider_values[team_map[fact.opponent_team_id]],
+                blocks=provider_values[team_map[fact.opponent_team_id]],
+                assists=provider_values[team_map[fact.opponent_team_id]] * 5,
             )
             for fact in source.team_facts
         )
+        assist_value_by_team = {
+            team_fact.team_id: provider_values[team_fact.opponent_team_id]
+            for team_fact in team_facts
+        }
+        assist_total_by_team = {
+            team_id: value * 5 for team_id, value in assist_value_by_team.items()
+        }
         player_facts = tuple(
             replace(
                 fact,
                 team_id=team_map[fact.team_id],
                 team_tricode=tricode_map[fact.team_id],
+                offensive_rebounds=0,
+                defensive_rebounds=0,
+                rebounds=0,
+                turnovers=0,
+                steals=0,
+                blocks=0,
+                assists=assist_total_by_team[team_map[fact.team_id]],
+                two_point_assists=0,
+                three_point_assists=0,
+                arc3_assists=assist_value_by_team[team_map[fact.team_id]],
+                corner3_assists=assist_value_by_team[team_map[fact.team_id]],
+                at_rim_assists=assist_value_by_team[team_map[fact.team_id]],
+                short_mid_range_assists=assist_value_by_team[team_map[fact.team_id]],
+                long_mid_range_assists=assist_value_by_team[team_map[fact.team_id]],
             )
             for fact in source.player_facts
         )
@@ -262,156 +307,189 @@ def _route_ledger_games(governance):
     return tuple(games)
 
 
-def _persist_independent_legacy_provider_output(
-    engine,
-    games,
-    governance,
-    *,
-    window,
-):
-    """Persist provider aggregates calculated independently of ledger windows.
+class _RecordedLegacyCatalog:
+    def __init__(self, events):
+        self.events = tuple(events)
 
-    The fixture deliberately computes the legacy aggregate from provider-like
-    team/detail rows, while ``LedgerMaterializationService`` derives its
-    candidate from typed canonical games.  Neither side copies the other's
-    serialized payload or mutates a completed snapshot after the fact.
+    def get_events(self, season):
+        assert season == SEASON
+        return list(self.events)
+
+
+def _recorded_provider_membership(team_ids):
+    """Return the independent game-log/detail response fixture.
+
+    These are provider-returned IDs recorded from the fixture provider, not
+    IDs read from the governed Event Catalog.  The deterministic schedule is
+    kept here so a catalog mutation cannot silently rewrite the provider
+    response that the refresh writer validates.
     """
 
-    game_ids_by_team = (
-        governance.expected_season_game_ids
-        if window == "season"
-        else governance.expected_l15_game_ids
-    )
-    game_by_id = {game.game_id: game for game in games}
-    traditional_metrics = {
-        "OPP_REB": "rebounds",
-        "OPP_TOV": "turnovers",
-        "OPP_STL": "steals",
-        "OPP_BLK": "blocks",
-    }
-    assist_metrics = {
-        "Assists": "assists",
-        "Arc3Assists": "arc3_assists",
-        "Corner3Assists": "corner3_assists",
-        "AtRimAssists": "at_rim_assists",
-        "ShortMidRangeAssists": "short_mid_range_assists",
-        "LongMidRangeAssists": "long_mid_range_assists",
-    }
-    authority = {
-        "window": window,
-        "provider_source": "nba_stats.team_game_log",
-        "provider_sources": [
-            "nba_stats.team_game_log",
-            "pbp_stats.team_game_log",
-        ],
-        "collect_before": governance.collect_before.isoformat(),
-        "provider_game_ids_by_source": {
-            source: {
-                str(team_id): sorted(game_ids_by_team[team_id])
-                for team_id in governance.team_ids
+    provider_order = list(sorted(team_ids))
+    membership = {team_id: [] for team_id in provider_order}
+    for round_index in range(15):
+        for pair_index in range(15):
+            home = provider_order[pair_index]
+            away = provider_order[-1 - pair_index]
+            game_id = f"game-{round_index:02d}-{pair_index:02d}"
+            membership[home].append(game_id)
+            membership[away].append(game_id)
+        provider_order = [provider_order[0], provider_order[-1], *provider_order[1:-1]]
+    return {team_id: tuple(sorted(game_ids)) for team_id, game_ids in membership.items()}
+
+
+class _RecordedLegacyNBA:
+    def __init__(self, team_ids, membership, values):
+        self.team_ids = tuple(team_ids)
+        self.membership = membership
+        self.values = values
+        self.aggregate_calls = []
+        self.detail_calls = []
+
+    def fetch_team_game_ids(self, *, team_id, season, season_type, date_from, date_to):
+        self.detail_calls.append((team_id, season, season_type, date_from, date_to))
+        return self.membership[team_id]
+
+    def fetch_opponent_team_stats(self, date_from, **kwargs):
+        self.aggregate_calls.append(("traditional", date_from, dict(kwargs)))
+        team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
+        return pd.DataFrame([
+            {
+                "TEAM_ID": team_id,
+                "TEAM_NAME": f"Team {team_id}",
+                "GP": len(self.membership[team_id]),
+                "MIN": len(self.membership[team_id]) * 48,
+                "OPP_REB": self.values[team_id] * len(self.membership[team_id]),
+                "OPP_TOV": self.values[team_id] * len(self.membership[team_id]),
+                "OPP_STL": self.values[team_id] * len(self.membership[team_id]),
+                "OPP_BLK": self.values[team_id] * len(self.membership[team_id]),
             }
-            for source in (
-                "nba_stats.team_game_log",
-                "pbp_stats.team_game_log",
-            )
-        },
-        "teams": {
-            str(team_id): {
-                "expected_games": len(game_ids_by_team[team_id]),
-                "authority_game_ids": sorted(game_ids_by_team[team_id]),
-                "provider_game_ids": sorted(game_ids_by_team[team_id]),
+            for team_id in team_ids
+        ])
+
+    def fetch_opponent_shot_chart(self, general_range, date_from, **kwargs):
+        team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
+        return pd.DataFrame([
+            {
+                "TEAM_ID": team_id,
+                "TEAM_NAME": f"Team {team_id}",
+                "GP": len(self.membership[team_id]),
+                "FG2M": 1,
+                "FG2A": 1,
+                "FG3M": 1,
+                "FG3A": 1,
             }
-            for team_id in governance.team_ids
-        },
+            for team_id in team_ids
+        ])
+
+    def fetch_opponent_shooting_zone(self, date_from, **kwargs):
+        team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
+        return pd.DataFrame([
+            {
+                "TEAM_ID": team_id,
+                "TEAM_NAME": f"Team {team_id}",
+                "Restricted Area_OPP_FGM": 1,
+                "Restricted Area_OPP_FGA": 1,
+            }
+            for team_id in team_ids
+        ])
+
+    def fetch_synergy_play_types(self, play_type, **kwargs):
+        return pd.DataFrame()
+
+
+class _RecordedLegacyPBP:
+    def __init__(self, team_ids, membership, values):
+        self.team_ids = tuple(team_ids)
+        self.membership = membership
+        self.values = values
+        self.aggregate_calls = []
+        self.detail_calls = []
+
+    def fetch_team_game_ids(self, *, team_id, season, season_type, date_from, date_to):
+        self.detail_calls.append((team_id, season, season_type, date_from, date_to))
+        return self.membership[team_id]
+
+    def fetch_totals_frame(self, data_type, **kwargs):
+        assert data_type == "opponent"
+        self.aggregate_calls.append(dict(kwargs))
+        team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
+        return pd.DataFrame([
+            {
+                "TeamId": team_id,
+                "Name": f"Team {team_id}",
+                "GamesPlayed": len(self.membership[team_id]),
+                "SecondsPlayed": len(self.membership[team_id]) * 48 * 60,
+                "Assists": self.values[team_id] * 5 * len(self.membership[team_id]),
+                "Arc3Assists": self.values[team_id] * len(self.membership[team_id]),
+                "Corner3Assists": self.values[team_id] * len(self.membership[team_id]),
+                "AtRimAssists": self.values[team_id] * len(self.membership[team_id]),
+                "ShortMidRangeAssists": self.values[team_id] * len(self.membership[team_id]),
+                "LongMidRangeAssists": self.values[team_id] * len(self.membership[team_id]),
+            }
+            for team_id in team_ids
+        ])
+
+
+def _refresh_isolated_legacy_output(legacy_engine, source_engine, governance):
+    """Run the production legacy writer against recorded provider responses."""
+
+    team_ids = tuple(sorted(governance.team_ids))
+    values = {
+        int(row["team_id"]): int(row["allowed"])
+        for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
     }
-    provider_window_identity = json.dumps(
-        authority, sort_keys=True, separators=(",", ":")
+    nba = _RecordedLegacyNBA(
+        team_ids, _recorded_provider_membership(team_ids), values
     )
-    facts = []
-    for team_id in sorted(governance.team_ids):
-        team_games = [
-            game_by_id[game_id] for game_id in sorted(game_ids_by_team[team_id])
-        ]
-        team_minutes = sum(
-            fact.team_minutes
-            for game in team_games
-            for fact in game.team_facts
-            if fact.team_id == team_id
-        )
-        opponent_by_game = {
-            game.game_id: next(
-                fact
-                for fact in game.team_facts
-                if fact.team_id != team_id
+    pbp = _RecordedLegacyPBP(
+        team_ids, _recorded_provider_membership(team_ids), values
+    )
+    with source_engine.connect() as connection:
+        manifest = connection.execute(
+            select(CollectionManifest.__table__).where(
+                CollectionManifest.manifest_id == governance.manifest_id
             )
-            for game in team_games
-        }
-        for base, metric_map, provider in (
-            ("traditional", traditional_metrics, "nba_stats"),
-            ("assist_locations", assist_metrics, "pbp_stats"),
-        ):
-            for metric, field in metric_map.items():
-                total = 0.0
-                for game in team_games:
-                    opponent = opponent_by_game[game.game_id]
-                    if base == "traditional" or metric == "Assists":
-                        total += float(getattr(opponent, field))
-                    else:
-                        total += sum(
-                            float(getattr(player, field))
-                            for player in game.player_facts
-                            if player.team_id == opponent.team_id
-                        )
-                facts.append(
-                    TeamMatchupFact(
-                        team_id=team_id,
-                        base=base,
-                        slice_key=metric,
-                        stat_key=metric,
-                        # Preserve provider integer counts and their exact
-                        # aggregate minute denominator; the query layer
-                        # derives the served per48 value from these facts.
-                        raw_value=total,
-                        denominator_value=team_minutes,
-                        denominator_unit="minutes",
-                        provider=provider,
-                        game_ids=tuple(sorted(game_ids_by_team[team_id])),
-                        cutoff=governance.cutoff,
-                        manifest_id=governance.manifest_id,
-                        event_catalog_publication_id=(
-                            governance.event_catalog_publication_id
-                        ),
-                        event_catalog_checksum=governance.event_catalog_checksum,
-                        provider_window_identity=provider_window_identity,
-                    )
-                )
-    game_ids = tuple(
-        sorted({game_id for ids in game_ids_by_team.values() for game_id in ids})
+        ).mappings().one()
+        catalog = connection.execute(
+            select(CatalogPublication.__table__).where(
+                CatalogPublication.publication_id
+                == governance.event_catalog_publication_id
+            )
+            ).mappings().one()
+    catalog_events = tuple(json.loads(catalog["payload"])["events"])
+    with legacy_engine.begin() as connection:
+        # The isolated writer needs the same immutable authority rows, but it
+        # owns the completed legacy snapshots independently of the route DB.
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CollectionManifest.__table__.insert().values(**manifest))
+    provenance = TeamMatchupProvenance(
+        cutoff=governance.cutoff,
+        manifest_id=governance.manifest_id,
+        event_catalog_publication_id=governance.event_catalog_publication_id,
+        event_catalog_checksum=governance.event_catalog_checksum,
+        manifest_checksum=manifest["checksum"],
+        collect_before=governance.collect_before,
     )
-    observations = tuple(
-        TeamMatchupObservation(
-            surface=base,
-            status="available",
-            game_ids=game_ids,
-            cutoff=governance.cutoff,
-            manifest_id=governance.manifest_id,
-            event_catalog_publication_id=governance.event_catalog_publication_id,
-            event_catalog_checksum=governance.event_catalog_checksum,
-            provider_window_identity=provider_window_identity,
+    TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(legacy_engine),
+        event_catalog=_RecordedLegacyCatalog(catalog_events),
+        nba_stats_provider=nba,
+        pbp_stats_provider=pbp,
+        # Keep collect_before in the future while preserving a real writer
+        # timestamp on the completed isolated snapshot.
+        clock=lambda: governance.cutoff - timedelta(minutes=1),
+    ).refresh(SEASON, as_of=governance.cutoff.date(), provenance=provenance)
+    repository = TeamMatchupRepository(legacy_engine)
+    snapshots = tuple(
+        repository.get_snapshot(
+            TeamMatchupSnapshotScope(SEASON, governance.cutoff.date(), window_games)
         )
-        for base in ("traditional", "assist_locations")
+        for window_games in (None, 15)
     )
-    scope = TeamMatchupSnapshotScope(
-        SEASON,
-        governance.cutoff.date(),
-        15 if window == "l15" else None,
-    )
-    repository = TeamMatchupRepository(engine)
-    repository.replace_snapshots(
-        ((scope, tuple(facts), observations),),
-        retrieved_at=governance.cutoff,
-    )
-    return repository.get_snapshot(scope)
+    assert len(nba.detail_calls) == len(team_ids) * 2
+    assert len(pbp.detail_calls) == len(team_ids) * 2
+    return snapshots, nba, pbp
 
 
 def _event_catalog(engine, settings):
@@ -1496,24 +1574,25 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         publication_id=diet_candidate, observation_id="journey-observation-diet",
     )
 
-    # Build complete production-shaped PBP games once, then run the legacy
-    # provider aggregate and ledger materializer in isolated repositories.
-    # The route database receives only their completed outputs; it never
-    # rewrites one source's facts or payload from the other's values.
+    # Build complete production-shaped PBP games for the ledger side.  The
+    # legacy side invokes the production writer against independently
+    # recorded provider aggregate/detail responses in its own database.
     ledger_games = _route_ledger_games(matchup_governance)
     legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite3'}")
     ledger_engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(legacy_engine)
     run_migrations(ledger_engine)
-    legacy_snapshots = tuple(
-        _persist_independent_legacy_provider_output(
-            legacy_engine,
-            ledger_games,
-            matchup_governance,
-            window=window,
-        )
-        for window in ("season", "l15")
+    legacy_snapshots, legacy_nba, legacy_pbp = _refresh_isolated_legacy_output(
+        legacy_engine,
+        engine,
+        matchup_governance,
     )
+    # The refresh writer requests the league Season aggregate once and one
+    # bounded per-team aggregate for exact L15 (for each independent source).
+    assert len(legacy_nba.aggregate_calls) == len(matchup_governance.team_ids) + 1
+    assert len(legacy_pbp.aggregate_calls) == len(matchup_governance.team_ids) + 1
+    assert len(legacy_nba.detail_calls) == len(matchup_governance.team_ids) * 2
+    assert len(legacy_pbp.detail_calls) == len(matchup_governance.team_ids) * 2
     TeamMatchupRepository(engine).replace_snapshots(
         tuple(
             (snapshot.scope, snapshot.facts, snapshot.observations)
@@ -1565,6 +1644,17 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
 
     ledger_repository = CanonicalGameLedgerRepository(ledger_engine)
     ledger_repository.replace_games_atomic(ledger_games)
+    LedgerMatchupMaterializationService(
+        ledger_repository,
+        TeamMatchupRepository(ledger_engine),
+        clock=lambda: matchup_governance.cutoff,
+    ).materialize(
+        SEASON,
+        as_of=matchup_governance.cutoff.date(),
+        expected_game_ids=matchup_governance.expected_game_ids,
+        expected_l15_game_ids=matchup_governance.expected_l15_game_ids,
+        team_ids=matchup_governance.team_ids,
+    )
     LedgerMaterializationService(
         ledger_repository,
         # Publications are staged in the route control plane, so their
@@ -1773,6 +1863,15 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert pre_matchup_response.status_code == 200
     assert pre_player_game_log_response.status_code == 200
     pre_matchup = pre_matchup_response.get_json()
+    def assert_matchup_freshness_envelope(payload, *, source):
+        for window in ("season", "last_15"):
+            for surface in ("traditional", "assist_locations"):
+                envelope = payload["freshness"]["team_matchups"][window]["surfaces"][surface]
+                assert envelope["status"] == "available"
+                assert envelope["unavailable_reason"] is None
+                assert envelope["retrieved_at"] is not None, source
+
+    assert_matchup_freshness_envelope(pre_matchup, source="legacy")
     for stream_key in (
         *matchup_publications["season"].keys(),
         *matchup_publications["l15"].keys(),
@@ -1865,6 +1964,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert repeated_player_game_log_response.status_code == 200
     assert repeated_player_game_log_response.data == player_game_log_response.data
     matchup = matchup_response.get_json()
+    assert_matchup_freshness_envelope(matchup, source="ledger")
     for stream_key in (
         *matchup_publications["season"].keys(),
         *matchup_publications["l15"].keys(),
