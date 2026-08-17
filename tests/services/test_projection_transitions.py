@@ -603,6 +603,118 @@ def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
     ]
 
 
+def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    initial = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, market_id="initial", player_id=7),),
+        OBSERVED_AT,
+    )
+    initial_result = archive.ingest_snapshot(
+        initial,
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    failure_started_at = OBSERVED_AT + timedelta(minutes=19)
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=failure_started_at,
+        completed_at=failure_completed_at,
+        failure_reason="access_denied",
+    )
+    late_retrieved_at = OBSERVED_AT + timedelta(minutes=10)
+    late_changed = archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, market_id="late", player_id=8),),
+            late_retrieved_at,
+        ),
+        query=QUERY,
+        accepted_at=failure_completed_at + timedelta(seconds=1),
+    )
+    late_empty = archive.ingest_snapshot(
+        _snapshot("dabble", SnapshotStatus.COMPLETE, (), late_retrieved_at),
+        query=QUERY,
+        accepted_at=failure_completed_at + timedelta(seconds=2),
+    )
+
+    fallback = _reader(
+        engine,
+        ("dabble",),
+        failure_completed_at + timedelta(seconds=2),
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert late_changed.materialization_outcome == "older_not_promoted"
+    assert late_empty.materialization_outcome == "older_not_promoted"
+    assert fallback.freshness["status"] == "stale-served"
+    assert [player.canonical_player_id for player in fallback.players] == [7]
+
+    recovery_at = OBSERVED_AT + timedelta(minutes=21)
+    recovery = archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, market_id="recovery", player_id=9),),
+            recovery_at,
+        ),
+        query=QUERY,
+        accepted_at=recovery_at,
+    )
+    recovered_pool = _reader(
+        engine,
+        ("dabble",),
+        recovery_at,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert recovery.materialization_outcome == "advanced"
+    assert recovered_pool.freshness["status"] == "fresh"
+    assert [player.canonical_player_id for player in recovered_pool.players] == [9]
+    with engine.connect() as connection:
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.confirmed_at,
+            )
+        ).one()
+        polls = connection.execute(
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
+                ProviderPoll.completed_at
+            )
+        ).all()
+        generations = connection.execute(
+            select(ProjectionMaterializationGeneration.outcome).order_by(
+                ProjectionMaterializationGeneration.created_at
+            )
+        ).scalars().all()
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 3
+    assert latest == (
+        recovery.generation_id,
+        recovery_at.replace(tzinfo=None),
+    )
+    assert polls == [
+        ("changed", True),
+        ("failed", False),
+        ("changed", False),
+        ("changed", False),
+        ("changed", True),
+    ]
+    assert generations == [
+        "advanced",
+        "older_not_promoted",
+        "older_not_promoted",
+        "advanced",
+    ]
+    assert initial_result.generation_id != recovery.generation_id
+
+
 def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
     catalog = StatisticCatalog.load_default()
     first = _snapshot(

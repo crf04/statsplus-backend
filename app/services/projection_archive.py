@@ -364,6 +364,13 @@ class ProjectionArchive:
                 season=query.season,
                 query_key=query_key,
             )
+            failed_through = self._failure_attempt_fence(
+                connection,
+                provider=snapshot.provider,
+                season=query.season,
+                query_key=query_key,
+                accepted_at=accepted,
+            )
             partial_transition = None
             if snapshot.status is SnapshotStatus.PARTIAL:
                 partial_transition = self._plan_partial_transition(
@@ -378,6 +385,7 @@ class ProjectionArchive:
                 current,
                 incoming_retrieved_at=snapshot.retrieved_at,
                 promoted_through=promoted_through,
+                failed_through=failed_through,
             )
             if (
                 current is not None
@@ -811,8 +819,9 @@ class ProjectionArchive:
         *,
         incoming_retrieved_at: datetime,
         promoted_through: datetime | None = None,
+        failed_through: datetime | None = None,
     ) -> str:
-        if current is None and promoted_through is None:
+        if current is None and promoted_through is None and failed_through is None:
             return "advanced"
         incoming = assume_utc(incoming_retrieved_at)
         fences = []
@@ -820,6 +829,8 @@ class ProjectionArchive:
             fences.append(assume_utc(current["retrieved_at"]))
         if promoted_through is not None:
             fences.append(assume_utc(promoted_through))
+        if failed_through is not None:
+            fences.append(assume_utc(failed_through))
         current_retrieved_at = max(fences)
         if incoming > current_retrieved_at:
             return "advanced"
@@ -842,6 +853,26 @@ class ProjectionArchive:
                 table.c.season == season,
                 table.c.query_key == query_key,
                 table.c.promoted.is_(True),
+            )
+        ).scalar_one()
+
+    @staticmethod
+    def _failure_attempt_fence(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        accepted_at: datetime,
+    ) -> datetime | None:
+        table = ProviderPoll.__table__
+        return connection.execute(
+            select(func.max(func.coalesce(table.c.started_at, table.c.completed_at))).where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+                table.c.outcome == "failed",
+                table.c.completed_at <= accepted_at,
             )
         ).scalar_one()
 

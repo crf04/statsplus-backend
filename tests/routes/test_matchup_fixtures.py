@@ -1600,9 +1600,11 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     ]["pool"]["status"] == "fresh"
 
     failed_at = partial_at + timedelta(minutes=16)
+    failure_started_at = failed_at - timedelta(minutes=1)
     assembled.projection_recorder.record_failed_poll(
         provider="dabble",
         query=query,
+        poll_started_at=failure_started_at,
         completed_at=failed_at,
         failure_reason="access_denied",
     )
@@ -1623,13 +1625,14 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     ] == [2544]
 
     late_accepted_at = failed_at + timedelta(seconds=1)
+    late_retrieved_at = partial_at + timedelta(minutes=10)
     assembled.projection_recorder.record_complete_snapshot(
         replace(
             recorded_snapshot,
             markets=(
                 replace(recorded_snapshot.markets[0], market_id="late-market"),
             ),
-            retrieved_at=rematerialized_at,
+            retrieved_at=late_retrieved_at,
         ),
         query=query,
         accepted_at=late_accepted_at,
@@ -1639,7 +1642,56 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert "status" not in late_matchup.get_json()["freshness"]["pool"]
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
 
-    empty_at = failed_at + timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=late_retrieved_at,
+        ),
+        query=query,
+        accepted_at=late_accepted_at + timedelta(seconds=1),
+    )
+    pool.clock = lambda: late_accepted_at + timedelta(seconds=1)
+    late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert [
+        player["canonical_id"]
+        for player in late_empty_matchup.get_json()["players"]
+    ] == [2544]
+    assert late_empty_matchup.get_json()["freshness"]["pool"]["providers"][
+        "dabble"
+    ]["status"] == "stale-served"
+    assert late_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": partial_at.isoformat(),
+    }
+
+    recovered_at = failed_at + timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=recovered_at),
+        query=query,
+        accepted_at=recovered_at,
+    )
+    pool.clock = lambda: recovered_at
+    recovered_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert [
+        player["canonical_id"] for player in recovered_matchup.get_json()["players"]
+    ] == [2544]
+    assert recovered_matchup.get_json()["freshness"]["pool"]["providers"][
+        "dabble"
+    ] == {
+        "status": "fresh",
+        "retrieved_at": recovered_at.isoformat(),
+    }
+
+    empty_at = failed_at + timedelta(minutes=2)
     for provider in ("dabble", "prizepicks"):
         assembled.projection_recorder.record_complete_snapshot(
             ProviderSnapshot(
@@ -1820,9 +1872,9 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             )
         ).scalar_one() == 1
     assert durable_counts == {
-        "snapshots": 9,
-        "polls": 15,
-        "generations": 11,
-        "observations": 8,
+        "snapshots": 11,
+        "polls": 17,
+        "generations": 13,
+        "observations": 9,
         "latest": 2,
     }

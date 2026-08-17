@@ -466,6 +466,89 @@ def test_delayed_retry_postgres_worker_reuses_the_exact_evidence_poll(
     assert latest == (first.generation_id, "PTS")
 
 
+def test_postgres_failure_attempt_fences_late_evidence_until_recovery(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    failure_started_at = OBSERVED_AT + timedelta(minutes=19)
+    failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
+    archive.record_failed_poll(
+        provider="dabble",
+        query=query,
+        poll_started_at=failure_started_at,
+        completed_at=failure_completed_at,
+        failure_reason="access_denied",
+    )
+    late_retrieved_at = OBSERVED_AT + timedelta(minutes=10)
+    late_changed = archive.ingest_snapshot(
+        _snapshot(catalog, late_retrieved_at, "21.5"),
+        query=query,
+        accepted_at=failure_completed_at + timedelta(seconds=1),
+    )
+    late_empty = archive.ingest_snapshot(
+        replace(
+            _snapshot(catalog, late_retrieved_at, "21.5"),
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+        ),
+        query=query,
+        accepted_at=failure_completed_at + timedelta(seconds=2),
+    )
+    recovery_at = OBSERVED_AT + timedelta(minutes=21)
+    recovery = archive.ingest_snapshot(
+        _snapshot(catalog, recovery_at, "22.5"),
+        query=query,
+        accepted_at=recovery_at,
+    )
+
+    assert late_changed.materialization_outcome == "older_not_promoted"
+    assert late_empty.materialization_outcome == "older_not_promoted"
+    assert recovery.materialization_outcome == "advanced"
+    with projection_pg_engine.connect() as connection:
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.confirmed_at,
+            )
+        ).one()
+        polls = connection.execute(
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
+                ProviderPoll.completed_at
+            )
+        ).all()
+        generation_outcomes = connection.execute(
+            select(ProjectionMaterializationGeneration.outcome).order_by(
+                ProjectionMaterializationGeneration.created_at
+            )
+        ).scalars().all()
+    assert latest == (recovery.generation_id, recovery_at)
+    assert polls == [
+        ("changed", True),
+        ("failed", False),
+        ("changed", False),
+        ("changed", False),
+        ("changed", True),
+    ]
+    assert generation_outcomes == [
+        "advanced",
+        "older_not_promoted",
+        "older_not_promoted",
+        "advanced",
+    ]
+
+
 def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
     projection_pg_engine,
 ):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -471,7 +470,6 @@ def build_dependencies(
         LatestProjectionPlayerPoolReader(
             engine,
             projection_read_scopes,
-            clock=lambda: datetime.now(timezone.utc),
             required_providers=settings.providers.dfs_enabled_providers,
         )
         if settings.features.projection_archive_read_enabled

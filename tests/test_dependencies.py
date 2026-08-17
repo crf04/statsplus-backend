@@ -195,6 +195,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     from sqlalchemy import create_engine
 
     from app.dependencies import build_dependencies
+    from app.domain.utc import utc_now
     from app.migrations import run_migrations
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
@@ -244,6 +245,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"
     assert reader.required_providers == frozenset()
+    assert reader.clock is utc_now
     assert {scope.provider for scope in reader.scopes} == {
         "dabble",
         "prizepicks",
