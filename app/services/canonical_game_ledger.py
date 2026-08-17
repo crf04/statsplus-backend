@@ -1958,6 +1958,23 @@ class CanonicalGameLedgerRepository:
                         [dict(pending_observations[observation_id]) for observation_id in sorted(pending_observations)],
                     )
             for candidate in candidates:
+                # Serialize revisions of one game and reject an older
+                # acceptance that raced a newer one.  The accepted timestamp
+                # is the authoritative ordering, independent of arrival or
+                # checksum ordering.
+                if accepted_observations is not None:
+                    existing = connection.execute(select(tables["game"]).where(
+                        tables["game"].c.game_id == candidate.game_id,
+                    ).with_for_update()).mappings().one_or_none()
+                    if existing is not None:
+                        incoming_at = assume_utc(
+                            accepted_observations[candidate.source_observation_id]["accepted_at"]
+                        )
+                        existing_at = connection.scalar(select(CollectionObservation.accepted_at).where(
+                            CollectionObservation.observation_id == existing["source_observation_id"],
+                        ))
+                        if existing_at is not None and incoming_at <= assume_utc(existing_at):
+                            continue
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
 

@@ -295,6 +295,7 @@ class LedgerRuntime:
                         CompositionJob.manifest_id == manifest_id,
                         CompositionJob.status == "queued",
                     ).with_for_update().order_by(
+                        CompositionJob.stream_key,
                         CompositionJob.created_at,
                         CompositionJob.job_id,
                     )).all()
@@ -359,6 +360,20 @@ class LedgerRuntime:
                             connection=read_connection,
                         )) is not None
                     )
+                    games_by_id = {game.game_id: game for game in games}
+                    for row in slice_jobs:
+                        raw_evidence = row.get("ledger_evidence")
+                        evidence = (
+                            json.loads(raw_evidence)
+                            if isinstance(raw_evidence, str) and raw_evidence
+                            else raw_evidence if isinstance(raw_evidence, dict) else {}
+                        )
+                        if any(
+                            game_id in games_by_id
+                            and str(checksum) != str(games_by_id[game_id].checksum)
+                            for game_id, checksum in evidence.items()
+                        ):
+                            raise ControlPlaneError("queued_ledger_evidence_stale")
                     if not trigger_game_ids:
                         source_observation_ids = {
                             str(source_observation_id)
