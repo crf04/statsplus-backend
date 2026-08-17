@@ -1154,6 +1154,12 @@ class DatabaseFirstPublicationReader:
         event_catalog_publication_id: str | None = None,
         event_catalog_checksum: str | None = None,
     ) -> PublicationRead:
+        # A failed or absent read is not a freshness observation.  The
+        # publication timestamp describes the retained immutable row, not a
+        # successful read of this surface, so never expose it as
+        # ``retrieved_at`` for a missing/unavailable result.
+        if status in {"missing", "unavailable"}:
+            retrieved_at = None
         return PublicationRead(
             stream_key=stream_key,
             publication_id=publication_id,

@@ -1,5 +1,6 @@
 """Stored matchup composition at the application-service seam."""
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup import MatchupService
+from app.services.database_first_activation import PublicationRead
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietResult,
@@ -925,6 +927,78 @@ def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
         else:
             assert availability["last_15"]["status"] == "missing"
     assert all(not rows for rows in payload["league"]["defense_sheet"].values())
+
+
+def test_unavailable_team_surface_has_no_failed_read_timestamp():
+    window = _window()
+    unavailable = replace(
+        window,
+        observations=tuple(
+            replace(
+                observation,
+                status="unavailable" if observation.surface == "traditional" else observation.status,
+                unavailable_reason=(
+                    "provider_invalid_numeric"
+                    if observation.surface == "traditional"
+                    else observation.unavailable_reason
+                ),
+            )
+            for observation in window.observations
+        ),
+    )
+
+    payload = _service(season_window=unavailable).get_matchup(game_id=GAME_ID)
+
+    assert payload["freshness"]["team_matchups"]["season"]["surfaces"]["traditional"] == {
+        "status": "unavailable",
+        "unavailable_reason": "provider_invalid_numeric",
+        "retrieved_at": None,
+    }
+
+
+def test_invalid_database_publication_has_no_retrieved_timestamp(tmp_path):
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'invalid-publication.sqlite3'}")
+    run_migrations(engine)
+    invalid = PublicationRead(
+        stream_key="traditional_opponent_season",
+        publication_id="invalid-publication",
+        season=SEASON,
+        cutoff=RETRIEVED_AT.isoformat(),
+        version=1,
+        status="active",
+        freshness="fresh",
+        age_seconds=0,
+        payload={"rows": [{"team_id": LAL}]},
+        retrieved_at=RETRIEVED_AT,
+        checksum="a" * 64,
+    )
+
+    class Reader:
+        def read_many(self, stream_keys, *, season):
+            assert season == SEASON
+            return {
+                stream_key: invalid
+                for stream_key in stream_keys
+                if stream_key == "traditional_opponent_season"
+            }
+
+    window = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        clock=lambda: NOW,
+        publication_reader=Reader(),
+    ).get_window(TeamMatchupSnapshotScope(SEASON, NOW.date()))
+
+    observation = next(
+        item for item in window.observations if item.surface == "traditional"
+    )
+    assert observation.status == "unavailable"
+    assert observation.retrieved_at is None
 
 
 def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():

@@ -1485,6 +1485,7 @@ class MatchupService:
         )
         if (
             observation is None
+            or observation.status in {"missing", "unavailable"}
             or observation.retrieved_at is None
             or observation.retrieved_at == datetime.min
         ):

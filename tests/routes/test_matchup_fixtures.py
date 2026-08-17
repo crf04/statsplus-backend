@@ -72,14 +72,8 @@ from app.services.matchup import MatchupService
 from app.services.matchup_selection import MatchupSelectionService
 from app.services.game_service import GameService
 from app.services.game_logs_source import StoredGameLogsSource
-from app.services.ledger_matchup_materialization import (
-    LedgerMatchupMaterializationService,
-)
-from app.services.ledger_derivations import (
-    ASSIST_DERIVED_METRICS,
-    TEAM_METRICS,
-    competition_ranks,
-)
+from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
 from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -117,9 +111,7 @@ from app.services.team_matchup_repository import (
 )
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_matchup_parity import (
-    _insert_runner_publication,
     _runner_world,
-    _write_legacy_facts,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 
@@ -268,6 +260,158 @@ def _route_ledger_games(governance):
         candidate = replace(candidate, raw_rows=raw_rows_from_facts(candidate))
         games.append(candidate.with_checksum())
     return tuple(games)
+
+
+def _persist_independent_legacy_provider_output(
+    engine,
+    games,
+    governance,
+    *,
+    window,
+):
+    """Persist provider aggregates calculated independently of ledger windows.
+
+    The fixture deliberately computes the legacy aggregate from provider-like
+    team/detail rows, while ``LedgerMaterializationService`` derives its
+    candidate from typed canonical games.  Neither side copies the other's
+    serialized payload or mutates a completed snapshot after the fact.
+    """
+
+    game_ids_by_team = (
+        governance.expected_season_game_ids
+        if window == "season"
+        else governance.expected_l15_game_ids
+    )
+    game_by_id = {game.game_id: game for game in games}
+    traditional_metrics = {
+        "OPP_REB": "rebounds",
+        "OPP_TOV": "turnovers",
+        "OPP_STL": "steals",
+        "OPP_BLK": "blocks",
+    }
+    assist_metrics = {
+        "Assists": "assists",
+        "Arc3Assists": "arc3_assists",
+        "Corner3Assists": "corner3_assists",
+        "AtRimAssists": "at_rim_assists",
+        "ShortMidRangeAssists": "short_mid_range_assists",
+        "LongMidRangeAssists": "long_mid_range_assists",
+    }
+    authority = {
+        "window": window,
+        "provider_source": "nba_stats.team_game_log",
+        "provider_sources": [
+            "nba_stats.team_game_log",
+            "pbp_stats.team_game_log",
+        ],
+        "collect_before": governance.collect_before.isoformat(),
+        "provider_game_ids_by_source": {
+            source: {
+                str(team_id): sorted(game_ids_by_team[team_id])
+                for team_id in governance.team_ids
+            }
+            for source in (
+                "nba_stats.team_game_log",
+                "pbp_stats.team_game_log",
+            )
+        },
+        "teams": {
+            str(team_id): {
+                "expected_games": len(game_ids_by_team[team_id]),
+                "authority_game_ids": sorted(game_ids_by_team[team_id]),
+                "provider_game_ids": sorted(game_ids_by_team[team_id]),
+            }
+            for team_id in governance.team_ids
+        },
+    }
+    provider_window_identity = json.dumps(
+        authority, sort_keys=True, separators=(",", ":")
+    )
+    facts = []
+    for team_id in sorted(governance.team_ids):
+        team_games = [
+            game_by_id[game_id] for game_id in sorted(game_ids_by_team[team_id])
+        ]
+        team_minutes = sum(
+            fact.team_minutes
+            for game in team_games
+            for fact in game.team_facts
+            if fact.team_id == team_id
+        )
+        opponent_by_game = {
+            game.game_id: next(
+                fact
+                for fact in game.team_facts
+                if fact.team_id != team_id
+            )
+            for game in team_games
+        }
+        for base, metric_map, provider in (
+            ("traditional", traditional_metrics, "nba_stats"),
+            ("assist_locations", assist_metrics, "pbp_stats"),
+        ):
+            for metric, field in metric_map.items():
+                total = 0.0
+                for game in team_games:
+                    opponent = opponent_by_game[game.game_id]
+                    if base == "traditional" or metric == "Assists":
+                        total += float(getattr(opponent, field))
+                    else:
+                        total += sum(
+                            float(getattr(player, field))
+                            for player in game.player_facts
+                            if player.team_id == opponent.team_id
+                        )
+                facts.append(
+                    TeamMatchupFact(
+                        team_id=team_id,
+                        base=base,
+                        slice_key=metric,
+                        stat_key=metric,
+                        # Preserve provider integer counts and their exact
+                        # aggregate minute denominator; the query layer
+                        # derives the served per48 value from these facts.
+                        raw_value=total,
+                        denominator_value=team_minutes,
+                        denominator_unit="minutes",
+                        provider=provider,
+                        game_ids=tuple(sorted(game_ids_by_team[team_id])),
+                        cutoff=governance.cutoff,
+                        manifest_id=governance.manifest_id,
+                        event_catalog_publication_id=(
+                            governance.event_catalog_publication_id
+                        ),
+                        event_catalog_checksum=governance.event_catalog_checksum,
+                        provider_window_identity=provider_window_identity,
+                    )
+                )
+    game_ids = tuple(
+        sorted({game_id for ids in game_ids_by_team.values() for game_id in ids})
+    )
+    observations = tuple(
+        TeamMatchupObservation(
+            surface=base,
+            status="available",
+            game_ids=game_ids,
+            cutoff=governance.cutoff,
+            manifest_id=governance.manifest_id,
+            event_catalog_publication_id=governance.event_catalog_publication_id,
+            event_catalog_checksum=governance.event_catalog_checksum,
+            provider_window_identity=provider_window_identity,
+        )
+        for base in ("traditional", "assist_locations")
+    )
+    scope = TeamMatchupSnapshotScope(
+        SEASON,
+        governance.cutoff.date(),
+        15 if window == "l15" else None,
+    )
+    repository = TeamMatchupRepository(engine)
+    repository.replace_snapshots(
+        ((scope, tuple(facts), observations),),
+        retrieved_at=governance.cutoff,
+    )
+    return repository.get_snapshot(scope)
 
 
 def _event_catalog(engine, settings):
@@ -1140,7 +1284,6 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     pool = _player_pool(engine)
     player_logs = _player_logs(engine, catalog)
     player_diets = _player_diets(engine)
-    team_matchups = _team_matchups(engine)
     log_facts = player_logs.list_player_rows(SEASON, 2544)
     diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
     publication_service = PublicationService(engine, clock=lambda: NOW)
@@ -1353,139 +1496,39 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         publication_id=diet_candidate, observation_id="journey-observation-diet",
     )
 
-    # Build the actual ledger-owned Season/L15 read model before the HTTP
-    # cutover.  The source fixtures are complete typed PBP games re-keyed to
-    # immutable Event Catalog IDs; the parity runner still consumes the
-    # independently persisted legacy provider rows and candidate payloads.
+    # Build complete production-shaped PBP games once, then run the legacy
+    # provider aggregate and ledger materializer in isolated repositories.
+    # The route database receives only their completed outputs; it never
+    # rewrites one source's facts or payload from the other's values.
     ledger_games = _route_ledger_games(matchup_governance)
-    CanonicalGameLedgerRepository(engine).replace_games_atomic(ledger_games)
-    LedgerMatchupMaterializationService(
-        CanonicalGameLedgerRepository(engine),
-        TeamMatchupRepository(engine),
-        clock=lambda: matchup_governance.cutoff,
-    ).materialize(
-        SEASON,
-        as_of=matchup_governance.cutoff.date(),
-        expected_game_ids=matchup_governance.expected_game_ids,
-        expected_l15_game_ids=matchup_governance.expected_l15_game_ids,
-        team_ids=matchup_governance.team_ids,
-    )
-    _write_legacy_facts(
-        engine,
-        game_ids_by_team=matchup_governance.expected_season_game_ids,
-        window="season",
-    )
-    _write_legacy_facts(
-        engine,
-        game_ids_by_team=matchup_governance.expected_l15_game_ids,
-        window="l15",
-    )
-
-    route_values = {
-        int(row["team_id"]): float(row["allowed"])
-        for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
-    }
-    route_ranks = {
-        metric: competition_ranks(route_values, descending=False)
-        for metric in (*TEAM_METRICS, *ASSIST_DERIVED_METRICS)
-    }
-    parity_repository = TeamMatchupRepository(engine)
-    for window in ("season", "l15"):
-        scope = TeamMatchupSnapshotScope(
-            SEASON,
-            matchup_governance.cutoff.date(),
-            15 if window == "l15" else None,
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite3'}")
+    ledger_engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
+    run_migrations(legacy_engine)
+    run_migrations(ledger_engine)
+    legacy_snapshots = tuple(
+        _persist_independent_legacy_provider_output(
+            legacy_engine,
+            ledger_games,
+            matchup_governance,
+            window=window,
         )
-        snapshot = parity_repository.get_snapshot(scope)
-        parity_repository.replace_snapshots(
-            ((
-                scope,
-                tuple(
-                    replace(fact, raw_value=route_values[fact.team_id])
-                    for fact in snapshot.facts
-                ),
-                snapshot.observations,
-            ),),
-            retrieved_at=matchup_governance.cutoff,
-        )
-
-    def route_publication_payload(game_ids_by_team, *, surface):
-        metrics = TEAM_METRICS if surface == "traditional" else ASSIST_DERIVED_METRICS
-        return canonical_publication_json([
-            {
-                "team_id": team_id,
-                "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
-                "game_ids": sorted(game_ids_by_team[team_id]),
-                "game_count": len(game_ids_by_team[team_id]),
-                "per48": {metric: route_values[team_id] for metric in metrics},
-                "league_average": {metric: 1.0 for metric in metrics},
-                "population_sigma": {metric: 1.0 for metric in metrics},
-                "competition_rank": {
-                    metric: route_ranks[metric][team_id] for metric in metrics
-                },
-                "counts": {metric: route_values[team_id] for metric in metrics},
-                "team_minutes": 48.0,
-            }
-            for team_id in sorted(game_ids_by_team)
-        ])
-
-    matchup_publications = {
-        window: {
-            stream: _insert_runner_publication(
-                engine,
-                stream_key=stream,
-                surface=(
-                    "traditional"
-                    if stream.startswith("traditional")
-                    else "assist_locations"
-                ),
-                window=window,
-                game_ids_by_team=(
-                    matchup_governance.expected_season_game_ids
-                    if window == "season"
-                    else matchup_governance.expected_l15_game_ids
-                ),
-                binding={
-                    "event_catalog_publication_id": (
-                        matchup_governance.event_catalog_publication_id
-                    ),
-                    "event_catalog_checksum": matchup_governance.event_catalog_checksum,
-                },
-                publication_suffix="-route",
-            )
-            for stream in (
-                f"traditional_opponent_{window}",
-                f"assist_locations_{window}",
-            )
-        }
         for window in ("season", "l15")
-    }
-    for window, publications in matchup_publications.items():
-        game_ids_by_team = (
-            matchup_governance.expected_season_game_ids
-            if window == "season"
-            else matchup_governance.expected_l15_game_ids
-        )
-        for stream_key, publication_id in publications.items():
-            surface = (
-                "traditional"
-                if stream_key.startswith("traditional")
-                else "assist_locations"
-            )
-            payload = route_publication_payload(
-                game_ids_by_team,
-                surface=surface,
-            )
-            with engine.begin() as connection:
-                connection.execute(PublicationVersion.__table__.update().where(
-                    PublicationVersion.publication_id == publication_id,
-                ).values(
-                    payload=payload,
-                    checksum=publication_payload_checksum(payload),
-                ))
+    )
+    TeamMatchupRepository(engine).replace_snapshots(
+        tuple(
+            (snapshot.scope, snapshot.facts, snapshot.observations)
+            for snapshot in legacy_snapshots
+        ),
+        retrieved_at=matchup_governance.cutoff,
+    )
+    team_matchups = TeamMatchupQueryService(
+        TeamMatchupRepository(engine), clock=lambda: NOW
+    )
+
     # Activation's ledger writer fence requires every canonical game to retain
     # accepted immutable observation evidence, and each candidate must cite
-    # that exact evidence rather than a synthetic aggregate checksum.
+    # that exact evidence rather than a synthetic aggregate checksum.  These
+    # observations are accepted before the actual ledger materializer runs.
     canonical_observation_rows = [
         {
             "observation_id": game.source_observation_id,
@@ -1514,28 +1557,53 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         connection.execute(
             CollectionObservation.__table__.insert(), canonical_observation_rows
         )
-        connection.execute(LedgerObservationEvidence.__table__.insert(), [
-            {
-                "observation_id": game.source_observation_id,
-                "game_id": game.game_id,
-                "created_at": matchup_governance.cutoff,
-            }
-            for game in ledger_games
-        ])
-        for publication_id in (
-            *matchup_publications["season"].values(),
-            *matchup_publications["l15"].values(),
-        ):
-            connection.execute(PublicationObservation.__table__.insert(), [
-                {
-                    "publication_id": publication_id,
-                    "observation_id": game.source_observation_id,
-                    "role": "ledger_game",
-                    "slice_key": game.game_id,
-                    "created_at": matchup_governance.cutoff,
-                }
-                for game in ledger_games
-            ])
+    CanonicalGameLedgerRepository(engine).replace_games_atomic(ledger_games)
+
+    class _NoLegacyDiagnostic:
+        def read(self, *_args, **_kwargs):
+            raise ValueError("route legacy diagnostic is isolated from ledger")
+
+    ledger_repository = CanonicalGameLedgerRepository(ledger_engine)
+    ledger_repository.replace_games_atomic(ledger_games)
+    LedgerMaterializationService(
+        ledger_repository,
+        # Publications are staged in the route control plane, so their
+        # durable parity artifacts must reference that same publication FK;
+        # derivation itself remains isolated in ``ledger_engine``.
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_NoLegacyDiagnostic(),
+        publication_service=publication_service,
+        clock=lambda: matchup_governance.cutoff,
+    ).compose(
+        ledger_games,
+        season=SEASON,
+        as_of=matchup_governance.cutoff.date(),
+        cutoff=matchup_governance.cutoff,
+        expected_game_ids=matchup_governance.expected_game_ids,
+        expected_l15_game_ids=matchup_governance.expected_l15_game_ids,
+        team_ids=matchup_governance.team_ids,
+        require_assist_locations=True,
+    )
+    matchup_publications = {}
+    with engine.connect() as connection:
+        for window in ("season", "l15"):
+            matchup_publications[window] = {}
+            for stream_key in (
+                f"traditional_opponent_{window}",
+                f"assist_locations_{window}",
+            ):
+                publication = connection.execute(
+                    select(PublicationVersion.publication_id)
+                    .where(
+                        PublicationVersion.stream_key == stream_key,
+                        PublicationVersion.season == SEASON,
+                        PublicationVersion.cutoff == matchup_governance.cutoff,
+                        PublicationVersion.status == "candidate",
+                    )
+                    .order_by(PublicationVersion.version.desc())
+                    .limit(1)
+                ).scalar_one()
+                matchup_publications[window][stream_key] = publication
     parity_runner = MatchupParityRunner(
         engine,
         governance=ActiveManifestLedgerGovernanceReader(engine),

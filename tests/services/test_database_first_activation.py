@@ -149,11 +149,15 @@ def test_reader_metadata_marks_fresh_plus_invalid_publication_as_mixed(tmp_path)
     metadata = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).metadata(
         ("fresh", "player_per36"), season="2025-26"
     )
+    invalid_read = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(
+        "player_per36", season="2025-26"
+    )
 
     assert metadata["streams"]["player_per36"]["status"] == "unavailable"
     assert metadata["streams"]["player_per36"]["unavailable_reason"] == (
         "publication_payload_invalid"
     )
+    assert invalid_read.retrieved_at is None
     assert metadata["mixed_cutoff"] is True
     assert metadata["mixed_freshness"] is True
 
@@ -175,6 +179,7 @@ def test_reader_marks_disabled_stream_as_the_only_legacy_fallback(tmp_path):
     assert result.legacy_fallback_allowed
     assert result.source == "legacy_database"
     assert result.status == "inactive"
+    assert result.retrieved_at is None
 
 
 def test_player_log_publication_decoder_is_strict():
