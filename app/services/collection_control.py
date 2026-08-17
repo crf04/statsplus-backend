@@ -3272,19 +3272,61 @@ class PublicationService(_SessionService):
                     )).all()
                     if row.provider == observation_provider
                 ]
+                matching_game_ids = tuple(
+                    sorted({
+                        str(_safe_json_mapping(row.scope).get("game_id") or "")
+                        for row in matching
+                        if _safe_json_mapping(row.scope).get("game_id")
+                    })
+                )
+                canonical_rows = session.execute(select(
+                    CanonicalGameLedgerGame.game_id,
+                    CanonicalGameLedgerGame.source_observation_id,
+                    CanonicalGameLedgerGame.checksum,
+                ).where(
+                    CanonicalGameLedgerGame.game_id.in_(matching_game_ids)
+                )).all() if matching_game_ids else ()
                 canonical_source_ids = {
                     str(row.game_id): str(row.source_observation_id)
+                    for row in canonical_rows
+                }
+                canonical_checksums = {
+                    str(row.game_id): str(row.checksum)
+                    for row in canonical_rows
+                }
+                attached_observation_ids = {
+                    (str(row.game_id), str(row.observation_id))
                     for row in session.execute(select(
-                        CanonicalGameLedgerGame.game_id,
-                        CanonicalGameLedgerGame.source_observation_id,
+                        LedgerObservationEvidence.game_id,
+                        LedgerObservationEvidence.observation_id,
                     ).where(
-                        CanonicalGameLedgerGame.game_id.in_(tuple(
-                            str(_safe_json_mapping(row.scope).get("game_id") or "")
-                            for row in matching
-                            if _safe_json_mapping(row.scope).get("game_id")
+                        LedgerObservationEvidence.observation_id.in_(tuple(
+                            str(row.observation_id) for row in matching
                         )),
                     )).all()
-                }
+                } if matching else set()
+                # A manifest observation is only composition evidence after it
+                # has supplied the canonical game that the current ledger row
+                # represents.  A staged observation with the same game scope
+                # is not allowed to borrow the current ledger checksum merely
+                # because it shares a manifest and cutoff.
+                matching = tuple(
+                    observation
+                    for observation in matching
+                    if (
+                        game_id := str(
+                            _safe_json_mapping(observation.scope).get("game_id")
+                            or ""
+                        )
+                    )
+                    and canonical_checksums.get(game_id)
+                    and (
+                        str(observation.observation_id)
+                        == canonical_source_ids.get(game_id)
+                        or (game_id, str(observation.observation_id))
+                        in attached_observation_ids
+                    )
+                )
                 # One game can retain many immutable accepted observations.
                 # Reconciliation compares the pending job with the latest
                 # accepted observation for each game, never with every
@@ -3338,7 +3380,7 @@ class PublicationService(_SessionService):
                     CompositionJob.season == season,
                     CompositionJob.cutoff == cutoff,
                 ).with_for_update())
-                if job is None and selected_game_ids is not None and not matching:
+                if job is None and not matching:
                     continue
                 if job is None:
                     now = self.clock()

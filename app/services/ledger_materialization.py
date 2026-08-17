@@ -13,6 +13,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CollectionObservation, CompositionJob
 from app.services.collection_control import LedgerPublicationComposition
 
@@ -250,7 +251,7 @@ class LedgerMaterializationService:
             if (
                 cutoff is None
                 or cutoff.tzinfo is None
-                or cutoff.date() != as_of
+                or slate_date_for_instant(cutoff) != as_of
             ):
                 raise LedgerMaterializationUnavailable(
                     "publication cutoff must be explicit, aware, and match "

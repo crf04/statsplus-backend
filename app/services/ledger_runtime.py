@@ -25,7 +25,6 @@ from app.models.collection_control import (
     CompositionJob,
     ReconciliationItem,
 )
-from app.models.event_catalog import EventCatalogEntry
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
@@ -112,7 +111,6 @@ class ActiveManifestLedgerGovernanceReader:
             season,
             cutoff,
             require_collection_authorization=False,
-            allow_legacy_catalog=False,
         )
 
     def read_for_composition(
@@ -125,7 +123,6 @@ class ActiveManifestLedgerGovernanceReader:
             season,
             cutoff,
             require_collection_authorization=False,
-            allow_legacy_catalog=True,
             manifest_id=manifest_id,
         )
 
@@ -249,7 +246,6 @@ class ActiveManifestLedgerGovernanceReader:
         cutoff: datetime,
         *,
         require_collection_authorization: bool,
-        allow_legacy_catalog: bool = False,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
         with self.engine.connect() as connection:
@@ -288,23 +284,6 @@ class ActiveManifestLedgerGovernanceReader:
             and manifest["event_catalog_checksum"]
         ):
             events = self._immutable_catalog_events(manifest)
-        elif allow_legacy_catalog:
-            # Correction propagation predates immutable Event Catalog binding.
-            # Keep legacy ledger-only manifests executable; NBA publication
-            # authority still rejects these manifests at composition time.
-            with self.engine.connect() as connection:
-                legacy_events = connection.execute(select(EventCatalogEntry).where(
-                    EventCatalogEntry.season == season,
-                    EventCatalogEntry.classification == "Regular Season",
-                    EventCatalogEntry.scheduled_at <= cutoff,
-                ).order_by(
-                    EventCatalogEntry.scheduled_at,
-                    EventCatalogEntry.nba_game_id,
-                )).mappings().all()
-            events = tuple(
-                event for event in legacy_events
-                if is_completed_non_postponed_event(event)
-            )
         else:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
@@ -721,12 +700,7 @@ class LedgerRuntime:
                         cutoff,
                         manifest_id,
                     )
-                    composition_as_of = (
-                        slate_date_for_instant(cutoff)
-                        if manifest_id is None
-                        or getattr(governance, "event_catalog_publication_id", None)
-                        else cutoff.date()
-                    )
+                    composition_as_of = slate_date_for_instant(cutoff)
                     read_connection = session.connection()
                     try:
                         summaries = self.repository.list_games(
@@ -835,7 +809,7 @@ class LedgerRuntime:
                         ):
                             self.matchup_materialization.refresh_publication_surfaces(
                                 season,
-                                as_of=cutoff.date(),
+                                as_of=slate_date_for_instant(cutoff),
                                 expected_game_ids_by_team=(
                                     governance.expected_season_game_ids
                                 ),

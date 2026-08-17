@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from app.migrations import run_migrations
 from app.models.collection_control import (
     ActiveSeason,
+    CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     CompositionJob,
@@ -28,6 +29,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
+from app.models.canonical_game_ledger import LedgerObservationEvidence
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
@@ -47,6 +49,7 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -58,7 +61,46 @@ from tests.services.test_ledger_derivations import _league_games
 
 
 UTC = timezone.utc
-AS_OF = datetime(2025, 10, 15, tzinfo=UTC)
+AS_OF = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
+
+
+def _event_catalog_publication(
+    games,
+    cutoff,
+    publication_id,
+    *,
+    scheduled_game_ids=frozenset(),
+):
+    events = []
+    for game in games:
+        scheduled = game.game_id in scheduled_game_ids
+        events.append({
+            "nba_game_id": game.game_id,
+            "home_team_id": game.home_team_id,
+            "away_team_id": game.away_team_id,
+            "phase": "Regular Season",
+            "status": "Scheduled" if scheduled else "Final",
+            "status_code": 1 if scheduled else 3,
+            "scheduled_at": (
+                datetime.combine(game.game_date, datetime.min.time(), UTC)
+                + timedelta(hours=5, minutes=22)
+            ).isoformat(),
+        })
+    payload = json.dumps(
+        {"events": events}, sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "publication_id": publication_id,
+        "season": "2025-26",
+        "catalog_type": "event",
+        "cutoff": cutoff,
+        "version": "event-v1",
+        "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+        "payload": payload,
+        "complete": True,
+        "published_at": cutoff - timedelta(minutes=1),
+        "expires_at": None,
+    }
 
 
 def test_keyed_lineage_merge_is_commutative_and_replaces_only_corrected_game():
@@ -218,6 +260,10 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
         }
 
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            games, cutoff, "replay-event-catalog"
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(ActiveSeason.__table__.insert().values(
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
@@ -226,6 +272,8 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
             manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
             collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), [
@@ -852,6 +900,10 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
         }
 
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            games, cutoff, "ledger-event-catalog"
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(ActiveSeason.__table__.insert().values(
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
@@ -860,6 +912,8 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
             manifest_id="ledger-manifest", season="2025-26", cutoff=cutoff,
             collect_before=cutoff + timedelta(days=1000), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), [{
@@ -1360,6 +1414,13 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
         }
 
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            (*games, first_boundary_game),
+            cutoff,
+            f"{manifest_id}-event-catalog",
+            scheduled_game_ids={first_boundary_game.game_id},
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(ActiveSeason.__table__.insert().values(
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
@@ -1368,6 +1429,8 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
             manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
             collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), [
@@ -1488,6 +1551,22 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
     assert len(before_season_observation.game_ids) == len(games)
 
     with engine.begin() as connection:
+        final_catalog = _event_catalog_publication(
+            (*games, first_boundary_game),
+            cutoff,
+            f"{manifest_id}-event-catalog-final",
+        )
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**final_catalog)
+        )
+        connection.execute(
+            update(CollectionManifest)
+            .where(CollectionManifest.manifest_id == manifest_id)
+            .values(
+                event_catalog_publication_id=final_catalog["publication_id"],
+                event_catalog_checksum=final_catalog["checksum"],
+            )
+        )
         connection.execute(
             update(EventCatalogEntry)
             .where(EventCatalogEntry.nba_game_id == boundary_game_id)
@@ -1661,6 +1740,10 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
 
     all_games = (*games, special_game)
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            all_games, cutoff, f"{manifest_id}-event-catalog"
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(ActiveSeason.__table__.insert().values(
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
@@ -1669,6 +1752,8 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
             manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
             collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), [
@@ -2275,7 +2360,7 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
     materialization.compose(
         games,
         season="2025-26",
-        as_of=AS_OF.date(),
+        as_of=slate_date_for_instant(AS_OF),
         cutoff=AS_OF,
         expected_game_ids=expected,
         expected_l15_game_ids=expected_l15,
@@ -2285,7 +2370,7 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
     )
     matchup_materialization.materialize(
         "2025-26",
-        as_of=AS_OF.date(),
+        as_of=slate_date_for_instant(AS_OF),
         cutoff=AS_OF,
         expected_game_ids=expected,
         expected_l15_game_ids=expected_l15,
@@ -2293,7 +2378,7 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
         recomposition_reason="initial_acceptance",
     )
     before_snapshot = matchup.get_snapshot(TeamMatchupSnapshotScope(
-        "2025-26", AS_OF.date(), 15
+        "2025-26", slate_date_for_instant(AS_OF), 15
     ))
     with engine.connect() as connection:
         before_pointers = {
@@ -2404,7 +2489,7 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
     assert calls["count"] == 2
 
     after_snapshot = matchup.get_snapshot(TeamMatchupSnapshotScope(
-        "2025-26", AS_OF.date(), 15
+        "2025-26", slate_date_for_instant(AS_OF), 15
     ))
     assert after_snapshot == before_snapshot
     with engine.connect() as connection:
@@ -2600,7 +2685,7 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
 
     assert publications.reconcile_pending(
         season="2025-26", cutoff=AS_OF,
-    ) == len(LedgerCorrectionQueue.STREAMS)
+    ) == 1
     with engine.connect() as connection:
         job = connection.execute(select(CompositionJob.__table__).where(
             CompositionJob.stream_key == "traditional_opponent_season",
@@ -2611,8 +2696,9 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
 
 
 @pytest.mark.parametrize("stream_enabled", [True, False], ids=("active", "inactive"))
+@pytest.mark.parametrize("attached", [False, True], ids=("unattached", "attached"))
 def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success(
-    tmp_path, stream_enabled,
+    tmp_path, stream_enabled, attached,
 ):
     """Reconciliation finds accepted evidence even when the prior job succeeded."""
     engine = _engine(tmp_path, "reconcile-lineage.sqlite3")
@@ -2667,6 +2753,12 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
             retrieved_at=cutoff + timedelta(days=20),
             accepted_at=cutoff + timedelta(days=20),
         ))
+        if attached:
+            connection.execute(LedgerObservationEvidence.__table__.insert().values(
+                observation_id=raw_only_source,
+                game_id=game.game_id,
+                created_at=cutoff + timedelta(days=20),
+            ))
     publications = PublicationService(engine, clock=lambda: AS_OF)
     publications.register_default_streams()
     with engine.begin() as connection:
@@ -2711,14 +2803,22 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
             generation=1,
         ))
 
-    assert publications.reconcile_pending(
+    reconciled = publications.reconcile_pending(
         season=game.season,
         cutoff=cutoff,
-    ) == len(LedgerCorrectionQueue.STREAMS)
+    )
     with engine.connect() as connection:
         job = connection.execute(select(CompositionJob.__table__).where(
             CompositionJob.stream_key == "traditional_opponent_season",
         )).mappings().one()
+    if not attached:
+        assert reconciled != len(LedgerCorrectionQueue.STREAMS)
+        assert job["status"] == "succeeded"
+        assert job["generation"] == 1
+        assert json.loads(job["source_observation_ids"]) == []
+        assert json.loads(job["ledger_evidence"]) == {}
+        return
+    assert reconciled == len(LedgerCorrectionQueue.STREAMS)
     assert job["status"] == "queued"
     assert job["generation"] == 2
     assert json.loads(job["trigger_game_ids"]) == [game.game_id]
@@ -2806,7 +2906,7 @@ def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_pa
     materialization.compose(
         games,
         season="2025-26",
-        as_of=AS_OF.date(),
+        as_of=slate_date_for_instant(AS_OF),
         cutoff=AS_OF,
         expected_game_ids=expected,
         expected_l15_game_ids=expected_l15,
@@ -2827,7 +2927,7 @@ def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_pa
     materialization.compose(
         games,
         season="2025-26",
-        as_of=AS_OF.date(),
+        as_of=slate_date_for_instant(AS_OF),
         cutoff=AS_OF,
         expected_game_ids=expected,
         expected_l15_game_ids=expected_l15,

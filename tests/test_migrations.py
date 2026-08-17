@@ -653,7 +653,11 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         ), {"cutoff": datetime(2025, 10, 15)})
 
     result = run_migrations(engine)
-    assert result.applied == ()
+    assert result.applied == (
+        "037_team_matchup_publication_lineage",
+        "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
+    )
     with engine.connect() as connection:
         row = connection.execute(text(
             "SELECT trigger_game_ids, ledger_evidence, game_set_checksum, generation "
@@ -663,6 +667,20 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
     assert json.loads(row.ledger_evidence) == {}
     assert row.game_set_checksum is None
     assert row.generation == 1
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE composition_jobs SET status = 'running', "
+            "claimed_generation = 1 WHERE job_id = 'legacy-job'"
+        ))
+
+    assert run_migrations(engine).applied == ()
+    with engine.connect() as connection:
+        running = connection.execute(text(
+            "SELECT status, claimed_generation FROM composition_jobs "
+            "WHERE job_id = 'legacy-job'"
+        )).one()
+    assert running == ("running", 1)
 
     # With no pre-change trigger/checksum columns, the first post-upgrade
     # acceptance creates only its own keyed evidence; no legacy lineage is

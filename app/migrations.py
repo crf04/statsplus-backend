@@ -325,6 +325,7 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
             "recomposition_reason": "VARCHAR(128)",
         },
     }
+    correction_columns_added = False
     for table_name, table_additions in additions.items():
         existing = {
             column["name"]
@@ -337,8 +338,14 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
             connection.execute(text(
                 f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
             ))
+            correction_columns_added |= table_name == "composition_jobs"
 
-    _backfill_correction_lineage(connection)
+    # The compatibility backfill is only safe while the correction columns are
+    # being introduced.  Re-running migrations is a normal startup operation;
+    # once the schema is current, rewriting a live row could clear a worker's
+    # claim while it is composing.
+    if correction_columns_added:
+        _backfill_correction_lineage(connection)
 
 
 def _backfill_correction_lineage(connection: Connection) -> None:
@@ -408,10 +415,9 @@ def _backfill_correction_lineage(connection: Connection) -> None:
             trigger_ids = sorted(evidence)
         if not trigger_ids and not evidence and not row.get("trigger_game_id"):
             # There is no legacy evidence to recover; normalize only the
-            # generation so future claims are still versioned.
+            # generation so future claims are still versioned.  A live claim
+            # is not compatibility data and must survive this upgrade.
             values = {"generation": max(int(row.get("generation") or 0), 1)}
-            if row.get("claimed_generation") is not None:
-                values["claimed_generation"] = None
             connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
             continue
         trigger_ids = sorted(set(trigger_ids) | set(evidence))
