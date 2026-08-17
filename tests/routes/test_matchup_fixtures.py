@@ -13,6 +13,10 @@ from sqlalchemy import create_engine, func, select
 
 from app import create_app
 from app.dependencies import build_dependencies
+from app.domain.publication_integrity import (
+    canonical_publication_json,
+    publication_payload_checksum,
+)
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -40,6 +44,10 @@ from app.models.projection_archive import (
     ProjectionProviderSnapshot,
     ProviderPoll,
 )
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    raw_rows_from_facts,
+)
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
@@ -60,10 +68,16 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
 )
 from app.services.collection_control import CollectionOperationsService, PublicationService
-from app.services.matchup import MatchupService
+from app.services.matchup import MatchupService, _PUBLICATION_STREAM_KEYS
 from app.services.matchup_selection import MatchupSelectionService
 from app.services.game_service import GameService
 from app.services.game_logs_source import StoredGameLogsSource
+from app.services.ledger_matchup_materialization import (
+    LedgerMatchupMaterializationService,
+)
+from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
 from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
@@ -97,6 +111,13 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+from tests.services.test_ledger_derivations import _league_games
+from tests.services.test_matchup_parity import (
+    _insert_runner_publication,
+    _runner_world,
+    _write_legacy_facts,
+)
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 
 
 TEAM_FIXTURE = Path(__file__).parents[1] / "fixtures/team_matchups/thirty_teams.json"
@@ -178,6 +199,61 @@ class _NoProvider:
         raise AssertionError(f"request-time provider access is forbidden: {name}")
 
 
+def _route_ledger_games(governance):
+    """Re-key complete production-shaped ledger fixtures to catalog IDs."""
+    source_games = _league_games()
+    events = governance.events
+    assert len(source_games) == len(events)
+    games = []
+    for source, event in zip(source_games, events):
+        team_map = {
+            source.home_team_id: int(event["home_team_id"]),
+            source.away_team_id: int(event["away_team_id"]),
+        }
+        tricode_map = {
+            team_id: NBA_TEAM_ID_TO_TRICODE[actual_id]
+            for team_id, actual_id in team_map.items()
+        }
+        team_facts = tuple(
+            replace(
+                fact,
+                team_id=team_map[fact.team_id],
+                team_tricode=tricode_map[fact.team_id],
+                opponent_team_id=team_map[fact.opponent_team_id],
+                opponent_team_tricode=tricode_map[fact.opponent_team_id],
+            )
+            for fact in source.team_facts
+        )
+        player_facts = tuple(
+            replace(
+                fact,
+                team_id=team_map[fact.team_id],
+                team_tricode=tricode_map[fact.team_id],
+            )
+            for fact in source.player_facts
+        )
+        participant_ids = tuple(
+            (team_map[team_id], player_ids)
+            for team_id, player_ids in source.participant_ids_by_team
+        )
+        candidate = replace(
+            source,
+            game_id=str(event["nba_game_id"]),
+            game_date=event["scheduled_at"].date(),
+            home_team_id=team_map[source.home_team_id],
+            home_team_tricode=tricode_map[source.home_team_id],
+            away_team_id=team_map[source.away_team_id],
+            away_team_tricode=tricode_map[source.away_team_id],
+            team_facts=team_facts,
+            player_facts=player_facts,
+            source_observation_id=f"route-ledger:{event['nba_game_id']}",
+            participant_ids_by_team=participant_ids,
+        )
+        candidate = replace(candidate, raw_rows=raw_rows_from_facts(candidate))
+        games.append(candidate.with_checksum())
+    return tuple(games)
+
+
 def _event_catalog(engine, settings):
     service = EventCatalogService(
         engine,
@@ -251,6 +327,7 @@ def _team_matchups(
         ("shot_types", "less_than_10_ft", "FG2A"),
         ("shot_types", "less_than_10_ft", "FG3M"),
         ("shot_types", "less_than_10_ft", "FG3A"),
+        ("assist_locations", "Assists", "Assists"),
         ("assist_locations", "Arc3Assists", "Arc3Assists"),
         ("assist_locations", "Corner3Assists", "Corner3Assists"),
         ("assist_locations", "AtRimAssists", "AtRimAssists"),
@@ -1031,10 +1108,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     tmp_path,
     monkeypatch,
 ):
-    """Exercise the public chain with activated, rollback, mixed, and L15 states."""
+    """Exercise authenticated bytes across legacy and ledger activation states."""
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'journey.sqlite3'}")
-    run_migrations(engine)
+    engine, matchup_governance, _ = _runner_world(tmp_path)
     settings = RuntimeSettings(
         environment="testing",
         # This journey must traverse the real Bearer-token path.  The Firebase
@@ -1054,7 +1130,10 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     publication_service = PublicationService(engine, clock=lambda: NOW)
     publication_service.register_default_streams()
     operations = CollectionOperationsService(
-        engine, publication_service=publication_service, clock=lambda: NOW
+        engine,
+        publication_service=publication_service,
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+        clock=lambda: NOW,
     )
 
     ledger_manifest_id = "journey-ledger-manifest"
@@ -1257,6 +1336,218 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         "synergy_play_types", {"base": "play_types", "rows": diet_rows},
         publication_id=diet_candidate, observation_id="journey-observation-diet",
     )
+
+    # Build the actual ledger-owned Season/L15 read model before the HTTP
+    # cutover.  The source fixtures are complete typed PBP games re-keyed to
+    # immutable Event Catalog IDs; the parity runner still consumes the
+    # independently persisted legacy provider rows and candidate payloads.
+    ledger_games = _route_ledger_games(matchup_governance)
+    CanonicalGameLedgerRepository(engine).replace_games_atomic(ledger_games)
+    LedgerMatchupMaterializationService(
+        CanonicalGameLedgerRepository(engine),
+        TeamMatchupRepository(engine),
+        clock=lambda: matchup_governance.cutoff,
+    ).materialize(
+        SEASON,
+        as_of=matchup_governance.cutoff.date(),
+        expected_game_ids=matchup_governance.expected_game_ids,
+        expected_l15_game_ids=matchup_governance.expected_l15_game_ids,
+        team_ids=matchup_governance.team_ids,
+    )
+    _write_legacy_facts(
+        engine,
+        game_ids_by_team=matchup_governance.expected_season_game_ids,
+        window="season",
+    )
+    _write_legacy_facts(
+        engine,
+        game_ids_by_team=matchup_governance.expected_l15_game_ids,
+        window="l15",
+    )
+
+    route_values = {
+        int(row["team_id"]): float(row["allowed"])
+        for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
+    }
+    parity_repository = TeamMatchupRepository(engine)
+    for window in ("season", "l15"):
+        scope = TeamMatchupSnapshotScope(
+            SEASON,
+            matchup_governance.cutoff.date(),
+            15 if window == "l15" else None,
+        )
+        snapshot = parity_repository.get_snapshot(scope)
+        parity_repository.replace_snapshots(
+            ((
+                scope,
+                tuple(
+                    replace(fact, raw_value=route_values[fact.team_id])
+                    for fact in snapshot.facts
+                ),
+                snapshot.observations,
+            ),),
+            retrieved_at=matchup_governance.cutoff,
+        )
+
+    def route_publication_payload(game_ids_by_team, *, surface):
+        metrics = TEAM_METRICS if surface == "traditional" else ASSIST_DERIVED_METRICS
+        return canonical_publication_json([
+            {
+                "team_id": team_id,
+                "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
+                "game_ids": sorted(game_ids_by_team[team_id]),
+                "game_count": len(game_ids_by_team[team_id]),
+                "per48": {metric: route_values[team_id] for metric in metrics},
+                "league_average": {metric: 1.0 for metric in metrics},
+                "population_sigma": {metric: 1.0 for metric in metrics},
+                "competition_rank": {metric: 1 for metric in metrics},
+                "counts": {metric: route_values[team_id] for metric in metrics},
+                "team_minutes": 48.0,
+            }
+            for team_id in sorted(game_ids_by_team)
+        ])
+
+    matchup_publications = {
+        window: {
+            stream: _insert_runner_publication(
+                engine,
+                stream_key=stream,
+                surface=(
+                    "traditional"
+                    if stream.startswith("traditional")
+                    else "assist_locations"
+                ),
+                window=window,
+                game_ids_by_team=(
+                    matchup_governance.expected_season_game_ids
+                    if window == "season"
+                    else matchup_governance.expected_l15_game_ids
+                ),
+                binding={
+                    "event_catalog_publication_id": (
+                        matchup_governance.event_catalog_publication_id
+                    ),
+                    "event_catalog_checksum": matchup_governance.event_catalog_checksum,
+                },
+                publication_suffix="-route",
+            )
+            for stream in (
+                f"traditional_opponent_{window}",
+                f"assist_locations_{window}",
+            )
+        }
+        for window in ("season", "l15")
+    }
+    for window, publications in matchup_publications.items():
+        game_ids_by_team = (
+            matchup_governance.expected_season_game_ids
+            if window == "season"
+            else matchup_governance.expected_l15_game_ids
+        )
+        for stream_key, publication_id in publications.items():
+            surface = (
+                "traditional"
+                if stream_key.startswith("traditional")
+                else "assist_locations"
+            )
+            payload = route_publication_payload(
+                game_ids_by_team,
+                surface=surface,
+            )
+            with engine.begin() as connection:
+                connection.execute(PublicationVersion.__table__.update().where(
+                    PublicationVersion.publication_id == publication_id,
+                ).values(
+                    payload=payload,
+                    checksum=publication_payload_checksum(payload),
+                ))
+    # Activation's ledger writer fence requires every canonical game to retain
+    # accepted immutable observation evidence, and each candidate must cite
+    # that exact evidence rather than a synthetic aggregate checksum.
+    canonical_observation_rows = [
+        {
+            "observation_id": game.source_observation_id,
+            "client_observation_id": game.source_observation_id,
+            "collector_id": "route-ledger-collector",
+            "manifest_id": matchup_governance.manifest_id,
+            "environment": "testing",
+            "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps({
+                "game_id": game.game_id,
+                "surface": "canonical_game_ledger",
+            }, sort_keys=True),
+            "season": SEASON,
+            "cutoff": matchup_governance.cutoff,
+            "schema_version": 1,
+            "checksum": hashlib.sha256(b"{}").hexdigest(),
+            "payload": "{}",
+            "payload_bytes": 2,
+            "retrieved_at": matchup_governance.cutoff,
+            "accepted_at": matchup_governance.cutoff,
+        }
+        for game in ledger_games
+    ]
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.insert(), canonical_observation_rows
+        )
+        connection.execute(LedgerObservationEvidence.__table__.insert(), [
+            {
+                "observation_id": game.source_observation_id,
+                "game_id": game.game_id,
+                "created_at": matchup_governance.cutoff,
+            }
+            for game in ledger_games
+        ])
+        for publication_id in (
+            *matchup_publications["season"].values(),
+            *matchup_publications["l15"].values(),
+        ):
+            connection.execute(PublicationObservation.__table__.insert(), [
+                {
+                    "publication_id": publication_id,
+                    "observation_id": game.source_observation_id,
+                    "role": "ledger_game",
+                    "slice_key": game.game_id,
+                    "created_at": matchup_governance.cutoff,
+                }
+                for game in ledger_games
+            ])
+    parity_runner = MatchupParityRunner(
+        engine,
+        governance=ActiveManifestLedgerGovernanceReader(engine),
+        legacy_source=StoredLegacyMatchupSource(TeamMatchupRepository(engine)),
+    )
+    parity_runner.run(
+        SEASON,
+        "season",
+        cutoff=matchup_governance.cutoff,
+        publications=matchup_publications["season"],
+    )
+    parity_runner.run(
+        SEASON,
+        "l15",
+        cutoff=matchup_governance.cutoff,
+        publications=matchup_publications["l15"],
+    )
+    with engine.connect() as connection:
+        matchup_artifacts = {
+            stream: connection.execute(
+                select(LedgerParityArtifact.artifact_id)
+                .where(
+                    LedgerParityArtifact.stream_key == stream,
+                    LedgerParityArtifact.season == SEASON,
+                    LedgerParityArtifact.cutoff == matchup_governance.cutoff,
+                )
+                .order_by(LedgerParityArtifact.created_at.desc())
+                .limit(1)
+            ).scalar_one()
+            for stream in (
+                *matchup_publications["season"].keys(),
+                *matchup_publications["l15"].keys(),
+            )
+        }
     operations.activate_stream(
         "player_game_logs", actor="journey-operator", reason="activate first logs",
         season=SEASON, cutoff=NOW - timedelta(days=1),
@@ -1285,6 +1576,17 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         first_log_payload, sort_keys=True, separators=(",", ":")
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    legacy_http_snapshot = reader.snapshot(
+        _PUBLICATION_STREAM_KEYS,
+        season=SEASON,
+    )
+
+    class LegacyHTTPPublicationReader:
+        """Freeze one pre-cutover generation for the public byte contract."""
+
+        def snapshot(self, *_args, **_kwargs):
+            return legacy_http_snapshot
+
     player_logs._publication_reader = reader
     player_diets.repository._publication_reader = reader
     team_matchups._publication_reader = reader
@@ -1300,7 +1602,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         settings=settings,
         injuries=None,
         clock=lambda: NOW,
-        publication_reader=reader,
+        publication_reader=LegacyHTTPPublicationReader(),
     )
     selection_service = MatchupSelectionService(
         event_catalog=event_catalog,
@@ -1367,6 +1669,32 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     client = app.test_client()
     auth_headers = {"Authorization": "Bearer authenticated-fixture-token"}
 
+    # Capture authenticated legacy bytes before any ledger pointer changes.
+    pre_matchup_response = client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
+    )
+    pre_player_game_log_response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26",
+        headers=auth_headers,
+    )
+    assert pre_matchup_response.status_code == 200
+    assert pre_player_game_log_response.status_code == 200
+
+    # The four ledger-owned Season/L15 surfaces are activated as one governed
+    # cohort.  This is deliberately between two real HTTP reads; repeated
+    # reads of one state cannot prove the public byte contract.
+    for window in ("season", "l15"):
+        for stream_key, publication_id in matchup_publications[window].items():
+            operations.activate_stream(
+                stream_key,
+                actor="journey-operator",
+                reason="activate governed matchup cohort",
+                season=SEASON,
+                cutoff=matchup_governance.cutoff,
+                parity_artifact_id=matchup_artifacts[stream_key],
+                candidate_publication_id=publication_id,
+            )
+
     slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
     matchup_response = client.get(
         f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
@@ -1402,9 +1730,11 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert slate_response.status_code == 200
     assert matchup_response.status_code == 200
     assert repeated_matchup_response.status_code == 200
+    assert matchup_response.data == pre_matchup_response.data
     assert repeated_matchup_response.data == matchup_bytes
     assert selection_response.status_code == 200
     assert player_game_log_response.status_code == 200
+    assert player_game_log_response.data == pre_player_game_log_response.data
     assert repeated_player_game_log_response.status_code == 200
     assert repeated_player_game_log_response.data == player_game_log_response.data
     matchup = matchup_response.get_json()

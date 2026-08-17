@@ -846,7 +846,7 @@ class TeamMatchupRefreshService:
                         team_ids=team_ids,
                         date_from=None,
                         date_to=date_to,
-                        last_n_games=None,
+                        expected_game_ids_by_team=expected_game_ids_by_team,
                     )
                 )
             traditional_frame = self.nba_stats.fetch_opponent_team_stats(
@@ -1021,7 +1021,9 @@ class TeamMatchupRefreshService:
                             team_ids=(team_id,),
                             date_from=self._nba_date(boundary.from_date),
                             date_to=date_to,
-                            last_n_games=15,
+                            expected_game_ids_by_team={
+                                team_id: boundary.game_ids,
+                            },
                         )
                         provider_ids_by_surface["traditional"][team_id] = (
                             provider_ids[team_id]
@@ -1184,7 +1186,7 @@ class TeamMatchupRefreshService:
         team_ids: Iterable[int],
         date_from: str | None,
         date_to: str | None,
-        last_n_games: int | None,
+        expected_game_ids_by_team: Mapping[int, Iterable[str]],
     ) -> dict[int, tuple[str, ...]]:
         """Collect membership from a provider detail endpoint.
 
@@ -1206,7 +1208,6 @@ class TeamMatchupRefreshService:
                 season_type=season_type,
                 date_from=date_from,
                 date_to=date_to,
-                last_n_games=last_n_games,
             )
             if isinstance(values, pd.DataFrame):
                 if "GAME_ID" not in values.columns:
@@ -1222,6 +1223,14 @@ class TeamMatchupRefreshService:
             if not ids or any(not value for value in ids) or len(ids) != len(set(ids)):
                 raise _ProviderWindowUnverified(
                     "provider detail response has invalid game membership"
+                )
+            expected_ids = tuple(sorted(
+                str(value).strip()
+                for value in expected_game_ids_by_team.get(int(team_id), ())
+            ))
+            if ids != expected_ids:
+                raise _ProviderWindowUnverified(
+                    "provider detail response does not match governed game membership"
                 )
             result[int(team_id)] = ids
         return result

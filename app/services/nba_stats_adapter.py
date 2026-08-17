@@ -931,7 +931,6 @@ class NBAStatsAdapter:
         season_type: str = "Regular Season",
         date_from: str | None = None,
         date_to: str | None = None,
-        last_n_games: int | None = None,
     ) -> tuple[str, ...]:
         """Return exact game IDs from the independent TeamGameLog endpoint.
 
@@ -956,8 +955,6 @@ class NBAStatsAdapter:
                 "date_to_nullable": date_to or "",
                 "timeout": timeout,
             }
-            if last_n_games is not None:
-                parameters["last_n_games"] = last_n_games
             return factory(**parameters)
 
         frame = self.run_endpoint(

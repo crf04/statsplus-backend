@@ -297,8 +297,31 @@ def test_team_game_log_returns_independent_exact_membership():
     captured = {}
 
     class TeamGameLogFixture:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+        def __init__(
+            self,
+            team_id,
+            season="2025-26",
+            season_type_all_star="Regular Season",
+            date_from_nullable="",
+            date_to_nullable="",
+            league_id_nullable="00",
+            proxy=None,
+            headers=None,
+            timeout=30,
+            get_request=True,
+        ):
+            captured.update({
+                "team_id": team_id,
+                "season": season,
+                "season_type_all_star": season_type_all_star,
+                "date_from_nullable": date_from_nullable,
+                "date_to_nullable": date_to_nullable,
+                "league_id_nullable": league_id_nullable,
+                "proxy": proxy,
+                "headers": headers,
+                "timeout": timeout,
+                "get_request": get_request,
+            })
 
         def get_data_frames(self):
             return [pd.DataFrame({"GAME_ID": ["g-2", "g-1"]})]
@@ -313,17 +336,29 @@ def test_team_game_log_returns_independent_exact_membership():
         "2024-25",
         date_from="01/01/2025",
         date_to="01/31/2025",
-        last_n_games=15,
     ) == ("g-1", "g-2")
     assert captured["team_id"] == 1610612738
     assert captured["season"] == "2024-25"
-    assert captured["last_n_games"] == 15
+    assert captured["date_from_nullable"] == "01/01/2025"
+    assert captured["date_to_nullable"] == "01/31/2025"
     assert captured["timeout"] == 7.5
 
 
 def test_team_game_log_rejects_missing_membership_ids():
     class TeamGameLogFixture:
-        def __init__(self, **kwargs):
+        def __init__(
+            self,
+            team_id,
+            season="2025-26",
+            season_type_all_star="Regular Season",
+            date_from_nullable="",
+            date_to_nullable="",
+            league_id_nullable="00",
+            proxy=None,
+            headers=None,
+            timeout=30,
+            get_request=True,
+        ):
             pass
 
         def get_data_frames(self):

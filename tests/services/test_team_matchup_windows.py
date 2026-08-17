@@ -413,24 +413,25 @@ def test_independent_provider_detail_membership_rejects_missing_or_wrong_same_co
     service = object.__new__(TeamMatchupRefreshService)
     service.nba_stats = DetailProvider()
     expected = tuple(sorted(f"game-{index}" for index in range(15)))
-    actual = service._independent_provider_game_ids(
-        season="2024-25",
-        season_type="Regular Season",
-        team_ids=(BOS,),
-        date_from="03/01/2025",
-        date_to="03/15/2025",
-        last_n_games=15,
-    )
     if set(returned_ids) == set(expected) and len(returned_ids) == len(expected):
+        actual = service._independent_provider_game_ids(
+            season="2024-25",
+            season_type="Regular Season",
+            team_ids=(BOS,),
+            date_from="03/01/2025",
+            date_to="03/15/2025",
+            expected_game_ids_by_team={BOS: expected},
+        )
         assert actual == {BOS: expected}
     else:
-        with pytest.raises(ValueError, match="game IDs"):
-            TeamMatchupRefreshService._provider_window_identity(
-                window="l15",
-                game_ids_by_team={BOS: expected},
-                provider_game_ids_by_team=actual,
-                expected_counts={BOS: 15},
-                collect_before=datetime(2025, 3, 16, tzinfo=timezone.utc),
+        with pytest.raises(ValueError, match="governed game membership"):
+            service._independent_provider_game_ids(
+                season="2024-25",
+                season_type="Regular Season",
+                team_ids=(BOS,),
+                date_from="03/01/2025",
+                date_to="03/15/2025",
+                expected_game_ids_by_team={BOS: expected},
             )
 
 
