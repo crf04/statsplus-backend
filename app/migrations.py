@@ -917,6 +917,50 @@ def _upgrade_publication_activation_constraints(connection: Connection) -> None:
         ))
 
 
+def _create_publication_player_game_log_projection(
+    connection: Connection,
+) -> None:
+    """Create and backfill immutable player-log rows keyed by publication."""
+
+    from app.models.collection_control import PublicationVersion
+    from app.models.player_game_log import PublicationPlayerGameLog
+    from app.services.database_first_activation import PublicationPayloadError
+    from app.services.player_game_log_projection import (
+        write_player_game_log_projection,
+    )
+
+    projection_table = PublicationPlayerGameLog.__table__
+    projection_table.create(connection, checkfirst=True)
+    projected_ids = set(
+        connection.execute(
+            select(projection_table.c.publication_id).distinct()
+        ).scalars()
+    )
+    publication_table = PublicationVersion.__table__
+    publications = connection.execute(
+        select(
+            publication_table.c.publication_id,
+            publication_table.c.season,
+            publication_table.c.payload,
+        ).where(publication_table.c.stream_key == "player_game_logs")
+    ).mappings()
+    for publication in publications:
+        publication_id = str(publication["publication_id"])
+        if publication_id in projected_ids:
+            continue
+        try:
+            write_player_game_log_projection(
+                connection,
+                publication_id,
+                publication["payload"],
+                season=str(publication["season"]),
+            )
+        except PublicationPayloadError:
+            # Existing malformed publications already read as unavailable.
+            # Preserve that fail-closed state instead of blocking deployment.
+            continue
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -964,6 +1008,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(33, "033_ledger_observation_evidence", _create_ledger_observation_evidence),
     Migration(34, "034_team_matchup_ledger_lineage", _add_team_matchup_ledger_lineage),
     Migration(35, "035_governed_catalog_freshness", _backfill_governed_catalog_freshness),
+    Migration(
+        36,
+        "036_publication_player_game_log_projection",
+        _create_publication_player_game_log_projection,
+    ),
 )
 
 

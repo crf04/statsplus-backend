@@ -810,6 +810,10 @@ and Redis caching behavior are unchanged, and cache telemetry is attributed to
 PBP Stats. A season with a complete, valid durable publication is served
 database-first from the stored `player_game_logs` facts with strictly identical
 values; every other valid season continues through the cached live PBP path.
+The database-first implementation resolves the active immutable publication
+and queries its publication-keyed player projection; a cold request does not
+load or decode the season-wide publication payload. This is an internal read
+optimization and does not change the endpoint parameters or response schema.
 Both paths
 return the same whole-minute presentation and the same composite/fantasy
 averages, and any season cut over to the database must satisfy strict parity.

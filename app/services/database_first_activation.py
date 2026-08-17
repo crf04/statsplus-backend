@@ -16,16 +16,17 @@ from datetime import date, datetime, timezone
 from math import isfinite
 from typing import Any, Callable, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import defer, sessionmaker
 
 from app.models.collection_control import (
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
 )
+from app.models.player_game_log import PublicationPlayerGameLog
 from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
@@ -529,13 +530,18 @@ class PublicationRead:
     # whose provenance it reports instead of decoding (or re-reading) a later
     # generation.
     decoded: tuple[Any, ...] | None = None
+    # Player-log requests use an immutable normalized projection instead of
+    # loading this publication's season-wide rendered payload.
+    projection_ready: bool = False
 
     @property
     def available(self) -> bool:
         # A rollback pointer still names a known-good immutable publication.
         # Keep its rollback status visible to callers instead of treating the
         # safety action itself as data loss.
-        return self.payload is not None and self.status in {"active", "rollback", "stale"}
+        return (
+            self.payload is not None or self.projection_ready
+        ) and self.status in {"active", "rollback", "stale"}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -683,6 +689,38 @@ class DatabaseFirstPublicationReader:
     ) -> PublicationReadSnapshot:
         """Capture all requested pointers, payloads, and decoded facts once."""
 
+        return self._snapshot(
+            stream_keys,
+            season=season,
+            require_active=require_active,
+            projection_only=False,
+        )
+
+    def snapshot_player_game_logs(
+        self,
+        *,
+        season: str,
+        require_active: bool = True,
+    ) -> PublicationReadSnapshot:
+        """Capture player-log provenance without selecting its large payload."""
+
+        return self._snapshot(
+            ("player_game_logs",),
+            season=season,
+            require_active=require_active,
+            projection_only=True,
+        )
+
+    def _snapshot(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str | None,
+        require_active: bool,
+        projection_only: bool,
+    ) -> PublicationReadSnapshot:
+        """Capture one immutable generation through its selected read shape."""
+
         keys = tuple(sorted(set(str(key) for key in stream_keys)))
         if not keys:
             return PublicationReadSnapshot(season, {}, ())
@@ -691,7 +729,7 @@ class DatabaseFirstPublicationReader:
             # PostgreSQL READ COMMITTED transaction takes a fresh snapshot per
             # statement, so three sequential SELECTs could otherwise label a
             # fact with the pointer from a later generation.
-            rows = session.execute(
+            statement = (
                 select(PublicationStream, PublicationPointer, PublicationVersion)
                 .outerjoin(
                     PublicationPointer,
@@ -703,17 +741,40 @@ class DatabaseFirstPublicationReader:
                     == PublicationPointer.active_publication_id,
                 )
                 .where(PublicationStream.stream_key.in_(keys))
-            ).all()
-            snapshot = {
-                stream.stream_key: (stream, pointer, publication)
-                for stream, pointer, publication in rows
-            }
+            )
+            if projection_only:
+                statement = statement.add_columns(
+                    exists(
+                        select(PublicationPlayerGameLog.publication_id).where(
+                            PublicationPlayerGameLog.publication_id
+                            == PublicationVersion.publication_id
+                        )
+                    ).label("projection_ready")
+                ).options(defer(PublicationVersion.payload, raiseload=True))
+                snapshot = {
+                    stream.stream_key: (
+                        stream,
+                        pointer,
+                        publication,
+                        bool(projection_ready),
+                    )
+                    for stream, pointer, publication, projection_ready
+                    in session.execute(statement).all()
+                }
+            else:
+                snapshot = {
+                    stream.stream_key: (stream, pointer, publication, False)
+                    for stream, pointer, publication
+                    in session.execute(statement).all()
+                }
             now = _utc(self.clock())
             reads = {
                 key: self._read_row(key, **{
                     "stream": snapshot[key][0] if key in snapshot else None,
                     "pointer": snapshot[key][1] if key in snapshot else None,
                     "publication": snapshot[key][2] if key in snapshot else None,
+                    "projection_ready": snapshot[key][3] if key in snapshot else False,
+                    "hydrate_payload": not projection_only,
                     "season": season,
                     "require_active": require_active,
                     "now": now,
@@ -747,6 +808,8 @@ class DatabaseFirstPublicationReader:
         season: str | None,
         require_active: bool,
         now: datetime,
+        projection_ready: bool = False,
+        hydrate_payload: bool = True,
     ) -> PublicationRead:
         if stream is None:
             if stream_key == "synergy:l15":
@@ -779,6 +842,35 @@ class DatabaseFirstPublicationReader:
                 reason="publication_season_mismatch",
                 fence=pointer.fence,
             )
+        retrieved_at = _utc(publication.created_at)
+        age = max(0, int((now - retrieved_at).total_seconds()))
+        threshold = self.freshness_seconds.get(str(stream.freshness_rule))
+        freshness = "fresh" if threshold is not None and age <= threshold else "stale"
+        if not hydrate_payload:
+            if not projection_ready:
+                return self._missing(
+                    stream_key,
+                    "unavailable",
+                    reason="publication_projection_missing",
+                    fence=pointer.fence,
+                )
+            return PublicationRead(
+                stream_key=stream_key,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                status=(
+                    "active" if publication.status == "active" else "rollback"
+                ),
+                freshness=freshness,
+                age_seconds=age,
+                payload=None,
+                retrieved_at=retrieved_at,
+                checksum=publication.checksum,
+                fence=int(pointer.fence),
+                projection_ready=True,
+            )
         try:
             payload = json.loads(publication.payload)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -790,7 +882,6 @@ class DatabaseFirstPublicationReader:
                 reason="publication_payload_invalid",
                 fence=pointer.fence,
             )
-        retrieved_at = _utc(publication.created_at)
         try:
             decoded = _decode_known_publication_payload(
                 stream_key,
@@ -805,9 +896,6 @@ class DatabaseFirstPublicationReader:
                 reason="publication_payload_invalid",
                 fence=pointer.fence,
             )
-        age = max(0, int((now - _utc(publication.created_at)).total_seconds()))
-        threshold = self.freshness_seconds.get(str(stream.freshness_rule))
-        freshness = "fresh" if threshold is not None and age <= threshold else "stale"
         return PublicationRead(
             stream_key=stream_key,
             publication_id=publication.publication_id,

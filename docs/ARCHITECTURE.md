@@ -1100,7 +1100,15 @@ season's own sidecar, or a fresh stats-surface observation for the configured
 current season).  The request-time router serves that season from the durable
 facts through `StoredGameLogsSource`, which rebuilds the canonical frame from
 `PlayerGameLogRecord` primitives with the same central derivations as the live
-path.  A valid season that has not yet received a complete durable publication
+path. Active immutable player-log publications also own a normalized
+`publication_player_game_logs` projection keyed by `publication_id`, player,
+and game. The request planner reads pointer/version metadata without selecting
+`publication_versions.payload`, then the repository executes one indexed
+player query and decodes only those rows. Composition and rollback write the
+projection in the publication transaction, while migration 036 backfills
+existing valid versions; the projection therefore preserves exact active and
+rollback generation semantics without a season-wide cold decode. A valid
+season that has not yet received a complete durable publication
 continues through the cached live PBP path; it is never mistaken for an empty
 stored season.  Because the #66 contract amendment removed plus/minus from the
 game-log contract, the durable path covers every public primitive and needs no
@@ -2564,6 +2572,14 @@ services that enforce the canonical catalog freshness contract. Migration 035
 backfills those sidecars from the newest complete governed publication for
 each catalog type and season, including catalogs published before this bridge
 was introduced.
+
+Migration 036 creates `publication_player_game_logs`, an immutable normalized
+query projection with `ON DELETE CASCADE` provenance to
+`publication_versions`. It backfills every valid existing player-log
+publication and leaves malformed historical versions unprojected so their
+existing fail-closed unavailable behavior is preserved. New composition and
+rollback transactions insert projection rows before advancing or returning a
+publication.
 
 Collector release health crosses a separate machine-authenticated status seam.
 It persists only a validated 64-character release identifier/checksum pair and
