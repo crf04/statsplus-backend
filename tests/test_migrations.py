@@ -44,6 +44,7 @@ def _create_projection_v37_fixture(engine) -> None:
         "CREATE TABLE latest_player_projections (provider VARCHAR(64) NOT NULL, season VARCHAR(7) NOT NULL, query_key VARCHAR(72) NOT NULL, canonical_game_id VARCHAR(32) NOT NULL, canonical_player_id INTEGER NOT NULL, market_reference VARCHAR(72) NOT NULL, observation_id VARCHAR(72) NOT NULL REFERENCES projection_observations(observation_id) ON DELETE RESTRICT, generation_id VARCHAR(72) NOT NULL REFERENCES projection_materialization_generations(generation_id) ON DELETE RESTRICT, canonical_team_id INTEGER NOT NULL, canonical_player_name VARCHAR(255) NOT NULL, canonical_statistic_id VARCHAR(128) NOT NULL, market_category VARCHAR(32) NOT NULL, observed_at DATETIME NOT NULL, PRIMARY KEY (provider, season, query_key, canonical_game_id, canonical_player_id, market_reference))",
     )
     observed_at = "2026-01-02 12:30:00"
+    unchanged_at = "2026-01-02 12:31:00"
     with engine.begin() as connection:
         for statement in statements:
             connection.exec_driver_sql(statement)
@@ -52,25 +53,101 @@ def _create_projection_v37_fixture(engine) -> None:
                 text("INSERT INTO schema_migrations (version, name) VALUES (:version, :name)"),
                 {"version": migration.version, "name": migration.name},
             )
-        connection.execute(text(
-            "INSERT INTO projection_provider_snapshots VALUES "
-            "('snapshot','dabble','2025-26','query','1','complete',:at,:at,'checksum','content','{}')"
-        ), {"at": observed_at})
-        connection.execute(text(
-            "INSERT INTO projection_provider_polls VALUES "
-            "('poll','dabble','2025-26','query',NULL,:at,:at,'changed','snapshot','generation',1)"
-        ), {"at": observed_at})
-        connection.execute(text(
-            "INSERT INTO projection_materialization_generations VALUES "
-            "('generation','dabble','2025-26','query','snapshot','poll',:at,:at,'materialized','advanced')"
-        ), {"at": observed_at})
+        for identity, retrieved_at in (
+            ("winner", observed_at),
+            ("older", "2026-01-02 12:29:00"),
+            ("same", observed_at),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO projection_provider_snapshots VALUES "
+                    "(:snapshot,'dabble','2025-26','query','1','complete',:at,:at,"
+                    ":checksum,:content,'{}')"
+                ),
+                {
+                    "snapshot": f"{identity}_snapshot",
+                    "at": retrieved_at,
+                    "checksum": f"{identity}_checksum",
+                    "content": f"{identity}_content",
+                },
+            )
+        for poll_id, completed_at, retrieved_at, outcome, snapshot_id, generation_id in (
+            (
+                "winner_poll",
+                observed_at,
+                observed_at,
+                "changed",
+                "winner_snapshot",
+                "winner_generation",
+            ),
+            (
+                "older_poll",
+                unchanged_at,
+                "2026-01-02 12:29:00",
+                "changed",
+                "older_snapshot",
+                "older_generation",
+            ),
+            (
+                "same_poll",
+                "2026-01-02 12:32:00",
+                observed_at,
+                "changed",
+                "same_snapshot",
+                "same_generation",
+            ),
+            (
+                "unchanged_poll",
+                "2026-01-02 12:33:00",
+                unchanged_at,
+                "unchanged",
+                "winner_snapshot",
+                "winner_generation",
+            ),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO projection_provider_polls VALUES "
+                    "(:poll,'dabble','2025-26','query',NULL,:completed,:retrieved,"
+                    ":outcome,:snapshot,:generation,1)"
+                ),
+                {
+                    "poll": poll_id,
+                    "completed": completed_at,
+                    "retrieved": retrieved_at,
+                    "outcome": outcome,
+                    "snapshot": snapshot_id,
+                    "generation": generation_id,
+                },
+            )
+        for identity, retrieved_at, outcome in (
+            ("winner", observed_at, "advanced"),
+            ("older", "2026-01-02 12:29:00", "older_not_promoted"),
+            ("same", observed_at, "same_time_not_promoted"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO projection_materialization_generations VALUES "
+                    "(:generation,'dabble','2025-26','query',:snapshot,:poll,:created,"
+                    ":retrieved,:materialized,:outcome)"
+                ),
+                {
+                    "generation": f"{identity}_generation",
+                    "snapshot": f"{identity}_snapshot",
+                    "poll": f"{identity}_poll",
+                    "created": observed_at,
+                    "retrieved": retrieved_at,
+                    "materialized": f"{identity}_materialized",
+                    "outcome": outcome,
+                },
+            )
         connection.execute(text(
             "INSERT INTO projection_observations VALUES "
-            "('observation','snapshot','generation','poll',0,'dabble','market','reference','game',7,'Player 7',10,'points','PTS','available','standard','full_game',1,:at)"
+            "('observation','winner_snapshot','winner_generation','winner_poll',0,'dabble','market','reference','game',7,'Player 7',10,'points','PTS','available','standard','full_game',1,:at)"
         ), {"at": observed_at})
         connection.execute(text(
             "INSERT INTO latest_player_projections VALUES "
-            "('dabble','2025-26','query','game',7,'reference','observation','generation',10,'Player 7','points','PTS',:at)"
+            "('dabble','2025-26','query','game',7,'reference','observation','winner_generation',10,'Player 7','points','PTS',:at)"
         ), {"at": observed_at})
 
 
@@ -98,12 +175,29 @@ def test_projection_transition_migration_upgrades_authentic_v37_sqlite(tmp_path)
     }
     assert latest_columns["confirmed_at"]["nullable"] is False
     with engine.connect() as connection:
-        migrated = connection.execute(text(
-            "SELECT promoted, confirmed_at, observed_at FROM projection_provider_polls "
-            "JOIN latest_player_projections ON 1 = 1 WHERE poll_id = 'poll'"
+        promoted = dict(connection.execute(text(
+            "SELECT poll_id, promoted FROM projection_provider_polls ORDER BY poll_id"
+        )).all())
+        assert promoted == {
+            "older_poll": 0,
+            "same_poll": 0,
+            "unchanged_poll": 1,
+            "winner_poll": 1,
+        }
+        latest = connection.execute(text(
+            "SELECT generation_id, confirmed_at, observed_at "
+            "FROM latest_player_projections"
         )).one()
-        assert migrated[0] == 1
-        assert migrated[1] == migrated[2]
+        assert latest[0] == "winner_generation"
+        assert latest[1] == "2026-01-02 12:31:00"
+        assert latest[2] == "2026-01-02 12:30:00"
+        assert dict(connection.execute(text(
+            "SELECT generation_id, outcome FROM projection_materialization_generations"
+        )).all()) == {
+            "winner_generation": "advanced",
+            "older_generation": "older_not_promoted",
+            "same_generation": "same_time_not_promoted",
+        }
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     with engine.begin() as connection:
         connection.execute(text(

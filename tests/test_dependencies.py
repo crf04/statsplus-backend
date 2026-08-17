@@ -218,6 +218,19 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
         },
     )
 
+    enabled = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+            features=FeatureSettings(projection_archive_read_enabled=True),
+            providers={"dfs_enabled_providers": ("dabble",)},
+        )
+    )
+    assert enabled.projection_player_pool_reader.required_providers == frozenset(
+        {"dabble"}
+    )
+
     dependencies = build_dependencies(settings)
     reader = dependencies.projection_player_pool_reader
 
@@ -230,6 +243,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_recorder.scope is reader.scope
     assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"
+    assert reader.required_providers == frozenset()
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
     selection_reader = dependencies.matchup_selection_service.player_pool
@@ -245,7 +259,6 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     ).freshness["state"] == "missing"
     assert not hasattr(reader, "board_service")
     assert not hasattr(reader, "provider_registry")
-
 
 def test_projection_archive_gate_refuses_the_read_only_demo_database(monkeypatch):
     from app.dependencies import build_dependencies

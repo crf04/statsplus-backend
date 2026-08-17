@@ -831,6 +831,7 @@ def _build_settings(
     _validate_environment_requirements(
         settings,
         cors_origins_configured=cors_origins is not None,
+        dfs_providers_configured=configured_dfs_providers is not None,
     )
     return settings
 
@@ -854,14 +855,16 @@ def _validate_environment_requirements(
     settings: RuntimeSettings,
     *,
     cors_origins_configured: bool | None = None,
+    dfs_providers_configured: bool | None = None,
 ) -> None:
     """Enforce settings that are required for a safe production process."""
 
     errors: list[str] = []
     if settings.environment == "production":
-        if not settings.providers.dfs_enabled_providers:
+        if dfs_providers_configured is False:
             errors.append(
-                "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider"
+                "DFS_ENABLED_PROVIDERS must be explicitly configured; an empty "
+                "value disables all providers"
             )
         if cors_origins_configured is None:
             cors_origins_configured = (

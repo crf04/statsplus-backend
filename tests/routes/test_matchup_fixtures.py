@@ -71,6 +71,7 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import StoredPlayerPoolReader
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
+    ProjectionSelectionPlayerPoolReader,
 )
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolSnapshotRepository,
@@ -1604,6 +1605,33 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             }
         },
     }
+    all_disabled_at = expired_at + timedelta(minutes=16)
+    all_disabled_pool = LatestProjectionPlayerPoolReader(
+        engine,
+        pool.scopes,
+        clock=lambda: all_disabled_at,
+        required_providers=(),
+    )
+    route_dependencies.slate_service.player_pool = all_disabled_pool
+    route_dependencies.matchup_service.player_pool = all_disabled_pool
+    route_dependencies.matchup_selection_service.player_pool = (
+        ProjectionSelectionPlayerPoolReader(all_disabled_pool)
+    )
+    all_disabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert all_disabled_matchup.status_code == 200
+    assert all_disabled_matchup.get_json()["players"] == []
+    assert all_disabled_matchup.get_json()["freshness"]["pool"] == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+    all_disabled_selection = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert all_disabled_selection.status_code == 503
+    assert all_disabled_selection.get_json()["error"]["code"] == "provider_unavailable"
     with engine.connect() as connection:
         durable_counts = {
             "snapshots": connection.execute(

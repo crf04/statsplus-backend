@@ -943,3 +943,20 @@ def test_production_requires_an_explicit_provider_registry(monkeypatch):
         load_settings()
 
     assert "DFS_ENABLED_PROVIDERS" in str(error.value)
+
+
+def test_production_accepts_an_explicit_empty_provider_registry():
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://example/db",
+            "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+            "DFS_ENABLED_PROVIDERS": "",
+            "FIREBASE_SERVICE_ACCOUNT_JSON": (
+                '{"project_id":"courtai-test","private_key":"test-key",'
+                '"client_email":"firebase@example.com"}'
+            ),
+        }
+    )
+
+    assert settings.providers.dfs_enabled_providers == ()

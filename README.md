@@ -81,14 +81,14 @@ the most important variables:
 | `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME` | No | `1` for play types, shot zones, and assist locations; `4` for shot types |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
-| `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires explicit non-empty configuration | Explicit comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`) |
+| `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires the variable explicitly | Comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`); an explicit empty value disables all providers |
 | `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `DFS_COMPARISON_MAX_MARKETS` | No | `10000`; post-filter Comparison Board ceiling |
 | `PROJECTION_ARCHIVE_MAX_MARKETS` | No | `10000`; independent pre-persistence ceiling for one normalized provider snapshot |
 | `INJURY_REPORT_ENABLED` / `ROTOWIRE_PERMISSION_GRANTED` | No | Both `false`; RotoWire collection exists only when both explicit gates are true |
 | `PROJECTION_ARCHIVE_READ_ENABLED` | No | `false`; selects the database-only projection reader and requires an application database with the archive schema |
-| `PROJECTION_ARCHIVE_READ_PROVIDER` | No | `dabble`; fallback archive scope only when `DFS_ENABLED_PROVIDERS` is empty |
+| `PROJECTION_ARCHIVE_READ_PROVIDER` | No | `dabble`; recorder compatibility scope when `DFS_ENABLED_PROVIDERS` is empty; it does not enable reads or failure fallback |
 | `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` / `ROTOWIRE_READ_TIMEOUT_SECONDS` | No | `3` / `8`; typed connect/read caps for the injury-table GET |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |

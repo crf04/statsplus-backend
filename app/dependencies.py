@@ -477,7 +477,7 @@ def build_dependencies(
             engine,
             projection_read_scopes,
             clock=lambda: datetime.now(timezone.utc),
-            required_providers=projection_record_providers,
+            required_providers=settings.providers.dfs_enabled_providers,
         )
         if settings.features.projection_archive_read_enabled
         else None

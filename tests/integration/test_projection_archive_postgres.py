@@ -314,15 +314,42 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
 ):
     run_migrations(projection_pg_engine)
     catalog = StatisticCatalog.load_default()
-    ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
-        _two_market_snapshot(
-            catalog,
-            OBSERVED_AT,
-            player_ids=(7, 8),
-            thresholds=("20.5", "10.5"),
-        ),
-        query=NBAMarketQuery(season=SEASON),
-        accepted_at=OBSERVED_AT,
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    winner = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT,
+        player_ids=(7, 8),
+        thresholds=("20.5", "10.5"),
+    )
+    older = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT - timedelta(minutes=1),
+        player_ids=(11, 12),
+        thresholds=("19.5", "9.5"),
+    )
+    same_time = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT,
+        player_ids=(9, 10),
+        thresholds=("21.5", "11.5"),
+    )
+    archive.ingest_snapshot(winner, query=query, accepted_at=OBSERVED_AT)
+    archive.ingest_snapshot(
+        older,
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=2),
+    )
+    archive.ingest_snapshot(
+        same_time,
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=3),
+    )
+    unchanged_at = OBSERVED_AT + timedelta(minutes=1)
+    archive.ingest_snapshot(
+        replace(winner, retrieved_at=unchanged_at),
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=4),
     )
     with projection_pg_engine.begin() as connection:
         connection.execute(text(
@@ -357,12 +384,24 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
     }
     assert latest["confirmed_at"]["nullable"] is False
     with projection_pg_engine.connect() as connection:
-        assert connection.execute(text(
-            "SELECT promoted FROM projection_provider_polls WHERE poll_id IS NOT NULL"
-        )).scalar_one() is True
-        assert connection.execute(text(
-            "SELECT confirmed_at = observed_at FROM latest_player_projections"
-        )).scalar_one() is True
+        migrated_polls = connection.execute(text(
+            "SELECT poll.outcome, poll.promoted, generation.outcome "
+            "FROM projection_provider_polls AS poll "
+            "JOIN projection_materialization_generations AS generation "
+            "ON generation.generation_id = poll.generation_id "
+            "ORDER BY poll.completed_at"
+        )).all()
+        assert migrated_polls == [
+            ("changed", True, "advanced"),
+            ("changed", False, "older_not_promoted"),
+            ("changed", False, "same_time_not_promoted"),
+            ("unchanged", True, "advanced"),
+        ]
+        latest_times = connection.execute(text(
+            "SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections"
+        )).one()
+        assert latest_times.observed_at == OBSERVED_AT
+        assert latest_times.confirmed_at == unchanged_at
 
 
 def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(

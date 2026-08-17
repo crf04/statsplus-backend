@@ -333,7 +333,10 @@ snapshot.
 Migration 037 adds the durable projection evidence path without replacing the
 legacy Player Pool reader. Migration 038 upgrades already-migrated databases
 with poll promotion/failure state and per-offering confirmation time; it
-backfills existing Latest confirmations from their observation times.
+backfills poll promotion only when the referenced v37 generation was a winner,
+including unchanged confirmations that reference that winning generation.
+Older and equal-time losing generations remain non-promoted, while Latest
+confirmation advances to the newest winning poll retrieval time.
 `ProjectionRecordingService.record_snapshot()` and
 `record_failed_poll()` are the application recording boundaries and delegate
 durable work to `ProjectionArchive`. They accept an already retrieved Complete
@@ -429,7 +432,11 @@ time. Complete and unchanged Complete polls confirm the whole scope; Partial
 polls confirm only included references. Confirmation is live through the
 inclusive 15-minute window. After a failed poll it may be stale-served only
 through the inclusive six-hour fallback. A disabled provider receives no new
-confirmations and expires without deleting Latest or immutable history. A targetable row
+confirmations and expires without deleting Latest or immutable history.
+`DFS_ENABLED_PROVIDERS` is the sole enablement authority: removing the final
+provider leaves compatibility read/record scopes intact for expiry and audit,
+but no provider is required and none receives the failure fallback beyond the
+15-minute live window. A targetable row
 requires the canonical athlete's name as well as its governed IDs; an ID is
 never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current

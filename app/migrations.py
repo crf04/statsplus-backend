@@ -1029,6 +1029,9 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
     poll_name = connection.dialect.identifier_preparer.quote(
         "projection_provider_polls"
     )
+    generation_name = connection.dialect.identifier_preparer.quote(
+        "projection_materialization_generations"
+    )
     latest_name = connection.dialect.identifier_preparer.quote(
         "latest_player_projections"
     )
@@ -1041,7 +1044,10 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
             f"ALTER TABLE {poll_name} ADD COLUMN promoted BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         connection.execute(text(
-            f"UPDATE {poll_name} SET promoted = TRUE WHERE outcome <> 'failed'"
+            f"UPDATE {poll_name} AS poll SET promoted = EXISTS ("
+            f"SELECT 1 FROM {generation_name} AS generation "
+            "WHERE generation.generation_id = poll.generation_id "
+            "AND generation.outcome IN ('advanced', 'rematerialized'))"
         ))
     connection.execute(text(
         f"ALTER TABLE {poll_name} ALTER COLUMN retrieved_at DROP NOT NULL"
@@ -1054,7 +1060,13 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
             f"ALTER TABLE {latest_name} ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE"
         ))
         connection.execute(text(
-            f"UPDATE {latest_name} SET confirmed_at = observed_at"
+            f"UPDATE {latest_name} AS latest SET confirmed_at = COALESCE (("
+            f"SELECT MAX(poll.retrieved_at) FROM {poll_name} AS poll "
+            f"JOIN {generation_name} AS generation "
+            "ON generation.generation_id = poll.generation_id "
+            "WHERE poll.generation_id = latest.generation_id "
+            "AND generation.outcome IN ('advanced', 'rematerialized')"
+            "), latest.observed_at)"
         ))
         connection.execute(text(
             f"ALTER TABLE {latest_name} ALTER COLUMN confirmed_at SET NOT NULL"
@@ -1108,9 +1120,23 @@ def _rebuild_projection_transition_tables_sqlite(
             if column in source_columns:
                 expressions.append(column)
             elif column == "confirmed_at":
-                expressions.append("observed_at AS confirmed_at")
+                expressions.append(
+                    "COALESCE((SELECT MAX(poll.retrieved_at) "
+                    "FROM projection_provider_polls AS poll "
+                    "JOIN projection_materialization_generations AS generation "
+                    "ON generation.generation_id = poll.generation_id "
+                    f"WHERE poll.generation_id = {table.name}.generation_id "
+                    "AND generation.outcome IN ('advanced', 'rematerialized')), "
+                    "observed_at) AS confirmed_at"
+                )
             elif column == "promoted":
-                expressions.append("CASE WHEN outcome = 'failed' THEN 0 ELSE 1 END AS promoted")
+                expressions.append(
+                    "CASE WHEN EXISTS (SELECT 1 "
+                    "FROM projection_materialization_generations AS generation "
+                    f"WHERE generation.generation_id = {table.name}.generation_id "
+                    "AND generation.outcome IN ('advanced', 'rematerialized')) "
+                    "THEN 1 ELSE 0 END AS promoted"
+                )
             elif column == "failure_reason":
                 expressions.append("NULL AS failure_reason")
             else:
