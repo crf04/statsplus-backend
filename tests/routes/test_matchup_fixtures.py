@@ -1297,6 +1297,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
 
     catalog = StatisticCatalog.load_default()
     pool = assembled.projection_player_pool_reader
+    pool.clock = lambda: NOW
     event_catalog = _event_catalog(engine, settings)
     stats_freshness = StatsFreshnessRepository(engine)
     stats_freshness.record_success(NOW)
@@ -1337,6 +1338,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         accepted_at=NOW,
     )
     rematerialized_at = NOW + timedelta(minutes=1)
+    pool.clock = lambda: rematerialized_at
     assembled.projection_recorder.archive.market_categories["points"] = "PRA"
     assembled.projection_recorder.record_complete_snapshot(
         replace(recorded_snapshot, retrieved_at=rematerialized_at),
@@ -1368,3 +1370,68 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [
         2544
     ]
+
+    partial_at = rematerialized_at + timedelta(minutes=1)
+    partial = replace(
+        recorded_snapshot,
+        status=SnapshotStatus.PARTIAL,
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=2,
+            warning_codes=("page_fetch_failed",),
+        ),
+        retrieved_at=partial_at,
+    )
+    assembled.projection_recorder.record_snapshot(
+        partial,
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=partial_at,
+    )
+    pool.clock = lambda: partial_at
+    assert client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()[
+        "freshness"
+    ]["pool"]["status"] == "fresh"
+
+    failed_at = partial_at + timedelta(minutes=16)
+    assembled.projection_recorder.record_failed_poll(
+        provider="dabble",
+        query=NBAMarketQuery(season=SEASON),
+        completed_at=failed_at,
+        failure_reason="access_denied",
+    )
+    pool.clock = lambda: failed_at
+    failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert failed_matchup.status_code == 200
+    assert failed_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
+    assert [
+        player["canonical_id"] for player in failed_matchup.get_json()["players"]
+    ] == [2544]
+
+    empty_at = failed_at + timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=empty_at,
+        ),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=empty_at,
+    )
+    pool.clock = lambda: empty_at
+    empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+    assert client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    ).status_code == 503

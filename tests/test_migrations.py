@@ -167,12 +167,17 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         column["name"]
         for column in inspect(engine).get_columns("projection_provider_polls")
     }
-    assert "generation_id" in poll_columns
+    assert {"generation_id", "failure_reason"} <= poll_columns
     observation_columns = {
         column["name"]
         for column in inspect(engine).get_columns("projection_observations")
     }
     assert {"generation_id", "source_poll_id"} <= observation_columns
+    latest_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("latest_player_projections")
+    }
+    assert "confirmed_at" in latest_columns
     collector_columns = {
         column["name"] for column in inspect(engine).get_columns("collector_identities")
     }

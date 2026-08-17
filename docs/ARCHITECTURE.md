@@ -331,12 +331,13 @@ snapshot.
 #### Projection archive expansion path
 
 Migration 037 adds the durable projection evidence path without replacing the
-legacy Player Pool reader. `ProjectionRecordingService.record_complete_snapshot()`
-is the application recording boundary for this first vertical slice and
-delegates durable work to `ProjectionArchive`. It accepts one already retrieved
-Complete normalized `ProviderSnapshot` and its canonical season query and
-writes only when its provider and canonical query key match the exact
-`ProjectionArchiveReadScope` shared with the request reader; a mismatch is
+legacy Player Pool reader. `ProjectionRecordingService.record_snapshot()` and
+`record_failed_poll()` are the application recording boundaries and delegate
+durable work to `ProjectionArchive`. They accept an already retrieved Complete
+or Partial normalized `ProviderSnapshot`, or one bounded failure, and its
+canonical season query. They write only when the provider and canonical query
+key match the configured `ProjectionArchiveReadScope` set shared with the
+request reader; a mismatch is
 rejected before persistence instead of creating invisible evidence. The
 lower-level archive retains multi-scope capability for internal use. It then
 writes one Provider Poll for every accepted attempt. A changed attempt writes
@@ -361,8 +362,9 @@ A caller
 may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,
 and the acceptance time is the completion time. Poll outcomes are `changed`,
-`rematerialized`, or `unchanged`; unchanged evidence points at the existing
-immutable snapshot and generation.
+`partial`, `rematerialized`, `unchanged`, or `failed`. Failed polls carry a
+bounded reason but no snapshot or generation; unchanged evidence points at the
+existing immutable snapshot and generation.
 The attempt identity is the exact evidence document, optional start, and
 completion time: replaying that recorded attempt returns its persisted result
 without adding a poll, while a different start, retrieval, or completion time
@@ -375,6 +377,9 @@ this slice.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An
+accepted Partial snapshot replaces only explicitly observed market references;
+omitted offerings keep their prior immutable observation and are carried into
+the new atomic state generation. Failed polls change no Latest pointers. An
 older snapshot remains immutable evidence but cannot move Latest backward. An
 identical snapshot at the same observation time is idempotent. A different
 document at the same provider/query observation time is archived with a
@@ -406,13 +411,15 @@ occurrence stays in immutable observations and the first targetable occurrence
 by source ordinal is the sole Latest pointer for that reference.
 
 `LatestProjectionPlayerPoolReader` is the database-only read interface. Its
-constructor requires one explicit canonical provider/query scope, and every
-read filters by that scope; unrelated providers or query generations can never
-be unioned into one request. Within that scope it groups current Latest Player
+constructor requires one or more provider scopes sharing one canonical query,
+and every read filters by those scopes. Within them it unions current Latest Player
 Projections by canonical player, category, and provider without holding a DFS
-Board or provider registry. Latest remains
-current until a newer Complete snapshot replaces its provider/query set; this
-slice does not invent a separate wall-clock expiry policy. A targetable row
+Board or calling a provider registry. Each offering has a separate confirmation
+time. Complete and unchanged Complete polls confirm the whole scope; Partial
+polls confirm only included references. Confirmation is live through the
+inclusive 15-minute window. After a failed poll it may be stale-served only
+through the inclusive six-hour fallback. A disabled provider receives no new
+confirmations and expires without deleting Latest or immutable history. A targetable row
 requires the canonical athlete's name as well as its governed IDs; an ID is
 never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current
@@ -426,7 +433,6 @@ never combines archive and legacy facts. The gate is refused when the
 configured database is the read-only demo
 fixture, which cannot contain the archive schema. The legacy collection/reader
 behavior above remains selected while the gate is off. Scheduled collection,
-partial-snapshot transitions,
 mapping replay, closing sets, and final cutover remain later slices of the
 projection-archive parent contract.
 

@@ -76,15 +76,20 @@ the same validation when called and fails before persistence. Either error
 directs operators to run migration `037_projection_archive`. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
-`false`; `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` and selects
-exactly one provider plus the configured current-season canonical query. When
-enabled on an application database, one database-only reader is
+`false`; `DFS_ENABLED_PROVIDERS` selects the provider union for the configured
+current-season canonical query. When that list is empty during expansion,
+`PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` as a single-provider
+fallback. When enabled on an application database, one database-only reader is
 used by Slate, Matchup, and Matchup Selection. Dependency assembly also exposes
 the named projection recording service on application databases so an
-operator-owned collector can submit an already retrieved Complete normalized
-snapshot. The recorder and reader share the same provider/current-season
-canonical query scope, and the recorder rejects a different provider or query
+operator-owned collector can submit an already retrieved Complete or Partial
+normalized snapshot or bounded failure. The recorder and reader share the same
+enabled-provider/current-season canonical query scopes, and the recorder rejects a different provider or query
 before writing. Provider polling and scheduling belong to later slices.
+The reader retains scopes for registered providers so a provider removed from
+`DFS_ENABLED_PROVIDERS` ages out through the 15-minute eligibility window rather
+than disappearing at process restart; disabled providers are not counted as
+required coverage and immutable evidence is not deleted.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

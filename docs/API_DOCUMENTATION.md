@@ -305,8 +305,12 @@ selects one database-only reader for Slate, Matchup, and Matchup Selection.
 Each Slate game then adds `projection_state` with `state: live | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
-`live`; they remain current until a newer Complete provider/query snapshot or
-governed rematerialization replaces them. Changes to canonical statistic
+`live` while their per-offering confirmation is no more than 15 minutes old.
+After a failed provider poll, prior confirmed offerings may be served as
+`stale-served` only through the inclusive six-hour fallback. Partial polls
+update and confirm only included references; omissions retain their prior
+evidence and confirmation. Complete empty snapshots retire only the same
+provider/query scope. Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
 duplicating unchanged provider evidence. The response `observed_at` comes from
 the accepted poll linked to that generation, not necessarily the older
@@ -318,9 +322,10 @@ because it contains live rows. Aggregate and per-provider observation times
 are the oldest included times, so neither understates the age of evidence in
 the union.
 An unchanged provider poll is recognized from canonical market, coverage, and
-query content even though its retrieval time is newer; the poll retains that
-new retrieval time while the existing immutable snapshot remains the content
-authority.
+query content even though its retrieval time is newer; it confirms existing
+Latest references without duplicating observations while the immutable snapshot
+remains the content authority. Enabled providers are unioned; an unpolled or
+disabled provider expires independently and cannot erase another contribution.
 The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and

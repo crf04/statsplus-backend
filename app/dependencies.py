@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -431,19 +432,53 @@ def build_dependencies(
         snapshot_repository=player_pool_snapshot_repository,
     )
     projection_archive = (
-        None if demo_database else ProjectionArchive(engine, statistic_catalog)
+        None
+        if demo_database
+        else ProjectionArchive(
+            engine,
+            statistic_catalog,
+            max_markets=settings.providers.dfs_comparison_max_markets,
+        )
     )
-    projection_read_scope = ProjectionArchiveReadScope(
-        provider=settings.features.projection_archive_read_provider,
-        query=NBAMarketQuery(season=settings.nba.current_season),
+    projection_record_providers = (
+        settings.providers.dfs_enabled_providers
+        or (settings.features.projection_archive_read_provider,)
+    )
+    projection_record_scopes = tuple(
+        ProjectionArchiveReadScope(
+            provider=provider,
+            query=NBAMarketQuery(season=settings.nba.current_season),
+        )
+        for provider in projection_record_providers
+    )
+    projection_read_providers = (
+        (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
+        if settings.providers.dfs_enabled_providers
+        else projection_record_providers
+    )
+    projection_read_scopes = (
+        projection_record_scopes
+        if projection_read_providers == projection_record_providers
+        else tuple(
+            ProjectionArchiveReadScope(
+                provider=provider,
+                query=NBAMarketQuery(season=settings.nba.current_season),
+            )
+            for provider in projection_read_providers
+        )
     )
     projection_recorder = (
         None
         if projection_archive is None
-        else ProjectionRecordingService(projection_archive, projection_read_scope)
+        else ProjectionRecordingService(projection_archive, projection_record_scopes)
     )
     projection_player_pool_reader = (
-        LatestProjectionPlayerPoolReader(engine, projection_read_scope)
+        LatestProjectionPlayerPoolReader(
+            engine,
+            projection_read_scopes,
+            clock=lambda: datetime.now(timezone.utc),
+            required_providers=projection_record_providers,
+        )
         if settings.features.projection_archive_read_enabled
         else None
     )

@@ -2,6 +2,7 @@
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -36,17 +37,29 @@ class ProviderPoll(Base):
     query_key = Column(String(72), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=False)
-    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=True)
     outcome = Column(String(24), nullable=False)
+    failure_reason = Column(String(64), nullable=True)
     snapshot_id = Column(
         String(72),
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
-    generation_id = Column(String(72), nullable=False)
+    generation_id = Column(String(72), nullable=True)
     observation_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed')",
+            name="ck_projection_provider_poll_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'failed' AND snapshot_id IS NULL AND generation_id IS NULL "
+            "AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
+            "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
+            "AND retrieved_at IS NOT NULL AND failure_reason IS NULL)",
+            name="ck_projection_provider_poll_payload",
+        ),
         Index(
             "ix_projection_provider_polls_scope_completed",
             "provider",
@@ -211,6 +224,7 @@ class LatestPlayerProjection(Base):
     canonical_statistic_id = Column(String(128), nullable=False)
     market_category = Column(String(32), nullable=False)
     observed_at = Column(DateTime(timezone=True), nullable=False)
+    confirmed_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         Index(
