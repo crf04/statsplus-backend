@@ -282,7 +282,7 @@ def test_projection_archive_gate_refuses_an_unmigrated_application_database(
         build_dependencies(settings)
 
 
-def test_projection_recorder_refuses_an_unmigrated_database_when_read_gate_is_off(
+def test_projection_recorder_lazily_refuses_unmigrated_database_when_gate_is_off(
     monkeypatch,
 ):
     from sqlalchemy import create_engine
@@ -298,11 +298,20 @@ def test_projection_recorder_refuses_an_unmigrated_database_when_read_gate_is_of
         features=FeatureSettings(projection_archive_read_enabled=False),
     )
 
+    dependencies = build_dependencies(settings)
+
+    assert dependencies.projection_player_pool_reader is None
+    assert dependencies.projection_recorder is not None
+    from app.providers.dfs import NBAMarketQuery
+
     with pytest.raises(
         ConfigurationError,
         match="require migration 037_projection_archive.*missing tables",
     ):
-        build_dependencies(settings)
+        dependencies.projection_recorder.record_complete_snapshot(
+            Mock(),
+            query=NBAMarketQuery(season=settings.nba.current_season),
+        )
 
 
 def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):

@@ -352,6 +352,11 @@ category authority, targetability, and the other governed fields used by the
 read model. If provider content is unchanged but that checksum changes, the
 poll outcome is `rematerialized`: no Provider Snapshot is duplicated, while a
 new immutable mapped-observation set and generation atomically replace Latest.
+The generation and every mapped observation reference the exact accepted poll
+that supplied their observation time. Their representative Provider Snapshot
+may therefore have an older retrieval time when identical provider content was
+deduplicated; `load_source_snapshot()` verifies that representative content,
+while the poll link is the authority for the rematerialization event.
 A caller
 may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,

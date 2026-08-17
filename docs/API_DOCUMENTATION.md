@@ -308,7 +308,9 @@ timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `live`; they remain current until a newer Complete provider/query snapshot or
 governed rematerialization replaces them. Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
-duplicating unchanged provider evidence. Only absent current evidence produces `missing` with zero
+duplicating unchanged provider evidence. The response `observed_at` comes from
+the accepted poll linked to that generation, not necessarily the older
+representative content snapshot retained for checksum verification. Only absent current evidence produces `missing` with zero
 targetable players. For a multi-game request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`

@@ -8,34 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from flask import current_app
-from sqlalchemy.engine import Engine
 from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 
 from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
-
-
-PROJECTION_ARCHIVE_REQUIRED_TABLES = (
-    "projection_archive_scope_locks",
-    "projection_provider_snapshots",
-    "projection_provider_polls",
-    "projection_observations",
-    "projection_materialization_generations",
-    "latest_player_projections",
-)
-
-
-def _require_projection_archive_schema(engine: Any) -> None:
-    missing_tables = tuple(
-        table_name
-        for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
-        if not inspect(engine).has_table(table_name)
-    )
-    if missing_tables:
-        raise ConfigurationError(
-            "Projection archive dependencies require migration "
-            "037_projection_archive; missing tables: " + ", ".join(missing_tables)
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +103,7 @@ def build_dependencies(
         ProjectionArchiveReadScope,
         ProjectionRecordingService,
         ProjectionSelectionPlayerPoolReader,
+        require_projection_archive_schema,
     )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -172,8 +150,8 @@ def build_dependencies(
         raise ConfigurationError(
             "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
         )
-    if not demo_database:
-        _require_projection_archive_schema(engine)
+    if settings.features.projection_archive_read_enabled:
+        require_projection_archive_schema(engine)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None

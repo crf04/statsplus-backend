@@ -11,10 +11,11 @@ import json
 import threading
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, inspect, insert, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from app.config.settings import ConfigurationError
 from app.domain.comparisons import market_reference
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.domain.utc import assume_utc
@@ -40,6 +41,29 @@ from app.services.dfs_snapshot_cache import (
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
+
+
+PROJECTION_ARCHIVE_REQUIRED_TABLES = (
+    "projection_archive_scope_locks",
+    "projection_provider_snapshots",
+    "projection_provider_polls",
+    "projection_observations",
+    "projection_materialization_generations",
+    "latest_player_projections",
+)
+
+
+def require_projection_archive_schema(engine: Engine) -> None:
+    missing_tables = tuple(
+        table_name
+        for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
+        if not inspect(engine).has_table(table_name)
+    )
+    if missing_tables:
+        raise ConfigurationError(
+            "Projection archive dependencies require migration "
+            "037_projection_archive; missing tables: " + ", ".join(missing_tables)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,9 +320,23 @@ class ProjectionArchive:
             for row in observation_rows:
                 row["snapshot_id"] = snapshot_id
                 row["generation_id"] = generation_id
+                row["source_poll_id"] = poll_id
                 row["observation_id"] = _digest(
                     "obs", generation_id, row["ordinal"], row["market_reference"]
                 )
+            self._record_poll(
+                connection,
+                poll_id=poll_id,
+                snapshot=snapshot,
+                season=query.season,
+                query_key=query_key,
+                started_at=poll_started,
+                completed_at=accepted,
+                outcome=("rematerialized" if provider_content_unchanged else "changed"),
+                snapshot_id=snapshot_id,
+                generation_id=generation_id,
+                observation_count=observation_count,
+            )
             connection.execute(
                 insert(ProjectionMaterializationGeneration.__table__).values(
                     generation_id=generation_id,
@@ -306,6 +344,7 @@ class ProjectionArchive:
                     season=query.season,
                     query_key=query_key,
                     snapshot_id=snapshot_id,
+                    source_poll_id=poll_id,
                     created_at=accepted,
                     retrieved_at=snapshot.retrieved_at,
                     materialization_checksum=materialization_checksum,
@@ -325,20 +364,6 @@ class ProjectionArchive:
                     query_key=query_key,
                     generation_id=generation_id,
                 )
-            self._record_poll(
-                connection,
-                poll_id=poll_id,
-                snapshot=snapshot,
-                season=query.season,
-                query_key=query_key,
-                started_at=poll_started,
-                completed_at=accepted,
-                outcome=("rematerialized" if provider_content_unchanged else "changed"),
-                snapshot_id=snapshot_id,
-                generation_id=generation_id,
-                observation_count=observation_count,
-            )
-
         return ProjectionArchiveResult(
             snapshot_id=snapshot_id,
             generation_id=generation_id,
@@ -825,6 +850,7 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
     ) -> ProjectionArchiveResult:
+        require_projection_archive_schema(self.archive.engine)
         provider = snapshot.provider.strip().casefold()
         if provider != self.scope.provider:
             raise ValueError(
@@ -850,4 +876,5 @@ __all__ = [
     "ProjectionArchiveResult",
     "ProjectionRecordingService",
     "ProjectionSelectionPlayerPoolReader",
+    "require_projection_archive_schema",
 ]

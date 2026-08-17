@@ -277,7 +277,9 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         remapped_generation = connection.execute(
             select(
                 ProjectionMaterializationGeneration.materialization_checksum,
+                ProjectionMaterializationGeneration.source_poll_id,
                 ProviderPoll.outcome,
+                ProviderPoll.retrieved_at,
             ).join(
                 ProviderPoll,
                 ProviderPoll.generation_id
@@ -288,7 +290,16 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
             )
         ).one()
         assert remapped_generation[0]
-        assert remapped_generation[1] == "rematerialized"
+        assert remapped_generation[2] == "rematerialized"
+        assert remapped_generation[3] == remapped_at.replace(tzinfo=None)
+        remapped_observation = connection.execute(
+            select(
+                ProjectionObservation.source_poll_id,
+                ProjectionObservation.observed_at,
+            ).where(ProjectionObservation.generation_id == remapped.generation_id)
+        ).one()
+        assert remapped_observation[0] == remapped_generation[1]
+        assert remapped_observation[1] == remapped_at.replace(tzinfo=None)
         assert connection.execute(
             select(LatestPlayerProjection.market_category)
         ).scalar_one() == "PRA"

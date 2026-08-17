@@ -158,7 +158,11 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "projection_materialization_generations"
         )
     }
-    assert {"retrieved_at", "materialization_checksum"} <= generation_columns
+    assert {
+        "retrieved_at",
+        "materialization_checksum",
+        "source_poll_id",
+    } <= generation_columns
     poll_columns = {
         column["name"]
         for column in inspect(engine).get_columns("projection_provider_polls")
@@ -168,7 +172,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         column["name"]
         for column in inspect(engine).get_columns("projection_observations")
     }
-    assert "generation_id" in observation_columns
+    assert {"generation_id", "source_poll_id"} <= observation_columns
     collector_columns = {
         column["name"] for column in inspect(engine).get_columns("collector_identities")
     }

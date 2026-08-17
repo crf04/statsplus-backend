@@ -1330,10 +1330,18 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert missing_selection.status_code == 503
     assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
 
+    recorded_snapshot = _recorded_projection_snapshot(catalog)
     assembled.projection_recorder.record_complete_snapshot(
-        _recorded_projection_snapshot(catalog),
+        recorded_snapshot,
         query=NBAMarketQuery(season=SEASON),
         accepted_at=NOW,
+    )
+    rematerialized_at = NOW + timedelta(minutes=1)
+    assembled.projection_recorder.archive.market_categories["points"] = "PRA"
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=rematerialized_at),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=rematerialized_at,
     )
 
     slate = client.get("/api/games/slate?date=2026-01-15")
@@ -1343,15 +1351,18 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert matchup.status_code == 200
     assert slate.get_json()["games"][0]["projection_state"] == {
         "state": "live",
-        "observed_at": NOW.isoformat(),
+        "observed_at": rematerialized_at.isoformat(),
     }
     assert matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",
         "state": "live",
-        "observed_at": NOW.isoformat(),
-        "retrieved_at": NOW.isoformat(),
+        "observed_at": rematerialized_at.isoformat(),
+        "retrieved_at": rematerialized_at.isoformat(),
         "providers": {
-            "dabble": {"status": "fresh", "retrieved_at": NOW.isoformat()}
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": rematerialized_at.isoformat(),
+            }
         },
     }
     assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [

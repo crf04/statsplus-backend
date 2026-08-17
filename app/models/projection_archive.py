@@ -43,14 +43,7 @@ class ProviderPoll(Base):
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
-    generation_id = Column(
-        String(72),
-        ForeignKey(
-            "projection_materialization_generations.generation_id",
-            ondelete="RESTRICT",
-        ),
-        nullable=False,
-    )
+    generation_id = Column(String(72), nullable=False)
     observation_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
@@ -118,6 +111,11 @@ class ProjectionObservation(Base):
         ),
         nullable=False,
     )
+    source_poll_id = Column(
+        String(72),
+        ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
@@ -162,6 +160,12 @@ class ProjectionMaterializationGeneration(Base):
         String(72),
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    source_poll_id = Column(
+        String(72),
+        ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
     )
     created_at = Column(DateTime(timezone=True), nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
